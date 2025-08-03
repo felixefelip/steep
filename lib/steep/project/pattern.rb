@@ -5,12 +5,12 @@ module Steep
       attr_reader :ignores
       attr_reader :prefixes
       attr_reader :ignore_prefixes
-      attr_reader :ext
+      attr_reader :exts
 
-      def initialize(patterns:, ignores: [], ext:)
+      def initialize(patterns:, ignores: [], exts:)
         @patterns = patterns
         @ignores = ignores
-        @ext = ext
+        @exts = exts
 
         @prefixes = patterns.map do |pat|
           if pat == "." || pat == "./"
@@ -48,7 +48,9 @@ module Steep
         string = path.to_s
 
         patterns.any? {|pat| File.fnmatch(pat, string, File::FNM_PATHNAME) } ||
-          prefixes.any? {|prefix| File.fnmatch("#{prefix}**/*#{ext}", string, File::FNM_PATHNAME) }
+          prefixes.any? {|prefix|
+            exts.any? {|ext| File.fnmatch("#{prefix}**/*#{ext}", string, File::FNM_PATHNAME) }
+          }
       end
 
       def empty?

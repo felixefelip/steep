@@ -978,6 +978,7 @@ module Steep
         patterns = [] #: Array[String]
 
         project.targets.each do |target|
+          # ajustar aqui
           patterns.concat(paths_to_watch(target.source_pattern, extname: ".rb"))
           patterns.concat(paths_to_watch(target.signature_pattern, extname: ".rbs"))
           target.groups.each do |group|

@@ -44,13 +44,15 @@ module Steep
                   yield relative_path
                 end
               else
-                files = Pathname.glob("#{absolute_path}/**/*#{pattern.ext}")
+                pattern.exts.each do |ext|
+                  files = Pathname.glob("#{absolute_path}/**/*#{ext}")
 
-                files.sort.each do |source_path|
-                  if source_path.file?
-                    relative_path = source_path.relative_path_from(base_dir)
-                    unless pattern.ignore?(relative_path)
-                      yield relative_path
+                  files.sort.each do |source_path|
+                    if source_path.file?
+                      relative_path = source_path.relative_path_from(base_dir)
+                      unless pattern.ignore?(relative_path)
+                        yield relative_path
+                      end
                     end
                   end
                 end

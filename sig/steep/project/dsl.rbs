@@ -63,6 +63,8 @@ module Steep
 
         attr_reader ignored_signatures: Array[String]
 
+        attr_reader exts: Array[String]
+
         def check: (*String args, ?inline: bool) -> void
 
         def ignore: (*String args, ?inline: bool) -> void
@@ -70,6 +72,8 @@ module Steep
         def signature: (*String args) -> void
 
         def ignore_signature: (*String args) -> void
+
+        def ext: (*String args) -> void
 
         def source_pattern: () -> Pattern
 

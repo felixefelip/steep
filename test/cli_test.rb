@@ -125,6 +125,29 @@ end
     end
   end
 
+  def test_erb_check_failure
+    in_tmpdir do
+      (current_dir + "Steepfile").write(<<-EOF)
+target :app do
+  check "app/views"
+  ext "erb"
+end
+      EOF
+
+      (current_dir + "app").mkdir
+      (current_dir + "app/views").mkdir
+
+      (current_dir + "app/views/foo.html.erb").write(<<-EOF)
+1 + "2"
+      EOF
+
+      stdout, status = sh(*steep, "check")
+
+      refute_predicate status, :success?, stdout
+      assert_match(/Detected 1 problem from 1 file/, stdout)
+    end
+  end
+
   def test_check_failure_with_formatter
     in_tmpdir do
       (current_dir + "Steepfile").write(<<-EOF)

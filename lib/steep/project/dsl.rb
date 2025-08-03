@@ -94,6 +94,10 @@ module Steep
           ignored_signatures.concat(args)
         end
 
+        def ext(*args)
+          exts.concat(args)
+        end
+
         def sources
           @sources ||= []
         end
@@ -118,16 +122,20 @@ module Steep
           @ignored_signatures ||= []
         end
 
+        def exts
+          @exts ||= [".rb"]
+        end
+
         def source_pattern
-          Pattern.new(patterns: sources, ignores: ignored_sources, ext: ".rb")
+          Pattern.new(patterns: sources, ignores: ignored_sources, exts:)
         end
 
         def signature_pattern
-          Pattern.new(patterns: signatures, ignores: ignored_signatures, ext: ".rbs")
+          Pattern.new(patterns: signatures, ignores: ignored_signatures, exts: [".rbs"])
         end
 
         def inline_source_pattern
-          Pattern.new(patterns: inline_sources, ignores: ignored_inline_sources, ext: ".rb")
+          Pattern.new(patterns: inline_sources, ignores: ignored_inline_sources, exts:)
         end
       end
 
