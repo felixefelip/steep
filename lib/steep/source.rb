@@ -38,7 +38,13 @@ module Steep
     end
 
     def self.parse(source_code, path:, factory:)
-      source_code = ErbToRubyCode.convert(source_code) if path.to_s.end_with?(".erb")
+      if path.to_s.end_with?(".erb")
+        source_code = ErbToRubyCode.convert(source_code)
+
+        if ENV["STEEP_ERB_CONVENTION"] && (erb_class = ErbSelfTypeResolver.resolve(path))
+          source_code = "# @type self: #{erb_class}\n" + source_code
+        end
+      end
 
       buffer = ::Parser::Source::Buffer.new(path.to_s, 1, source: source_code)
       node, comments = new_parser().parse_with_comments(buffer)
