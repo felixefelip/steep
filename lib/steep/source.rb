@@ -1,3 +1,5 @@
+require "herb"
+
 module Steep
   class Source
     attr_reader :buffer
@@ -38,13 +40,17 @@ module Steep
     end
 
     def self.parse(source_code, path:, factory:)
+<<<<<<< HEAD
       if path.to_s.end_with?(".erb")
-        source_code = ErbToRubyCode.convert(source_code)
+        source_code = extract_ruby_from_erb(source_code)
 
         if ENV["STEEP_ERB_CONVENTION"] && (erb_class = ErbSelfTypeResolver.resolve(path))
           source_code = "# @type self: #{erb_class}\n" + source_code
         end
       end
+=======
+      source_code = extract_ruby_from_erb(source_code) if path.to_s.end_with?(".erb")
+>>>>>>> support_erb/convert_erb_code_into_ruby_before_type_checking
 
       buffer = ::Parser::Source::Buffer.new(path.to_s, 1, source: source_code)
       node, comments = new_parser().parse_with_comments(buffer)
@@ -104,6 +110,10 @@ module Steep
       end
 
       new(buffer: buffer, path: path, node: node, mapping: map, comments: comments, ignores: ignores)
+    end
+
+    def self.extract_ruby_from_erb(source_code)
+      ::Herb.extract_ruby(source_code, semicolons: true, comments: true)
     end
 
     def self.construct_mapping(node:, annotations:, mapping:, line_range: nil)
