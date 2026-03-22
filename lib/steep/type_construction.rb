@@ -149,6 +149,29 @@ module Steep
       end
     end
 
+    def ivar_import_commands_for_type(type, except_definition: nil)
+      case type
+      when AST::Types::Name::Instance
+        if except_definition && except_definition.type_name == type.name
+          return []
+        end
+        definition = checker.factory.definition_builder.build_instance(type.name)
+        [TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory).merge!]
+      when AST::Types::Name::Singleton
+        if except_definition && except_definition.type_name == type.name
+          return []
+        end
+        definition = checker.factory.definition_builder.build_singleton(type.name)
+        [TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory).merge!]
+      when AST::Types::Intersection
+        type.types.flat_map { |t| ivar_import_commands_for_type(t, except_definition: except_definition) }
+      else
+        []
+      end
+    rescue
+      []
+    end
+
     def for_new_method(method_name, node, args:, self_type:, definition:)
       annots = source.annotations(block: node, factory: checker.factory, context: nesting)
       definition_method_type = if definition
@@ -245,6 +268,7 @@ module Steep
           end
         end,
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory),
+        *ivar_import_commands_for_type(self_type, except_definition: definition),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annots).merge!
       ).build(type_env)
 
@@ -4541,19 +4565,13 @@ module Steep
       type_env = type_env.merge(local_variable_types: pins)
       type_env = type_env.merge(local_variable_types: param_types)
       type_env = TypeInference::TypeEnvBuilder.new(
-        if self_binding = block_annotations.self_type || block_self_hint
-          definition =
-            case self_binding
-            when AST::Types::Name::Instance
-              checker.factory.definition_builder.build_instance(self_binding.name)
-            when AST::Types::Name::Singleton
-              checker.factory.definition_builder.build_singleton(self_binding.name)
-            end
-
-          if definition
-            TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory)
+        *(
+          if self_binding = block_annotations.self_type || block_self_hint
+            ivar_import_commands_for_type(self_binding)
+          else
+            []
           end
-        end,
+        ),
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(block_annotations).merge!.on_duplicate! do |name, outer_type, inner_type|
           next if outer_type.is_a?(AST::Types::Var) || inner_type.is_a?(AST::Types::Var)
           next unless body_node
