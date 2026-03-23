@@ -4428,4 +4428,132 @@ class TypeCheckTest < Minitest::Test
       YAML
     )
   end
+
+  def test_erb_convention_imports_ivars_from_self_type
+    ENV["STEEP_ERB_CONVENTION"] = "1"
+    run_type_check_test(
+      signatures: {
+        "erb_class.rbs" => <<~RBS
+          class ERBPostsShow
+            @post: String
+            @count: Integer
+          end
+        RBS
+      },
+      code: {
+        "app/views/posts/show.html.erb" => <<~ERB
+          <%= @post %>
+          <%= @count %>
+        ERB
+      },
+      expectations: <<~YAML
+        ---
+        - file: app/views/posts/show.html.erb
+          diagnostics: []
+      YAML
+    )
+  ensure
+    ENV.delete("STEEP_ERB_CONVENTION")
+  end
+
+  def test_type_instance_annotation_imports_ivars_from_annotated_type
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            @name: String
+          end
+
+          module Concern
+            def do_thing: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module Concern
+            # @type instance: Foo
+            def do_thing
+              @name
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_instance_annotation_imports_ivars_from_intersection_type
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class ApplicationController
+            @request_id: String
+          end
+
+          module FilterConfiguration
+            @filter_name: Symbol
+
+            def configure_filter: (untyped name) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module FilterConfiguration
+            # @type instance: FilterConfiguration & ApplicationController
+            def configure_filter(name)
+              @filter_name
+              @request_id
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_instance_annotation_imports_inherited_ivars
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Base
+            @base_var: Integer
+          end
+
+          class Child < Base
+            @child_var: String
+          end
+
+          module Mixin
+            def check: () -> untyped
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module Mixin
+            # @type instance: Child
+            def check
+              @child_var
+              @base_var
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
 end
