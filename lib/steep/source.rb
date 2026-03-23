@@ -44,7 +44,7 @@ module Steep
         source_code = extract_ruby_from_erb(source_code)
 
         if ENV["STEEP_ERB_CONVENTION"] && (erb_class = ErbSelfTypeResolver.resolve(path))
-          source_code = "# @type self: #{erb_class}\n" + source_code
+          source_code = source_code + "\n# @type self: #{erb_class}"
         end
       end
 
