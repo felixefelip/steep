@@ -48,6 +48,10 @@ module Steep
         end
       end
 
+      if ENV["STEEP_MODULE_CONVENTION"] && path.to_s.end_with?(".rb")
+        source_code = ModuleSelfTypeResolver.annotate(path, source_code)
+      end
+
       buffer = ::Parser::Source::Buffer.new(path.to_s, 1, source: source_code)
       node, comments = new_parser().parse_with_comments(buffer)
 
