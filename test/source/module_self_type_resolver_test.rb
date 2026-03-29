@@ -111,18 +111,121 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     assert_equal source, result
   end
 
-  # --- files outside app/models/ ---
+  # --- files outside app/models/ and app/helpers/ ---
 
-  def test_non_models_file_is_unchanged
+  def test_non_models_non_helpers_file_is_unchanged
     source = <<~RUBY
-      module SomeHelper
+      module SomeModule
         def help; end
       end
     RUBY
 
-    result = Resolver.annotate("app/helpers/some_helper.rb", source)
+    result = Resolver.annotate("lib/some_module.rb", source)
 
     assert_equal source, result
+  end
+
+  # --- app/helpers/ ---
+
+  def test_helper_injects_instance_annotation
+    source = <<~RUBY
+      module PostsHelper
+        def post_status_badge(post)
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/helpers/posts_helper.rb", source)
+
+    assert_includes result, "# @type instance: ApplicationController & PostsHelper"
+    refute_includes result, "@type self:"
+  end
+
+  def test_helper_annotation_inserted_after_module_line
+    source = <<~RUBY
+      module PostsHelper
+        def post_status_badge(post)
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/helpers/posts_helper.rb", source)
+    lines = result.lines
+
+    module_idx   = lines.index { |l| l.include?("module PostsHelper") }
+    instance_idx = lines.index { |l| l.include?("@type instance:") }
+
+    assert instance_idx == module_idx + 1
+  end
+
+  def test_application_helper_injects_instance_annotation
+    source = <<~RUBY
+      module ApplicationHelper
+        def current_year
+          Time.current.year
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/helpers/application_helper.rb", source)
+
+    assert_includes result, "# @type instance: ApplicationController & ApplicationHelper"
+  end
+
+  def test_helper_concern_injects_self_and_instance
+    source = <<~RUBY
+      module PostsHelper
+        extend ActiveSupport::Concern
+
+        included do
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/helpers/posts_helper.rb", source)
+
+    assert_includes result, "# @type self: singleton(ApplicationController) & singleton(PostsHelper)"
+    assert_includes result, "# @type instance: ApplicationController & PostsHelper"
+  end
+
+  def test_already_annotated_helper_is_unchanged
+    source = <<~RUBY
+      module PostsHelper
+        # @type instance: ApplicationController & PostsHelper
+
+        def post_status_badge(post)
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/helpers/posts_helper.rb", source)
+
+    assert_equal source, result
+  end
+
+  def test_helper_full_absolute_path
+    source = <<~RUBY
+      module PostsHelper
+        def help; end
+      end
+    RUBY
+
+    result = Resolver.annotate("/home/user/myapp/app/helpers/posts_helper.rb", source)
+
+    assert_includes result, "# @type instance: ApplicationController & PostsHelper"
+  end
+
+  def test_namespaced_helper
+    source = <<~RUBY
+      module Admin::PostsHelper
+        def admin_badge(post)
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/helpers/admin/posts_helper.rb", source)
+
+    assert_includes result, "# @type instance: ApplicationController & Admin::PostsHelper"
   end
 
   # --- module without namespace (Strategy B not yet supported) ---

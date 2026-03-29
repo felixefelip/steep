@@ -25,12 +25,16 @@ module Steep
     # Idempotent: skips files that already contain `@type self:` for the module.
     module ModuleSelfTypeResolver
       MODELS_PREFIX = "app/models/"
+      HELPERS_PREFIX = "app/helpers/"
 
       class << self
         # Returns the annotated source_code, or the original if nothing to inject.
         def annotate(path, source_code)
           path_str = path.to_s
           return source_code unless path_str.end_with?(".rb")
+
+          helpers_idx = path_str.index(HELPERS_PREFIX)
+          return annotate_helper(path_str, source_code, helpers_idx) if helpers_idx
 
           idx = path_str.index(MODELS_PREFIX)
           return source_code unless idx
@@ -59,6 +63,25 @@ module Steep
         end
 
         private
+
+        def annotate_helper(path_str, source_code, idx)
+          relative = path_str[(idx + HELPERS_PREFIX.length)..].delete_suffix(".rb")
+          module_name = relative.split("/").map { |s| camelize(s) }.join("::")
+          return source_code if module_name.empty?
+
+          including_class = "ApplicationController"
+
+          # Idempotency
+          return source_code if source_code.match?(/@type instance:.*#{Regexp.escape(module_name)}/)
+
+          is_concern = source_code.include?("extend ActiveSupport::Concern")
+
+          if is_concern
+            inject_after_extend(source_code, module_name, including_class)
+          else
+            inject_after_module_line(source_code, module_name, including_class)
+          end
+        end
 
         def inject_after_extend(source_code, module_name, including_class)
           self_annotation     = "# @type self: singleton(#{including_class}) & singleton(#{module_name})"
