@@ -111,6 +111,56 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     assert_equal source, result
   end
 
+  # --- app/controllers/concerns/ ---
+
+  def test_controller_concern_injects_instance_annotation
+    source = <<~RUBY
+      module FilterConfiguration
+        extend ActiveSupport::Concern
+
+        def configure_filter(name)
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/controllers/concerns/filter_configuration.rb", source)
+
+    assert_includes result, "# @type self: singleton(ApplicationController) & singleton(FilterConfiguration)"
+    assert_includes result, "# @type instance: ApplicationController & FilterConfiguration"
+  end
+
+  def test_controller_concern_plain_module_injects_only_instance
+    source = <<~RUBY
+      module FilterConfiguration
+        def configure_filter(name)
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/controllers/concerns/filter_configuration.rb", source)
+
+    assert_includes result, "# @type instance: ApplicationController & FilterConfiguration"
+    refute_includes result, "@type self:"
+  end
+
+  def test_already_annotated_controller_concern_is_unchanged
+    source = <<~RUBY
+      module FilterConfiguration
+        extend ActiveSupport::Concern
+
+        # @type self: singleton(ApplicationController) & singleton(FilterConfiguration)
+        # @type instance: ApplicationController & FilterConfiguration
+
+        def configure_filter(name)
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/controllers/concerns/filter_configuration.rb", source)
+
+    assert_equal source, result
+  end
+
   # --- files outside app/models/ and app/helpers/ ---
 
   def test_non_models_non_helpers_file_is_unchanged
