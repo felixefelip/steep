@@ -2,27 +2,29 @@
 
 module Steep
   class Source
-    # Injects `# @type self:` annotations into module and concern files at parse
-    # time, without touching files on disk.
+    # Appends `# @type self:` / `# @type instance:` annotations to module and
+    # concern files at parse time, without touching files on disk.
     #
-    # Mirrors the ErbSelfTypeResolver pattern: when STEEP_MODULE_CONVENTION is
-    # set, Steep calls `ModuleSelfTypeResolver.annotate(path, source_code)` and
-    # the returned source is parsed instead of the original.
+    # Mirrors the ErbSelfTypeResolver pattern: annotations are appended at the
+    # END of the source (after the closing `end`), so original line numbers are
+    # preserved and IDE error messages point to the correct lines.
     #
     # Rules:
-    #   - ActiveSupport::Concern modules get:
+    #   - ActiveSupport::Concern modules get both annotations appended:
     #       # @type self: singleton(Post) & singleton(Post::Notifiable)
-    #     (inserted after the `extend ActiveSupport::Concern` line)
+    #       # @type instance: Post & Post::Notifiable
     #
-    #   - Plain modules get:
-    #       # @type self: Post & Post::Notifiable
-    #     (inserted after the `module ModuleName` line)
+    #   - Plain modules get only the instance annotation appended:
+    #       # @type instance: Post & Post::Taggable
     #
     # Including class is resolved from the module's namespace:
     #   Post::Notifiable  → Post
     #   User::Recoverable → User
     #
-    # Idempotent: skips files that already contain `@type self:` for the module.
+    # For helpers and controller concerns the including class is always
+    # ApplicationController (derived by Rails convention, not namespace).
+    #
+    # Idempotent: skips files that already contain the annotation for the module.
     module ModuleSelfTypeResolver
       MODELS_PREFIX = "app/models/"
       HELPERS_PREFIX = "app/helpers/"
@@ -60,9 +62,9 @@ module Steep
           return source_code if source_code.match?(/@type (?:self|instance):.*#{Regexp.escape(module_name)}/)
 
           if is_concern
-            inject_after_extend(source_code, module_name, including_class)
+            append_concern_annotations(source_code, module_name, including_class)
           else
-            inject_after_module_line(source_code, module_name, including_class)
+            append_module_annotation(source_code, module_name, including_class)
           end
         end
 
@@ -81,9 +83,9 @@ module Steep
           is_concern = source_code.include?("extend ActiveSupport::Concern")
 
           if is_concern
-            inject_after_extend(source_code, module_name, including_class)
+            append_concern_annotations(source_code, module_name, including_class)
           else
-            inject_after_module_line(source_code, module_name, including_class)
+            append_module_annotation(source_code, module_name, including_class)
           end
         end
 
@@ -100,35 +102,24 @@ module Steep
           is_concern = source_code.include?("extend ActiveSupport::Concern")
 
           if is_concern
-            inject_after_extend(source_code, module_name, including_class)
+            append_concern_annotations(source_code, module_name, including_class)
           else
-            inject_after_module_line(source_code, module_name, including_class)
+            append_module_annotation(source_code, module_name, including_class)
           end
         end
 
-        def inject_after_extend(source_code, module_name, including_class)
+        # Appends both @type self: and @type instance: at end of file (concern).
+        # Mirrors ERB convention: source_code + "\n# @type self: ..."
+        def append_concern_annotations(source_code, module_name, including_class)
           self_annotation     = "# @type self: singleton(#{including_class}) & singleton(#{module_name})"
           instance_annotation = "# @type instance: #{including_class} & #{module_name}"
-
-          lines = source_code.lines
-          extend_idx = lines.index { |l| l.match?(/\bextend\s+ActiveSupport::Concern\b/) }
-          return source_code unless extend_idx
-
-          indent = lines[extend_idx].match(/\A(\s*)/)[1]
-          lines.insert(extend_idx + 1, "\n", "#{indent}#{self_annotation}\n", "#{indent}#{instance_annotation}\n")
-          lines.join
+          source_code.rstrip + "\n\n#{self_annotation}\n#{instance_annotation}\n"
         end
 
-        def inject_after_module_line(source_code, module_name, including_class)
+        # Appends @type instance: at end of file (plain module).
+        def append_module_annotation(source_code, module_name, including_class)
           annotation = "# @type instance: #{including_class} & #{module_name}"
-
-          lines = source_code.lines
-          module_idx = lines.index { |l| l.match?(/\A\s*module\s+#{Regexp.escape(module_name)}\b/) }
-          return source_code unless module_idx
-
-          indent = lines[module_idx].match(/\A(\s*)/)[1] + "  "
-          lines.insert(module_idx + 1, "#{indent}#{annotation}\n", "\n")
-          lines.join
+          source_code.rstrip + "\n\n#{annotation}\n"
         end
 
         def camelize(str)

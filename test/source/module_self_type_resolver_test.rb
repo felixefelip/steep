@@ -21,7 +21,7 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     assert_includes result, "# @type instance: Post & Post::Notifiable"
   end
 
-  def test_concern_annotations_inserted_after_extend_line
+  def test_concern_annotations_appended_at_end_of_file
     source = <<~RUBY
       module Post::Notifiable
         extend ActiveSupport::Concern
@@ -34,12 +34,31 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     result = Resolver.annotate("app/models/post/notifiable.rb", source)
     lines = result.lines
 
-    extend_idx = lines.index { |l| l.include?("extend ActiveSupport::Concern") }
-    self_idx     = lines.index { |l| l.include?("@type self:") }
-    instance_idx = lines.index { |l| l.include?("@type instance:") }
+    module_close_idx = lines.rindex { |l| l.strip == "end" }
+    self_idx         = lines.index { |l| l.include?("@type self:") }
+    instance_idx     = lines.index { |l| l.include?("@type instance:") }
 
-    assert self_idx > extend_idx
-    assert instance_idx > extend_idx
+    assert self_idx > module_close_idx
+    assert instance_idx > module_close_idx
+  end
+
+  def test_concern_original_line_numbers_preserved
+    source = <<~RUBY
+      module Post::Notifiable
+        extend ActiveSupport::Concern
+
+        def notify
+          "hello"
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/models/post/notifiable.rb", source)
+
+    # Every original line must appear at the same 1-based index in the result
+    source.lines.each_with_index do |line, i|
+      assert_equal line, result.lines[i], "Line #{i + 1} shifted after annotation"
+    end
   end
 
   # --- plain module with namespace ---
@@ -59,7 +78,7 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     refute_includes result, "@type self:"
   end
 
-  def test_plain_module_annotation_inserted_after_module_line
+  def test_plain_module_annotation_appended_at_end_of_file
     source = <<~RUBY
       module Post::Taggable
         def tag_names
@@ -70,10 +89,10 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     result = Resolver.annotate("app/models/post/taggable.rb", source)
     lines = result.lines
 
-    module_idx   = lines.index { |l| l.include?("module Post::Taggable") }
-    instance_idx = lines.index { |l| l.include?("@type instance:") }
+    module_close_idx = lines.rindex { |l| l.strip == "end" }
+    instance_idx     = lines.index { |l| l.include?("@type instance:") }
 
-    assert instance_idx == module_idx + 1
+    assert instance_idx > module_close_idx
   end
 
   # --- idempotency ---
@@ -191,7 +210,7 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     refute_includes result, "@type self:"
   end
 
-  def test_helper_annotation_inserted_after_module_line
+  def test_helper_annotation_appended_at_end_of_file
     source = <<~RUBY
       module PostsHelper
         def post_status_badge(post)
@@ -202,10 +221,10 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     result = Resolver.annotate("app/helpers/posts_helper.rb", source)
     lines = result.lines
 
-    module_idx   = lines.index { |l| l.include?("module PostsHelper") }
-    instance_idx = lines.index { |l| l.include?("@type instance:") }
+    module_close_idx = lines.rindex { |l| l.strip == "end" }
+    instance_idx     = lines.index { |l| l.include?("@type instance:") }
 
-    assert instance_idx == module_idx + 1
+    assert instance_idx > module_close_idx
   end
 
   def test_application_helper_injects_instance_annotation
@@ -318,17 +337,6 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     result = Resolver.annotate(Pathname("app/models/post/notifiable.rb"), source)
 
     assert_includes result, "# @type self: singleton(Post) & singleton(Post::Notifiable)"
-  end
-
-  # --- indentation ---
-
-  def test_concern_indentation_mirrors_extend_line
-    source = "module Post::Notifiable\n  extend ActiveSupport::Concern\nend\n"
-
-    result = Resolver.annotate("app/models/post/notifiable.rb", source)
-
-    assert_includes result, "  # @type self:"
-    assert_includes result, "  # @type instance:"
   end
 
   # --- app/models/concerns/ directory (Rails autoload root, no namespace) ---
