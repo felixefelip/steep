@@ -37,6 +37,8 @@ module Steep
       def run
         @project = load_config()
 
+        infer_contracts(@project)
+
         interaction_worker = Server::WorkerProcess.start_worker(:interaction, name: "interaction", steepfile: project.steepfile_path, steep_command: jobs_option.steep_command)
         typecheck_workers = Server::WorkerProcess.start_typecheck_workers(steepfile: project.steepfile_path, args: [], steep_command: jobs_option.steep_command, count: jobs_option.jobs_count_value)
 
@@ -53,6 +55,23 @@ module Steep
         master.start()
 
         0
+      end
+
+      private
+
+      def infer_contracts(project)
+        runner = Contracts::Runner.new(project)
+        contracts = runner.run
+        runner.write(contracts)
+        Steep.logger.info do
+          if contracts.any?
+            "Inferred #{contracts.size} precondition(s); sidecar at #{project.relative_path(runner.output_path)}"
+          else
+            "Inferred 0 preconditions; sidecar #{runner.output_path.file? ? "kept" : "absent"}"
+          end
+        end
+      rescue => e
+        Steep.logger.warn "Precondition inference failed: #{e.class}: #{e.message}"
       end
     end
   end

@@ -29,10 +29,13 @@ module Steep
         subtyping.factory.env
       end
 
-      def initialize(source:, subtyping:)
+      attr_reader :contracts
+
+      def initialize(source:, subtyping:, contracts: Steep::Contracts::Store.empty)
         @source = source
         @subtyping = subtyping
         @buffer = source.buffer
+        @contracts = contracts
       end
 
       def run(line:, column:)
@@ -77,7 +80,7 @@ module Steep
         source = self.source.without_unrelated_defs(line: line, column: column)
         resolver = RBS::Resolver::ConstantResolver.new(builder: subtyping.factory.definition_builder)
         pos = self.source.buffer.loc_to_pos([line, column])
-        TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: pos)
+        TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: pos, contracts: contracts)
       end
 
       def last_argument_nodes_for(argument_nodes:, line:, column:)

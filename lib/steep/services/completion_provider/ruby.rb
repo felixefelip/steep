@@ -11,10 +11,13 @@ module Steep
         attr_reader :source
         attr_reader :typing
 
-        def initialize(source_text:, path:, subtyping:)
+        attr_reader :contracts
+
+        def initialize(source_text:, path:, subtyping:, contracts: Steep::Contracts::Store.empty)
           @source_text = source_text
           @path = path
           @subtyping = subtyping
+          @contracts = contracts
         end
 
         def type_check!(text, line:, column:)
@@ -29,7 +32,7 @@ module Steep
           Steep.measure "typechecking" do
             location = source.buffer.loc_to_pos([line, column])
             resolver = ::RBS::Resolver::ConstantResolver.new(builder: subtyping.factory.definition_builder)
-            @typing = TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: location)
+            @typing = TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: location, contracts: contracts)
           end
         end
 
