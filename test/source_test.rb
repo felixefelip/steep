@@ -1041,4 +1041,41 @@ super { } # $ nil
       end
     end
   end
+
+  def test_erb_convention_injects_self_type_annotation
+    with_factory({ "erb_class.rbs" => <<~RBS }) do |factory|
+        class ERBPostsShow
+        end
+      RBS
+
+      erb_code = <<~ERB
+        <h1><%= @post.title %></h1>
+      ERB
+
+      ENV["STEEP_ERB_CONVENTION"] = "1"
+      source = Steep::Source.parse(erb_code, path: Pathname("app/views/posts/show.html.erb"), factory: factory)
+
+      # The node-level annotations should contain a self type annotation for ERBPostsShow
+      annotations = source.mapping[source.node] || []
+      self_annotation = annotations.find { |a| a.is_a?(Steep::AST::Annotation::SelfType) }
+      refute_nil self_annotation, "Expected @type self: ERBPostsShow annotation to be injected"
+    ensure
+      ENV.delete("STEEP_ERB_CONVENTION")
+    end
+  end
+
+  def test_erb_convention_not_injected_without_env_var
+    with_factory do |factory|
+      erb_code = <<~ERB
+        <h1><%= @post.title %></h1>
+      ERB
+
+      ENV.delete("STEEP_ERB_CONVENTION")
+      source = Steep::Source.parse(erb_code, path: Pathname("app/views/posts/show.html.erb"), factory: factory)
+
+      annotations = source.mapping[source.node] || []
+      self_annotation = annotations.find { |a| a.is_a?(Steep::AST::Annotation::SelfType) }
+      assert_nil self_annotation, "Expected no self type annotation without STEEP_ERB_CONVENTION"
+    end
+  end
 end

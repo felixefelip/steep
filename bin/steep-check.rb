@@ -110,7 +110,7 @@ class Command
 
       type_env = TypeInference::TypeEnvBuilder.new(
         TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(factory),
-        TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations),
+        TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations).merge!,
         TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annotations),
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annotations)
       ).build(TypeInference::TypeEnv.new(const_env))

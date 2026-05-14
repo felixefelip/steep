@@ -72,7 +72,7 @@ module TestHelper
 
   def assert_any(collection, &block)
     assert collection.any?(&block)
-  end 
+  end
 
   # @rbs [T] (_Each[T], ?size: Integer) { (T) -> void } -> void
   def assert_any!(collection, size: nil, &block)
@@ -681,10 +681,12 @@ module TypeConstructionHelper
       instance_type = AST::Builtin::Object.instance_type
     end
 
+    definition = checker.factory.definition_builder.build_instance(module_name)
     rbs_env = checker.factory.env
     type_env = Steep::TypeInference::TypeEnvBuilder.new(
       Steep::TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(checker.factory),
-      Steep::TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations),
+      Steep::TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory),
+      Steep::TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations).merge!,
       Steep::TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annotations),
       Steep::TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annotations)
     ).build(TypeEnv.new(const_env))

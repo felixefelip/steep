@@ -98,6 +98,12 @@ module Steep
           def initialize(definition, factory)
             @definition = definition
             @factory = factory
+            @merge = false
+          end
+
+          def merge!(merge = true)
+            @merge = merge
+            self
           end
 
           def call(env)
@@ -107,7 +113,11 @@ module Steep
               factory.type(ivar.type)
             end
 
-            env.update(instance_variable_types: instance_variable_types)
+            if @merge
+              env.merge(instance_variable_types: instance_variable_types)
+            else
+              env.update(instance_variable_types: instance_variable_types)
+            end
           end
         end
 

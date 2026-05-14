@@ -359,7 +359,7 @@ module Steep
           TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annotations),
           TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(subtyping.factory),
           TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, subtyping.factory),
-          TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations),
+          TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations).merge!,
           TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annotations)
         ).build(type_env)
 
