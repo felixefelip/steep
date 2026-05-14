@@ -45,6 +45,7 @@ module Steep
     attr_reader :source
     attr_reader :annotations
     attr_reader :typing
+    attr_reader :contracts
 
     attr_reader :context
 
@@ -80,12 +81,13 @@ module Steep
       context.variable_context
     end
 
-    def initialize(checker:, source:, annotations:, typing:, context:)
+    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty)
       @checker = checker
       @source = source
       @annotations = annotations
       @typing = typing
       @context = context
+      @contracts = contracts
     end
 
     def with_new_typing(typing)
@@ -94,7 +96,8 @@ module Steep
         source: source,
         annotations: annotations,
         typing: typing,
-        context: context
+        context: context,
+        contracts: contracts
       )
     end
 
@@ -113,7 +116,8 @@ module Steep
           source: source,
           annotations: annotations,
           typing: typing,
-          context: context
+          context: context,
+          contracts: contracts
         )
       else
         self
@@ -306,6 +310,7 @@ module Steep
           variable_context: variable_context
         ),
         typing: typing,
+        contracts: contracts
       )
     end
 
@@ -484,7 +489,8 @@ module Steep
           type_env: module_type_env,
           call_context: TypeInference::MethodCall::ModuleContext.new(type_name: module_context.class_name),
           variable_context: variable_context
-        )
+        ),
+        contracts: contracts
       )
     end
 
@@ -575,7 +581,8 @@ module Steep
         source: source,
         annotations: annots,
         typing: typing,
-        context: class_body_context
+        context: class_body_context,
+        contracts: contracts
       )
     end
 
@@ -688,7 +695,8 @@ module Steep
         source: source,
         annotations: annots,
         typing: typing,
-        context: body_context
+        context: body_context,
+        contracts: contracts
       )
     end
 
@@ -3305,6 +3313,8 @@ module Steep
           end
 
           if call.is_a?(TypeInference::MethodCall::Typed)
+            constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name)
+
             if (pure_call, type = constr.context.type_env.pure_method_calls.fetch(node, nil))
               if type
                 call = pure_call.update(node: node, return_type: type)
@@ -3312,8 +3322,16 @@ module Steep
               end
             else
               if pure_send?(call, receiver, arguments)
-                constr = constr.update_type_env do |env|
-                  env.add_pure_call(node, call, call.return_type)
+                narrowed = constr.contract_narrowed_type(node, call.return_type)
+                if narrowed
+                  constr = constr.update_type_env do |env|
+                    env.add_pure_call(node, call, call.return_type).refine_types(pure_call_types: { node => narrowed })
+                  end
+                  call = call.with_return_type(narrowed)
+                else
+                  constr = constr.update_type_env do |env|
+                    env.add_pure_call(node, call, call.return_type)
+                  end
                 end
               else
                 constr = constr.update_type_env do |env|
@@ -4632,7 +4650,8 @@ module Steep
           type_env: type_env,
           call_context: self.context.call_context,
           variable_context: variable_context
-        )
+        ),
+        contracts: contracts
       )
     end
 
@@ -5344,6 +5363,116 @@ module Steep
             )
           )
         end
+      end
+    end
+
+    def contract_for_current_method
+      return nil if contracts.empty?
+      mc = method_context
+      return nil unless mc&.name
+      class_name = module_context&.class_name
+      return nil unless class_name
+
+      contracts.lookup_instance(class_name.to_s.sub(/\A::/, ""), mc.name)
+    end
+
+    def contract_narrowed_type(node, original_type)
+      return nil unless node.type == :send
+
+      contract = contract_for_current_method
+      return nil unless contract
+
+      contract.requires.each do |req|
+        next unless req.is_a?(Contracts::Predicate::NotNil)
+        next unless contract_expression_matches?(req.expr, node)
+
+        truthy_type, _ = checker.factory.partition_union(original_type)
+        return truthy_type if truthy_type && !truthy_type.equal?(original_type)
+      end
+      nil
+    end
+
+    def contract_expression_matches?(expr, node)
+      return false unless expr.is_a?(Contracts::Expr::Send)
+      build_contract_send_variants(expr).any? { |built| built == node }
+    end
+
+    def build_contract_send_variants(expr)
+      return [] unless expr.receiver.is_a?(Contracts::Expr::SelfRef)
+
+      [nil, Parser::AST::Node.new(:self, [])].map do |recv|
+        chained = Parser::AST::Node.new(:send, [recv, expr.method])
+        expr.chain.each do |seg|
+          chained = Parser::AST::Node.new(:send, [chained, seg])
+        end
+        chained
+      end
+    end
+
+    def check_precondition_at_call_site(node, receiver, receiver_type, method_name)
+      return if contracts.empty?
+      return unless receiver.nil? || receiver.type == :self
+
+      target_name = precondition_target_type_name(receiver_type)
+      return unless target_name
+
+      contract = contracts.lookup_instance(target_name.to_s.sub(/\A::/, ""), method_name)
+      return unless contract
+
+      env = context.type_env
+      contract.requires.each do |req|
+        next unless req.is_a?(Contracts::Predicate::NotNil)
+        next if precondition_holds?(req.expr, env)
+
+        typing.add_error(
+          Diagnostic::Ruby::PreconditionUnsatisfied.new(
+            node: node,
+            method_name: method_name,
+            expression_source: contract_expression_source(req.expr),
+            contract_source: contracts.source
+          )
+        )
+      end
+    end
+
+    def precondition_target_type_name(receiver_type)
+      case receiver_type
+      when AST::Types::Name::Instance
+        receiver_type.name
+      when AST::Types::Self
+        case st = self_type
+        when AST::Types::Name::Instance
+          st.name
+        end
+      end
+    end
+
+    def precondition_holds?(expr, env)
+      build_contract_send_variants(expr).any? do |built|
+        entry = env.pure_method_calls.fetch(built, nil)
+        next false unless entry
+        _call, type = entry
+        type && !contract_nullable_type?(type)
+      end
+    end
+
+    def contract_nullable_type?(type)
+      case type
+      when AST::Types::Nil
+        true
+      when AST::Types::Union
+        type.types.any? { |t| contract_nullable_type?(t) }
+      else
+        false
+      end
+    end
+
+    def contract_expression_source(expr)
+      case expr
+      when Contracts::Expr::Send
+        "self." + ([expr.method] + expr.chain).map(&:to_s).join(".")
+      else
+        expr.inspect
       end
     end
   end
