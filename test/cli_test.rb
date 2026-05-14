@@ -106,49 +106,6 @@ end
     end
   end
 
-  def test_check_auto_infers_contracts_and_writes_sidecar
-    in_tmpdir do
-      (current_dir + "Steepfile").write(<<-EOF)
-target :app do
-  check "app"
-  signature "sig"
-end
-      EOF
-
-      sig = current_dir + "sig"
-      sig.mkpath
-      (sig + "foo.rbs").write(<<-EOF)
-class Foo
-  attr_reader name: String?
-  def helper: () -> Integer
-end
-      EOF
-
-      app = current_dir + "app"
-      app.mkpath
-      (app + "foo.rb").write(<<-EOF)
-class Foo
-  def helper
-    name.size
-  end
-end
-      EOF
-
-      stdout, status = sh(*steep, "check")
-
-      assert_predicate status, :success?, stdout
-      assert_match(/Inferred preconditions/, stdout)
-      assert_match(/Foo#helper/, stdout)
-      assert_match(/No type error detected/, stdout)
-
-      sidecar = current_dir + "sig/generated/.steep_contracts.yml"
-      assert sidecar.file?, "expected sidecar at #{sidecar}"
-      content = sidecar.read
-      assert_includes content, "Foo#helper"
-      assert_includes content, "not_nil"
-    end
-  end
-
   def test_check_failure
     in_tmpdir do
       (current_dir + "Steepfile").write(<<-EOF)

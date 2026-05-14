@@ -16,7 +16,7 @@ module Steep
     end
 
     def self.available_commands
-      [:init, :check, :validate, :annotations, :version, :project, :watch, :langserver, :stats, :binstub, :checkfile, :contracts]
+      [:init, :check, :validate, :annotations, :version, :project, :watch, :langserver, :stats, :binstub, :checkfile]
     end
 
     def process_global_options
@@ -101,27 +101,6 @@ module Steep
           jobs_option.jobs_count = [2, jobs_option.default_jobs_count].min
         end
       end
-    end
-
-    def process_contracts
-      Drivers::ContractsInfer.new(stdout: stdout, stderr: stderr).tap do |command|
-        OptionParser.new do |opts|
-          opts.banner = <<BANNER
-Usage: steep contracts [options]
-
-Description:
-    Runs the type checker against the project, infers method preconditions
-    from nil-related diagnostics, and writes sig/generated/.steep_contracts.yml.
-
-    Phase 2 v1: no call-site verification yet. Over-inferred preconditions
-    are surfaced as PreconditionUnsatisfied at the next `steep check`.
-
-Options:
-BANNER
-          handle_steepfile_option(opts, command)
-          handle_logging_options(opts)
-        end.parse!(argv)
-      end.run()
     end
 
     def process_init
