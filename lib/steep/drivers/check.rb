@@ -36,6 +36,24 @@ module Steep
         @expressions = []
       end
 
+      def infer_contracts(project)
+        runner = Contracts::Runner.new(project)
+        contracts = runner.run
+        runner.write(contracts)
+
+        if contracts.any?
+          stdout.puts Rainbow("# Inferred preconditions:").bold
+          contracts.each do |contract|
+            sep = contract.singleton ? "." : "#"
+            stdout.puts "  #{contract.type_name}#{sep}#{contract.method_name}"
+          end
+          stdout.puts "  → #{project.relative_path(runner.output_path)}"
+          stdout.puts
+        end
+      rescue => e
+        stderr.puts "Warning: precondition inference failed: #{e.class}: #{e.message}"
+      end
+
       def active_group?(group)
         return true if active_group_names.empty?
 
@@ -58,6 +76,8 @@ module Steep
         unless expressions.empty?
           return run_expressions(project)
         end
+
+        infer_contracts(project)
 
         stdout.puts Rainbow("# Type checking files:").bold
         stdout.puts
