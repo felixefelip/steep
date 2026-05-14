@@ -1053,6 +1053,25 @@ module Steep
         end
       end
 
+      class PreconditionUnsatisfied < Base
+        attr_reader :method_name, :expression_source, :contract_source
+
+        def initialize(node:, method_name:, expression_source:, contract_source:)
+          super(node: node, location: node.location.expression)
+          @method_name = method_name
+          @expression_source = expression_source
+          @contract_source = contract_source
+        end
+
+        def header_line
+          "`#{method_name}` requires `#{expression_source}` to be non-nil here"
+        end
+
+        def detail_lines
+          contract_source ? "Contract source: #{contract_source}" : nil
+        end
+      end
+
       ALL = ObjectSpace.each_object(Class).with_object([]) do |klass, array|
         if klass < Base
           array << klass

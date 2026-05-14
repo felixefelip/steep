@@ -144,6 +144,7 @@ require "steep/project/options"
 require "steep/project/target"
 require "steep/project/group"
 require "steep/project/dsl"
+require "steep/contracts"
 
 require "steep/expectations"
 require "steep/drivers/utils/driver_helper"
