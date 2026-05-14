@@ -63,7 +63,8 @@ module Steep
             source: source,
             subtyping: subtyping,
             constant_resolver: resolver,
-            cursor: nil
+            cursor: nil,
+            contracts: Store.empty
           )
 
           out.concat(Inferrer.infer(source, typing))
