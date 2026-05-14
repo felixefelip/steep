@@ -43,14 +43,19 @@ module Steep
         return unless node.is_a?(Parser::AST::Node)
 
         case node.type
-        when :class, :module
+        when :class
           const_node, _super, body = node.children
           name = extract_const_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
           walk_classes(body, nesting: new_nesting, &block) if body
+        when :module
+          const_node, body = node.children
+          name = extract_const_name(const_node)
+          new_nesting = name ? nesting + [name] : nesting
+          walk_classes(body, nesting: new_nesting, &block) if body
         when :def
-          if (class_name = nesting.last)
-            yield node, class_name
+          unless nesting.empty?
+            yield node, nesting.join("::")
           end
         when :begin, :kwbegin
           node.children.each { |child| walk_classes(child, nesting: nesting, &block) }

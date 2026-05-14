@@ -112,6 +112,107 @@ class ContractsInferrerTest < Minitest::Test
                  "expected no contract when the failing receiver is a local, got: #{contracts.map(&:type_name)}"
   end
 
+  def test_emits_fully_qualified_name_for_nested_class
+    rbs = <<~RBS
+      module Outer
+        class Inner
+          attr_reader name: String?
+          def helper: () -> Integer
+        end
+      end
+    RBS
+
+    contracts = nil
+    with_checker(rbs) do |checker|
+      source = parse_ruby(<<~RUBY)
+        module Outer
+          class Inner
+            def helper
+              name.size
+            end
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        contracts = Contracts::Inferrer.infer(source, typing)
+      end
+    end
+
+    assert_equal 1, contracts.size
+    assert_equal "Outer::Inner", contracts.first.type_name,
+                 "expected fully-qualified type name, got: #{contracts.first.type_name}"
+  end
+
+  def test_handles_deeply_nested_modules_and_classes
+    rbs = <<~RBS
+      module A
+        module B
+          class C
+            attr_reader name: String?
+            def helper: () -> Integer
+          end
+        end
+      end
+    RBS
+
+    contracts = nil
+    with_checker(rbs) do |checker|
+      source = parse_ruby(<<~RUBY)
+        module A
+          module B
+            class C
+              def helper
+                name.size
+              end
+            end
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        contracts = Contracts::Inferrer.infer(source, typing)
+      end
+    end
+
+    assert_equal 1, contracts.size
+    assert_equal "A::B::C", contracts.first.type_name
+  end
+
+  def test_handles_class_inside_class
+    rbs = <<~RBS
+      class Outer
+        class Inner
+          attr_reader name: String?
+          def helper: () -> Integer
+        end
+      end
+    RBS
+
+    contracts = nil
+    with_checker(rbs) do |checker|
+      source = parse_ruby(<<~RUBY)
+        class Outer
+          class Inner
+            def helper
+              name.size
+            end
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        contracts = Contracts::Inferrer.infer(source, typing)
+      end
+    end
+
+    assert_equal 1, contracts.size
+    assert_equal "Outer::Inner", contracts.first.type_name
+  end
+
   def test_dedupes_same_obligation_across_uses
     contracts = infer_for(<<~RUBY)
       class Foo
