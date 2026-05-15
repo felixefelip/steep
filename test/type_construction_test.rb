@@ -1906,6 +1906,42 @@ foo.order_import = nil
     end
   end
 
+  def test_intersection_attr_write_narrows_pure_send_receiver
+    # Mirrors the order_factory `CompanyExperiments` case: the receiver of the
+    # setter is a pure attr_reader (a `:send`, not a `:lvar`) whose declared
+    # return type is an intersection. After the write, the cached pure_call
+    # type of the receiver must be narrowed too — otherwise a subsequent read
+    # keeps the stale `Validated` marker and the next access sees a non-nil
+    # value that has just been set to nil.
+    with_checker <<-EOF do |checker|
+class Holder
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+
+class HolderValid < Holder
+  def value: () -> Integer
+end
+
+class Host
+  attr_reader thing: HolderValid & Holder
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type self: Host
+self.thing.value = nil
+narrowed = self.thing.value
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer?"), pair.context.type_env[:narrowed]
+      end
+    end
+  end
+
   def test_masgn_array_error
     with_checker do |checker|
       source = parse_ruby(<<-RUBY)
