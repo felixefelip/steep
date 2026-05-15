@@ -3315,6 +3315,29 @@ module Steep
           if call.is_a?(TypeInference::MethodCall::Typed)
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name)
 
+            # Phase 1: type subtraction on attribute write for intersection receivers
+            # (issue felixefelip/steep#1). When the receiver is a local variable and its
+            # current type is an intersection, drop components whose attribute
+            # invariant (the getter's return type) would be broken by the RHS.
+            if receiver &&
+                receiver.type == :lvar &&
+                method_name.to_s =~ /\w=\Z/ &&
+                receiver_type.is_a?(AST::Types::Intersection) &&
+                (last_arg = arguments.last) &&
+                typing.has_type?(last_arg)
+              rhs_type = typing.type_of(node: last_arg)
+              remaining = receiver_type.types.select do |component|
+                accepts_attribute_write?(component, method_name, rhs_type)
+              end
+              if !remaining.empty? && remaining.size < receiver_type.types.size
+                new_type = AST::Types::Intersection.build(types: remaining)
+                var_name = receiver.children[0] #: Symbol
+                constr = constr.update_type_env do |env|
+                  env.refine_types(local_variable_types: { var_name => new_type })
+                end
+              end
+            end
+
             if (pure_call, type = constr.context.type_env.pure_method_calls.fetch(node, nil))
               if type
                 call = pure_call.update(node: node, return_type: type)
@@ -3573,6 +3596,24 @@ module Steep
         end
       else
         shape
+      end
+    end
+
+    # Phase 1 of "type subtraction on attribute write" (issue felixefelip/steep#1).
+    # Returns true when `rhs_type` is compatible with `component_type`'s
+    # invariant for the attribute. We check the matching getter's return type
+    # rather than the setter's parameter so that components which only narrow
+    # the getter (e.g. a "Valid" refinement that promises non-nil reads while
+    # inheriting a wide setter) get dropped on a write that breaks the
+    # narrowed invariant.
+    def accepts_attribute_write?(component_type, setter_name, rhs_type)
+      getter_name = setter_name.to_s.chomp("=").to_sym
+      entry = calculate_interface(component_type, getter_name, private: false)
+      return true unless entry
+
+      entry.overloads.any? do |overload|
+        ret = overload.method_type.type.return_type
+        check_relation(sub_type: rhs_type, super_type: ret).success?
       end
     end
 

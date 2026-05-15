@@ -1826,6 +1826,86 @@ y = x.itself
     end
   end
 
+  def test_intersection_attr_write_drops_invariant_component
+    with_checker <<-EOF do |checker|
+class Box
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+
+class BoxNonNil
+  def value: () -> Integer
+  def value=: (Integer) -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type var box: BoxNonNil & Box
+box = (_ = nil)
+box.value = nil
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Box"), pair.context.type_env[:box]
+      end
+    end
+  end
+
+  def test_intersection_attr_write_keeps_all_components_when_all_accept
+    with_checker <<-EOF do |checker|
+class Box
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+
+class Tagged
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type var box: Box & Tagged
+box = (_ = nil)
+box.value = nil
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Box & ::Tagged"), pair.context.type_env[:box]
+      end
+    end
+  end
+
+  def test_intersection_attr_write_drops_valid_marker_via_narrowed_getter
+    with_checker <<-EOF do |checker|
+class Process
+  def order_import: () -> Integer?
+  def order_import=: (Integer?) -> Integer?
+end
+
+class ProcessValid < Process
+  def order_import: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type var foo: Process & ProcessValid
+foo = (_ = nil)
+foo.order_import = nil
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Process"), pair.context.type_env[:foo]
+      end
+    end
+  end
+
   def test_masgn_array_error
     with_checker do |checker|
       source = parse_ruby(<<-RUBY)
