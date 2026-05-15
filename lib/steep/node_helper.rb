@@ -29,7 +29,12 @@ module Steep
         true
       when :true, :false, :str, :sym, :int, :float, :nil
         true
-      when :lvar
+      when :lvar, :ivar
+        # Treat ivar reads as stable between two evaluations within the same
+        # method body (issue felixefelip/steep#8). Reassignment via `@x = …`
+        # is invalidated in `TypeConstruction#ivasgn`. Mutation through
+        # collaborators (a non-pure self-send that writes the ivar) is left
+        # unsound on purpose — same trade-off TypeScript makes for `this.x`.
         true
       when :const
         each_child_node(node).all? {|child| child.type == :cbase || value_node?(child) }

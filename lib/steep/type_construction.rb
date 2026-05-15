@@ -2841,7 +2841,11 @@ module Steep
         typing.add_error(Diagnostic::Ruby::UnknownInstanceVariable.new(node: node, name: name))
       end
 
-      add_typing(node, type: rhs_type)
+      # ivar pure-call narrowing (issue felixefelip/steep#8): once the ivar is
+      # reassigned, any pure_method_calls cached on `@name` are stale and must
+      # be dropped so subsequent `@name.foo` doesn't reuse the previous type.
+      update_type_env { |env| env.invalidate_pure_node(::Parser::AST::Node.new(:ivar, [name])) }
+        .add_typing(node, type: rhs_type)
     end
 
     def gvasgn(node, rhs_type)

@@ -1372,6 +1372,117 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_ivar_pure_call_narrowing
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarNarrowContainer
+            attr_reader value: Integer?
+          end
+
+          class IvarNarrowHost
+            attr_reader container: IvarNarrowContainer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarNarrowHost.new.instance_eval do
+            if @container.value
+              @container.value + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_ivar_pure_call_narrowing__invalidated_by_reassignment
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarReassignContainer
+            attr_reader value: Integer?
+          end
+
+          class IvarReassignHost
+            attr_accessor container: IvarReassignContainer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarReassignHost.new.instance_eval do
+            if @container.value
+              @container = IvarReassignContainer.new
+              @container.value + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 21
+              end:
+                line: 4
+                character: 22
+            severity: ERROR
+            message: Type `(::Integer | nil)` does not have method `+`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_ivar_pure_call_narrowing__non_pure_method_not_narrowed
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarNonPureProvider
+            def maybe_value: () -> Integer?
+          end
+
+          class IvarNonPureHost
+            attr_reader provider: IvarNonPureProvider
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarNonPureHost.new.instance_eval do
+            if @provider.maybe_value
+              @provider.maybe_value + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 26
+              end:
+                line: 3
+                character: 27
+            severity: ERROR
+            message: Type `(::Integer | nil)` does not have method `+`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
   def test_case_when__bool_value
     run_type_check_test(
       signatures: {
