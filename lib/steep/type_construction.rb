@@ -3344,6 +3344,11 @@ module Steep
                   constr = constr.update_type_env do |env|
                     env.refine_types(local_variable_types: { var_name => new_type })
                   end
+                when :ivar
+                  ivar_name = receiver.children[0] #: Symbol
+                  constr = constr.update_type_env do |env|
+                    env.refine_types(instance_variable_types: { ivar_name => new_type })
+                  end
                 when :send
                   if constr.context.type_env.pure_method_calls.key?(receiver)
                     constr = constr.update_type_env do |env|

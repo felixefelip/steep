@@ -1942,6 +1942,37 @@ narrowed = self.thing.value
     end
   end
 
+  def test_intersection_attr_write_narrows_ivar_receiver
+    # Same shape as the pure-send case, but the receiver is an instance
+    # variable (`:ivar`). The refinement lives in `instance_variable_types`
+    # rather than `pure_call_types`, but the user-visible effect is the same:
+    # after the write, the next read of `@thing` sees the narrowed
+    # intersection.
+    with_checker <<-EOF do |checker|
+class Holder
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+
+class HolderValid < Holder
+  def value: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @thing: HolderValid & Holder
+@thing.value = nil
+narrowed = @thing.value
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer?"), pair.context.type_env[:narrowed]
+      end
+    end
+  end
+
   def test_masgn_array_error
     with_checker do |checker|
       source = parse_ruby(<<-RUBY)
