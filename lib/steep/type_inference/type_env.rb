@@ -134,7 +134,7 @@ module Steep
         )
       end
 
-      def refine_types(local_variable_types: {}, pure_call_types: {})
+      def refine_types(local_variable_types: {}, instance_variable_types: {}, pure_call_types: {})
         local_variable_updates = {} #: Hash[Symbol, local_variable_entry]
 
         local_variable_types.each do |name, type|
@@ -146,6 +146,9 @@ module Steep
         local_variable_types.each_key do |name|
           invalidated_nodes.merge(invalidated_pure_nodes(Parser::AST::Node.new(:lvar, [name])))
         end
+        instance_variable_types.each_key do |name|
+          invalidated_nodes.merge(invalidated_pure_nodes(Parser::AST::Node.new(:ivar, [name])))
+        end
 
         pure_call_updates = pure_node_invalidation(invalidated_nodes)
 
@@ -154,7 +157,11 @@ module Steep
           pure_call_updates[node] = [call, type]
         end
 
-        merge(local_variable_types: local_variable_updates, pure_method_calls: pure_call_updates)
+        merge(
+          local_variable_types: local_variable_updates,
+          instance_variable_types: instance_variable_types,
+          pure_method_calls: pure_call_updates
+        )
       end
 
       def constant(arg1, arg2)

@@ -3319,12 +3319,15 @@ module Steep
           if call.is_a?(TypeInference::MethodCall::Typed)
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name)
 
-            # Phase 1: type subtraction on attribute write for intersection receivers
-            # (issue felixefelip/steep#1). When the receiver is a local variable and its
-            # current type is an intersection, drop components whose attribute
-            # invariant (the getter's return type) would be broken by the RHS.
+            # Phase 1: type subtraction on attribute write for intersection
+            # receivers (issue felixefelip/steep#1). When an attribute write
+            # invalidates one component's invariant (the getter's return type),
+            # drop that component from the intersection. Handles two forms of
+            # receiver: a local variable (refine `local_variable_types`) and a
+            # cached pure send like an `attr_reader` returning an intersection
+            # (refine `pure_call_types`). Other receivers are left alone — for
+            # them the existing `invalidate_pure_node` flow runs instead.
             if receiver &&
-                receiver.type == :lvar &&
                 method_name.to_s =~ /\w=\Z/ &&
                 receiver_type.is_a?(AST::Types::Intersection) &&
                 (last_arg = arguments.last) &&
@@ -3335,9 +3338,23 @@ module Steep
               end
               if !remaining.empty? && remaining.size < receiver_type.types.size
                 new_type = AST::Types::Intersection.build(types: remaining)
-                var_name = receiver.children[0] #: Symbol
-                constr = constr.update_type_env do |env|
-                  env.refine_types(local_variable_types: { var_name => new_type })
+                case receiver.type
+                when :lvar
+                  var_name = receiver.children[0] #: Symbol
+                  constr = constr.update_type_env do |env|
+                    env.refine_types(local_variable_types: { var_name => new_type })
+                  end
+                when :ivar
+                  ivar_name = receiver.children[0] #: Symbol
+                  constr = constr.update_type_env do |env|
+                    env.refine_types(instance_variable_types: { ivar_name => new_type })
+                  end
+                when :send
+                  if constr.context.type_env.pure_method_calls.key?(receiver)
+                    constr = constr.update_type_env do |env|
+                      env.refine_types(pure_call_types: { receiver => new_type })
+                    end
+                  end
                 end
               end
             end
