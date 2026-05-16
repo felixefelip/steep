@@ -1444,10 +1444,15 @@ class TypeCheckTest < Minitest::Test
   end
 
   def test_ivar_pure_call_narrowing__non_pure_method_not_narrowed
+    # Negative control: a method annotated `%a{impure}` opts out of the
+    # optimistic-pure default (felixefelip/steep#12), so the pure_call
+    # cache stays empty and the second `@provider.maybe_value` doesn't
+    # carry the narrowing from the conditional.
     run_type_check_test(
       signatures: {
         "a.rbs" => <<~RBS
           class IvarNonPureProvider
+            %a{impure}
             def maybe_value: () -> Integer?
           end
 
