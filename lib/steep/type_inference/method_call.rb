@@ -128,14 +128,28 @@ module Steep
 
         def pure?
           method_decls.all? do |method_decl|
+            name = method_decl.method_name.method_name.to_s
+            # Setters and bang methods are conventionally mutating; treat them
+            # as impure so `invalidate_pure_node` fires on the receiver. The
+            # attribute writer (`attr_*` form) follows the same rule.
+            next false if name.end_with?("=", "!")
+
             case method_decl.method_def.member
             when RBS::AST::Members::Attribute
-              # The attribute writer is not pure
-              !method_decl.method_name.method_name.end_with?("=")
+              true
             else
-              method_decl.method_def.each_annotation.any? do |annotation|
-                annotation.string == "pure"
-              end
+              # Optimistic treatment for `def`: assume the method is pure
+              # unless its name marks it as mutating (handled above). This
+              # mirrors the pragmatic line we already drew for `:ivar` reads
+              # in NodeHelper#value_node? (felixefelip/steep#8) — same
+              # trade-off as TypeScript's control-flow narrowing of
+              # `this.x`. Methods that legitimately return different values
+              # across calls (Time.now, rand, counters) are rare in the
+              # narrowing patterns this enables. Opt out of narrowing
+              # explicitly with `%a{impure}` if needed.
+              annotations = method_decl.method_def.each_annotation.to_a
+              next false if annotations.any? { |a| a.string == "impure" }
+              true
             end
           end
         end
