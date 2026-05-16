@@ -1973,6 +1973,158 @@ narrowed = @thing.value
     end
   end
 
+  def test_optimistic_pure_caches_plain_def_calls
+    # Regression: `MethodCall::Typed#pure?` used to require `%a{pure}` on
+    # any `def` declaration. Now plain `def` are treated as pure by
+    # default, so a `self.name` call inside a method body gets cached as
+    # a pure_call and conditional narrowing refines subsequent reads —
+    # without forcing rbs_rails (or the user) to spread `%a{pure}`
+    # everywhere.
+    with_checker <<-EOF do |checker|
+class Host
+  def name: () -> String?
+  def run: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-'RUBY')
+class Host
+  # @dynamic name
+
+  def run
+    if name
+      name.size
+    else
+      0
+    end
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # Inside the truthy branch, `name` is refined to non-nil via
+        # the existing pure_call narrowing — even though `def name:` has
+        # no `%a{pure}` annotation. If the optimistic-pure change didn't
+        # take effect, `name.size` would raise NoMethod on `nil`.
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_optimistic_pure_setter_invalidates_cached_receiver_call
+    with_checker <<-EOF do |checker|
+class Host
+  def name: () -> String?
+  def name=: (String?) -> String?
+  def run: () -> void
+end
+    EOF
+      source = parse_ruby(<<-'RUBY')
+class Host
+  # @dynamic name, name=
+
+  def run
+    if self.name
+      self.name = nil
+      self.name.size
+    end
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # The setter `name=` is impure (ends with `=`), so it must
+        # invalidate the cached pure_call for `self.name`. After the
+        # write, reading `self.name.size` errors because the type is
+        # `String?` again. (Receivers are kept explicit to make the
+        # cached node match the invalidation node — implicit-self
+        # `name` parses as `(send nil :name)` while `self.name=` parses
+        # with `(self)` receiver, and invalidation walks descendants.)
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) do |error|
+            assert_instance_of Diagnostic::Ruby::NoMethod, error
+            assert_equal :size, error.method
+          end
+        end
+      end
+    end
+  end
+
+  def test_optimistic_pure_bang_method_invalidates_cached_receiver_call
+    with_checker <<-EOF do |checker|
+class Host
+  def name: () -> String?
+  def reset!: () -> void
+  def run: () -> void
+end
+    EOF
+      source = parse_ruby(<<-'RUBY')
+class Host
+  # @dynamic name, reset!
+
+  def run
+    if self.name
+      self.reset!
+      self.name.size
+    end
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # Bang methods are impure by convention; invalidates the `name`
+        # cache the same way the setter does.
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) do |error|
+            assert_instance_of Diagnostic::Ruby::NoMethod, error
+            assert_equal :size, error.method
+          end
+        end
+      end
+    end
+  end
+
+  def test_optimistic_pure_explicit_impure_annotation_opts_out
+    with_checker <<-EOF do |checker|
+class Host
+  %a{impure}
+  def name: () -> String?
+  def run: () -> void
+end
+    EOF
+      source = parse_ruby(<<-'RUBY')
+class Host
+  # @dynamic name
+
+  def run
+    if name
+      name.size
+    end
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # `%a{impure}` on the def forces the legacy non-pure behavior:
+        # no cache, no narrowing — `name.size` errors because the read
+        # is still typed as `String?`.
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) do |error|
+            assert_instance_of Diagnostic::Ruby::NoMethod, error
+            assert_equal :size, error.method
+          end
+        end
+      end
+    end
+  end
+
   def test_masgn_array_error
     with_checker do |checker|
       source = parse_ruby(<<-RUBY)
