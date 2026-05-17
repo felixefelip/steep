@@ -4914,6 +4914,342 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  # ---------------------------------------------------------------------------
+  # via_receiver — Phase 2 (felixefelip/steep#14)
+  #
+  # Refines the *receiver of the receiver* of a predicate call. Covers
+  # delegation patterns: POROs (`def x; y.x; end`) and `has_one through:`.
+  # ---------------------------------------------------------------------------
+
+  def test_postconditions__via_receiver_poro_delegation
+    # account.profile.display_ready? narrows account.profile (via `self`)
+    # AND narrows account itself (via via_receiver), so the delegated
+    # accessor `account.nickname` resolves through Account's marker class.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCProfile
+            attr_reader nickname: String?
+            def display_ready?: () -> bool
+
+            class DisplayReady
+              attr_reader nickname: String
+            end
+          end
+
+          class PCAccount
+            attr_reader profile: PCProfile
+            def nickname: () -> String?
+
+            class WithDisplayReadyProfile
+              def nickname: () -> String
+            end
+
+            def self.first: () -> PCAccount
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          account = PCAccount.first
+          if account.profile.display_ready?
+            account.nickname.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCProfile",
+          "method" => "display_ready?",
+          "when_true" => {
+            "self" => "PCProfile & PCProfile::DisplayReady",
+            "via_receiver" => [
+              { "through" => "PCAccount#profile",
+                "as" => "PCAccount & PCAccount::WithDisplayReadyProfile" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__via_receiver_does_not_match_other_method
+    # The via_receiver only fires when the through method matches.
+    # Calling .display_ready? on a *different* parent chain (.other.profile.display_ready?)
+    # must not narrow the irrelevant host.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCProfile2
+            def display_ready?: () -> bool
+          end
+
+          class PCOtherHost
+            attr_reader profile: PCProfile2
+            def nickname: () -> String?
+            def self.first: () -> PCOtherHost
+          end
+
+          class PCHost
+            attr_reader profile: PCProfile2
+            def nickname: () -> String?
+
+            class Refined
+              def nickname: () -> String
+            end
+
+            def self.first: () -> PCHost
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          host = PCOtherHost.first
+          if host.profile.display_ready?
+            host.nickname.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCProfile2",
+          "method" => "display_ready?",
+          "when_true" => {
+            "via_receiver" => [
+              { "through" => "PCHost#profile",
+                "as" => "PCHost & PCHost::Refined" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 16
+              end:
+                line: 3
+                character: 22
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__via_receiver_when_false_branch
+    # via_receiver under `when_false` narrows the host in the falsy branch.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCInner
+            def fail?: () -> bool
+          end
+
+          class PCOuter
+            attr_reader inner: PCInner
+            def message: () -> String?
+
+            class WhenNotFail
+              def message: () -> String
+            end
+
+            def self.first: () -> PCOuter
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          outer = PCOuter.first
+          unless outer.inner.fail?
+            outer.message.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCInner",
+          "method" => "fail?",
+          "when_false" => {
+            "via_receiver" => [
+              { "through" => "PCOuter#inner",
+                "as" => "PCOuter & PCOuter::WhenNotFail" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__phase1_send_receiver_narrowing
+    # Sanity check: Phase 1's `self:` refinement should already narrow a
+    # pure-send receiver (account.profile). This isolates whether the
+    # bug in compose_with_self is in Phase 2 or pre-existing.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCSendProfile
+            attr_reader nickname: String?
+            def display_ready?: () -> bool
+
+            class Ready
+              attr_reader nickname: String
+            end
+          end
+
+          class PCSendAccount
+            attr_reader profile: PCSendProfile
+            def self.first: () -> PCSendAccount
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          account = PCSendAccount.first
+          if account.profile.display_ready?
+            account.profile.nickname.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCSendProfile",
+          "method" => "display_ready?",
+          "when_true" => { "self" => "PCSendProfile & PCSendProfile::Ready" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__via_receiver_composes_with_self
+    # Both `self:` and `via_receiver` apply at once: account.profile
+    # (the inner receiver) gets the Profile marker AND account gets the
+    # Account marker. Accessor on both should narrow.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCComProfile
+            attr_reader nickname: String?
+            def display_ready?: () -> bool
+
+            class Ready
+              attr_reader nickname: String
+            end
+          end
+
+          class PCComAccount
+            attr_reader profile: PCComProfile
+            def nickname: () -> String?
+
+            class WithReady
+              def nickname: () -> String
+            end
+
+            def self.first: () -> PCComAccount
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          account = PCComAccount.first
+          if account.profile.display_ready?
+            account.profile.nickname.upcase
+            account.nickname.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCComProfile",
+          "method" => "display_ready?",
+          "when_true" => {
+            "self" => "PCComProfile & PCComProfile::Ready",
+            "via_receiver" => [
+              { "through" => "PCComAccount#profile",
+                "as" => "PCComAccount & PCComAccount::WithReady" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__via_receiver_matches_intersected_inner_type
+    # The inner receiver may already be narrowed (e.g. another marker
+    # applied earlier). The `through:` check walks intersections.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIntInner
+            def ready?: () -> bool
+          end
+
+          class PCIntHost
+            attr_reader inner: PCIntInner
+            def value: () -> String?
+
+            class Marker
+            end
+
+            class Refined
+              def value: () -> String
+            end
+
+            def self.first: () -> (PCIntHost & PCIntHost::Marker)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          host = PCIntHost.first
+          if host.inner.ready?
+            host.value.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIntInner",
+          "method" => "ready?",
+          "when_true" => {
+            "via_receiver" => [
+              { "through" => "PCIntHost#inner",
+                "as" => "PCIntHost & PCIntHost::Refined" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_postconditions__dropout_on_attribute_write
     run_type_check_test(
       signatures: {
