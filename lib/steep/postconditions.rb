@@ -1,0 +1,129 @@
+module Steep
+  # Conditional postconditions sidecar (issue felixefelip/steep#10).
+  #
+  # Loads `.steep_postconditions.yml`, a sidecar produced by rbs_rails (and
+  # any other source) that declares, per `(class, method)` pair, how the
+  # receiver should be refined in the truthy/falsy branches of a boolean
+  # call. The intent mirrors `Steep::Contracts` (preconditions): keep the
+  # extension out of the RBS grammar by emitting a YAML file the checker
+  # consumes at type-check time.
+  #
+  # Schema:
+  #
+  #     ---
+  #     postconditions:
+  #       - class: OrderImport
+  #         method: shipment?
+  #         when_true:
+  #           self: OrderImport & OrderImport::ValidatedAsShipment
+  #         when_false:
+  #           self: OrderImport
+  #
+  # `when_true` / `when_false` are independent and optional. The `self:`
+  # type string is parsed lazily via `RBS::Parser.parse_type`.
+  module Postconditions
+    DEFAULT_SIDECAR_PATH = "sig/generated/.steep_postconditions.yml".freeze
+
+    class << self
+      def load(base_dir, path: DEFAULT_SIDECAR_PATH)
+        absolute = base_dir + path
+        return Store.empty unless absolute.file?
+
+        raw = YAML.safe_load(absolute.read, aliases: false)
+        Store.from_hash(raw, source: absolute.to_s)
+      rescue Psych::SyntaxError, LoadError => e
+        Steep.logger.warn { "[postconditions] failed to parse #{absolute}: #{e.message}" }
+        Store.empty
+      end
+    end
+
+    class Store
+      attr_reader :entries, :source
+
+      def self.empty
+        new(entries: {}, source: nil)
+      end
+
+      def self.from_hash(raw, source:)
+        rows = (raw && raw["postconditions"]) || []
+        index = {} #: Hash[[String, Symbol], Entry]
+        rows.each do |row|
+          entry = Entry.parse(row, source: source)
+          next unless entry
+          key = [entry.class_name, entry.method_name]
+          if index.key?(key)
+            Steep.logger.warn { "[postconditions] duplicate entry for #{entry.class_name}##{entry.method_name} in #{source}; keeping first" }
+            next
+          end
+          index[key] = entry
+        end
+        new(entries: index, source: source)
+      end
+
+      def initialize(entries:, source:)
+        @entries = entries
+        @source = source
+      end
+
+      def empty?
+        @entries.empty?
+      end
+
+      def lookup_instance(type_name, method_name)
+        @entries[[type_name.to_s.sub(/\A::/, ""), method_name.to_sym]]
+      end
+    end
+
+    class Entry
+      attr_reader :class_name, :method_name, :when_true, :when_false
+
+      def self.parse(row, source:)
+        return nil unless row.is_a?(Hash)
+        klass = row["class"]
+        method = row["method"]
+        return nil unless klass && method
+
+        when_true = Branch.parse(row["when_true"], source: source)
+        when_false = Branch.parse(row["when_false"], source: source)
+        return nil unless when_true || when_false
+
+        new(class_name: klass.to_s, method_name: method.to_sym, when_true: when_true, when_false: when_false)
+      end
+
+      def initialize(class_name:, method_name:, when_true:, when_false:)
+        @class_name = class_name
+        @method_name = method_name
+        @when_true = when_true
+        @when_false = when_false
+      end
+    end
+
+    class Branch
+      attr_reader :self_type_string
+
+      def self.parse(raw, source:)
+        return nil unless raw.is_a?(Hash)
+        self_str = raw["self"]
+        return nil unless self_str.is_a?(String) && !self_str.empty?
+        new(self_type_string: self_str)
+      end
+
+      def initialize(self_type_string:)
+        @self_type_string = self_type_string
+      end
+
+      # Parses the YAML `self:` payload into an `RBS::Types::t`. Cached so
+      # repeated lookups (the same predicate called many times) don't keep
+      # re-parsing. Returns `nil` if the string fails to parse.
+      def rbs_type
+        return @rbs_type if defined?(@rbs_type)
+        @rbs_type = begin
+          RBS::Parser.parse_type(self_type_string)
+        rescue RBS::ParsingError => e
+          Steep.logger.warn { "[postconditions] failed to parse self type #{self_type_string.inspect}: #{e.message}" }
+          nil
+        end
+      end
+    end
+  end
+end

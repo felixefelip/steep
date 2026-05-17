@@ -148,6 +148,7 @@ require "steep/contracts"
 require "steep/contracts/writer"
 require "steep/contracts/inferrer"
 require "steep/contracts/runner"
+require "steep/postconditions"
 
 require "steep/expectations"
 require "steep/drivers/utils/driver_helper"

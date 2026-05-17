@@ -64,7 +64,8 @@ module Steep
             subtyping: subtyping,
             constant_resolver: resolver,
             cursor: nil,
-            contracts: Store.empty
+            contracts: Store.empty,
+            postconditions: Steep::Postconditions::Store.empty
           )
 
           out.concat(Inferrer.infer(source, typing))

@@ -20,11 +20,13 @@ module Steep
       attr_reader :subtyping
       attr_reader :typing
       attr_reader :config
+      attr_reader :postconditions
 
-      def initialize(subtyping:, typing:, config:)
+      def initialize(subtyping:, typing:, config:, postconditions: Steep::Postconditions::Store.empty)
         @subtyping = subtyping
         @typing = typing
         @config = config
+        @postconditions = postconditions
       end
 
       def factory
@@ -205,6 +207,15 @@ module Steep
               if falsy_type
                 falsy_result = Result.new(type: falsy_type, env: falsy_result.env.refine_types(pure_call_types: { node => falsy_type }), unreachable: false)
               end
+            end
+
+            if receiver
+              truthy_result, falsy_result = apply_postconditions(
+                node: node,
+                receiver: receiver,
+                truthy_result: truthy_result,
+                falsy_result: falsy_result
+              )
             end
 
             return [truthy_result, falsy_result]
@@ -668,6 +679,84 @@ module Steep
 
             method_type.type.return_type if method_type
           end
+        end
+      end
+
+      # Applies a `.steep_postconditions.yml` entry to refine the receiver's
+      # type in the truthy/falsy branches of a boolean call (issue
+      # felixefelip/steep#10). When a method-decl on the call matches an
+      # entry, the receiver type is intersected with the entry's declared
+      # `self` type; this intersects (not substitutes) so multiple
+      # predicates compose via `&&` without losing prior narrowings.
+      def apply_postconditions(node:, receiver:, truthy_result:, falsy_result:)
+        return [truthy_result, falsy_result] if postconditions.empty?
+
+        call = typing.call_of(node: node) rescue nil
+        return [truthy_result, falsy_result] unless call.is_a?(MethodCall::Typed)
+
+        entry = lookup_postcondition_entry(call)
+        return [truthy_result, falsy_result] unless entry
+
+        receiver_type = typing.type_of(node: receiver) rescue nil
+        return [truthy_result, falsy_result] unless receiver_type
+
+        if entry.when_true
+          new_truthy = postcondition_intersect(receiver_type, entry.when_true)
+          if new_truthy
+            truthy_env, _ = refine_node_type(
+              env: truthy_result.env,
+              node: receiver,
+              truthy_type: new_truthy,
+              falsy_type: receiver_type
+            )
+            truthy_result = Result.new(type: truthy_result.type, env: truthy_env, unreachable: truthy_result.unreachable)
+          end
+        end
+
+        if entry.when_false
+          new_falsy = postcondition_intersect(receiver_type, entry.when_false)
+          if new_falsy
+            _, falsy_env = refine_node_type(
+              env: falsy_result.env,
+              node: receiver,
+              truthy_type: receiver_type,
+              falsy_type: new_falsy
+            )
+            falsy_result = Result.new(type: falsy_result.type, env: falsy_env, unreachable: falsy_result.unreachable)
+          end
+        end
+
+        [truthy_result, falsy_result]
+      end
+
+      def lookup_postcondition_entry(call)
+        call.method_decls.each do |decl|
+          name = decl.method_name
+          next unless name.is_a?(InstanceMethodName)
+          entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
+          return entry if entry
+        end
+        nil
+      end
+
+      def postcondition_intersect(receiver_type, branch)
+        rbs_type = branch.rbs_type or return nil
+        marker = factory.type(absolutize_rbs_type(rbs_type))
+        AST::Types::Intersection.build(types: [receiver_type, marker])
+      end
+
+      def absolutize_rbs_type(rbs_type)
+        case rbs_type
+        when RBS::Types::ClassInstance, RBS::Types::ClassSingleton, RBS::Types::Interface, RBS::Types::Alias
+          rbs_type.class.new(name: rbs_type.name.absolute!, args: rbs_type.respond_to?(:args) ? rbs_type.args.map { |a| absolutize_rbs_type(a) } : [], location: rbs_type.location)
+        when RBS::Types::Intersection
+          rbs_type.class.new(types: rbs_type.types.map { |t| absolutize_rbs_type(t) }, location: rbs_type.location)
+        when RBS::Types::Union
+          rbs_type.class.new(types: rbs_type.types.map { |t| absolutize_rbs_type(t) }, location: rbs_type.location)
+        when RBS::Types::Optional
+          rbs_type.class.new(type: absolutize_rbs_type(rbs_type.type), location: rbs_type.location)
+        else
+          rbs_type
         end
       end
     end

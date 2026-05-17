@@ -20,9 +20,10 @@ class TypeCheckTest < Minitest::Test
   # @rbs code: Hash[String, String]
   # @rbs inline_code: Hash[String, String]
   # @rbs expectations: String?
+  # @rbs postconditions: Steep::Postconditions::Store
   # @rbs &block: ? (Hash[String, Steep::Typing]) -> void
   # @rbs return: void
-  def run_type_check_test(signatures: {}, code: {}, inline_code: {}, expectations: nil, &block)
+  def run_type_check_test(signatures: {}, code: {}, inline_code: {}, expectations: nil, postconditions: Steep::Postconditions::Store.empty, &block)
     typings = {}
 
     with_factory(signatures, inline_code, nostdlib: false) do |factory|
@@ -31,7 +32,7 @@ class TypeCheckTest < Minitest::Test
 
       code.merge(inline_code).each do |path, content|
         source = Source.parse(content, path: Pathname(path), factory: factory)
-        with_standard_construction(subtyping, source) do |construction, typing|
+        with_standard_construction(subtyping, source, postconditions: postconditions) do |construction, typing|
           if source.node
             construction.synthesize(source.node)
           end
@@ -4669,6 +4670,282 @@ class TypeCheckTest < Minitest::Test
         ---
         - file: a.rb
           diagnostics: []
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Conditional postconditions (felixefelip/steep#10)
+  #
+  # Sidecar declarations refine the receiver in the truthy/falsy branches of a
+  # boolean call. Hits Pattern A (predicate) and Pattern B (update/save/valid?).
+  # ---------------------------------------------------------------------------
+
+  def postconditions_store(entries)
+    Steep::Postconditions::Store.from_hash(
+      { "postconditions" => entries },
+      source: "test"
+    )
+  end
+
+  def test_postconditions__predicate_refines_receiver
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCOrderImport
+            attr_reader logistics_operator: PCLogisticsOperator?
+            def shipment?: () -> bool
+
+            class ValidatedAsShipment
+              attr_reader logistics_operator: PCLogisticsOperator
+            end
+          end
+
+          class PCLogisticsOperator
+            attr_reader name: String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          order_import = PCOrderImport.new
+          if order_import.shipment?
+            order_import.logistics_operator.name
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCOrderImport",
+          "method" => "shipment?",
+          "when_true" => { "self" => "PCOrderImport & PCOrderImport::ValidatedAsShipment" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__update_refines_receiver
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCUser
+            attr_reader name: String?
+            def update: (untyped) -> bool
+
+            class Validated
+              attr_reader name: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          user = PCUser.new
+          if user.update({})
+            user.name.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCUser",
+          "method" => "update",
+          "when_true" => { "self" => "PCUser & PCUser::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__composition_via_and
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCMixUser
+            attr_reader email: String?
+            attr_reader phone: String?
+            def email_required?: () -> bool
+            def phone_required?: () -> bool
+
+            class ValidatedAsEmail
+              attr_reader email: String
+            end
+
+            class ValidatedAsPhone
+              attr_reader phone: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          user = PCMixUser.new
+          if user.email_required? && user.phone_required?
+            user.email.length
+            user.phone.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCMixUser",
+          "method" => "email_required?",
+          "when_true" => { "self" => "PCMixUser & PCMixUser::ValidatedAsEmail" }
+        },
+        {
+          "class" => "PCMixUser",
+          "method" => "phone_required?",
+          "when_true" => { "self" => "PCMixUser & PCMixUser::ValidatedAsPhone" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__falsy_branch_not_refined_without_when_false
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCFalsyHost
+            attr_reader value: String?
+            def ready?: () -> bool
+
+            class Validated
+              attr_reader value: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          host = PCFalsyHost.new
+          unless host.ready?
+            host.value.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCFalsyHost",
+          "method" => "ready?",
+          "when_true" => { "self" => "PCFalsyHost & PCFalsyHost::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 13
+              end:
+                line: 3
+                character: 19
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__dropout_on_attribute_write
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCDropOrderImport
+            attr_accessor logistics_operator: PCDropLogisticsOperator?
+            def shipment?: () -> bool
+
+            class ValidatedAsShipment
+              attr_reader logistics_operator: PCDropLogisticsOperator
+            end
+          end
+
+          class PCDropLogisticsOperator
+            attr_reader name: String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          order_import = PCDropOrderImport.new
+          if order_import.shipment?
+            order_import.logistics_operator = nil
+            order_import.logistics_operator.name
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDropOrderImport",
+          "method" => "shipment?",
+          "when_true" => { "self" => "PCDropOrderImport & PCDropOrderImport::ValidatedAsShipment" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 34
+              end:
+                line: 4
+                character: 38
+            severity: ERROR
+            message: Type `(::PCDropLogisticsOperator | nil)` does not have method `name`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__negative_control_no_entry_no_refinement
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCNoEntry
+            attr_reader value: String?
+            def ready?: () -> bool
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          host = PCNoEntry.new
+          if host.ready?
+            host.value.length
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 13
+              end:
+                line: 3
+                character: 19
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
       YAML
     )
   end

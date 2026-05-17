@@ -261,7 +261,8 @@ module Steep
             subtyping: subtyping,
             constant_resolver: signature_service.latest_constant_resolver,
             cursor: nil,
-            contracts: project.contracts
+            contracts: project.contracts,
+            postconditions: project.postconditions
           )
 
           diagnostics = typing.errors.filter_map { |error| lsp_formatter.format(error) }
