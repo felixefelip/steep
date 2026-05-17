@@ -312,7 +312,7 @@ module Steep
       def type_check_file(target:, subtyping:, path:, text:)
         Steep.logger.tagged "#type_check_file(#{path}@#{target.name})" do
           source = Source.parse(text, path: path, factory: subtyping.factory)
-          typing = TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: yield, cursor: nil, contracts: project.contracts)
+          typing = TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: yield, cursor: nil, contracts: project.contracts, postconditions: project.postconditions)
           ignores = Source::IgnoreRanges.new(ignores: source.ignores)
           SourceFile.with_typing(path: path, content: text, node: source.node, typing: typing, ignores: ignores)
         end
@@ -329,7 +329,7 @@ module Steep
         SourceFile.no_data(path: path, content: text)
       end
 
-      def self.type_check(source:, subtyping:, constant_resolver:, cursor:, contracts:)
+      def self.type_check(source:, subtyping:, constant_resolver:, cursor:, contracts:, postconditions:)
         annotations = source.annotations(block: source.node, factory: subtyping.factory, context: nil)
 
         case annotations.self_type
@@ -390,7 +390,8 @@ module Steep
           source: source,
           context: context,
           typing: typing,
-          contracts: contracts
+          contracts: contracts,
+          postconditions: postconditions
         )
 
         construction.synthesize(source.node) if source.node

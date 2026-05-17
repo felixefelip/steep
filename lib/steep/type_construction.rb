@@ -46,6 +46,7 @@ module Steep
     attr_reader :annotations
     attr_reader :typing
     attr_reader :contracts
+    attr_reader :postconditions
 
     attr_reader :context
 
@@ -81,13 +82,14 @@ module Steep
       context.variable_context
     end
 
-    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty)
+    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty, postconditions: Postconditions::Store.empty)
       @checker = checker
       @source = source
       @annotations = annotations
       @typing = typing
       @context = context
       @contracts = contracts
+      @postconditions = postconditions
     end
 
     def with_new_typing(typing)
@@ -97,7 +99,8 @@ module Steep
         annotations: annotations,
         typing: typing,
         context: context,
-        contracts: contracts
+        contracts: contracts,
+        postconditions: postconditions
       )
     end
 
@@ -117,7 +120,8 @@ module Steep
           annotations: annotations,
           typing: typing,
           context: context,
-          contracts: contracts
+          contracts: contracts,
+          postconditions: postconditions
         )
       else
         self
@@ -310,7 +314,8 @@ module Steep
           variable_context: variable_context
         ),
         typing: typing,
-        contracts: contracts
+        contracts: contracts,
+        postconditions: postconditions
       )
     end
 
@@ -490,7 +495,8 @@ module Steep
           call_context: TypeInference::MethodCall::ModuleContext.new(type_name: module_context.class_name),
           variable_context: variable_context
         ),
-        contracts: contracts
+        contracts: contracts,
+        postconditions: postconditions
       )
     end
 
@@ -582,7 +588,8 @@ module Steep
         annotations: annots,
         typing: typing,
         context: class_body_context,
-        contracts: contracts
+        contracts: contracts,
+        postconditions: postconditions
       )
     end
 
@@ -696,7 +703,8 @@ module Steep
         annotations: annots,
         typing: typing,
         context: body_context,
-        contracts: contracts
+        contracts: contracts,
+        postconditions: postconditions
       )
     end
 
@@ -1811,7 +1819,7 @@ module Steep
 
             left_type, constr, left_context = synthesize(left_node, hint: hint, condition: true).to_ary
 
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions)
             left_truthy, left_falsy = interpreter.eval(env: left_context.type_env, node: left_node)
 
             if left_type.is_a?(AST::Types::Logic::Env)
@@ -1870,7 +1878,7 @@ module Steep
             end
             left_type, constr, left_context = synthesize(left_node, hint: left_hint, condition: true).to_ary
 
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions)
             left_truthy, left_falsy = interpreter.eval(env: left_context.type_env, node: left_node)
 
             if left_type.is_a?(AST::Types::Logic::Env)
@@ -1924,7 +1932,7 @@ module Steep
             cond, true_clause, false_clause = node.children
 
             cond_type, constr = synthesize(cond, condition: true).to_ary
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: constr.typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: constr.typing, config: builder_config, postconditions: postconditions)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
 
             if true_clause
@@ -2035,7 +2043,7 @@ module Steep
             cond, *whens, els = node.children
 
             constr = self #: TypeConstruction
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions)
 
             if cond
               types, envs = TypeInference::CaseWhen.type_check(constr, node, interpreter, hint: hint, condition: condition)
@@ -2304,7 +2312,7 @@ module Steep
             cond, body = node.children
             cond_type, constr = synthesize(cond, condition: true).to_ary
 
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
             truthy_env = truthy.env
             falsy_env = falsy.env
@@ -4713,7 +4721,8 @@ module Steep
           call_context: self.context.call_context,
           variable_context: variable_context
         ),
-        contracts: contracts
+        contracts: contracts,
+        postconditions: postconditions
       )
     end
 

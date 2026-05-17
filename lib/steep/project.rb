@@ -25,6 +25,10 @@ module Steep
       @contracts ||= Contracts.load(base_dir)
     end
 
+    def postconditions
+      @postconditions ||= Postconditions.load(base_dir)
+    end
+
     def relative_path(path)
       path.relative_path_from(base_dir)
     rescue ArgumentError
