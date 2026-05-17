@@ -5197,6 +5197,54 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_postconditions__predicate_from_included_module_matches_by_receiver_type
+    # Predicate `verified?` is defined in module `PCVerifiable`, which
+    # `PCDocument` includes. The sidecar is keyed on `PCDocument` (the
+    # receiver's concrete type), not on the module. Lookup must walk the
+    # receiver type to find the entry. Hits the same shape as Rails AR
+    # column predicates that live in `Model::GeneratedAttributeMethods`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module PCVerifiable
+            def verified?: () -> bool
+          end
+
+          class PCDocument
+            include PCVerifiable
+            attr_reader content: String?
+
+            class Verified
+              attr_reader content: String
+            end
+
+            def self.first!: () -> PCDocument
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          doc = PCDocument.first!
+          if doc.verified?
+            doc.content.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDocument",
+          "method" => "verified?",
+          "when_true" => { "self" => "PCDocument & PCDocument::Verified" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_postconditions__via_receiver_matches_intersected_inner_type
     # The inner receiver may already be narrowed (e.g. another marker
     # applied earlier). The `through:` check walks intersections.

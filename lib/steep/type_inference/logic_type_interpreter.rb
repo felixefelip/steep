@@ -694,11 +694,11 @@ module Steep
         call = typing.call_of(node: node) rescue nil
         return [truthy_result, falsy_result] unless call.is_a?(MethodCall::Typed)
 
-        entry = lookup_postcondition_entry(call)
-        return [truthy_result, falsy_result] unless entry
-
         receiver_type = typing.type_of(node: receiver) rescue nil
         return [truthy_result, falsy_result] unless receiver_type
+
+        entry = lookup_postcondition_entry(call: call, receiver_type: receiver_type)
+        return [truthy_result, falsy_result] unless entry
 
         # Order matters: apply `via_receiver` (which narrows local vars / ivars)
         # *before* `self` (which narrows a pure_call entry). Refining a local
@@ -820,14 +820,43 @@ module Steep
         nil
       end
 
-      def lookup_postcondition_entry(call)
+      # Looks up a postcondition entry for a method call. Tries the method
+      # name first against the receiver's concrete type (handles methods
+      # inherited from modules / superclasses — e.g. an AR predicate that
+      # lives in `Model::GeneratedAttributeMethods`), then falls back to
+      # the type where the method is actually defined.
+      def lookup_postcondition_entry(call:, receiver_type:)
+        method_sym = call.method_decls.map { |d| d.method_name.method_name }.compact.first
+        return nil unless method_sym
+
+        receiver_type_names(receiver_type).each do |type_name|
+          entry = postconditions.lookup_instance(type_name.to_s, method_sym)
+          return entry if entry
+        end
+
         call.method_decls.each do |decl|
           name = decl.method_name
           next unless name.is_a?(InstanceMethodName)
           entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
           return entry if entry
         end
+
         nil
+      end
+
+      # Names that count as the receiver's type for postcondition lookup.
+      # Walks intersections so a previously narrowed receiver (e.g.
+      # `OrderImport & OrderImport::Validated`) still matches a
+      # postcondition keyed by `OrderImport`.
+      def receiver_type_names(receiver_type)
+        case receiver_type
+        when AST::Types::Intersection
+          receiver_type.types.flat_map { |t| receiver_type_names(t) }
+        when AST::Types::Name::Instance
+          [receiver_type.name]
+        else
+          []
+        end
       end
 
       def postcondition_intersect(receiver_type, branch)
