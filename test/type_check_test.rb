@@ -4862,6 +4862,58 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_postconditions__return_unless_pattern
+    # `return X unless cond` narrows the continuation to cond's truthy env.
+    # Mirrors `app/models/company.rb#store_code` from order_factory: column
+    # readers live on an AR mixin (`GeneratedAttributeMethods`), the
+    # predicate is on the class, and the marker module overrides only the
+    # column reader.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module PCRetCompany::GeneratedAttributeMethods
+            def code: () -> ::String?
+          end
+
+          class PCRetCompany
+            include PCRetCompany::GeneratedAttributeMethods
+            def store?: () -> bool
+
+            class Validated
+            end
+
+            class ValidatedAsStore
+              def code: () -> ::String
+            end
+
+            def self.first!: () -> (PCRetCompany & PCRetCompany::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          # @type self: PCRetCompany
+          company = PCRetCompany.first!
+          return "N/A" unless company.store?
+
+          company.code.length
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCRetCompany",
+          "method" => "store?",
+          "when_true" => { "self" => "PCRetCompany & PCRetCompany::ValidatedAsStore" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_postconditions__dropout_on_attribute_write
     run_type_check_test(
       signatures: {

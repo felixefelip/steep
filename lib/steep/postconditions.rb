@@ -22,18 +22,40 @@ module Steep
   # `when_true` / `when_false` are independent and optional. The `self:`
   # type string is parsed lazily via `RBS::Parser.parse_type`.
   module Postconditions
-    DEFAULT_SIDECAR_PATH = "sig/generated/.steep_postconditions.yml".freeze
+    # Glob (relative to `base_dir`) used to discover sidecar files. Unlike
+    # the single-file `Steep::Contracts`, postconditions are written by
+    # external generators (rbs_rails, rbs_inline, hand-authored…) that all
+    # land under `sig/`, so the loader scans recursively and merges
+    # entries.
+    DEFAULT_SIDECAR_GLOB = "sig/**/.steep_postconditions.yml".freeze
 
     class << self
-      def load(base_dir, path: DEFAULT_SIDECAR_PATH)
-        absolute = base_dir + path
-        return Store.empty unless absolute.file?
+      def load(base_dir, glob: DEFAULT_SIDECAR_GLOB)
+        paths = Dir.glob(File.join(base_dir.to_s, glob)).sort
+        return Store.empty if paths.empty?
 
-        raw = YAML.safe_load(absolute.read, aliases: false)
-        Store.from_hash(raw, source: absolute.to_s)
-      rescue Psych::SyntaxError, LoadError => e
-        Steep.logger.warn { "[postconditions] failed to parse #{absolute}: #{e.message}" }
-        Store.empty
+        merged = {} #: Hash[[String, Symbol], Entry]
+        sources = []
+
+        paths.each do |path|
+          absolute = Pathname.new(path)
+          raw = YAML.safe_load(absolute.read, aliases: false)
+          next unless raw
+
+          sub = Store.from_hash(raw, source: absolute.to_s)
+          sub.entries.each do |key, entry|
+            if merged.key?(key)
+              Steep.logger.warn { "[postconditions] duplicate entry for #{key.first}##{key.last} across files; keeping first (#{merged[key].class}); ignoring #{absolute}" }
+              next
+            end
+            merged[key] = entry
+          end
+          sources << absolute.to_s
+        rescue Psych::SyntaxError, LoadError => e
+          Steep.logger.warn { "[postconditions] failed to parse #{absolute}: #{e.message}" }
+        end
+
+        Store.new(entries: merged, source: sources.join(", "))
       end
     end
 

@@ -1,4 +1,6 @@
 require_relative "test_helper"
+require "tmpdir"
+require "fileutils"
 
 class PostconditionsTest < Minitest::Test
   Postconditions = Steep::Postconditions
@@ -87,5 +89,52 @@ class PostconditionsTest < Minitest::Test
   def test_branch_rbs_type_returns_nil_on_invalid_string
     branch = Postconditions::Branch.new(self_type_string: "@@invalid syntax")
     assert_nil branch.rbs_type
+  end
+
+  def test_load_merges_multiple_sidecars_under_sig
+    Dir.mktmpdir do |dir|
+      base = Pathname.new(dir)
+      FileUtils.mkdir_p(base / "sig/rbs_rails")
+      FileUtils.mkdir_p(base / "sig/manual")
+      (base / "sig/rbs_rails/.steep_postconditions.yml").write(
+        YAML.dump("postconditions" => [
+          { "class" => "Foo", "method" => "ok?", "when_true" => { "self" => "Foo & Foo::A" } }
+        ])
+      )
+      (base / "sig/manual/.steep_postconditions.yml").write(
+        YAML.dump("postconditions" => [
+          { "class" => "Bar", "method" => "ready?", "when_true" => { "self" => "Bar & Bar::Validated" } }
+        ])
+      )
+
+      store = Postconditions.load(base)
+      refute_predicate store, :empty?
+      refute_nil store.lookup_instance("Foo", :ok?)
+      refute_nil store.lookup_instance("Bar", :ready?)
+    end
+  end
+
+  def test_load_returns_empty_when_no_sidecar_present
+    Dir.mktmpdir do |dir|
+      store = Postconditions.load(Pathname.new(dir))
+      assert_predicate store, :empty?
+    end
+  end
+
+  def test_load_skips_invalid_yaml
+    Dir.mktmpdir do |dir|
+      base = Pathname.new(dir)
+      FileUtils.mkdir_p(base / "sig/broken")
+      FileUtils.mkdir_p(base / "sig/good")
+      (base / "sig/broken/.steep_postconditions.yml").write("not: : valid: yaml")
+      (base / "sig/good/.steep_postconditions.yml").write(
+        YAML.dump("postconditions" => [
+          { "class" => "Foo", "method" => "ok?", "when_true" => { "self" => "Foo" } }
+        ])
+      )
+
+      store = Postconditions.load(base)
+      refute_nil store.lookup_instance("Foo", :ok?)
+    end
   end
 end
