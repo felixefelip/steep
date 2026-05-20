@@ -812,7 +812,15 @@ module Steep
               receiver_type
             end
 
-          new_falsy = postcondition_intersect(base_for_intersect, entry.when_false)
+          # `when_false.self` uses REPLACE semantics (felixefelip/steep#29):
+          # the falsy branch substitutes the receiver type with the
+          # declared one, rather than intersecting. Intersection can't
+          # drop a marker (`(T & Marker) ∩ T == T & Marker`), so it
+          # was useless for the common case of `update`/`save` losing
+          # the `Validated` marker on failure. Replacement explicitly
+          # narrows away from the marker. Asymmetric with `when_true`
+          # (still intersection) by design.
+          new_falsy = postcondition_replacement(entry.when_false)
           if new_falsy
             _, falsy_env = refine_node_type(
               env: falsy_result.env,
@@ -942,6 +950,17 @@ module Steep
         rbs_type = branch.rbs_type or return nil
         marker = factory.type(absolutize_rbs_type(rbs_type))
         AST::Types::Intersection.build(types: [receiver_type, marker])
+      end
+
+      # Materializes the branch's `self:` type directly, without
+      # intersecting against the current receiver type. Used for
+      # `when_false` to allow predicates like `update`/`save` to
+      # narrow AWAY from a marker (`Validated`) on the failure path
+      # — something intersection alone cannot express
+      # (felixefelip/steep#29).
+      def postcondition_replacement(branch)
+        rbs_type = branch.rbs_type or return nil
+        factory.type(absolutize_rbs_type(rbs_type))
       end
 
       def absolutize_rbs_type(rbs_type)

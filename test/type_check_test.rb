@@ -7067,4 +7067,242 @@ class TypeCheckTest < Minitest::Test
       YAML
     )
   end
+
+  # ---------------------------------------------------------------------------
+  # felixefelip/steep#29: `when_false.self` uses REPLACE semantics.
+  #
+  # Intersection (the `when_true` behavior) can only narrow — it cannot
+  # drop a marker. `update`/`save` on a `(T & Validated)` receiver that
+  # returned `false` lost its validation invariant, so the falsy branch
+  # type should be `T` alone, not `T & Validated`. REPLACE makes that
+  # expressible: the falsy `self:` is *substituted* into the env rather
+  # than intersected against the prior receiver type.
+  # ---------------------------------------------------------------------------
+
+  def test_postconditions__when_false_replaces_receiver_drops_validated_marker
+    # `update` is declared with both branches: `when_true` keeps the
+    # Validated marker (intersection refines further); `when_false`
+    # drops it (replacement). In the else branch, calling a method
+    # that exists only on `Validated` must fail — the marker was
+    # dropped.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCUpdateCompany
+            def update: (untyped) -> bool
+            attr_reader name: String?
+
+            class Validated
+              attr_reader name: String
+              attr_reader strict_field: String
+            end
+
+            def self.first: () -> (PCUpdateCompany & PCUpdateCompany::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          company = PCUpdateCompany.first
+          if company.update({})
+            company.strict_field.length
+          else
+            company.strict_field.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCUpdateCompany",
+          "method" => "update",
+          "when_true" => { "self" => "PCUpdateCompany & PCUpdateCompany::Validated" },
+          "when_false" => { "self" => "PCUpdateCompany" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 10
+              end:
+                line: 5
+                character: 22
+            severity: ERROR
+            message: Type `::PCUpdateCompany` does not have method `strict_field`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__when_false_replace_with_ivar_receiver
+    # Same as above but the receiver is an ivar. `refine_node_type`'s
+    # `:ivar` case routes the replacement into the env's
+    # `instance_variable_types`, so reads in the else branch see the
+    # widened type.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCUpdateIvarCompany
+            def update: (untyped) -> bool
+            attr_reader name: String?
+
+            class Validated
+              attr_reader name: String
+              attr_reader strict_field: String
+            end
+
+            def self.first: () -> (PCUpdateIvarCompany & PCUpdateIvarCompany::Validated)
+          end
+
+          class PCUpdateIvarHost
+            @company: (PCUpdateIvarCompany & PCUpdateIvarCompany::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          PCUpdateIvarHost.new.instance_eval do
+            if @company.update({})
+              @company.strict_field
+            else
+              @company.strict_field
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCUpdateIvarCompany",
+          "method" => "update",
+          "when_true" => { "self" => "PCUpdateIvarCompany & PCUpdateIvarCompany::Validated" },
+          "when_false" => { "self" => "PCUpdateIvarCompany" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 13
+              end:
+                line: 5
+                character: 25
+            severity: ERROR
+            message: Type `::PCUpdateIvarCompany` does not have method `strict_field`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__when_false_replace_without_when_true_still_works
+    # Only `when_false` is declared. The truthy branch keeps whatever
+    # the receiver was; the falsy branch substitutes. Sanity that the
+    # two slots are independent.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCLoneWhenFalse
+            def succeeded?: () -> bool
+            attr_reader fancy: String
+
+            class Failed
+              # `fancy` deliberately absent — Failed loses access.
+            end
+
+            def self.first: () -> PCLoneWhenFalse
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          obj = PCLoneWhenFalse.first
+          unless obj.succeeded?
+            obj.fancy.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCLoneWhenFalse",
+          "method" => "succeeded?",
+          "when_false" => { "self" => "PCLoneWhenFalse::Failed" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 6
+              end:
+                line: 3
+                character: 11
+            severity: ERROR
+            message: Type `::PCLoneWhenFalse::Failed` does not have method `fancy`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__when_false_replace_does_not_affect_truthy_branch
+    # The truthy branch keeps intersection. A method that exists only
+    # on `Validated` works inside the `if` block, and a sister
+    # `when_false` declaration doesn't disturb it.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCTwoBranchCheck
+            def ok?: () -> bool
+            attr_reader generic: String
+
+            class Validated
+              attr_reader fancy: String
+            end
+
+            def self.first: () -> PCTwoBranchCheck
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          obj = PCTwoBranchCheck.first
+          if obj.ok?
+            obj.fancy.length
+          else
+            obj.fancy.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCTwoBranchCheck",
+          "method" => "ok?",
+          "when_true" => { "self" => "PCTwoBranchCheck & PCTwoBranchCheck::Validated" },
+          "when_false" => { "self" => "PCTwoBranchCheck" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 6
+              end:
+                line: 5
+                character: 11
+            severity: ERROR
+            message: Type `::PCTwoBranchCheck` does not have method `fancy`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
 end
