@@ -3821,8 +3821,16 @@ module Steep
         end
       end
 
-      # 2. self: refines the receiver's type via REPLACE.
-      if branch.rbs_type
+      # 2. self: refines the receiver's type via REPLACE. Skipped if
+      # any class name referenced inside `branch.rbs_type` (typically
+      # a marker like `Foo::AfterX`) isn't declared in RBS — applying
+      # the refinement anyway would crash `build_instance` later
+      # whenever Steep tries to compute a shape on the intersection.
+      # Sidecar emitters can race ahead of marker-class generation
+      # (rbs_rails today doesn't emit markers, rbs_infer does);
+      # tolerating dangling references keeps an in-progress project
+      # type-checking rather than aborting the whole run.
+      if branch.rbs_type && marker_references_resolvable?(branch.rbs_type)
         new_receiver_type = checker.factory.type(branch.rbs_type) rescue nil
         constr = constr.refine_receiver_for_unconditional(receiver, new_receiver_type) if new_receiver_type
       end
@@ -3839,6 +3847,35 @@ module Steep
       end
 
       constr
+    end
+
+    # Walks `rbs_type` collecting every class/module name referenced
+    # inside, then checks each against the env's known declarations.
+    # Returns `false` on the first unknown name so the caller can
+    # bail out of refinement before building shapes that would crash.
+    # `RBS::Types::Intersection` and `Union` are the common shapes for
+    # marker payloads (`Foo & Foo::AfterX`); leaf types like literals
+    # and `void`/`nil` carry no class name and don't need validation.
+    def marker_references_resolvable?(rbs_type)
+      env = checker.factory.env
+      collect_marker_class_names(rbs_type).all? do |name|
+        absolute = name.absolute? ? name : name.absolute!
+        env.class_decls.key?(absolute) || env.class_alias_decls.key?(absolute) || env.normalized_module_class_entry(absolute)
+      end
+    rescue StandardError
+      false
+    end
+
+    def collect_marker_class_names(rbs_type, acc = [])
+      case rbs_type
+      when RBS::Types::ClassInstance, RBS::Types::ClassSingleton
+        acc << rbs_type.name
+      when RBS::Types::Intersection, RBS::Types::Union
+        rbs_type.types.each { |t| collect_marker_class_names(t, acc) }
+      when RBS::Types::Optional
+        collect_marker_class_names(rbs_type.type, acc)
+      end
+      acc
     end
 
     # Routes a receiver-type refinement to the appropriate env slot

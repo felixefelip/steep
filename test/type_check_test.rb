@@ -7560,6 +7560,57 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_postconditions__unconditional_self_skips_when_marker_missing_in_rbs
+    # Sidecar emitters (rbs_infer side) can race ahead of the
+    # marker-class generators (rbs_rails today doesn't emit any). When
+    # the sidecar's `unconditional.self` references a class that
+    # doesn't exist in RBS, applying the refinement would later crash
+    # `build_instance` whenever Steep computes a shape on the
+    # intersection. Guard verifies the marker resolves; if not, the
+    # refinement is silently skipped so the rest of the project
+    # still type-checks.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCMissingMarkerVenue
+            def set_default_name: () -> String
+          end
+
+          class PCMissingMarkerHost
+            @venue: PCMissingMarkerVenue
+
+            def edit: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCMissingMarkerHost
+            # @dynamic edit
+            def edit
+              @venue.set_default_name
+              @venue.set_default_name.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCMissingMarkerVenue",
+          "method" => "set_default_name",
+          "unconditional" => {
+            "self" => "PCMissingMarkerVenue & PCMissingMarkerVenue::DoesNotExist"
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_postconditions__unconditional_ivars_still_only_fires_for_self_receiver
     # Regression guard: `unconditional.ivars` only applies when the
     # call's receiver is self (or implicit). For non-self receivers,
