@@ -48,6 +48,7 @@ module Steep
     attr_reader :contracts
     attr_reader :postconditions
     attr_reader :callbacks
+    attr_reader :delegation_registry
 
     attr_reader :context
 
@@ -90,7 +91,7 @@ module Steep
       context.variable_context
     end
 
-    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty, postconditions: Postconditions::Store.empty, callbacks: Callbacks::Store.empty)
+    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty, postconditions: Postconditions::Store.empty, callbacks: Callbacks::Store.empty, delegation_registry: nil)
       @checker = checker
       @source = source
       @annotations = annotations
@@ -99,6 +100,7 @@ module Steep
       @contracts = contracts
       @postconditions = postconditions
       @callbacks = callbacks
+      @delegation_registry = delegation_registry
     end
 
     def with_new_typing(typing)
@@ -110,7 +112,8 @@ module Steep
         context: context,
         contracts: contracts,
         postconditions: postconditions,
-        callbacks: callbacks
+        callbacks: callbacks,
+        delegation_registry: delegation_registry
       )
     end
 
@@ -132,7 +135,8 @@ module Steep
           context: context,
           contracts: contracts,
           postconditions: postconditions,
-          callbacks: callbacks
+          callbacks: callbacks,
+        delegation_registry: delegation_registry
         )
       else
         self
@@ -329,7 +333,8 @@ module Steep
         typing: typing,
         contracts: contracts,
         postconditions: postconditions,
-        callbacks: callbacks
+        callbacks: callbacks,
+        delegation_registry: delegation_registry
       )
     end
 
@@ -511,7 +516,8 @@ module Steep
         ),
         contracts: contracts,
         postconditions: postconditions,
-        callbacks: callbacks
+        callbacks: callbacks,
+        delegation_registry: delegation_registry
       )
     end
 
@@ -605,7 +611,8 @@ module Steep
         context: class_body_context,
         contracts: contracts,
         postconditions: postconditions,
-        callbacks: callbacks
+        callbacks: callbacks,
+        delegation_registry: delegation_registry
       )
     end
 
@@ -721,7 +728,8 @@ module Steep
         context: body_context,
         contracts: contracts,
         postconditions: postconditions,
-        callbacks: callbacks
+        callbacks: callbacks,
+        delegation_registry: delegation_registry
       )
     end
 
@@ -5087,7 +5095,8 @@ module Steep
         ),
         contracts: contracts,
         postconditions: postconditions,
-        callbacks: callbacks
+        callbacks: callbacks,
+        delegation_registry: delegation_registry
       )
     end
 
