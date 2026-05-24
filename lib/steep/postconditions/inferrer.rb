@@ -167,90 +167,146 @@ module Steep
       end
 
       # Returns `Hash[Symbol, AST::Types::t]` mapping `@ivar` to its
-      # non-nil refined type, for methods whose body is a "this ivar
-      # is non-nil" predicate. Currently recognized shape:
+      # refined type for methods whose body, when evaluated by the
+      # `LogicTypeInterpreter`, narrows one or more ivars in the
+      # truthy branch.
       #
-      #     def confirmed?
-      #       !@name.nil?
-      #     end
+      # Defers all shape recognition to the same logical-type
+      # machinery Steep uses for `if`/`unless`/`&&`/`||` narrowing —
+      # so `!@x.nil?`, `@x.is_a?(Klass)` and any future Logic-type
+      # patterns are picked up uniformly, without re-implementing
+      # the case analysis here.
       #
-      # If the declared ivar type is `T?` (a union containing nil),
-      # the refinement maps `@name` to `T` (the non-nil portion).
-      # Methods whose body doesn't match the shape, or whose declared
-      # ivar type is already non-nilable, are skipped.
+      # The interpreter runs against a fresh env populated only with
+      # the class's declared instance variables; the result's truthy
+      # env is compared to that baseline. Ivar entries that ended up
+      # strictly narrower (declared `T?` → refined `T`) become
+      # postcondition refinements. Equal entries are dropped — a
+      # no-op refinement would only add sidecar noise.
       def collect_when_true_nonnil_refinements(def_node, class_name, singleton:)
         body = def_node.children[2]
         return {} unless body
+        last_expr = last_expression(body) or return {}
 
-        ivars = collect_nonnil_check_ivars(body)
-        return {} if ivars.empty?
+        return {} unless predicate_body?(last_expr)
 
-        declared_types = declared_ivar_types(class_name, singleton: singleton)
-        ivars.each_with_object({}) do |name, result|
-          declared = declared_types[name]
-          next unless declared
-          non_nil = strip_nil(declared)
-          next unless non_nil
-          next if non_nil == declared
-          result[name] = non_nil
+        env = build_env_for_class(class_name, singleton: singleton) or return {}
+        interpreter = build_interpreter_for_class(class_name, singleton: singleton)
+        return {} unless interpreter
+
+        truthy_result = nil
+        begin
+          truthy_result = evaluate_truthy(interpreter: interpreter, env: env, node: last_expr)
+        rescue StandardError => e
+          Steep.logger.warn { "[postconditions] when_true inference failed for #{class_name}##{def_node.children[0]}: #{e.message}" }
+          return {}
+        end
+        return {} unless truthy_result
+        return {} if truthy_result.unreachable
+
+        declared = declared_ivar_types(class_name, singleton: singleton)
+        refined_ivars = truthy_result.env.instance_variable_types
+        refined_ivars.each_with_object({}) do |(name, refined_type), result|
+          declared_type = declared[name]
+          next unless declared_type
+          next if refined_type == declared_type
+          next unless strict_subtype?(refined_type, declared_type)
+          result[name] = refined_type
         end
       end
 
-      # Walks a body node and collects ivars verified to be non-nil
-      # by the body's truthy-return shape. Recognizes:
-      #
-      #   !@x.nil?                              → {:@x}
-      #   (!@x.nil? && !@y.nil?)                → {:@x, :@y} (conjunction)
-      #   <stuff>; !@x.nil?                     → matches the last expr
-      def collect_nonnil_check_ivars(node)
+      def last_expression(node)
         case node&.type
-        when :send
-          if node.children[1] == :! && (inner = node.children[0])&.type == :send
-            ivar = nonnil_check_ivar(inner)
-            return Set[ivar] if ivar
-          end
-          Set.new
-        when :and
-          # `cond_a && cond_b` — both branches must verify non-nil
-          left = collect_nonnil_check_ivars(node.children[0])
-          right = collect_nonnil_check_ivars(node.children[1])
-          left | right
         when :begin, :kwbegin
           last = node.children.compact.last
-          collect_nonnil_check_ivars(last)
+          last ? last_expression(last) : nil
         else
-          Set.new
+          node
         end
       end
 
-      # If `node` is `(:send (:ivar :@x) :nil?)`, returns `:@x`.
-      def nonnil_check_ivar(node)
-        return nil unless node.type == :send
-        recv, method, *args = node.children
-        return nil unless method == :nil?
-        return nil unless args.empty?
-        return nil unless recv&.type == :ivar
-        recv.children[0]
-      end
-
-      # Strips `nil` from the type, returning the non-nil residual.
-      # Returns nil if the type doesn't contain a nil component
-      # (no refinement opportunity) or if the result would be empty.
-      def strip_nil(type)
-        case type
-        when AST::Types::Union
-          non_nil_types = type.types.reject { |t| nil_type?(t) }
-          return nil if non_nil_types.empty?
-          return non_nil_types.first if non_nil_types.size == 1
-          AST::Types::Union.build(types: non_nil_types)
+      # Returns the LogicTypeInterpreter `Result` for the truthy
+      # branch of `node`, handling `:and`/`:or` by composition.
+      # The interpreter natively dispatches on `:send` /
+      # `Logic::Env`-typed nodes, but method bodies aren't
+      # type-checked in conditional mode, so `:and`/`:or` nodes
+      # carry plain Boolean types and the interpreter's default
+      # path would refine nothing. Walking them here threads the
+      # truthy env from the left side into the right side's
+      # evaluation, matching what `type_construction.rb`'s `:and`
+      # handler does during real conditional type-checking.
+      def evaluate_truthy(interpreter:, env:, node:)
+        case node.type
+        when :and
+          left_truthy = evaluate_truthy(interpreter: interpreter, env: env, node: node.children[0])
+          return nil unless left_truthy
+          return left_truthy if left_truthy.unreachable
+          evaluate_truthy(interpreter: interpreter, env: left_truthy.env, node: node.children[1])
         else
-          nil
+          truthy_result, _falsy_result = interpreter.eval(env: env, node: node)
+          truthy_result
         end
       end
 
-      def nil_type?(type)
-        type.is_a?(AST::Types::Nil) ||
-          (type.is_a?(AST::Types::Name::Instance) && type.name.to_s == "::NilClass")
+      # Whether `node` is or recursively contains a logic-typed
+      # sub-expression (`Logic::Base` / `Logic::Env`) the interpreter
+      # can derive a narrowing from. Method bodies aren't
+      # type-checked in conditional mode, so `:and`/`:or` operators
+      # carry plain Boolean — recursing into their operands is the
+      # only way to spot a nil-check buried inside `a && b`.
+      def predicate_body?(node)
+        case node&.type
+        when :and, :or
+          predicate_body?(node.children[0]) || predicate_body?(node.children[1])
+        else
+          type = type_of(node)
+          return false unless type
+          type.is_a?(AST::Types::Logic::Base) || type.is_a?(AST::Types::Logic::Env)
+        end
+      end
+
+      # Minimal env with just the class's declared instance variables
+      # populated, scoped to a fresh `ConstantEnv`. The interpreter
+      # mutates the env on refinement; we compare the result against
+      # the same baseline to surface only the differences.
+      def build_env_for_class(class_name, singleton:)
+        ivars = declared_ivar_types(class_name, singleton: singleton)
+        return nil if ivars.empty?
+
+        const_env = TypeInference::ConstantEnv.new(
+          factory: @factory,
+          context: nil,
+          resolver: RBS::Resolver::ConstantResolver.new(builder: @factory.definition_builder)
+        )
+        env = TypeInference::TypeEnv.new(const_env)
+        env.refine_types(instance_variable_types: ivars)
+      end
+
+      def build_interpreter_for_class(class_name, singleton:)
+        type_name = RBS::TypeName.parse("::#{class_name}").absolute! rescue nil
+        return nil unless type_name
+
+        instance_type =
+          if singleton
+            AST::Types::Name::Singleton.new(name: type_name)
+          else
+            AST::Types::Name::Instance.new(name: type_name, args: [])
+          end
+        class_type = AST::Types::Name::Singleton.new(name: type_name)
+
+        config = Interface::Builder::Config.new(
+          self_type: instance_type,
+          class_type: class_type,
+          instance_type: instance_type,
+          variable_bounds: {}
+        )
+
+        TypeInference::LogicTypeInterpreter.new(
+          subtyping: @subtyping,
+          typing: @typing,
+          config: config,
+          self_type: instance_type
+        )
       end
 
       # Recursively walks `node` yielding every `:ivasgn` descendant.

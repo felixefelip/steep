@@ -277,9 +277,11 @@ class PostconditionsInferrerTest < Minitest::Test
   end
 
   def test_skips_truthy_bare_ivar_in_body
-    # `def confirmed?; @name; end` is a truthy check too, but
-    # conservative V1 only handles the explicit `!@x.nil?` form.
-    # Bare ivar return doesn't qualify.
+    # `def has_name?; @name; end` returns the ivar's actual type
+    # (e.g. `String?`), not a logic type. The interpreter has no
+    # narrowing handle, so we silently skip. A future extension
+    # could partition the ivar's union (truthy vs falsy halves)
+    # but it's a separate decision.
     entries = infer_predicate_for(<<~RUBY)
       class PCPredVenue
         def has_name?
@@ -289,5 +291,24 @@ class PostconditionsInferrerTest < Minitest::Test
     RUBY
 
     assert_empty entries
+  end
+
+  def test_infers_when_true_for_multi_statement_body
+    # Body has setup statements before the final predicate
+    # expression. The interpreter only cares about the last
+    # expression (the return value), so the side-effecting calls
+    # above don't interfere.
+    entries = infer_predicate_for(<<~RUBY)
+      class PCPredVenue
+        def confirmed?
+          _logged = "checking"
+          !@name.nil?
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :confirmed? }
+    refute_nil entry, "expected refinement to survive a leading non-predicate statement"
+    assert_equal "::String", entry.when_true_ivars[:"@name"].to_s
   end
 end
