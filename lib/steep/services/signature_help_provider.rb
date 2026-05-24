@@ -34,7 +34,7 @@ module Steep
       attr_reader :callbacks
       attr_reader :delegation_registry
 
-      def initialize(source:, subtyping:, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, delegation_registry: nil)
+      def initialize(source:, subtyping:, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, delegation_registry:)
         @source = source
         @subtyping = subtyping
         @buffer = source.buffer
