@@ -34,6 +34,27 @@ class DelegationAnalyzerTest < Minitest::Test
     refute_nil info, "expected delegation info for Ticket#venue_name"
     assert_equal :attr_send, info.receiver_kind
     assert_equal :event, info.receiver_name
+    assert_equal :venue_name, info.delegate_method
+  end
+
+  def test_detects_renaming_forward
+    # `def venue_name; venue.name; end` — outer name differs from
+    # the inner send's name. Still narrowing-compatible: typing
+    # `host.venue_name` is equivalent to typing `host.venue.name`,
+    # so a narrowing on `host.venue` in the caller env propagates.
+    result = analyze(<<~RUBY)
+      class Event
+        def venue_name
+          venue.name
+        end
+      end
+    RUBY
+
+    info = result.dig("Event", :venue_name)
+    refute_nil info, "expected delegation info for renaming forward"
+    assert_equal :attr_send, info.receiver_kind
+    assert_equal :venue, info.receiver_name
+    assert_equal :name, info.delegate_method
   end
 
   def test_detects_manual_same_name_delegation_via_ivar
@@ -50,6 +71,7 @@ class DelegationAnalyzerTest < Minitest::Test
     refute_nil info
     assert_equal :ivar, info.receiver_kind
     assert_equal :"@event", info.receiver_name
+    assert_equal :venue_name, info.delegate_method
   end
 
   def test_skips_methods_with_transforming_body
@@ -80,9 +102,10 @@ class DelegationAnalyzerTest < Minitest::Test
     assert_nil result.dig("Ticket", :venue_name)
   end
 
-  def test_skips_methods_that_call_a_different_name
-    # `def display_name; event.title; end` — name doesn't match;
-    # not a forward, just a regular wrapper.
+  def test_detects_renaming_wrapper_as_forward
+    # Different name (`display_name → event.title`) — still
+    # narrowing-compatible. Captured as a forward with
+    # `delegate_method: :title`.
     result = analyze(<<~RUBY)
       class Ticket
         def display_name
@@ -91,7 +114,10 @@ class DelegationAnalyzerTest < Minitest::Test
       end
     RUBY
 
-    assert_nil result.dig("Ticket", :display_name)
+    info = result.dig("Ticket", :display_name)
+    refute_nil info
+    assert_equal :title, info.delegate_method
+    assert_equal :event, info.receiver_name
   end
 
   def test_handles_nested_modules_correctly
@@ -110,6 +136,7 @@ class DelegationAnalyzerTest < Minitest::Test
     refute_nil info
     assert_equal :attr_send, info.receiver_kind
     assert_equal :event, info.receiver_name
+    assert_equal :venue_name, info.delegate_method
   end
 
   def test_skips_singleton_def_self_methods
@@ -154,5 +181,6 @@ class DelegationAnalyzerTest < Minitest::Test
     refute_nil info
     assert_equal :attr_send, info.receiver_kind
     assert_equal :inner, info.receiver_name
+    assert_equal :perform, info.delegate_method
   end
 end

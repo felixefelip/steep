@@ -101,6 +101,7 @@ require "steep/type_inference/multiple_assignment"
 require "steep/type_inference/method_call"
 require "steep/type_inference/case_when"
 require "steep/type_inference/delegation_analyzer"
+require "steep/project/delegation_registry"
 
 require "steep/locator.rb"
 

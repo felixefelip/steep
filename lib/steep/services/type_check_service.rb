@@ -300,13 +300,21 @@ module Steep
       end
 
       def update_sources(changes:)
+        any_change = false
         changes.each do |path, changes|
           if source_file?(path)
             file = source_files[path] || SourceFile.no_data(path: path, content: "")
             content = changes.inject(file.content) {|text, change| change.apply_to(text) }
             source_files[path] = file.update_content(content)
+            any_change = true
           end
         end
+        # Coarse invalidation: any source change blows away the
+        # delegation registry. felixefelip/steep#32 — re-parsing the
+        # project is cheap compared to type-checking, and granular
+        # invalidation would need a path → class-name reverse map
+        # that the registry doesn't carry today.
+        project.invalidate_delegation_registry! if any_change
       end
 
       def type_check_file(target:, subtyping:, path:, text:)

@@ -16,16 +16,20 @@ module Steep
     #
     # felixefelip/steep#32.
     class DelegationAnalyzer
-      # A method that forwards `host.method_name(args)` to
-      # `host.<receiver>.method_name(args)`. `receiver_kind` is one of:
+      # A method whose body inlines to `host.<receiver>.<delegate_method>(args)`.
+      # Both same-name (`def m; receiver.m; end`) and renaming
+      # (`def venue_name; venue.name; end`) forwards qualify — the
+      # only requirement is that the body is a single send whose
+      # receiver is a known attr-shape (ivar or implicit-self send).
       #
-      #   :attr_send  — `def m; foo.m; end` where `foo` resolves to an
-      #                 attr_reader-like method on self (Steep checks
-      #                 this at apply time).
-      #   :ivar       — `def m; @foo.m; end`.
-      #   :self       — `def m; self.m; end`. (Trivial; semantically
-      #                 a no-op so the analyzer skips it.)
-      DelegationInfo = Struct.new(:receiver_kind, :receiver_name, keyword_init: true)
+      # Fields:
+      #   :receiver_kind   — `:attr_send` (`def m; foo.x; end`) or
+      #                      `:ivar` (`def m; @foo.x; end`).
+      #   :receiver_name   — `Symbol`, the attr method name (`:foo`)
+      #                      or ivar name including `@` (`:@foo`).
+      #   :delegate_method — `Symbol`, the method invoked on the
+      #                      receiver (`:name`, `:venue_name`, etc.).
+      DelegationInfo = Struct.new(:receiver_kind, :receiver_name, :delegate_method, keyword_init: true)
 
       def self.analyze(node)
         new.analyze(node)
@@ -81,29 +85,34 @@ module Steep
         @result[class_name][method_name] = info
       end
 
-      # Recognizes the body shape `receiver.method_name(args)` where:
-      # - method_name in the send matches the enclosing def's name
+      # Recognizes the body shape `receiver.delegate_method(args)` where:
       # - receiver is `:ivar` (`@foo`) or `:send` with nil receiver
-      #   (looks like an implicit-self call to `foo` — a likely
-      #   attr_reader; the actual attr_reader check happens at apply
-      #   time against the receiver's RBS def)
-      # - args in the send are either empty or `(:forward_args)` for the
-      #   `*args, **kwargs` forwarding shape
+      #   (an implicit-self call to `foo` — a likely attr_reader; the
+      #   actual attr_reader check happens at apply time against the
+      #   receiver's RBS def)
+      # - args are either empty or all forwarded shapes (splat,
+      #   kwsplat, lvar/ivar). The actual arg compatibility is
+      #   delegated to Steep's own type-send checking at apply time.
+      #
+      # Same-name forwards (`def m; receiver.m; end`) and renaming
+      # forwards (`def venue_name; venue.name; end`) both qualify —
+      # the narrowing semantic is the same: typing `host.<method>`
+      # is equivalent to typing `host.<receiver>.<delegate_method>`,
+      # so receivers narrowed in the caller env propagate through.
       def detect_forward_delegation(body, method_name:)
         return nil unless body.is_a?(::Parser::AST::Node)
         return nil unless body.type == :send
         send_receiver, send_method, *send_args = body.children
-        return nil unless send_method == method_name
         return nil unless empty_or_simple_forward?(send_args)
 
         case send_receiver&.type
         when :ivar
           ivar_name = send_receiver.children[0]
-          DelegationInfo.new(receiver_kind: :ivar, receiver_name: ivar_name)
+          DelegationInfo.new(receiver_kind: :ivar, receiver_name: ivar_name, delegate_method: send_method)
         when :send
           recv2, name2, *args2 = send_receiver.children
           return nil unless recv2.nil? && args2.empty?
-          DelegationInfo.new(receiver_kind: :attr_send, receiver_name: name2)
+          DelegationInfo.new(receiver_kind: :attr_send, receiver_name: name2, delegate_method: send_method)
         end
       end
 
