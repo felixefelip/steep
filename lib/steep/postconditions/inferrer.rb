@@ -41,15 +41,21 @@ module Steep
         results = []
         walk_classes(@source.node, nesting: []) do |def_node, class_name, singleton|
           ivars = collect_ivar_refinements(def_node, class_name, singleton: singleton)
-          next if ivars.empty?
+          when_true_ivars = collect_when_true_nonnil_refinements(def_node, class_name, singleton: singleton)
+          next if ivars.empty? && when_true_ivars.empty?
 
           method_name = def_node.children[0]
+          self_type_string = marker_self_type_for(class_name, method_name, singleton: singleton) unless ivars.empty?
+          when_true_self_type_string = marker_self_type_for(class_name, method_name, singleton: singleton) unless when_true_ivars.empty?
+
           results << InferredEntry.new(
             class_name: class_name,
             method_name: method_name,
             singleton: singleton,
             ivars: ivars,
-            self_type_string: marker_self_type_for(class_name, method_name, singleton: singleton)
+            self_type_string: self_type_string,
+            when_true_ivars: when_true_ivars,
+            when_true_self_type_string: when_true_self_type_string
           )
         end
         results
@@ -160,6 +166,93 @@ module Steep
         end
       end
 
+      # Returns `Hash[Symbol, AST::Types::t]` mapping `@ivar` to its
+      # non-nil refined type, for methods whose body is a "this ivar
+      # is non-nil" predicate. Currently recognized shape:
+      #
+      #     def confirmed?
+      #       !@name.nil?
+      #     end
+      #
+      # If the declared ivar type is `T?` (a union containing nil),
+      # the refinement maps `@name` to `T` (the non-nil portion).
+      # Methods whose body doesn't match the shape, or whose declared
+      # ivar type is already non-nilable, are skipped.
+      def collect_when_true_nonnil_refinements(def_node, class_name, singleton:)
+        body = def_node.children[2]
+        return {} unless body
+
+        ivars = collect_nonnil_check_ivars(body)
+        return {} if ivars.empty?
+
+        declared_types = declared_ivar_types(class_name, singleton: singleton)
+        ivars.each_with_object({}) do |name, result|
+          declared = declared_types[name]
+          next unless declared
+          non_nil = strip_nil(declared)
+          next unless non_nil
+          next if non_nil == declared
+          result[name] = non_nil
+        end
+      end
+
+      # Walks a body node and collects ivars verified to be non-nil
+      # by the body's truthy-return shape. Recognizes:
+      #
+      #   !@x.nil?                              → {:@x}
+      #   (!@x.nil? && !@y.nil?)                → {:@x, :@y} (conjunction)
+      #   <stuff>; !@x.nil?                     → matches the last expr
+      def collect_nonnil_check_ivars(node)
+        case node&.type
+        when :send
+          if node.children[1] == :! && (inner = node.children[0])&.type == :send
+            ivar = nonnil_check_ivar(inner)
+            return Set[ivar] if ivar
+          end
+          Set.new
+        when :and
+          # `cond_a && cond_b` — both branches must verify non-nil
+          left = collect_nonnil_check_ivars(node.children[0])
+          right = collect_nonnil_check_ivars(node.children[1])
+          left | right
+        when :begin, :kwbegin
+          last = node.children.compact.last
+          collect_nonnil_check_ivars(last)
+        else
+          Set.new
+        end
+      end
+
+      # If `node` is `(:send (:ivar :@x) :nil?)`, returns `:@x`.
+      def nonnil_check_ivar(node)
+        return nil unless node.type == :send
+        recv, method, *args = node.children
+        return nil unless method == :nil?
+        return nil unless args.empty?
+        return nil unless recv&.type == :ivar
+        recv.children[0]
+      end
+
+      # Strips `nil` from the type, returning the non-nil residual.
+      # Returns nil if the type doesn't contain a nil component
+      # (no refinement opportunity) or if the result would be empty.
+      def strip_nil(type)
+        case type
+        when AST::Types::Union
+          non_nil_types = type.types.reject { |t| nil_type?(t) }
+          return nil if non_nil_types.empty?
+          return non_nil_types.first if non_nil_types.size == 1
+          AST::Types::Union.build(types: non_nil_types)
+        else
+          nil
+        end
+      end
+
+      def nil_type?(type)
+        type.is_a?(AST::Types::Nil) ||
+          (type.is_a?(AST::Types::Name::Instance) && type.name.to_s == "::NilClass")
+      end
+
       # Recursively walks `node` yielding every `:ivasgn` descendant.
       def walk_ivasgns(node, &block)
         return unless node.is_a?(Parser::AST::Node)
@@ -255,14 +348,18 @@ module Steep
     # callers can serialize the inference output without round-tripping
     # through the loader.
     class InferredEntry
-      attr_reader :class_name, :method_name, :singleton, :ivars, :self_type_string
+      attr_reader :class_name, :method_name, :singleton
+      attr_reader :ivars, :self_type_string
+      attr_reader :when_true_ivars, :when_true_self_type_string
 
-      def initialize(class_name:, method_name:, singleton:, ivars:, self_type_string: nil)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
         @ivars = ivars
         @self_type_string = self_type_string
+        @when_true_ivars = when_true_ivars
+        @when_true_self_type_string = when_true_self_type_string
       end
 
       def ==(other)
@@ -271,13 +368,16 @@ module Steep
           other.method_name == method_name &&
           other.singleton == singleton &&
           other.ivars == ivars &&
-          other.self_type_string == self_type_string
+          other.self_type_string == self_type_string &&
+          other.when_true_ivars == when_true_ivars &&
+          other.when_true_self_type_string == when_true_self_type_string
       end
 
       alias eql? ==
 
       def hash
-        class_name.hash ^ method_name.hash ^ singleton.hash ^ ivars.hash ^ self_type_string.hash
+        class_name.hash ^ method_name.hash ^ singleton.hash ^ ivars.hash ^ self_type_string.hash ^
+          when_true_ivars.hash ^ when_true_self_type_string.hash
       end
     end
   end

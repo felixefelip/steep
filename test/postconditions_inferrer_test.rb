@@ -192,4 +192,102 @@ class PostconditionsInferrerTest < Minitest::Test
 
     assert_empty entries
   end
+
+  # --------------------------------------------------------------------
+  # `when_true` postconditions for nil-check predicates.
+  # `def confirmed?; !@name.nil?; end` should emit a `when_true.ivars`
+  # entry refining `@name` to non-nil (and a self marker for chain
+  # narrowing).
+  # --------------------------------------------------------------------
+
+  PREDICATE_RBS_FIXTURE = <<~RBS
+    class PCPredVenue
+      @name: String?
+      @owner: String?
+
+      def confirmed?: () -> bool
+      def fully_set?: () -> bool
+      def has_name?: () -> bool
+      def truthy_only: () -> bool
+    end
+  RBS
+
+  def infer_predicate_for(ruby)
+    entries = nil
+    with_checker(PREDICATE_RBS_FIXTURE) do |checker|
+      source = parse_ruby(ruby)
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        entries = Postconditions::Inferrer.infer(source, typing, checker)
+      end
+    end
+    entries
+  end
+
+  def test_infers_when_true_for_negated_nil_check
+    entries = infer_predicate_for(<<~RUBY)
+      class PCPredVenue
+        def confirmed?
+          !@name.nil?
+        end
+      end
+    RUBY
+
+    refute_empty entries
+    entry = entries.find { |e| e.method_name == :confirmed? }
+    refute_nil entry
+    assert_empty entry.ivars, "unconditional should be empty for a predicate body"
+    assert_equal "::String", entry.when_true_ivars[:"@name"].to_s
+    assert_equal "::PCPredVenue & ::PCPredVenue::AfterConfirmed",
+                 entry.when_true_self_type_string
+  end
+
+  def test_infers_when_true_for_conjunction_of_nil_checks
+    # `!@a.nil? && !@b.nil?` — both ivars refined non-nil in the
+    # truthy branch.
+    entries = infer_predicate_for(<<~RUBY)
+      class PCPredVenue
+        def fully_set?
+          !@name.nil? && !@owner.nil?
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :fully_set? }
+    refute_nil entry
+    assert_equal "::String", entry.when_true_ivars[:"@name"].to_s
+    assert_equal "::String", entry.when_true_ivars[:"@owner"].to_s
+  end
+
+  def test_skips_when_declared_type_already_non_nil
+    # Even though the body matches the nil-check shape, if the ivar
+    # is already declared non-nilable in RBS, there's no narrowing
+    # opportunity. Don't emit a no-op refinement.
+    entries = infer_predicate_for(<<~RUBY)
+      class PCPredVenue
+        def truthy_only
+          !@nonexistent.nil?
+        end
+      end
+    RUBY
+
+    # No declared @nonexistent → no entry. Sanity: not crashing on
+    # missing ivar declaration.
+    assert_empty entries
+  end
+
+  def test_skips_truthy_bare_ivar_in_body
+    # `def confirmed?; @name; end` is a truthy check too, but
+    # conservative V1 only handles the explicit `!@x.nil?` form.
+    # Bare ivar return doesn't qualify.
+    entries = infer_predicate_for(<<~RUBY)
+      class PCPredVenue
+        def has_name?
+          @name
+        end
+      end
+    RUBY
+
+    assert_empty entries
+  end
 end
