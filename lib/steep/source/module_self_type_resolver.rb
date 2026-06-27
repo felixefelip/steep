@@ -50,6 +50,7 @@ module Steep
           relative = relative.delete_prefix("concerns/")
           module_name = relative.split("/").map { |s| camelize(s) }.join("::")
           return source_code if module_name.empty?
+          module_name = resolve_declared_name(source_code, module_name)
 
           parts = module_name.split("::")
           return source_code if parts.size < 2
@@ -74,6 +75,7 @@ module Steep
           relative = path_str[(idx + CONTROLLER_CONCERNS_PREFIX.length)..].delete_suffix(".rb")
           module_name = relative.split("/").map { |s| camelize(s) }.join("::")
           return source_code if module_name.empty?
+          module_name = resolve_declared_name(source_code, module_name)
 
           including_class = "ApplicationController"
 
@@ -93,6 +95,7 @@ module Steep
           relative = path_str[(idx + HELPERS_PREFIX.length)..].delete_suffix(".rb")
           module_name = relative.split("/").map { |s| camelize(s) }.join("::")
           return source_code if module_name.empty?
+          module_name = resolve_declared_name(source_code, module_name)
 
           including_class = "ApplicationController"
 
@@ -200,6 +203,55 @@ module Steep
 
         def camelize(str)
           str.split(/[_-]/).map(&:capitalize).join
+        end
+
+        # The path-derived module name camelizes each path segment naively
+        # (`sqlite` -> `Sqlite`), which mis-cases acronyms and any name the
+        # app's inflector customizes (`SQLite`, `OAuth`, ...). The only
+        # reliable source of the real casing is the declaration in the source
+        # itself. Find the declared module/class whose fully-qualified name
+        # matches `fallback_name` case-insensitively and return its actual
+        # casing; fall back to the path-derived name when there's no match
+        # (so behavior is unchanged whenever the source can't be read).
+        def resolve_declared_name(source_code, fallback_name)
+          return fallback_name unless defined?(Prism)
+
+          result = Prism.parse(source_code)
+          return fallback_name unless result.success?
+
+          target = fallback_name.downcase
+          match = nil
+          walk = lambda do |node, prefix|
+            return unless node.is_a?(Prism::Node)
+
+            next_prefix = prefix
+            if node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::ClassNode)
+              segment = constant_path_string(node.constant_path)
+              if segment
+                fqn = prefix.empty? ? segment : "#{prefix}::#{segment}"
+                match ||= fqn if fqn.downcase == target
+                next_prefix = fqn
+              end
+            end
+            node.compact_child_nodes.each { |c| walk.call(c, next_prefix) }
+          end
+          walk.call(result.value, "")
+
+          match || fallback_name
+        rescue StandardError
+          fallback_name
+        end
+
+        # Full dotted name of a class/module path node (`A::B::C`), or nil.
+        # Leading `::` (absolute root) is dropped — names here are relative.
+        def constant_path_string(node)
+          case node
+          when Prism::ConstantReadNode
+            node.name.to_s
+          when Prism::ConstantPathNode
+            parent = node.parent ? constant_path_string(node.parent) : nil
+            parent ? "#{parent}::#{node.name}" : node.name.to_s
+          end
         end
       end
     end

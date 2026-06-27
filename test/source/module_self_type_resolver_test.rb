@@ -382,6 +382,68 @@ class Steep::Source::ModuleSelfTypeResolverTest < Minitest::Test
     assert_includes result, "singleton(User) & singleton(User::PasswordRecoverable)"
   end
 
+  # --- acronym casing: naive camelize of the path mis-cases acronyms
+  #     (sqlite -> Sqlite), so the declared name in the source is the source
+  #     of truth for the real casing (SQLite). ---
+
+  def test_acronym_in_leaf_uses_declared_casing
+    source = <<~RUBY
+      module Search::Record::SQLite
+        extend ActiveSupport::Concern
+      end
+    RUBY
+
+    result = Resolver.annotate("app/models/search/record/sqlite.rb", source)
+
+    assert_includes result, "# @type self: singleton(Search::Record) & singleton(Search::Record::SQLite)"
+    assert_includes result, "# @type instance: Search::Record & Search::Record::SQLite"
+    refute_includes result, "Sqlite"
+  end
+
+  def test_acronym_resolved_from_nested_declaration
+    source = <<~RUBY
+      module Search
+        class Record
+          module SQLite
+            extend ActiveSupport::Concern
+          end
+        end
+      end
+    RUBY
+
+    result = Resolver.annotate("app/models/search/record/sqlite.rb", source)
+
+    assert_includes result, "& singleton(Search::Record::SQLite)"
+    assert_includes result, "instance: Search::Record & Search::Record::SQLite"
+    refute_includes result, "Sqlite"
+  end
+
+  def test_acronym_in_namespace_segment_uses_declared_casing
+    source = <<~RUBY
+      module OAuth::Token
+        extend ActiveSupport::Concern
+      end
+    RUBY
+
+    result = Resolver.annotate("app/models/o_auth/token.rb", source)
+
+    assert_includes result, "singleton(OAuth) & singleton(OAuth::Token)"
+  end
+
+  def test_unmatched_declaration_falls_back_to_path_name
+    # The source declares something unrelated to the path → keep the
+    # path-derived (camelized) name, i.e. behavior is unchanged.
+    source = <<~RUBY
+      module Unrelated::Thing
+        extend ActiveSupport::Concern
+      end
+    RUBY
+
+    result = Resolver.annotate("app/models/search/record/sqlite.rb", source)
+
+    assert_includes result, "Search::Record::Sqlite"
+  end
+
   # --- nested namespace (module declared inside a class/module wrapper) ---
   #
   # A trailing end-of-file comment attaches to the OUTER scope, so Steep ignores
