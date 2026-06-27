@@ -160,8 +160,6 @@ module Steep
         # Returns [innermost matching ModuleNode/ClassNode, nested?] where
         # nested? is true when the node is enclosed in another class/module.
         def find_target_scope(source_code, last_segment)
-          return [nil, false] unless defined?(Prism)
-
           result = Prism.parse(source_code)
           return [nil, false] unless result.success?
 
@@ -214,8 +212,6 @@ module Steep
         # casing; fall back to the path-derived name when there's no match
         # (so behavior is unchanged whenever the source can't be read).
         def resolve_declared_name(source_code, fallback_name)
-          return fallback_name unless defined?(Prism)
-
           result = Prism.parse(source_code)
           return fallback_name unless result.success?
 
