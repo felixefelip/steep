@@ -21,6 +21,7 @@ module Steep
     # value, so it must not leak into the postcondition.
     class ReturnEstablishmentInferrer
       include TypedNodeUtils
+      include NodeHelper
 
       def initialize(typing, subtyping)
         @typing = typing
@@ -63,21 +64,19 @@ module Steep
       # target_name>.attr = rhs` assignment reachable in `node`. Only
       # plain attribute writes count — `[]=`, `==` and op-asgns
       # (`+=`, which parse as `:op_asgn`, not `:send`) are excluded.
-      def walk_attr_writes(node, target_name, &block)
-        return unless node.is_a?(Parser::AST::Node)
-        if node.type == :send
-          receiver, method_name, *args = node.children
-          if receiver.is_a?(Parser::AST::Node) && receiver.type == :lvar &&
-              receiver.children[0] == target_name
-            name = method_name.to_s
-            if name.end_with?("=") && name != "==" && name != "[]=" && (rhs = args.last)
-              attr = name.delete_suffix("=")
-              yield attr.to_sym, rhs unless attr.empty?
-            end
-          end
-        end
-        node.children.each do |child|
-          walk_attr_writes(child, target_name, &block) if child.is_a?(Parser::AST::Node)
+      # `node` here is always a multi-statement `:begin` body (the caller
+      # bails unless the return value is a bare local), so the writes are
+      # descendants — `NodeHelper#each_descendant_node` does the walk.
+      def walk_attr_writes(node, target_name)
+        each_descendant_node(node) do |descendant|
+          next unless descendant.type == :send
+          receiver, method_name, *args = descendant.children
+          next unless receiver.is_a?(Parser::AST::Node) &&
+                      receiver.type == :lvar && receiver.children[0] == target_name
+          name = method_name.to_s
+          next unless name.end_with?("=") && name != "==" && name != "[]=" && (rhs = args.last)
+          attr = name.delete_suffix("=")
+          yield attr.to_sym, rhs unless attr.empty?
         end
       end
 
