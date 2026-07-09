@@ -16,10 +16,6 @@ module Steep
     # (`constr`) through and returns the updated one — the helpers are all
     # private and used only by `apply`.
     class ReturnEstablishmentApplier
-      def self.apply(constr, name:, rhs:)
-        new(constr).apply(name: name, rhs: rhs)
-      end
-
       def initialize(constr)
         @constr = constr
       end

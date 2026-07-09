@@ -876,7 +876,7 @@ module Steep
                 # felixefelip/steep#56: `x = build` where `build` declares a
                 # `returns.establishes` postcondition imports the return-value
                 # attribute facts onto `x` (so a later `x.save` is satisfied).
-                constr = Postconditions::ReturnEstablishmentApplier.apply(constr, name: name, rhs: rhs)
+                constr = Postconditions::ReturnEstablishmentApplier.new(constr).apply(name: name, rhs: rhs)
 
                 constr.add_typing(node, type: rhs_type)
               else
