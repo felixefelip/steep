@@ -876,7 +876,7 @@ module Steep
                 # felixefelip/steep#56: `x = build` where `build` declares a
                 # `returns.establishes` postcondition imports the return-value
                 # attribute facts onto `x` (so a later `x.save` is satisfied).
-                constr = constr.apply_return_value_establishments(name: name, rhs: rhs)
+                constr = Postconditions::ReturnEstablishmentApplier.apply(constr, name: name, rhs: rhs)
 
                 constr.add_typing(node, type: rhs_type)
               else
@@ -6053,132 +6053,6 @@ module Steep
         context.type_env.pure_method_calls.key?(receiver)
       else
         false
-      end
-    end
-
-    # felixefelip/steep#56. At `x = <call>`, when `<call>`'s method
-    # declares a `returns.establishes: [attr, …]` postcondition, imports
-    # each attribute as a pure-node fact `x.attr` non-nil — exactly as if
-    # `x.attr = <non-nil>` had been written at this call site
-    # (reusing the #51 attribute-write narrowing). This carries the
-    # "attribute was set" fact across the method-return boundary: `build`
-    # establishes it on its returned record, and `x = build` lands it on
-    # `x`, so a subsequent `x.save` satisfies its `requires self.attr`
-    # precondition even though the write happened in a different method.
-    def apply_return_value_establishments(name:, rhs:)
-      return self if postconditions.empty?
-      return self unless rhs.is_a?(::Parser::AST::Node)
-      return self unless rhs.type == :send || rhs.type == :csend
-
-      call = begin
-               typing.call_of(node: rhs)
-             rescue Typing::UnknownNodeError
-               nil
-             end
-      return self unless call.is_a?(TypeInference::MethodCall::Typed)
-
-      entry = lookup_return_postcondition_entry(call, rhs)
-      return self unless entry&.unconditional
-
-      attrs = entry.unconditional.returns_establishes
-      return self if attrs.empty?
-
-      receiver_node = ::Parser::AST::Node.new(:lvar, [name])
-      constr = self
-      attrs.each do |attr|
-        constr = constr.establish_return_attribute_non_nil(receiver_node: receiver_node, attr: attr)
-      end
-      constr
-    end
-
-    # Establishes `<receiver_node>.<attr>` as non-nil in the env by
-    # caching a pure-call fact for the getter read. Mirrors
-    # `narrow_attribute_write` (#51) but sources the non-nil type from
-    # the getter's own declared return (stripped of `nil`) rather than a
-    # written value — there is no written value at the call site, only
-    # the postcondition's guarantee that the callee set it.
-    def establish_return_attribute_non_nil(receiver_node:, attr:)
-      read_node = ::Parser::AST::Node.new(:send, [receiver_node, attr])
-
-      getter_call = nil #: TypeInference::MethodCall::Typed?
-      non_nil_type = nil #: AST::Types::t?
-      begin
-        # Type the read in a throwaway child typing to obtain a real getter
-        # `MethodCall` (and confirm it is a pure attr reader). The child is
-        # discarded, so the synthetic read leaks no diagnostics/typings.
-        typing.new_child do |child|
-          pair = with_new_typing(child).synthesize(read_node, hint: nil)
-          call = pair.constr.typing.call_of(node: read_node)
-          if call.is_a?(TypeInference::MethodCall::Typed) &&
-              pair.constr.typing.errors.empty? &&
-              pure_send?(call, receiver_node, [])
-            getter_call = call
-            ret = call.return_type
-            non_nil_type = checker.factory.unwrap_optional(ret) || ret
-          end
-        end
-      rescue StandardError => exn
-        Steep.logger.warn { "[postconditions] return-value establishment failed for .#{attr}: #{exn.message}" }
-        return self
-      end
-      return self unless getter_call && non_nil_type
-
-      update_type_env do |env|
-        env.add_pure_call(read_node, getter_call, non_nil_type)
-      end
-    end
-
-    # Looks up the `unconditional` postcondition entry for a `x = <call>`
-    # site, trying two keyings of the same method:
-    #
-    #   1. the RECEIVER's static type — the class the postcondition is
-    #      keyed on when the method BODY was defined (and inferred) there.
-    #      This is what matches an inherited/reopened method: the AR
-    #      pseudo-code defines `build` on `Post_Assignment::…Proxy`, but
-    #      the RBS declares it on the parent `Assignment::…Proxy`, so the
-    #      call's method-decl points at the parent while the entry lives
-    #      under the subclass the receiver actually is.
-    #   2. the method DECLS' defining types — covers the plain case where
-    #      the entry is keyed on the class that declares the method
-    #      (including singleton `def self.build`).
-    #
-    # First hit wins; the establishment is receiver-agnostic either way.
-    def lookup_return_postcondition_entry(call, rhs)
-      if (recv_name = return_lookup_receiver_type_name(rhs))
-        entry = postconditions.lookup_instance(recv_name.to_s, call.method_name)
-        return entry if entry
-      end
-
-      call.method_decls.each do |decl|
-        name = decl.method_name
-        type_name =
-          case name
-          when InstanceMethodName, SingletonMethodName
-            name.type_name
-          end
-        next unless type_name
-        entry = postconditions.lookup_instance(type_name.to_s, name.method_name)
-        return entry if entry
-      end
-      nil
-    end
-
-    # Resolves the receiver type-name of a `x = <send>` for postcondition
-    # lookup. An explicit receiver uses its typed-out type; an implicit
-    # self receiver (`x = build`) uses the enclosing self type. Only
-    # class/module instance and singleton names are usable as keys.
-    def return_lookup_receiver_type_name(rhs)
-      recv = rhs.children[0]
-      type =
-        if recv
-          typing.type_of(node: recv) rescue nil
-        else
-          self_type
-        end
-      type = self_type if type.is_a?(AST::Types::Self)
-      case type
-      when AST::Types::Name::Instance, AST::Types::Name::Singleton
-        type.name
       end
     end
 
