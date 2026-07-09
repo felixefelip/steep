@@ -23,6 +23,8 @@ module Steep
     #   - Methods whose def is inside a singleton (`def self.x`) emit a
     #     singleton entry; everything else is an instance entry.
     class Inferrer
+      include TypedNodeUtils
+
       def self.infer(source, typing, subtyping)
         new(source, typing, subtyping).infer
       end
@@ -33,6 +35,7 @@ module Steep
         @subtyping = subtyping
         @factory = subtyping.factory
         @definition_builder = subtyping.factory.definition_builder
+        @return_establishment_inferrer = ReturnEstablishmentInferrer.new(typing, subtyping)
       end
 
       def infer
@@ -42,7 +45,7 @@ module Steep
         walk_classes(@source.node, nesting: []) do |def_node, class_name, singleton|
           ivars = collect_ivar_refinements(def_node, class_name, singleton: singleton)
           when_true_ivars = collect_when_true_nonnil_refinements(def_node, class_name, singleton: singleton)
-          returns_establishes = collect_return_establishments(def_node)
+          returns_establishes = @return_establishment_inferrer.establishments(def_node)
           next if ivars.empty? && when_true_ivars.empty? && returns_establishes.empty?
 
           method_name = def_node.children[0]
@@ -217,95 +220,6 @@ module Steep
         end
       end
 
-      # Returns `Array[Symbol]` of attribute names the method establishes
-      # non-nil on its RETURNED value (felixefelip/steep#56). Detects the
-      # factory shape:
-      #
-      #     record = Klass.new
-      #     record.attr = <non-nil>    # attribute write on a local
-      #     record                     # …that local is the return value
-      #
-      # For each `<local>.attr = rhs` whose `rhs` is a strict subtype of
-      # the attribute's declared (nilable) read type — the same strict
-      # narrowing test the ivar path uses — `attr` is established. The
-      # LAST write per attribute wins (linear-flow assumption, matching
-      # `collect_ivar_refinements`).
-      #
-      # Only the local that is syntactically the method's last expression
-      # is considered — a write to some OTHER local doesn't reach the
-      # return value, so it must not leak into the postcondition.
-      def collect_return_establishments(def_node)
-        body = def_node.children[2]
-        return [] unless body
-        last_expr = last_expression(body)
-        return [] unless last_expr.is_a?(Parser::AST::Node) && last_expr.type == :lvar
-
-        returned_name = last_expr.children[0]
-        returned_type = type_of(last_expr)
-        return [] unless returned_type
-
-        last_writes = {} #: Hash[Symbol, AST::Types::t]
-        walk_attr_writes(body, returned_name) do |attr, rhs_node|
-          rhs_type = intrinsic_type_of(rhs_node)
-          next unless rhs_type
-          last_writes[attr] = rhs_type
-        end
-        return [] if last_writes.empty?
-
-        last_writes.filter_map do |attr, rhs_type|
-          declared = declared_attr_read_type(returned_type, attr)
-          next unless declared
-          next unless strict_subtype?(rhs_type, declared)
-          attr
-        end
-      end
-
-      # Yields `(attr_name_symbol, rhs_node)` for every `<lvar
-      # target_name>.attr = rhs` assignment reachable in `node`. Only
-      # plain attribute writes count — `[]=`, `==` and op-asgns
-      # (`+=`, which parse as `:op_asgn`, not `:send`) are excluded.
-      def walk_attr_writes(node, target_name, &block)
-        return unless node.is_a?(Parser::AST::Node)
-        if node.type == :send
-          receiver, method_name, *args = node.children
-          if receiver.is_a?(Parser::AST::Node) && receiver.type == :lvar &&
-              receiver.children[0] == target_name
-            name = method_name.to_s
-            if name.end_with?("=") && name != "==" && name != "[]=" && (rhs = args.last)
-              attr = name.delete_suffix("=")
-              yield attr.to_sym, rhs unless attr.empty?
-            end
-          end
-        end
-        node.children.each do |child|
-          walk_attr_writes(child, target_name, &block) if child.is_a?(Parser::AST::Node)
-        end
-      end
-
-      # Declared read type of `attr` on `type` (the returned local's
-      # type). Returns the AST type of the getter's return, or `nil` when
-      # the type isn't a resolvable class instance or has no such getter.
-      def declared_attr_read_type(type, attr)
-        return nil unless type.is_a?(AST::Types::Name::Instance)
-        definition = @definition_builder.build_instance(type.name) rescue nil
-        return nil unless definition
-        method = definition.methods[attr]
-        return nil unless method
-        method_type = method.method_types.first
-        return nil unless method_type
-        @factory.type(method_type.type.return_type) rescue nil
-      end
-
-      def last_expression(node)
-        case node&.type
-        when :begin, :kwbegin
-          last = node.children.compact.last
-          last ? last_expression(last) : nil
-        else
-          node
-        end
-      end
-
       # Returns the LogicTypeInterpreter `Result` for the truthy
       # branch of `node`, handling `:and`/`:or` by composition.
       # The interpreter natively dispatches on `:send` /
@@ -399,56 +313,6 @@ module Steep
         end
       end
 
-      def type_of(node)
-        @typing.type_of(node: node)
-      rescue Typing::UnknownNodeError
-        nil
-      end
-
-      # Returns the intrinsic (hint-free) type of a node. For literal
-      # AST nodes — `:str`, `:int`, `:sym`, etc. — Steep's `:ivasgn`
-      # handler passes the LHS's declared type to `synthesize` as a
-      # `hint:`, which widens the literal's emitted type to match the
-      # declared one (e.g. `@name = "x"` with `@name: String?` ends up
-      # with the str node typed as `(String | nil)`, not `String`).
-      # The widening is useful for collections (`Array[Integer] !<:
-      # Array[Numeric]` would otherwise fail to assign), but it makes
-      # narrowing detection silently no-op for the common
-      # setter-with-literal pattern.
-      #
-      # For literal nodes we compute the type directly from the node
-      # shape, matching what `synthesize` would return if hint were
-      # nil. For non-literal nodes (sends, lvars, dstrs, arrays, …)
-      # we fall back to the typed-out `type_of` — those rarely suffer
-      # the widening issue since the hint mostly affects literal
-      # value-class lookups.
-      #
-      # Tracked in felixefelip/steep#34; the upstream-friendly
-      # follow-up would expose `synthesize(node, hint: nil)` as a
-      # general-purpose helper.
-      def intrinsic_type_of(node)
-        case node.type
-        when :nil
-          AST::Builtin.nil_type
-        when :str, :dstr
-          AST::Builtin::String.instance_type
-        when :int
-          AST::Builtin::Integer.instance_type
-        when :float
-          AST::Builtin::Float.instance_type
-        when :sym, :dsym
-          AST::Builtin::Symbol.instance_type
-        when :true
-          AST::Types::Literal.new(value: true)
-        when :false
-          AST::Types::Literal.new(value: false)
-        when :regexp
-          AST::Builtin::Regexp.instance_type
-        else
-          type_of(node)
-        end
-      end
-
       def declared_ivar_types(class_name, singleton:)
         return {} if class_name.empty?
         type_name = RBS::TypeName.parse("::#{class_name}").absolute!
@@ -464,20 +328,6 @@ module Steep
         end
       end
 
-      # Strict subtype check: `sub_type <: super_type` and the two are
-      # not structurally equal. Equality short-circuits the subtype call
-      # for the common case of `@x = same_type_method` (no refinement
-      # opportunity).
-      def strict_subtype?(sub_type, super_type)
-        return false if sub_type == super_type
-        @subtyping.check(
-          Subtyping::Relation.new(sub_type: sub_type, super_type: super_type),
-          self_type: AST::Builtin::Object.instance_type,
-          instance_type: AST::Builtin::Object.instance_type,
-          class_type: AST::Builtin::Object.module_type,
-          constraints: Subtyping::Constraints.empty
-        ).success?
-      end
     end
 
     # Minimal value object for an inferred entry. Distinct from
