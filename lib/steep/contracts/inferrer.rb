@@ -1,11 +1,11 @@
 module Steep
   module Contracts
     class Inferrer
-      def self.infer(source, typing, return_aliases: {})
+      def self.infer(source, typing, return_aliases:)
         new(source, typing, return_aliases: return_aliases).infer
       end
 
-      def initialize(source, typing, return_aliases: {})
+      def initialize(source, typing, return_aliases:)
         @source = source
         @typing = typing
         @return_aliases = return_aliases
