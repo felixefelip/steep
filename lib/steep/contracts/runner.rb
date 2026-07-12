@@ -76,7 +76,7 @@ module Steep
             delegation_registry: @project.delegation_registry
           )
 
-          out.concat(Inferrer.infer(source, typing))
+          out.concat(Inferrer.infer(source, typing, return_aliases: @project.return_alias_registry.to_h))
         end
 
         out
