@@ -88,7 +88,20 @@ module Steep
         source = self.source.without_unrelated_defs(line: line, column: column)
         resolver = RBS::Resolver::ConstantResolver.new(builder: subtyping.factory.definition_builder)
         pos = self.source.buffer.loc_to_pos([line, column])
-        TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: pos, contracts: contracts, postconditions: postconditions, callbacks: callbacks, delegation_registry: delegation_registry, return_alias: return_alias)
+
+        TypeCheckService.type_check(
+          source: source,
+          subtyping: subtyping,
+          constant_resolver: resolver,
+          cursor: pos,
+          contracts: contracts,
+          postconditions: postconditions,
+          callbacks: callbacks,
+          delegation_registry: delegation_registry,
+          constructor_bindings: Project::ConstructorBindingRegistry.new,
+          return_forwarding: Project::ReturnForwardingRegistry.new,
+          return_alias: return_alias
+        )
       end
 
       def last_argument_nodes_for(argument_nodes:, line:, column:)

@@ -40,7 +40,19 @@ module Steep
           Steep.measure "typechecking" do
             location = source.buffer.loc_to_pos([line, column])
             resolver = ::RBS::Resolver::ConstantResolver.new(builder: subtyping.factory.definition_builder)
-            @typing = TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: location, contracts: contracts, postconditions: postconditions, callbacks: callbacks, delegation_registry: delegation_registry, return_alias: return_alias)
+            @typing = TypeCheckService.type_check(
+              source: source,
+              subtyping: subtyping,
+              constant_resolver: resolver,
+              cursor: location,
+              contracts: contracts,
+              postconditions: postconditions,
+              callbacks: callbacks,
+              delegation_registry: delegation_registry,
+              constructor_bindings: Project::ConstructorBindingRegistry.new,
+              return_forwarding: Project::ReturnForwardingRegistry.new,
+              return_alias: return_alias
+            )
           end
         end
 

@@ -73,7 +73,10 @@ module Steep
             contracts: Store.empty,
             postconditions: @project.postconditions,
             callbacks: @project.callbacks,
-            delegation_registry: @project.delegation_registry
+            delegation_registry: @project.delegation_registry,
+            constructor_bindings: Project::ConstructorBindingRegistry.new,
+            return_forwarding: Project::ReturnForwardingRegistry.new,
+            return_alias: Project::ReturnAliasRegistry.new
           )
 
           out.concat(Inferrer.infer(source, typing, return_aliases: @project.return_alias_registry.to_h))

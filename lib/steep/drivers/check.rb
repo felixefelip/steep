@@ -183,6 +183,8 @@ module Steep
             postconditions: project.postconditions,
             callbacks: project.callbacks,
             delegation_registry: project.delegation_registry,
+            constructor_bindings: Project::ConstructorBindingRegistry.new,
+            return_forwarding: Project::ReturnForwardingRegistry.new,
             return_alias: project.return_alias_registry
           )
 

@@ -346,7 +346,21 @@ module Steep
       def type_check_file(target:, subtyping:, path:, text:)
         Steep.logger.tagged "#type_check_file(#{path}@#{target.name})" do
           source = Source.parse(text, path: path, factory: subtyping.factory)
-          typing = TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: yield, cursor: nil, contracts: project.contracts, postconditions: project.postconditions, callbacks: project.callbacks, delegation_registry: project.delegation_registry, constructor_bindings: project.constructor_binding_registry, return_forwarding: project.return_forwarding_registry, return_alias: project.return_alias_registry)
+
+          typing = TypeCheckService.type_check(
+            source: source,
+            subtyping: subtyping,
+            constant_resolver: yield,
+            cursor: nil,
+            contracts: project.contracts,
+            postconditions: project.postconditions,
+            callbacks: project.callbacks,
+            delegation_registry: project.delegation_registry,
+            constructor_bindings: project.constructor_binding_registry,
+            return_forwarding: project.return_forwarding_registry,
+            return_alias: project.return_alias_registry
+          )
+
           ignores = Source::IgnoreRanges.new(ignores: source.ignores)
           SourceFile.with_typing(path: path, content: text, node: source.node, typing: typing, ignores: ignores)
         end
@@ -369,7 +383,19 @@ module Steep
       # check and the LSP providers read already-persisted, already-enforced
       # contracts, so they legitimately need no registry — only the Enforcement
       # / Runner paths pass the real one.
-      def self.type_check(source:, subtyping:, constant_resolver:, cursor:, contracts:, postconditions:, callbacks:, delegation_registry:, constructor_bindings: Project::ConstructorBindingRegistry.new, return_forwarding: Project::ReturnForwardingRegistry.new, return_alias: Project::ReturnAliasRegistry.new)
+      def self.type_check(
+        source:,
+        subtyping:,
+        constant_resolver:,
+        cursor:,
+        contracts:,
+        postconditions:,
+        callbacks:,
+        delegation_registry:,
+        constructor_bindings:,
+        return_forwarding:,
+        return_alias:
+      )
         annotations = source.annotations(block: source.node, factory: subtyping.factory, context: nil)
 
         case annotations.self_type
