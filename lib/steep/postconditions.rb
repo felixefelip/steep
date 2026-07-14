@@ -98,6 +98,18 @@ module Steep
 
     class Entry
       attr_reader :class_name, :method_name, :when_true, :when_false, :unconditional
+      # Set[Symbol] of ivars the method MAY write — directly, or through any
+      # method it calls on `self` (transitively, including from inside blocks
+      # it passes along). felixefelip/steep#68.
+      #
+      # This is an EFFECT, not a refinement: it says nothing about the value,
+      # only that the caller's narrowing of that ivar is no longer valid after
+      # the call. Without it, a caller that narrowed `@x` before the call keeps
+      # believing the narrowing afterwards — stale, and in the controller
+      # pseudo-code that is what makes every halt check after the first one look
+      # like dead code (the callback CAN halt; Steep just could not see it,
+      # because the write lives in the callee).
+      attr_reader :may_write_ivars
 
       def self.parse(row, source:)
         return nil unless row.is_a?(Hash)
@@ -107,6 +119,7 @@ module Steep
 
         when_true = Branch.parse(row["when_true"], source: source)
         when_false = Branch.parse(row["when_false"], source: source)
+        may_write = parse_may_write(row["effects"])
         # `unconditional:` fires at every call site of the method, with no
         # regard for whether the return value is used as a guard. Carries
         # the same shape as `when_true`/`when_false` (`self`, `via_receiver`,
@@ -120,23 +133,33 @@ module Steep
         #   - both at once for methods that mutate the receiver *and* set
         #     another caller ivar.
         unconditional = Branch.parse(row["unconditional"], source: source)
-        return nil unless when_true || when_false || unconditional
+        return nil unless when_true || when_false || unconditional || may_write.any?
 
         new(
           class_name: klass.to_s,
           method_name: method.to_sym,
           when_true: when_true,
           when_false: when_false,
-          unconditional: unconditional
+          unconditional: unconditional,
+          may_write_ivars: may_write
         )
       end
 
-      def initialize(class_name:, method_name:, when_true:, when_false:, unconditional: nil)
+      # `effects: { may_write: ["@halted"] }`
+      def self.parse_may_write(raw)
+        names = raw.is_a?(Hash) ? raw["may_write"] : nil
+        return Set[] unless names.is_a?(Array)
+
+        Set.new(names.filter_map { |n| n.to_sym if n.is_a?(String) && n.start_with?("@") })
+      end
+
+      def initialize(class_name:, method_name:, when_true:, when_false:, unconditional: nil, may_write_ivars: Set[])
         @class_name = class_name
         @method_name = method_name
         @when_true = when_true
         @when_false = when_false
         @unconditional = unconditional
+        @may_write_ivars = may_write_ivars
       end
     end
 

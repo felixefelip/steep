@@ -350,6 +350,23 @@ module Steep
         merge(pure_method_calls: pure_node_invalidation(invalidated_pure_nodes(node)))
       end
 
+      # Drops every cached pure self-send (`performed?`, `authenticated?`, …).
+      # felixefelip/steep#68: a pure predicate's return type depends on ivars its
+      # BODY reads, a dependency the pure-node cache — which only tracks
+      # syntactic descendants — cannot see. When something writes an ivar (an
+      # in-frame `@x = …` or a callee's may-write effect), those cached
+      # predicates are stale and must be recomputed. Restricted to self-sends:
+      # `other.foo` cannot read this receiver's ivars.
+      def invalidate_self_pure_calls
+        self_calls = pure_method_calls.keys.select do |node|
+          (node.type == :send || node.type == :csend) &&
+            (node.children[0].nil? || node.children[0].type == :self)
+        end
+        return self if self_calls.empty?
+
+        merge(pure_method_calls: pure_node_invalidation(self_calls))
+      end
+
       def pure_node_invalidation(invalidated_nodes)
         # @type var invalidation: Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]]
         invalidation = {}

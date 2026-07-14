@@ -5142,6 +5142,72 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_postconditions__may_write_invalidates_stale_narrowing
+    # felixefelip/steep#68 (item 1). `guard` writes `@halted` only through the
+    # callee `redirect_to` (the `effects.may_write` entry is the call-graph
+    # closure). Without the effect, the first `performed?` guard refines
+    # `@halted`/the cached `performed?` to falsy, and the SECOND `performed?`
+    # reuses that stale view — making `return if performed?` look unreachable.
+    # The effect drops that narrowing at the `guard` call, so the second guard
+    # is reachable again.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class MWGuardHost
+            @halted: bool
+
+            def redirect_to: () -> void
+            def performed?: () -> bool
+            def guard: () -> void
+            def run: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class MWGuardHost
+            def redirect_to
+              @halted = true
+            end
+
+            def performed?
+              @halted
+            end
+
+            def guard
+              redirect_to
+            end
+
+            def run
+              guard
+              return if performed?
+
+              guard
+              return if performed?
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "MWGuardHost",
+          "method" => "redirect_to",
+          "effects" => { "may_write" => ["@halted"] }
+        },
+        {
+          "class" => "MWGuardHost",
+          "method" => "guard",
+          "effects" => { "may_write" => ["@halted"] }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_postconditions__update_refines_receiver
     run_type_check_test(
       signatures: {

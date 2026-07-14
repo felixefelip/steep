@@ -46,7 +46,12 @@ module Steep
           ivars = collect_ivar_refinements(def_node, class_name, singleton: singleton)
           when_true_ivars = collect_when_true_nonnil_refinements(def_node, class_name, singleton: singleton)
           returns_establishes = @return_establishment_inferrer.establishments(def_node)
-          next if ivars.empty? && when_true_ivars.empty? && returns_establishes.empty?
+          may_write = collect_ivar_writes(def_node, class_name, singleton: singleton)
+          self_call_deps = collect_self_call_deps(def_node)
+          if ivars.empty? && when_true_ivars.empty? && returns_establishes.empty? &&
+             may_write.empty? && self_call_deps.empty?
+            next
+          end
 
           method_name = def_node.children[0]
           self_type_string = marker_self_type_for(class_name, method_name, singleton: singleton) unless ivars.empty?
@@ -60,7 +65,9 @@ module Steep
             self_type_string: self_type_string,
             when_true_ivars: when_true_ivars,
             when_true_self_type_string: when_true_self_type_string,
-            returns_establishes: returns_establishes
+            returns_establishes: returns_establishes,
+            may_write_ivars: may_write,
+            self_call_deps: self_call_deps
           )
         end
         results
@@ -304,6 +311,71 @@ module Steep
         )
       end
 
+      # felixefelip/steep#68 (item 1), the EFFECT side of the inference.
+      #
+      # Every declared ivar the body assigns — anywhere, including inside a
+      # block it passes to someone else (`respond_to { |f| f.html { @x = 1 } }`),
+      # since a block body runs in this same `self`. Unlike
+      # `collect_ivar_refinements` this records no type: it is a MAY-write, used
+      # by the caller only to drop a now-stale narrowing.
+      def collect_ivar_writes(def_node, class_name, singleton:)
+        body = def_node.children[2]
+        return Set[] unless body
+
+        declared = declared_ivar_types(class_name, singleton: singleton)
+        writes = Set.new #: Set[Symbol]
+        walk_ivasgns(body) do |ivasgn_node|
+          name = ivasgn_node.children[0]
+          writes << name if declared.key?(name)
+        end
+        writes
+      end
+
+      # The self-sends of the body, as `"Class#method"` keys — the edges of the
+      # call graph the Runner closes over, so that a method whose only "write" is
+      # a call to something that writes (`authenticate_user` -> `redirect_to`)
+      # still reports the effect.
+      #
+      # Only self-sends: an ivar write inside `other.foo` mutates OTHER's ivars,
+      # not ours. The callee's OWNER comes from the typed call (`method_decls`),
+      # so an inherited method resolves to the class that declares it
+      # (`redirect_to` -> `ActionController::Base`), which is how the store is
+      # keyed.
+      def collect_self_call_deps(def_node)
+        body = def_node.children[2]
+        return Set[] unless body
+
+        deps = Set.new #: Set[String]
+        walk_sends(body) do |send_node|
+          receiver = send_node.children[0]
+          next unless receiver.nil? || receiver.type == :self
+
+          call = @typing.call_of(node: send_node) rescue nil
+          next unless call.is_a?(TypeInference::MethodCall::Typed)
+
+          call.method_decls.each do |decl|
+            method_name = decl.method_name
+            next unless method_name.respond_to?(:type_name)
+
+            owner = method_name.type_name.to_s.sub(/\A::/, "")
+            deps << "#{owner}##{method_name.method_name}"
+          end
+        end
+        deps
+      end
+
+      # Every `:send`/`:csend` descendant, including those inside block bodies —
+      # the halt of a controller guard sits two blocks deep
+      # (`respond_to { |f| f.html { redirect_to … } }`), and the block runs in
+      # the same `self`, so its sends are ours.
+      def walk_sends(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        yield node if node.type == :send || node.type == :csend
+        node.children.each do |child|
+          walk_sends(child, &block) if child.is_a?(Parser::AST::Node)
+        end
+      end
+
       # Recursively walks `node` yielding every `:ivasgn` descendant.
       def walk_ivasgns(node, &block)
         return unless node.is_a?(Parser::AST::Node)
@@ -341,8 +413,13 @@ module Steep
       # Array[Symbol] of attribute names the method establishes non-nil
       # on its returned value (felixefelip/steep#56).
       attr_reader :returns_establishes
+      # Set[Symbol] of ivars the method may write, directly or transitively
+      # (felixefelip/steep#68). `self_call_deps` are the call-graph edges the
+      # Runner closes over to compute the transitive part; they are not
+      # serialized.
+      attr_reader :may_write_ivars, :self_call_deps
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [])
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[])
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -351,6 +428,26 @@ module Steep
         @when_true_ivars = when_true_ivars
         @when_true_self_type_string = when_true_self_type_string
         @returns_establishes = returns_establishes
+        @may_write_ivars = may_write_ivars
+        @self_call_deps = self_call_deps
+      end
+
+      # A copy with `may_write_ivars` replaced — the Runner's fixpoint result.
+      def with_may_write(ivars)
+        InferredEntry.new(
+          class_name: class_name, method_name: method_name, singleton: singleton,
+          ivars: self.ivars, self_type_string: self_type_string,
+          when_true_ivars: when_true_ivars, when_true_self_type_string: when_true_self_type_string,
+          returns_establishes: returns_establishes,
+          may_write_ivars: ivars, self_call_deps: self_call_deps
+        )
+      end
+
+      # Whether the entry says anything a consumer can use. Entries that exist
+      # only as call-graph nodes (no refinement, no effect) are dropped after
+      # the fixpoint.
+      def empty?
+        ivars.empty? && when_true_ivars.empty? && returns_establishes.empty? && may_write_ivars.empty?
       end
 
       def ==(other)
@@ -362,14 +459,16 @@ module Steep
           other.self_type_string == self_type_string &&
           other.when_true_ivars == when_true_ivars &&
           other.when_true_self_type_string == when_true_self_type_string &&
-          other.returns_establishes == returns_establishes
+          other.returns_establishes == returns_establishes &&
+          other.may_write_ivars == may_write_ivars
       end
 
       alias eql? ==
 
       def hash
         class_name.hash ^ method_name.hash ^ singleton.hash ^ ivars.hash ^ self_type_string.hash ^
-          when_true_ivars.hash ^ when_true_self_type_string.hash ^ returns_establishes.hash
+          when_true_ivars.hash ^ when_true_self_type_string.hash ^ returns_establishes.hash ^
+          may_write_ivars.hash
       end
     end
   end

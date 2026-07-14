@@ -3514,6 +3514,12 @@ module Steep
               receiver: receiver
             )
 
+            # felixefelip/steep#68 (item 1): the callee may WRITE ivars this
+            # frame has narrowed — directly, or through anything it calls on
+            # `self`. Drop those narrowings, or the caller keeps believing a
+            # fact the call already invalidated.
+            constr = constr.apply_ivar_effects(call: call, receiver: receiver)
+
             if (pure_call, type = constr.context.type_env.pure_method_calls.fetch(node, nil))
               if type
                 call = pure_call.update(node: node, return_type: type)
@@ -3927,6 +3933,57 @@ module Steep
     #
     # `via_receiver:` inside `unconditional:` is parsed but not yet
     # applied — follow-up.
+    # felixefelip/steep#68 (item 1). Widens every ivar the callee MAY write back
+    # to its declared type, dropping any narrowing this frame had established —
+    # and drops the pure-call facts cached on it, exactly as an in-frame `@x = …`
+    # already does (`ivasgn`).
+    #
+    # Only for self/implicit-self receivers: `other.foo` writes OTHER's ivars.
+    #
+    # An ivar the entry also REFINES is left alone: `apply_unconditional_postconditions`
+    # has just given it a precise type, which is strictly better than the declared
+    # one and already accounts for the write.
+    #
+    # This is the invalidation half of the effect. The other half — knowing WHICH
+    # exit the callee took, and hence what actually holds (`performed? == false`
+    # => `current_user` non-nil) — is item 2: the path-sensitive exit state.
+    def apply_ivar_effects(call:, receiver:)
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self if postconditions.empty?
+      return self unless self_receiver_for_attr?(receiver)
+
+      entry = lookup_unconditional_postcondition_entry(call)
+      return self unless entry
+      return self if entry.may_write_ivars.empty?
+
+      refined = entry.unconditional&.ivar_type_strings&.keys || []
+      env = context.type_env
+      updates = {} #: Hash[Symbol, AST::Types::t]
+
+      entry.may_write_ivars.each do |name|
+        next if refined.include?(name)
+
+        declared = env.declared_instance_variable_type(name) or next
+        next if env.instance_variable_types[name] == declared
+
+        updates[name] = declared
+      end
+
+      update_type_env do |type_env|
+        # Widen any narrowed ivar the callee may have overwritten back to its
+        # declared type...
+        unless updates.empty?
+          updates.each_key do |name|
+            type_env = type_env.invalidate_pure_node(::Parser::AST::Node.new(:ivar, [name]))
+          end
+          type_env = type_env.refine_types(instance_variable_types: updates)
+        end
+        # ...and drop cached pure self-predicates whose value depends on an ivar
+        # the callee may have written (`performed?` reads `@__rbs_infer__halted`).
+        type_env.invalidate_self_pure_calls
+      end
+    end
+
     def apply_unconditional_postconditions(node:, call:, receiver:)
       return self unless call.is_a?(TypeInference::MethodCall::Typed)
       return self if postconditions.empty?

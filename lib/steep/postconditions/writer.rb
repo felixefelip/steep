@@ -68,6 +68,14 @@ module Steep
           }
         end
         row["unconditional"] = unconditional unless unconditional.empty?
+        # The MAY-write effect (felixefelip/steep#68): not a refinement, so it
+        # sits outside the branches — it applies at every call site, and only
+        # tells the caller to stop trusting its narrowing of these ivars.
+        unless entry.may_write_ivars.empty?
+          row["effects"] = {
+            "may_write" => entry.may_write_ivars.map(&:to_s).sort
+          }
+        end
         unless entry.when_true_ivars.empty?
           row["when_true"] = serialize_branch(
             ivars: entry.when_true_ivars,

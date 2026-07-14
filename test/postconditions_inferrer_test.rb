@@ -83,7 +83,12 @@ class PostconditionsInferrerTest < Minitest::Test
       end
     RUBY
 
-    assert_empty entries
+    # No REFINEMENT — the assignment narrows nothing. The method does still
+    # WRITE @company, so it carries the may-write effect (felixefelip/steep#68):
+    # a caller that narrowed @company must drop that view after the call.
+    refute_empty entries
+    assert_empty entries[0].ivars
+    assert_equal Set[:@company], entries[0].may_write_ivars
   end
 
   def test_does_not_infer_when_rhs_is_not_strict_subtype
