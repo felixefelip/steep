@@ -3997,7 +3997,7 @@ module Steep
           type_env = type_env.refine_types(instance_variable_types: updates)
         end
         # ...and drop cached pure self-predicates whose value depends on an ivar
-        # the callee may have written (`performed?` reads `@__rbs_infer__halted`).
+        # the callee may have written (`performed?` reads `@__rbs_infer__performed`).
         type_env.invalidate_self_pure_calls
       end
     end
