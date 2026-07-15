@@ -305,6 +305,72 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  ME_RBS = <<~RBS
+    class User
+    end
+
+    class Current
+      def self.user: () -> User?
+      def self.user=: (User?) -> User?
+    end
+
+    class MEController
+      @performed: bool
+      def current_user: () -> User?
+      def redirect_to: () -> void
+      def performed?: () -> bool
+      def authenticate_user: () -> void
+      def log_it: () -> void
+      def __rbs_infer__run_index: () -> void
+    end
+  RBS
+
+  ME_RUBY = <<~RUBY
+    class MEController
+      def redirect_to
+        @performed = true
+      end
+      def performed?
+        @performed
+      end
+      def authenticate_user
+        unless current_user
+          redirect_to
+          return
+        end
+        Current.user = current_user
+      end
+      def log_it
+      end
+      def __rbs_infer__run_index
+        authenticate_user
+        return if performed?
+        log_it
+        return if performed?
+      end
+    end
+  RUBY
+
+  # felixefelip/steep#68 item 4: the runner shows `log_it` runs after
+  # `authenticate_user`, so authenticate_user's proven facts (item 2 + 3) hold
+  # at log_it's entry.
+  def test_runner_infers_method_entry_facts_from_runner
+    in_tmpdir do
+      write("sig/me.rbs", ME_RBS)
+      write("app/me.rb", ME_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      facts = reparsed.lookup_method_entry_facts("MEController", :log_it)
+      refute_nil facts, "log_it should get authenticate_user's facts at entry"
+      assert_equal "::User", facts[:self_methods][:current_user].to_s
+      assert_equal "::User", facts[:consts]["Current.user"].to_s
+    end
+  end
+
   def test_runner_is_idempotent
     in_tmpdir do
       write("sig/company.rbs", FIXTURE_RBS)
