@@ -105,6 +105,13 @@ module Steep
           resolve_gates!(entry.conditional_const_returns, entry, effects)
         end
 
+        # felixefelip/steep#68 item 5: a `Const.user = <non-nil>` write also
+        # proves the OTHER constant attributes the setter establishes (its
+        # override does `self.author_name = value&.full_name`). Expand each
+        # guard's const-returns with those, when the singleton setter is
+        # confirmed to delegate to the instance one.
+        resolved.each_value { |entry| expand_transitive_const_returns(entry, resolved) }
+
         resolved.values.reject(&:empty?)
       end
 
@@ -125,6 +132,29 @@ module Steep
 
       def key_of(entry)
         entry_key(entry)
+      end
+
+      # For each proven `Const.attr`, if the singleton `Const.attr=` delegates to
+      # the instance setter and that setter establishes further attributes, add
+      # `Const.<other>` under the same gate. `by_key` holds the setter entries.
+      def expand_transitive_const_returns(entry, by_key)
+        entry.conditional_const_returns.dup.each do |path, spec|
+          const_name, attr = path.split(".", 2)
+          next unless const_name && attr
+
+          singleton = by_key["#{const_name}.#{attr}="]
+          next unless singleton&.delegates_to_instance
+
+          instance_setter = by_key["#{const_name}##{attr}="]
+          next unless instance_setter
+
+          instance_setter.establishes_consts.each do |other, type|
+            other_path = "#{const_name}.#{other}"
+            next if entry.conditional_const_returns.key?(other_path)
+
+            entry.conditional_const_returns[other_path] = { gate_ivar: spec[:gate_ivar], type: type }
+          end
+        end
       end
 
       def infer_for_target(target)

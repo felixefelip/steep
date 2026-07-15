@@ -371,6 +371,75 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  TC_RBS = <<~RBS
+    class User
+      def full_name: () -> String
+    end
+
+    class Current
+      def self.user: () -> User?
+      def self.user=: (User?) -> User?
+      def self.author_name: () -> String?
+      def self.instance: () -> Current
+      def user=: (User?) -> void
+      def author_name=: (String?) -> String?
+    end
+
+    class TCHost
+      @halted: bool
+      def current_user: () -> User?
+      def redirect_to: () -> void
+      def authenticate_user: () -> void
+    end
+  RBS
+
+  TC_RUBY = <<~RUBY
+    class Current
+      def user=(value)
+        @user = value
+        self.author_name = value&.full_name
+      end
+      def self.user=(value)
+        @user = value
+        instance.user = value
+      end
+    end
+
+    class TCHost
+      def redirect_to
+        @halted = true
+      end
+      def authenticate_user
+        unless current_user
+          redirect_to
+          return
+        end
+        Current.user = current_user
+      end
+    end
+  RUBY
+
+  # felixefelip/steep#68 item 5: `Current.user = <non-nil>` also proves
+  # `Current.author_name`, because the (delegated) instance setter establishes it.
+  def test_runner_expands_transitive_const_returns
+    in_tmpdir do
+      write("sig/tc.rbs", TC_RBS)
+      write("app/tc.rb", TC_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      entry = reparsed.lookup_instance("TCHost", :authenticate_user)
+      refute_nil entry
+      assert entry.conditional_const_returns.key?("Current.user")
+      author = entry.conditional_const_returns["Current.author_name"]
+      refute_nil author, "the setter's establishment should promote to a const return"
+      assert_equal "::String", author[:type].to_s
+    end
+  end
+
   def test_runner_is_idempotent
     in_tmpdir do
       write("sig/company.rbs", FIXTURE_RBS)
