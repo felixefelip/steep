@@ -110,6 +110,11 @@ module Steep
       # like dead code (the callback CAN halt; Steep just could not see it,
       # because the write lives in the callee).
       attr_reader :may_write_ivars
+      # felixefelip/steep#68 item 2. `returns_ivar`: Symbol? — this method is a
+      # transparent getter of that ivar (halt-check). `conditional_returns`:
+      # { method_sym => { gate_ivar: Symbol, type: RBS::Types::t } } — self-methods
+      # proven non-nil while `gate_ivar` is falsy.
+      attr_reader :returns_ivar, :conditional_returns
 
       def self.parse(row, source:)
         return nil unless row.is_a?(Hash)
@@ -120,6 +125,8 @@ module Steep
         when_true = Branch.parse(row["when_true"], source: source)
         when_false = Branch.parse(row["when_false"], source: source)
         may_write = parse_may_write(row["effects"])
+        returns_ivar = parse_returns_ivar(row["effects"])
+        conditional_returns = parse_conditional_returns(row["conditional_returns"], source: source)
         # `unconditional:` fires at every call site of the method, with no
         # regard for whether the return value is used as a guard. Carries
         # the same shape as `when_true`/`when_false` (`self`, `via_receiver`,
@@ -133,7 +140,8 @@ module Steep
         #   - both at once for methods that mutate the receiver *and* set
         #     another caller ivar.
         unconditional = Branch.parse(row["unconditional"], source: source)
-        return nil unless when_true || when_false || unconditional || may_write.any?
+        return nil unless when_true || when_false || unconditional || may_write.any? ||
+                          returns_ivar || conditional_returns.any?
 
         new(
           class_name: klass.to_s,
@@ -141,7 +149,9 @@ module Steep
           when_true: when_true,
           when_false: when_false,
           unconditional: unconditional,
-          may_write_ivars: may_write
+          may_write_ivars: may_write,
+          returns_ivar: returns_ivar,
+          conditional_returns: conditional_returns
         )
       end
 
@@ -153,13 +163,44 @@ module Steep
         Set.new(names.filter_map { |n| n.to_sym if n.is_a?(String) && n.start_with?("@") })
       end
 
-      def initialize(class_name:, method_name:, when_true:, when_false:, unconditional: nil, may_write_ivars: Set[])
+      # `effects: { returns_ivar: "@halted" }`
+      def self.parse_returns_ivar(raw)
+        name = raw.is_a?(Hash) ? raw["returns_ivar"] : nil
+        name.to_sym if name.is_a?(String) && name.start_with?("@")
+      end
+
+      # conditional_returns:
+      #   current_user: { gate_ivar: "@halted", type: "::User" }
+      def self.parse_conditional_returns(raw, source:)
+        return {} unless raw.is_a?(Hash)
+
+        raw.each_with_object({}) do |(method, spec), acc|
+          next unless spec.is_a?(Hash)
+          gate = spec["gate_ivar"]
+          type_str = spec["type"]
+          next unless gate.is_a?(String) && gate.start_with?("@") && type_str.is_a?(String)
+
+          type = begin
+                   RBS::Parser.parse_type(type_str)
+                 rescue StandardError => e
+                   Steep.logger.warn { "[postconditions] bad conditional_returns type #{type_str.inspect} (#{source}): #{e.message}" }
+                   nil
+                 end
+          next unless type
+
+          acc[method.to_sym] = { gate_ivar: gate.to_sym, type: type }
+        end
+      end
+
+      def initialize(class_name:, method_name:, when_true:, when_false:, unconditional: nil, may_write_ivars: Set[], returns_ivar: nil, conditional_returns: {})
         @class_name = class_name
         @method_name = method_name
         @when_true = when_true
         @when_false = when_false
         @unconditional = unconditional
         @may_write_ivars = may_write_ivars
+        @returns_ivar = returns_ivar
+        @conditional_returns = conditional_returns
       end
     end
 

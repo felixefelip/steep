@@ -5208,6 +5208,101 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_postconditions__conditional_return_narrows_past_halt_check
+    # felixefelip/steep#68 item 2. `authenticate_user` proves `current_user`
+    # non-nil on its unhalted exit (`conditional_returns`, gated by `@halted`);
+    # `performed?` is a transparent getter of `@halted` (`returns_ivar`). So
+    # after `authenticate_user; return if performed?`, the guard's continuing
+    # branch has `@halted` falsy, and the gated fact fires: `current_user` is
+    # `User`. Without the `return if performed?`, the fact stays gated and the
+    # deref must still error — that is the soundness boundary.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class CRHost
+            @halted: bool
+
+            def current_user: () -> User?
+            def redirect_to: () -> void
+            def performed?: () -> bool
+            def authenticate_user: () -> void
+            def guarded: () -> void
+            def unguarded: () -> void
+          end
+
+          class User
+            def full_name: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class CRHost
+            def current_user
+              User.new if @halted
+            end
+
+            def redirect_to
+              @halted = true
+            end
+
+            def performed?
+              @halted
+            end
+
+            def authenticate_user
+              unless current_user
+                redirect_to
+                return
+              end
+            end
+
+            def guarded
+              authenticate_user
+              return if performed?
+
+              current_user.full_name
+            end
+
+            def unguarded
+              authenticate_user
+              current_user.full_name
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "CRHost",
+          "method" => "performed?",
+          "effects" => { "returns_ivar" => "@halted" }
+        },
+        {
+          "class" => "CRHost",
+          "method" => "authenticate_user",
+          "conditional_returns" => {
+            "current_user" => { "gate_ivar" => "@halted", "type" => "::User" }
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 30
+                character: 17
+              end:
+                line: 30
+                character: 26
+            severity: ERROR
+            message: Type `(::User | nil)` does not have method `full_name`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
   def test_postconditions__update_refines_receiver
     run_type_check_test(
       signatures: {
