@@ -4252,6 +4252,15 @@ module Steep
     # here the call IS the singleton setter, keyed by the constant's own name.
     # Gated on a NON-NIL right-hand side: setting the attribute to `nil`
     # establishes nothing.
+    #
+    # Both spellings of the write are honored, symmetric to the read side
+    # (`memoized_singleton_accessor_base`): the singleton setter (`Foo.user =`)
+    # AND the direct write through the memoized accessor
+    # (`Foo.foo_instance.user =`) name the same slot, so both establish (non-nil
+    # rhs) and — crucially for soundness — INVALIDATE (nilable rhs) the same
+    # `Const.attr` fact. Without the accessor spelling, a `Foo.foo_instance.user
+    # = nil` after a `Foo.user = <non-nil>` would leave a stale non-nil fact and
+    # mask the nil at a later `Foo.user` / `Foo.foo_instance.user` read.
     def apply_const_establishes_on_write(node:, call:, receiver:)
       return self if postconditions.empty?
       return self unless call.is_a?(TypeInference::MethodCall::Typed)
@@ -4261,30 +4270,51 @@ module Steep
       # A `\w=` setter (`user=`), the same shape the `w=` return-type handling
       # keys on — excludes `==`/`<=`/`>=`/`!=`.
       return self unless method.to_s =~ /\w=\z/
-      return self unless receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
 
-      base = resolved_const_name_string(receiver)
-
-      entry = postconditions.lookup_instance(base, method) or return self
-      branch = entry.unconditional or return self
-      return self if branch.const_establishes_type_strings.empty?
+      base =
+        if receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
+          resolved_const_name_string(receiver)
+        else
+          memoized_singleton_accessor_base(receiver)
+        end
+      base or return self
 
       last_arg = node.children.last
       return self unless last_arg.is_a?(::Parser::AST::Node) && typing.has_type?(last_arg)
 
-      paths = branch.const_establishes_rbs_types.keys.map { |attr| "#{base}.#{attr}" }
+      # The attribute this write targets (`user` for `user=`), and its own fact
+      # key. Invalidation keys on THIS, not on the setter's `establishes_consts`,
+      # so a nil write invalidates even through a plain `attr_accessor` setter
+      # that establishes nothing itself (e.g. `name` was established non-nil by a
+      # sibling `user=` write, then written nil via `name=`).
+      written_attr = method.to_s.chomp("=")
 
-      # A nilable/nil write to `Const.attr` invalidates the established non-nil
-      # facts this setter proves — otherwise a stale `Const.attr: NonNil` would
-      # survive a `Const.attr = nil` and mask the nil at a later read.
-      # felixefelip/steep#76 (RC3). Runs before the non-nil establishment below
-      # so the two writes never coexist for the same setter.
+      entry = postconditions.lookup_instance(base, method)
+      branch = entry&.unconditional
+      # Sibling attributes this setter would establish non-nil (`user=` also
+      # writes `name`); dropped alongside the written attr on a nil write.
+      sibling_paths = branch ? branch.const_establishes_rbs_types.keys.map { |attr| "#{base}.#{attr}" } : []
+
+      # A nilable/nil write to `Const.attr` (written directly as `Const.attr =` or
+      # through the memoized accessor as `Const.foo_instance.attr =`) invalidates
+      # the written attr's own established non-nil fact AND any sibling facts this
+      # setter proves — otherwise a stale `Const.attr: NonNil` would survive the
+      # write and mask the nil at a later read. felixefelip/steep#76 (RC3),
+      # generalized to the written attribute so a plain-accessor setter with no
+      # `establishes_consts` still invalidates. Runs before the non-nil
+      # establishment below so the two never coexist for the same write.
       if contract_nullable_type?(typing.type_of(node: last_arg))
-        return self if paths.empty?
+        drop = ["#{base}.#{written_attr}", *sibling_paths]
         return update_type_env do |env|
-          env.update(unconditional_const_returns: env.unconditional_const_returns.reject { |k, _| paths.include?(k) })
+          env.update(unconditional_const_returns: env.unconditional_const_returns.reject { |k, _| drop.include?(k) })
         end
       end
+
+      # Non-nil write — establish the sibling facts. Needs a setter that actually
+      # proves them; a plain accessor with no `establishes_consts` establishes
+      # nothing (only invalidation above is unconditional on the written attr).
+      return self unless branch
+      return self if branch.const_establishes_type_strings.empty?
 
       consts = {} #: Hash[String, AST::Types::t]
       branch.const_establishes_rbs_types.each do |attr, rbs_type|
