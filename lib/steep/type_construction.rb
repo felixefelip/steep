@@ -4092,7 +4092,40 @@ module Steep
       elsif receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
         base = resolved_const_name_string(receiver) or return nil
         env.unconditional_const_returns["#{base}.#{node.children[1]}"]
+      elsif (base = memoized_singleton_accessor_base(receiver))
+        env.unconditional_const_returns["#{base}.#{node.children[1]}"]
       end
+    end
+
+    # The memoized-singleton READ path — companion to the write-side
+    # establishment in felixefelip/steep#76/#77. A sibling attribute established
+    # non-nil at a `Const.attr = <non-nil>` write can be read back two ways:
+    # through the singleton getter (`Foo.user`, handled by
+    # the `:const` branch above) OR directly through the memoized accessor
+    # (`Foo.foo_instance.user`). Both name the SAME slot — `foo_instance` is
+    # `@x ||= Foo.new` (stable identity) and the singleton setter that
+    # established the fact wrote THROUGH it (`self.user=` -> `foo_instance.user =`).
+    # So a receiver of shape `Const.<accessor>` whose resolved return type is an
+    # INSTANCE of `Const` canonicalizes to the same `Const.attr` fact key. This
+    # is the exact memoized-accessor recognition the establishment inference
+    # already trusts on the write side
+    # (`Postconditions::Inferrer#delegating_instance_receiver?`) — it's the
+    # return TYPE, not the accessor's name, that makes the identity sound, so a
+    # memoized accessor under any name is covered. Returns the const base string,
+    # or nil.
+    def memoized_singleton_accessor_base(receiver)
+      return nil unless receiver.is_a?(::Parser::AST::Node) && receiver.type == :send
+
+      const = receiver.children[0]
+      return nil unless const.is_a?(::Parser::AST::Node) && const.type == :const
+
+      base = resolved_const_name_string(const) or return nil
+      recv_type = (typing.type_of(node: receiver) rescue nil) or return nil
+      recv_type = checker.factory.unwrap_optional(recv_type) || recv_type
+      return nil unless recv_type.is_a?(AST::Types::Name::Instance)
+      return base if recv_type.name.to_s.sub(/\A::/, "") == base
+
+      nil
     end
 
     # The fully-qualified name of a constant receiver (`Foo` written inside
