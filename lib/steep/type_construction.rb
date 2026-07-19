@@ -3515,6 +3515,15 @@ module Steep
               receiver: receiver
             )
 
+            # felixefelip/rbs_infer#71: a `Const.attr = <non-nil>` write whose
+            # setter carries an `establishes_consts` postcondition proves sibling
+            # `Const.<other>` reads non-nil for the rest of the frame.
+            constr = constr.apply_const_establishes_on_write(
+              node: node,
+              call: call,
+              receiver: receiver
+            )
+
             # felixefelip/steep#68 (item 1): the callee may WRITE ivars this
             # frame has narrowed — directly, or through anything it calls on
             # `self`. Drop those narrowings, or the caller keeps believing a
@@ -4167,6 +4176,53 @@ module Steep
       end
 
       constr
+    end
+
+    # felixefelip/rbs_infer#71 — the memoized-singleton delegation. A singleton
+    # setter `Const.user = <non-nil>` establishes sibling constant attributes
+    # (`Const.name`) non-nil, because the setter's body forwards to the memoized
+    # instance whose own `user=` writes `name`. The fact lives on the setter's
+    # `unconditional.establishes_consts` slot. Seed each `Const.<attr>` into
+    # `unconditional_const_returns`, keyed EXACTLY as the read-site
+    # (`method_entry_narrowed_type`, item 4) looks it up, so a later `Const.name`
+    # read narrows with no gate and no pure-node pre-registration.
+    #
+    # A dedicated path (rather than a step inside
+    # `apply_unconditional_postconditions`) because that method's entry lookup
+    # only resolves INSTANCE method names and bails for a singleton receiver —
+    # here the call IS the singleton setter, keyed by the constant's own name.
+    # Gated on a NON-NIL right-hand side: setting the attribute to `nil`
+    # establishes nothing.
+    def apply_const_establishes_on_write(node:, call:, receiver:)
+      return self if postconditions.empty?
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self unless node.type == :send
+
+      method = node.children[1]
+      # A `\w=` setter (`user=`), the same shape the `w=` return-type handling
+      # keys on — excludes `==`/`<=`/`>=`/`!=`.
+      return self unless method.to_s =~ /\w=\z/
+      return self unless receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
+
+      const_name = RBS::TypeName.parse(constant_path_string(receiver)) rescue (return self)
+      base = const_name.to_s.sub(/\A::/, "")
+
+      entry = postconditions.lookup_instance(base, method) or return self
+      branch = entry.unconditional or return self
+      return self if branch.const_establishes_type_strings.empty?
+
+      last_arg = node.children.last
+      return self unless last_arg.is_a?(::Parser::AST::Node) && typing.has_type?(last_arg)
+      return self if contract_nullable_type?(typing.type_of(node: last_arg))
+
+      consts = {} #: Hash[String, AST::Types::t]
+      branch.const_establishes_rbs_types.each do |attr, rbs_type|
+        ast_type = checker.factory.type(rbs_type) rescue next
+        consts["#{base}.#{attr}"] = ast_type
+      end
+      return self if consts.empty?
+
+      update_type_env { |env| env.with_method_entry_facts(self_methods: {}, consts: consts) }
     end
 
     # Walks `rbs_type` collecting every class/module name referenced
