@@ -50,6 +50,78 @@ class PostconditionsConstEstablishesTest < Minitest::Test
     typing.type_of(node: node)
   end
 
+  # A NESTED constant: `Foo` written inside `module Bar` resolves to `::Bar::Foo`,
+  # but its literal source path is just `Foo`. The sidecar (like every
+  # `.steep_postconditions.yml`) is keyed by the full class name `Bar::Foo`, so
+  # the establishment must be looked up / seeded / read by the RESOLVED name, not
+  # the source spelling — the `resolved_const_name_string` path.
+  NESTED_RBS = <<~RBS
+    module Bar
+      class Foo
+        def self.name: () -> String?
+        def self.user=: (String value) -> void
+      end
+    end
+  RBS
+
+  # `Bar::Foo#user=` establishes `Bar::Foo.name` non-nil — keyed by the full name.
+  def nested_establishes_name_store
+    Postconditions::Store.from_hash(
+      {
+        "version" => 1,
+        "postconditions" => [
+          {
+            "class" => "Bar::Foo",
+            "method" => "user=",
+            "unconditional" => {
+              "establishes_consts" => { "name" => "::String" }
+            }
+          }
+        ]
+      },
+      source: "<test>"
+    )
+  end
+
+  # The first descendant matching `block`, depth-first.
+  def find_descendant(node, &block)
+    return nil unless node.is_a?(::Parser::AST::Node)
+    return node if block.call(node)
+    node.children.each do |child|
+      found = find_descendant(child, &block)
+      return found if found
+    end
+    nil
+  end
+
+  # The `(send (const nil :Foo) :name)` read node nested inside `module Bar`.
+  def nested_foo_name_type(source, typing)
+    node = find_descendant(source.node) do |n|
+      n.type == :send && n.children[1] == :name &&
+        n.children[0].is_a?(::Parser::AST::Node) &&
+        n.children[0].type == :const && n.children[0].children[1] == :Foo
+    end
+    typing.type_of(node: node)
+  end
+
+  def test_nested_const_establishes_via_resolved_name
+    with_checker(NESTED_RBS) do |checker|
+      source = parse_ruby(<<~RUBY)
+        module Bar
+          Foo.user = "x"
+          Foo.name
+        end
+      RUBY
+
+      with_standard_construction(checker, source, postconditions: nested_establishes_name_store) do |construction, typing|
+        construction.synthesize(source.node)
+        t = nested_foo_name_type(source, typing)
+        assert_equal "::String", t.to_s,
+                     "a nested `Foo` (resolving to `::Bar::Foo`) must find its sidecar entry by the resolved full name and narrow `Foo.name`"
+      end
+    end
+  end
+
   def test_write_establishes_sibling_const_non_nil
     with_checker(RBS) do |checker|
       source = parse_ruby(<<~RUBY)
