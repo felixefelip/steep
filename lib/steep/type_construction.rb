@@ -4080,9 +4080,25 @@ module Steep
       if self_receiver_for_attr?(receiver)
         env.unconditional_method_returns[node.children[1]]
       elsif receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
-        const_name = RBS::TypeName.parse(constant_path_string(receiver)) rescue (return nil)
-        env.unconditional_const_returns["#{const_name.to_s.sub(/\A::/, "")}.#{node.children[1]}"]
+        base = resolved_const_name_string(receiver) or return nil
+        env.unconditional_const_returns["#{base}.#{node.children[1]}"]
       end
+    end
+
+    # The fully-qualified name of a constant receiver (`Foo` written inside
+    # `Example3` → `Example3::Foo`), read off its inferred singleton type so a
+    # nested or aliased constant keys `unconditional_const_returns` by identity
+    # rather than by its source spelling — both the write-site seed and this
+    # read-site lookup resolve the same way, and a `.steep_postconditions.yml`
+    # entry (always keyed by the full class name) is found. Falls back to the
+    # literal lexical path when the type is unavailable; for a top-level
+    # constant (`Current`) the two coincide, so item 4 is unaffected.
+    def resolved_const_name_string(receiver)
+      type = typing.type_of(node: receiver) rescue nil
+      if type.is_a?(AST::Types::Name::Singleton)
+        return type.name.to_s.sub(/\A::/, "")
+      end
+      constant_path_string(receiver).sub(/\A::/, "")
     end
 
     # felixefelip/steep#68 item 3 — APPLY (lookup half). The recorded
@@ -4204,8 +4220,7 @@ module Steep
       return self unless method.to_s =~ /\w=\z/
       return self unless receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
 
-      const_name = RBS::TypeName.parse(constant_path_string(receiver)) rescue (return self)
-      base = const_name.to_s.sub(/\A::/, "")
+      base = resolved_const_name_string(receiver)
 
       entry = postconditions.lookup_instance(base, method) or return self
       branch = entry.unconditional or return self
