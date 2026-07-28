@@ -622,6 +622,72 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  # felixefelip/steep#103. `expand_transitive_const_returns` gave a HALTING guard the
+  # sibling attributes its setter override establishes; the ungated establishments (#100)
+  # had no such expansion. So the same `Current.user = <non-nil>` write proved
+  # `Current.name` too when it sat in a guard that redirects, and did not when it sat in a
+  # plain `before_action` — the shape every Rails app actually writes.
+  def test_runner_expands_an_ungated_establishment_through_the_setter_override
+    in_tmpdir do
+      write("sig/tr.rbs", <<~RBS)
+        class TRUser
+          def name: () -> String
+        end
+        class TRCurrent
+          def self.user: () -> TRUser?
+          def self.user=: (TRUser?) -> TRUser?
+          def self.name: () -> String?
+          def self.name=: (String?) -> String?
+          def self.instance: () -> TRCurrent
+          def user=: (TRUser?) -> void
+          def name=: (String?) -> String?
+        end
+        class TRController
+          def proven_user: () -> TRUser
+          def set_current: () -> void
+          def act: () -> void
+          def __rbs_infer__run_act: () -> void
+        end
+      RBS
+      write("app/tr.rb", <<~RUBY)
+        class TRCurrent
+          def user=(value)
+            @user = value
+            self.name = value&.name
+          end
+          def self.user=(value)
+            @user = value
+            instance.user = value
+          end
+        end
+
+        class TRController
+          def set_current
+            TRCurrent.user = proven_user
+          end
+          def act
+          end
+          def __rbs_infer__run_act
+            set_current
+            act
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      facts = reparsed.lookup_method_entry_facts("TRController", :act)
+      refute_nil facts, "the write should reach the action"
+      assert_equal "::TRUser", facts[:consts]["TRCurrent.user"].to_s
+      assert_equal "::String", facts[:consts]["TRCurrent.name"].to_s,
+                   "the setter override's sibling establishment must come along, gate or no gate"
+    end
+  end
+
   TC_RBS = <<~RBS
     class User
       def full_name: () -> String

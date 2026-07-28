@@ -121,6 +121,15 @@ module Steep
         # confirmed to delegate to the instance one.
         resolved.each_value { |entry| expand_transitive_const_returns(entry, resolved) }
 
+        # felixefelip/steep#103: the same expansion for the UNCONDITIONAL establishments
+        # (#100). A handler that cannot halt has no gate, so its facts live in
+        # `const_establishments` and were never expanded — meaning
+        # `Current.user = current_user` in a plain `before_action` proved `Current.user`
+        # and stopped there, while the identical write in a HALTING guard also proved
+        # `Current.caderneta`. Same write, same setter, different answer depending on
+        # whether the enclosing method happened to redirect.
+        resolved.each_value { |entry| expand_transitive_const_establishments(entry, resolved) }
+
         # felixefelip/rbs_infer#71 (piece 1): gate the UNCONDITIONAL establishment
         # (`Const.attr =` proves a sibling non-nil for the rest of the frame) on a
         # confirmed delegation. An instance setter's `establishes_consts` fires at
@@ -189,6 +198,28 @@ module Steep
             next if entry.conditional_const_returns.key?(other_path)
 
             entry.conditional_const_returns[other_path] = { gate_ivar: spec[:gate_ivar], type: type }
+          end
+        end
+      end
+
+      # `expand_transitive_const_returns` for the ungated establishments. Keyed the same
+      # way (`"Const.attr"`), carrying the type directly instead of a gate spec.
+      def expand_transitive_const_establishments(entry, by_key)
+        entry.const_establishments.dup.each do |path, _type|
+          const_name, attr = path.split(".", 2)
+          next unless const_name && attr
+
+          singleton = by_key["#{const_name}.#{attr}="]
+          next unless singleton&.delegates_to_instance
+
+          instance_setter = by_key["#{const_name}##{attr}="]
+          next unless instance_setter
+
+          instance_setter.establishes_consts.each do |other, other_type|
+            other_path = "#{const_name}.#{other}"
+            next if entry.const_establishments.key?(other_path)
+
+            entry.const_establishments[other_path] = other_type
           end
         end
       end
