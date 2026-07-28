@@ -627,6 +627,28 @@ module Steep
         end
       end
 
+      # felixefelip/steep#101. A body annotated `@type self:` / `@type self_method:` with a
+      # type name the environment does not declare. Reported instead of raised: the
+      # annotation names a type, and an unknown type in an annotation is what diagnostics
+      # are for — the same treatment `UnknownConstant` gives a constant in the code.
+      #
+      # Raising was measurably worse than wrong. The name usually belongs to GENERATED code
+      # (an ERB template's `ERBFoo`), so the message named a class the user never typed, and
+      # it came out of `RBS::DefinitionBuilder` as a bare RuntimeError — killing the whole
+      # run rather than the one file.
+      class UnknownSelfTypeAnnotation < Base
+        attr_reader :name
+
+        def initialize(node:, name:)
+          super(node: node)
+          @name = name
+        end
+
+        def header_line
+          "Cannot find the declaration of the annotated self type: `#{name}` (checking with `untyped` self)"
+        end
+      end
+
       autoload :UnknownConstantAssigned, "steep/diagnostic/deprecated/unknown_constant_assigned"
       autoload :ElseOnExhaustiveCase, "steep/diagnostic/deprecated/else_on_exhaustive_case"
 
@@ -1164,6 +1186,7 @@ module Steep
             UnexpectedTypeArgument => :hint,
             UnexpectedYield => :warning,
             UnknownConstant => :warning,
+            UnknownSelfTypeAnnotation => :warning,
             UnknownGlobalVariable => :warning,
             UnknownRecordKey => :information,
             UnknownInstanceVariable => :information,
@@ -1228,6 +1251,7 @@ module Steep
             UnexpectedTypeArgument => :error,
             UnexpectedYield => :error,
             UnknownConstant => :error,
+            UnknownSelfTypeAnnotation => :error,
             UnknownGlobalVariable => :error,
             UnknownRecordKey => :warning,
             UnknownInstanceVariable => :error,
@@ -1293,6 +1317,7 @@ module Steep
             UnexpectedTypeArgument => nil,
             UnexpectedYield => :information,
             UnknownConstant => :hint,
+            UnknownSelfTypeAnnotation => :hint,
             UnknownGlobalVariable => :hint,
             UnknownRecordKey => :hint,
             UnknownInstanceVariable => :hint,
