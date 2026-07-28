@@ -440,6 +440,106 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  # felixefelip/steep#96. The end-to-end shape the issue is about: a fact proven in a
+  # controller runner has to survive the hop THROUGH a template — a top-level body with no
+  # `def` at all — into the partial that template renders.
+  #
+  # Before #96 the chain stopped at `VWView#__rbs_infer__body`: the template contributed no
+  # flow, so `VWView#render` had no call site, no entry facts, and neither did the partial.
+  def test_runner_carries_facts_through_a_self_method_template_into_its_partial
+    in_tmpdir do
+      write("sig/vw.rbs", <<~RBS)
+        class User
+        end
+        class Current
+          def self.user: () -> User?
+          def self.user=: (User?) -> User?
+        end
+        class VWController
+          @performed: bool
+          def current_user: () -> User?
+          def redirect_to: () -> void
+          def performed?: () -> bool
+          def authenticate_user: () -> void
+          def render: () -> void
+          def __rbs_infer__run_show: () -> void
+        end
+        class VWView
+          def __rbs_infer__body: () -> void
+          def render: () -> void
+        end
+        class VWPartial
+          def __rbs_infer__body: () -> void
+        end
+      RBS
+      write("app/vw.rb", <<~RUBY)
+        class VWController
+          def redirect_to
+            @performed = true
+          end
+          def performed?
+            @performed
+          end
+          def authenticate_user
+            unless current_user
+              redirect_to
+              return
+            end
+            Current.user = current_user
+          end
+          def render
+            VWView.new.__rbs_infer__body
+          end
+          def __rbs_infer__run_show
+            authenticate_user
+            return if performed?
+            render
+          end
+        end
+
+        class VWView
+          def render
+            VWPartial.new.__rbs_infer__body
+          end
+          def __rbs_infer__body
+          end
+        end
+
+        class VWPartial
+          def __rbs_infer__body
+          end
+        end
+      RUBY
+      # The template. Its compiled body has no `def`; the annotation is what says which
+      # method it is — exactly what STEEP_ERB_CONVENTION injects for an `.erb`.
+      write("app/vw_template.rb", <<~RUBY)
+        # @type self_method: VWView#__rbs_infer__body
+        render
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      view = reparsed.lookup_method_entry_facts("VWView", :__rbs_infer__body)
+      refute_nil view, "the view body should get the guard's Current.user (worked before #96)"
+      assert_equal "::User", view[:consts]["Current.user"].to_s
+
+      # The two hops #96 adds: the template body IS the flow of `__rbs_infer__body`, so its
+      # `render` call carries the fact into `VWView#render`, whose own (ordinary) def body
+      # carries it into the partial.
+      render = reparsed.lookup_method_entry_facts("VWView", :render)
+      refute_nil render, "the template's `render` call should give VWView#render entry facts"
+      assert_equal "::User", render[:consts]["Current.user"].to_s
+
+      partial = reparsed.lookup_method_entry_facts("VWPartial", :__rbs_infer__body)
+      refute_nil partial, "the partial should inherit Current.user through the template"
+      assert_equal "::User", partial[:consts]["Current.user"].to_s
+    end
+  end
+
   TC_RBS = <<~RBS
     class User
       def full_name: () -> String

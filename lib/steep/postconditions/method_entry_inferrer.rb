@@ -45,6 +45,14 @@ module Steep
       # the callee's parameters.
       UNRELIABLE_ARG_TYPES = Set[:splat, :forwarded_args, :forwarded_restarg, :forwarded_kwrestarg].freeze
 
+      # A nested definition scope, skipped when walking a body for calls. Its body is not
+      # part of the enclosing flow: a `def` body runs when the method is CALLED, not where
+      # it is written, and a class/module body has its own `self`. `each_method_def` visits
+      # the defs inside separately, so descending here would attribute their calls to the
+      # wrong owner — and for a `@type self_method:` source, where the walked "body" is the
+      # whole file, to a wildly wrong one.
+      DEFINITION_SCOPES = Set[:def, :defs, :class, :module, :sclass].freeze
+
       def self.sequences(source, typing)
         new(source, typing).sequences
       end
@@ -134,10 +142,42 @@ module Steep
           next if events.empty?
           result << RunnerSequence.new(events: events, owner: owner)
         end
+        result.concat(self_method_sequences)
         result
       end
 
       private
+
+      # felixefelip/steep#96. The flow of a top-level body annotated with
+      # `@type self_method: Klass#method` — an ERB template compiled to that method at
+      # runtime — owned by the annotated method.
+      #
+      # `each_method_def` finds only `def` nodes, and such a template has none, so without
+      # this the body contributes NO flow: every call it makes is invisible to the walk and
+      # the facts holding at its entry stop dead there. `defined_method_keys` already treats
+      # the same annotation as defining the method (so a fact recorded FOR it survives the
+      # Runner's filter) — this is the other half, the facts it PROPAGATES.
+      #
+      # Concretely, it is what carries a view's facts into the partials it renders:
+      #
+      #   show.html.erb  (@type self_method: ERBPostsShow#__rbs_infer__body)
+      #     render "posts/summary", post: @post   # <= only reachable through this sequence
+      #   ERBPostsShow#render                     # a real def, walked as usual once it has facts
+      #     ERBPartialPostsSummary.new(...).__rbs_infer__body
+      #
+      # Not a duplicate of the `each_method_def` walk: `body_events` reads only the
+      # TOP-LEVEL statements of the node it is given, so a `def` nested in the body is still
+      # the def walk's alone.
+      def self_method_sequences
+        node = @source.node or return []
+        owners = self_method_def_keys
+        return [] if owners.empty?
+
+        events = body_events(node)
+        return [] if events.empty?
+
+        owners.map { |owner| RunnerSequence.new(events: events, owner: owner) }
+      end
 
       # Yields `[def_node, "Class#method"]` for every method def under a class/module,
       # tracking lexical nesting for the owner key (nil at top level). Mirrors `walk_defs`
@@ -169,7 +209,13 @@ module Steep
       # order (`Bar.new.foo_name.upcase` => `new`, `foo_name`, `upcase`) so a callee whose entry
       # we care about isn't hidden as an inner receiver of a longer chain.
       def method_events(def_node)
-        body = def_node.children[2]
+        body_events(def_node.children[2])
+      end
+
+      # `method_events` for a body node that is not a `def`'s — the top-level body of a
+      # `@type self_method:` source (felixefelip/steep#96). Reads only `body`'s own
+      # statements; nested defs are the def walk's.
+      def body_events(body)
         return [] unless body
 
         events = [] #: Array[Hash[Symbol, untyped]]
@@ -244,6 +290,7 @@ module Steep
       # before the send itself), so chained calls are recorded in the order they run.
       def each_call_send(node, &block)
         return unless node.is_a?(Parser::AST::Node)
+        return if DEFINITION_SCOPES.include?(node.type)
 
         if node.type == :send
           receiver = node.children[0]
