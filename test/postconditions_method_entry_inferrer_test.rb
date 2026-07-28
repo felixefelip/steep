@@ -33,6 +33,11 @@ class PostconditionsMethodEntryInferrerTest < Minitest::Test
     class MRun
       def run: () -> void
     end
+
+    class MView
+      def __rbs_infer__body: () -> void
+      def render: () -> void
+    end
   RBS
 
   def sequences_for(ruby)
@@ -92,6 +97,54 @@ class PostconditionsMethodEntryInferrerTest < Minitest::Test
       keys = Postconditions::MethodEntryInferrer.defined_method_keys(source)
       assert_empty keys.grep(/__rbs_infer__body/)
     end
+  end
+
+  # felixefelip/steep#96. The counterpart of the test above: the annotation makes the body
+  # DEFINE the method, and it must also make the body BE that method's flow. Otherwise the
+  # template's calls are invisible and facts holding at its entry stop there instead of
+  # reaching what it renders.
+  def test_self_method_body_is_a_flow_owned_by_the_annotated_method
+    sequences = sequences_for(<<~RUBY)
+      # @type self_method: MView#__rbs_infer__body
+      render
+    RUBY
+
+    assert_equal 1, sequences.size
+    assert_equal "MView#__rbs_infer__body", sequences[0].owner
+
+    calls = sequences[0].events.select { |e| e[:kind] == :call }
+    assert_equal [:render], calls.map { |c| c[:method_name] }
+    assert_equal "MView", calls.first[:class_name]
+    assert calls.first[:same_self], "a receiverless call in the body is same-self"
+  end
+
+  def test_top_level_body_without_the_annotation_is_not_a_flow
+    # Same body, no annotation: nothing owns it, so it contributes no flow — the
+    # pre-#96 behaviour, kept for every other top-level script.
+    sequences = sequences_for(<<~RUBY)
+      MRun.new.run
+    RUBY
+
+    assert_empty sequences
+  end
+
+  def test_self_method_flow_does_not_swallow_nested_defs
+    # The top-level walk reads only the body's OWN statements, so a `def` in the same
+    # source is still the def walk's — one flow each, not one flow counted twice.
+    sequences = sequences_for(<<~RUBY)
+      # @type self_method: MView#__rbs_infer__body
+      render
+
+      class MRun
+        def run
+          MBar.new.foo_name
+        end
+      end
+    RUBY
+
+    assert_equal ["MRun#run", "MView#__rbs_infer__body"], sequences.map(&:owner).sort
+    body = sequences.find { |s| s.owner == "MView#__rbs_infer__body" }
+    assert_equal [:render], body.events.select { |e| e[:kind] == :call }.map { |c| c[:method_name] }
   end
 
   def test_halt_check_makes_a_flow_regardless_of_method_name
