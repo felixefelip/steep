@@ -652,6 +652,17 @@ module Steep
         recv = rhs.children[0]
         return nil unless recv.is_a?(Parser::AST::Node) && recv.type == :lvar && recv.children[0] == param
 
+        # Steep already typed this node under whatever narrowing holds AT it — inside
+        # `unless value.nil?`, `value` is non-nil — and its dispatch handles an
+        # intersection receiver properly, picking `User::Validated#name: () -> String`
+        # over `User#name: () -> String?`. When that type is non-nil it IS the answer.
+        #
+        # The manual resolution below stays for the shape where the node's own type is
+        # nilable because the READ is, not because the attribute is: `value&.full_name`
+        # types as `String?` no matter how non-nil `full_name` is (felixefelip/steep#102).
+        typed = type_of(rhs)
+        return typed if typed && subtract_nil(typed) == typed
+
         recv_type = type_of(recv) or return nil
         ret = resolve_method_return(subtract_nil(recv_type), rhs.children[1]) or return nil
         subtract_nil(ret) == ret ? ret : nil
@@ -659,16 +670,36 @@ module Steep
 
       # The return type of `method` resolved on `type` (walking union/
       # intersection members), or nil.
+      #
+      # Every member that declares the method contributes a candidate, and the MOST
+      # SPECIFIC one wins (felixefelip/steep#102). Returning the first match instead threw
+      # away exactly what a refinement marker exists to say: for
+      # `(User & User::Validated)`, `::User` is reached first and answers
+      # `caderneta: () -> Caderneta?`, so the marker's proven
+      # `caderneta: () -> (Caderneta & Caderneta::Validated)` was never consulted and the
+      # establishment was refused as nilable.
       def resolve_method_return(type, method)
-        instance_type_names(type).each do |type_name|
+        candidates = instance_type_names(type).filter_map do |type_name|
           definition = @definition_builder.build_instance(type_name) rescue next
           method_def = definition.methods[method] or next
           types = method_def.method_types.map { |mt| @factory.type(mt.type.return_type) }
           next if types.empty?
 
-          return types.size == 1 ? types.first : AST::Types::Union.build(types: types)
+          types.size == 1 ? types.first : AST::Types::Union.build(types: types)
         end
-        nil
+        return nil if candidates.empty?
+
+        most_specific(candidates)
+      end
+
+      # The narrowest of a set of candidate types: one that is a strict subtype of every
+      # other survivor. Falls back to the first when they are unrelated — an intersection
+      # of unrelated types is not something this can usefully collapse, and the first is
+      # what the previous behaviour returned.
+      def most_specific(candidates)
+        candidates.reduce do |best, candidate|
+          strict_subtype?(candidate, best) ? candidate : best
+        end
       end
 
       def instance_type_names(type)

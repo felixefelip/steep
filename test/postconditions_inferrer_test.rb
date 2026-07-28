@@ -445,6 +445,19 @@ class PostconditionsInferrerTest < Minitest::Test
       def proven_user: () -> User
       def set_current_user: () -> void
     end
+
+    class Marked
+      def name: () -> String?
+    end
+
+    class Marked::Validated
+      def name: () -> String
+    end
+
+    class MarkedHost
+      def value=: ((Marked & Marked::Validated)? value) -> void
+      def other=: (String?) -> void
+    end
   RBS
 
   def infer_cr_for(ruby)
@@ -574,6 +587,42 @@ class PostconditionsInferrerTest < Minitest::Test
 
     entry = entries.find { |e| e.method_name == :set_current_user }
     assert(entry.nil? || entry.const_establishments.empty?)
+  end
+
+  # felixefelip/steep#102. The param is an INTERSECTION carrying a refinement marker, and
+  # the attribute it reads is nilable on the base but proven on the marker — which is the
+  # whole reason the marker exists. Answering from the first member alone (`::Marked`, so
+  # `name: () -> String?`) refused the establishment as nilable and dropped the narrowing.
+  def test_establishes_through_an_intersection_receiver
+    entries = infer_cr_for(<<~RUBY)
+      class MarkedHost
+        def value=(value)
+          unless value.nil?
+            self.other = value.name
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :value= }
+    refute_nil entry, "expected an entry for the setter"
+    assert_equal "::String", entry.establishes_consts[:other].to_s
+  end
+
+  # The `&.` shape has no narrowing at the node (`value&.name` is `String?` however non-nil
+  # `name` is), so it goes through the manual resolution — which must reach the marker too.
+  def test_establishes_through_an_intersection_receiver_via_safe_navigation
+    entries = infer_cr_for(<<~RUBY)
+      class MarkedHost
+        def value=(value)
+          self.other = value&.name
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :value= }
+    refute_nil entry, "expected an entry for the setter"
+    assert_equal "::String", entry.establishes_consts[:other].to_s
   end
 
   def test_infers_establishes_consts_from_instance_setter_override
