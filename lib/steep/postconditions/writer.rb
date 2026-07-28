@@ -133,6 +133,14 @@ module Steep
             .sort_by { |name, _| name.to_s }
             .each_with_object({}) { |(name, type), h| h[name.to_s] = type.to_s }
         end
+        # felixefelip/steep#100: constant attributes written non-nil on every exit. Same
+        # `"Const.attr" => type` shape as a `method_entry_facts` row's `consts:`, since it
+        # is exactly what the Runner copies into one at each call site.
+        unless entry.const_establishments.empty?
+          unconditional["consts"] = entry.const_establishments
+            .sort
+            .each_with_object({}) { |(path, type), h| h[path] = type.to_s }
+        end
         row["unconditional"] = unconditional unless unconditional.empty?
         # The MAY-write effect (felixefelip/steep#68): not a refinement, so it
         # sits outside the branches — it applies at every call site, and only

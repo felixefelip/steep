@@ -51,12 +51,13 @@ module Steep
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
           conditional_const_returns = collect_conditional_const_returns(def_node)
+          const_establishments = collect_const_establishments(def_node)
           establishes_consts = collect_establishes_consts(def_node, singleton: singleton)
           delegates_to_instance = singleton_delegates_to_instance?(def_node, class_name, singleton: singleton)
           if ivars.empty? && when_true_ivars.empty? && returns_establishes.empty? &&
              may_write.empty? && self_call_deps.empty? && returns_ivar.nil? &&
              conditional_returns.empty? && conditional_const_returns.empty? &&
-             establishes_consts.empty? && !delegates_to_instance
+             establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance
             next
           end
 
@@ -79,6 +80,7 @@ module Steep
             conditional_returns: conditional_returns,
             conditional_const_returns: conditional_const_returns,
             establishes_consts: establishes_consts,
+            const_establishments: const_establishments,
             delegates_to_instance: delegates_to_instance
           )
         end
@@ -458,6 +460,41 @@ module Steep
 
           type = nonnil_value_type(rhs) or next
           result[const_path] = gate.merge(type: type)
+        end
+        result
+      end
+
+      # felixefelip/steep#100. The UNCONDITIONAL sibling of
+      # `collect_conditional_const_returns`: a method whose body cannot halt writes its
+      # constant attributes on every exit, so they need no gate.
+      #
+      #   def set_current_account
+      #     Current.account = current_account   # non-nil at entry, past the guard
+      #   end
+      #
+      # A `before_action` handler that populates global state is the shape this exists for.
+      # It used to prove nothing at all — `conditional_const_returns` needs a halt gate to
+      # key its facts on, and a plain handler has none, so the establishment stopped at the
+      # handler's own body and reached neither the action nor the view it renders.
+      #
+      # Only emitted when there is NO halt gate, so the two collectors partition rather
+      # than double-report. Sound because `each_statement` yields the body's TOP-LEVEL
+      # statements only: a write nested in an `if` is invisible here, and stays that way.
+      #
+      # => Hash[String("Const.attr"), AST::Types::t]
+      def collect_const_establishments(def_node)
+        body = def_node.children[2]
+        return {} unless body
+        return {} if method_halt_gate(body)
+
+        result = {} #: Hash[String, untyped]
+        each_statement(body) do |stmt|
+          write = const_attr_write(stmt) or next
+          const_path, rhs = write
+          next if result.key?(const_path)
+
+          type = nonnil_value_type(rhs) or next
+          result[const_path] = type
         end
         result
       end
@@ -858,8 +895,12 @@ module Steep
       # attributes set non-nil when the setter's arg is non-nil. `delegates_to_instance`
       # (singleton setters): whether `self.x=` forwards to `instance.x=`.
       attr_reader :establishes_consts, :delegates_to_instance
+      # felixefelip/steep#100: { "Const.attr" => type } — constant attributes this method
+      # writes non-nil on EVERY exit, because nothing in it can halt first. The
+      # unconditional sibling of `conditional_const_returns`.
+      attr_reader :const_establishments
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -874,6 +915,7 @@ module Steep
         @conditional_returns = conditional_returns
         @conditional_const_returns = conditional_const_returns
         @establishes_consts = establishes_consts
+        @const_establishments = const_establishments
         @delegates_to_instance = delegates_to_instance
       end
 
@@ -887,7 +929,8 @@ module Steep
           may_write_ivars: ivars, self_call_deps: self_call_deps,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
-          establishes_consts: establishes_consts, delegates_to_instance: delegates_to_instance
+          establishes_consts: establishes_consts, const_establishments: const_establishments,
+          delegates_to_instance: delegates_to_instance
         )
       end
 
@@ -902,7 +945,8 @@ module Steep
           may_write_ivars: may_write_ivars, self_call_deps: self_call_deps,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
-          establishes_consts: consts, delegates_to_instance: delegates_to_instance
+          establishes_consts: consts, const_establishments: const_establishments,
+          delegates_to_instance: delegates_to_instance
         )
       end
 
@@ -914,7 +958,8 @@ module Steep
       def empty?
         ivars.empty? && when_true_ivars.empty? && returns_establishes.empty? &&
           may_write_ivars.empty? && returns_ivar.nil? && conditional_returns.empty? &&
-          conditional_const_returns.empty? && establishes_consts.empty?
+          conditional_const_returns.empty? && establishes_consts.empty? &&
+          const_establishments.empty?
       end
 
       def ==(other)

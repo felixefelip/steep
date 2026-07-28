@@ -442,6 +442,8 @@ class PostconditionsInferrerTest < Minitest::Test
       def redirect_to: () -> void
       def authenticate_user: () -> void
       def no_return: () -> void
+      def proven_user: () -> User
+      def set_current_user: () -> void
     end
   RBS
 
@@ -521,6 +523,57 @@ class PostconditionsInferrerTest < Minitest::Test
     refute_nil spec, "expected a conditional const return for Current.user"
     assert_equal :redirect_to, spec[:gate_via]
     assert_equal "::User", spec[:type].to_s
+  end
+
+  # felixefelip/steep#100. A handler with no halt at all writes the constant on EVERY
+  # exit, so the establishment is unconditional — there is no gate to key it on, which is
+  # exactly why it used to be dropped.
+  def test_infers_unconditional_const_establishment_from_plain_handler
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def set_current_user
+          Current.user = proven_user
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :set_current_user }
+    refute_nil entry, "expected an entry for the populating handler"
+    assert_equal "::User", entry.const_establishments["Current.user"].to_s
+    assert_empty entry.conditional_const_returns, "no halt gate, so nothing conditional"
+  end
+
+  def test_no_unconditional_const_establishment_when_the_method_halts
+    # The two collectors partition: with a gate the write is `conditional_const_returns`'s,
+    # and reporting it here too would claim it holds on the halting exit as well.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user
+            redirect_to
+            return
+          end
+          Current.user = current_user
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_empty entry.const_establishments
+    refute_empty entry.conditional_const_returns
+  end
+
+  def test_no_unconditional_const_establishment_for_a_nilable_write
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def set_current_user
+          Current.user = current_user
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :set_current_user }
+    assert(entry.nil? || entry.const_establishments.empty?)
   end
 
   def test_infers_establishes_consts_from_instance_setter_override

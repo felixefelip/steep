@@ -306,6 +306,7 @@ module Steep
               next if halt_predicate?(entry)
               record_entry_facts(per_method, seen, key, accumulated, same_self: event[:same_self])
               apply_call_ivar_effects(accumulated, entry, same_self: event[:same_self])
+              apply_call_const_establishments(accumulated, entry)
               # A call's guard facts (`conditional_*`) are proven only on its NON-halting exit,
               # so they hold downstream only once a halt check has ruled out the halting exit.
               # Hold them until a `:halt` promotes them.
@@ -505,6 +506,20 @@ module Steep
       # Establishing after invalidating matters: a setter both may-writes and proves the same
       # ivar, and what it proves is the more precise statement.
       #
+      # A constant attribute the callee writes on every exit holds for everything AFTER the
+      # call, the same way a write in this very body would (felixefelip/steep#100). Unlike
+      # ivar effects this is NOT same-self gated: a constant is global state, so
+      # `Foo.new.populate` establishes it just as `populate` does — the same reason
+      # `record_entry_facts` carries const facts across an explicit receiver.
+      def apply_call_const_establishments(accumulated, entry)
+        return unless entry
+
+        establishments = entry.const_establishments
+        return if establishments.nil? || establishments.empty?
+
+        establishments.each { |path, type| accumulated[:consts][path] = type.to_s }
+      end
+
       # Same-self only: a call on another object neither writes nor proves anything about
       # this object's ivars.
       def apply_call_ivar_effects(accumulated, entry, same_self:)
