@@ -398,15 +398,33 @@ module Steep
       )
         annotations = source.annotations(block: source.node, factory: subtyping.factory, context: nil)
 
+        # An annotated self type whose name the environment does not declare falls back to
+        # the same `Object` this uses when there is NO annotation, and is reported
+        # (felixefelip/steep#101). `build_instance` answers an unknown name by raising a
+        # bare RuntimeError, so without this a single un-declared name took the whole run
+        # down — and the name is typically generated code (`ERBFoo` for a template whose
+        # RBS has not been inferred yet), i.e. one the user never wrote.
+        unknown_self_type = nil #: RBS::TypeName?
+
         case annotations.self_type
-        when AST::Types::Name::Instance
-          module_name = annotations.self_type.name
-          module_type = AST::Types::Name::Singleton.new(name: module_name)
-          instance_type = annotations.self_type
-        when AST::Types::Name::Singleton
-          module_name = annotations.self_type.name
-          module_type = annotations.self_type
-          instance_type = annotations.self_type
+        when AST::Types::Name::Instance, AST::Types::Name::Singleton
+          annotated_name = annotations.self_type.name
+
+          if subtyping.factory.env.class_decls.key?(annotated_name)
+            module_name = annotated_name
+            module_type =
+              if annotations.self_type.is_a?(AST::Types::Name::Singleton)
+                annotations.self_type
+              else
+                AST::Types::Name::Singleton.new(name: annotated_name)
+              end
+            instance_type = annotations.self_type
+          else
+            unknown_self_type = annotated_name
+            module_name = AST::Builtin::Object.module_name
+            module_type = AST::Builtin::Object.module_type
+            instance_type = AST::Builtin::Object.instance_type
+          end
         else
           module_name = AST::Builtin::Object.module_name
           module_type = AST::Builtin::Object.module_type
@@ -477,6 +495,12 @@ module Steep
         )
 
         typing = Typing.new(source: source, root_context: context, cursor: cursor)
+
+        if unknown_self_type && source.node
+          typing.add_error(
+            Diagnostic::Ruby::UnknownSelfTypeAnnotation.new(node: source.node, name: unknown_self_type)
+          )
+        end
 
         construction = TypeConstruction.new(
           checker: subtyping,
