@@ -540,6 +540,88 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  # felixefelip/steep#100, end to end: a `before_action` handler that populates global
+  # state proves it populated for everything the runner calls after it.
+  #
+  # `set_current_account` cannot halt, so it has no gate for `conditional_const_returns` to
+  # key on and used to prove nothing — the establishment died in its own body and reached
+  # neither the action nor the view the action renders.
+  #
+  # The write reads a method that is non-nil in its OWN right. Writing
+  # `Current.account = current_account` — non-nil only because the guard proved it — also
+  # works, but not in a single run: the Inferrer walks the body before any entry fact
+  # exists, so the RHS still looks nilable and nothing is established until a later run
+  # sees the fact. Fine for the sidecar (it is regenerated to a fixed point), wrong to hide
+  # inside a test that would then pass for the wrong reason.
+  def test_runner_carries_an_unconditional_const_establishment_to_later_calls
+    in_tmpdir do
+      write("sig/uc.rbs", <<~RBS)
+        class Account
+          def label: () -> String
+        end
+        class Current
+          def self.account: () -> Account?
+          def self.account=: (Account?) -> Account?
+        end
+        class UCController
+          @performed: bool
+          def current_account: () -> Account?
+          def proven_account: () -> Account
+          def redirect_to: () -> void
+          def performed?: () -> bool
+          def authenticate_account!: () -> void
+          def set_current_account: () -> void
+          def show: () -> void
+          def __rbs_infer__run_show: () -> void
+        end
+      RBS
+      write("app/uc.rb", <<~RUBY)
+        class UCController
+          def redirect_to
+            @performed = true
+          end
+          def performed?
+            @performed
+          end
+          def authenticate_account!
+            unless current_account
+              redirect_to
+              return
+            end
+          end
+          def set_current_account
+            Current.account = proven_account
+          end
+          def show
+          end
+          def __rbs_infer__run_show
+            authenticate_account!
+            return if performed?
+            set_current_account
+            return if performed?
+            show
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      # The handler still sits past the guard, so it keeps the facts it always had...
+      handler = reparsed.lookup_method_entry_facts("UCController", :set_current_account)
+      refute_nil handler, "the handler runs past the guard"
+      assert_equal "::Account", handler[:self_methods][:current_account].to_s
+
+      # ...and THAT is what this issue adds: the establishment reaches the action.
+      action = reparsed.lookup_method_entry_facts("UCController", :show)
+      refute_nil action, "expected the populated constant to reach the action"
+      assert_equal "::Account", action[:consts]["Current.account"].to_s
+    end
+  end
+
   TC_RBS = <<~RBS
     class User
       def full_name: () -> String
