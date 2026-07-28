@@ -7,6 +7,7 @@ module Steep
 
       def initialize(project)
         @project = project
+        @contexts = {}
       end
 
       def run
@@ -16,6 +17,13 @@ module Steep
         end
         merged = merge(contracts)
         close_and_enforce(merged)
+      end
+
+      # The loaded environment + parsed sources for a target, built once and reused by
+      # the inference pass and by EVERY enforcement pass. Rebuilding it per pass was the
+      # bulk of a `steep check`; see `TargetContext`.
+      def context_for(target)
+        @contexts.fetch(target.name) { @contexts[target.name] = TargetContext.build(@project, target) }
       end
 
       def output_path
@@ -33,56 +41,18 @@ module Steep
       private
 
       def infer_for_target(target)
-        loader = Project::Target.construct_env_loader(options: target.options, project: @project)
-        file_loader = Services::FileLoader.new(base_dir: @project.base_dir)
+        context = context_for(target) or return []
 
-        file_loader.each_path_in_patterns(target.signature_pattern) do |path|
-          absolute = @project.absolute_path(path)
-          loader.add(path: absolute) if absolute.file?
-        end
-
-        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
-        status = signature_service.status
-        return [] unless status.is_a?(Services::SignatureService::LoadedStatus)
-
-        subtyping = status.subtyping
-        resolver = status.constant_resolver
-        out = []
-
-        file_loader.each_path_in_patterns(target.source_pattern) do |path|
-          absolute = @project.absolute_path(path)
-          next unless absolute.file? && absolute.extname == ".rb"
-
-          text = absolute.read
-          source = begin
-                     Source.parse(text, path: absolute, factory: subtyping.factory)
-                   rescue ::Parser::SyntaxError, AnnotationParser::SyntaxError
-                     next
-                   end
-
+        context.sources.flat_map do |_path, source|
           # Real postconditions matter here: with via_receiver / self
           # narrowing in scope, the inferrer can prove nil-safety inside
           # method bodies and *avoid* emitting a precondition the body no
           # longer needs. Always pass the project's loaded store, not
           # `Store.empty` — felixefelip/steep#14 follow-up.
-          typing = Services::TypeCheckService.type_check(
-            source: source,
-            subtyping: subtyping,
-            constant_resolver: resolver,
-            cursor: nil,
-            contracts: Store.empty,
-            postconditions: @project.postconditions,
-            callbacks: @project.callbacks,
-            delegation_registry: @project.delegation_registry,
-            constructor_bindings: @project.constructor_binding_registry,
-            return_forwarding: @project.return_forwarding_registry,
-            return_alias: @project.return_alias_registry
-          )
+          typing = context.type_check(source, contracts: Store.empty, project: @project)
 
-          out.concat(Inferrer.infer(source, typing, return_aliases: @project.return_alias_registry.to_h))
+          Inferrer.infer(source, typing, return_aliases: @project.return_alias_registry.to_h)
         end
-
-        out
       end
 
       # Close preconditions over the self-call graph and decide enforcement,
@@ -107,7 +77,7 @@ module Steep
 
         MAX_PASSES.times do
           store = build_store(by_key, enforced)
-          result = Enforcement.analyze(@project, store)
+          result = Enforcement.analyze(@project, store, contexts: method(:context_for))
 
           obligations_changed = apply_transitive_obligations(by_key, result.obligations)
           enforced_changed = result.enforced != enforced
