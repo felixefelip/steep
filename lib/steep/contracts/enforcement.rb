@@ -11,13 +11,19 @@ module Steep
     #
     # See felixefelip/steep#20.
     class Enforcement
-      def self.analyze(project, store)
-        new(project, store).analyze
+      # `contexts`: a callable `target -> TargetContext | nil`. REQUIRED, not defaulted:
+      # the Runner calls `analyze` once per fixpoint pass, and a default that built its
+      # own context would silently reload every RBS file and re-parse every source on
+      # each pass — the exact cost this parameter exists to avoid, and invisible except
+      # as a slow run.
+      def self.analyze(project, store, contexts:)
+        new(project, store, contexts: contexts).analyze
       end
 
-      def initialize(project, store)
+      def initialize(project, store, contexts:)
         @project = project
         @store = store
+        @contexts = contexts
       end
 
       # Whole-program analysis result: the `enforced` flag per contract key,
@@ -48,47 +54,12 @@ module Steep
       private
 
       def collect_for_target(target, observations, obligations)
-        loader = Project::Target.construct_env_loader(options: target.options, project: @project)
-        file_loader = Services::FileLoader.new(base_dir: @project.base_dir)
+        context = @contexts.call(target) or return
 
-        file_loader.each_path_in_patterns(target.signature_pattern) do |path|
-          absolute = @project.absolute_path(path)
-          loader.add(path: absolute) if absolute.file?
-        end
-
-        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
-        status = signature_service.status
-        return unless status.is_a?(Services::SignatureService::LoadedStatus)
-
-        subtyping = status.subtyping
-        resolver = status.constant_resolver
-
-        file_loader.each_path_in_patterns(target.source_pattern) do |path|
-          absolute = @project.absolute_path(path)
-          next unless absolute.file? && absolute.extname == ".rb"
-
-          text = absolute.read
-          source = begin
-                     Source.parse(text, path: absolute, factory: subtyping.factory)
-                   rescue ::Parser::SyntaxError, AnnotationParser::SyntaxError
-                     next
-                   end
-
+        context.sources.each do |_path, source|
           # Type-check with the inferred contracts loaded so that
           # check_precondition_at_call_site fires and records observations.
-          typing = Services::TypeCheckService.type_check(
-            source: source,
-            subtyping: subtyping,
-            constant_resolver: resolver,
-            cursor: nil,
-            contracts: @store,
-            postconditions: @project.postconditions,
-            callbacks: @project.callbacks,
-            delegation_registry: @project.delegation_registry,
-            constructor_bindings: @project.constructor_binding_registry,
-            return_forwarding: @project.return_forwarding_registry,
-            return_alias: @project.return_alias_registry
-          )
+          typing = context.type_check(source, contracts: @store, project: @project)
 
           typing.contract_call_sites.each do |obs|
             bucket = observations[obs[:key]]
