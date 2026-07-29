@@ -1,10 +1,37 @@
 module Steep
   module Postconditions
     # Typed-AST helpers shared by the postcondition inferrers
-    # (`Inferrer` and `ReturnEstablishmentInferrer`). The includer must
-    # expose a `@typing` (`Typing`) and a `@subtyping` (`Subtyping::Check`)
-    # instance variable.
+    # (`Inferrer`, `MethodEntryInferrer` and `ReturnEstablishmentInferrer`).
+    # The includer must expose a `@typing` (`Typing`) instance variable, and a
+    # `@subtyping` (`Subtyping::Check`) one if it calls `strict_subtype?`.
     module TypedNodeUtils
+      # The full resolved name of a constant node (`Registry` written inside
+      # `Outer` => `Outer::Registry`), read off its singleton type so every
+      # sidecar key names the constant by IDENTITY rather than by how it happened
+      # to be spelled. This is the write-side counterpart of
+      # `TypeConstruction#resolved_const_name_string`, which resolves the same way
+      # on the read side; the two must agree or a fact is written under one key
+      # and looked up under another, and the proof silently evaporates.
+      #
+      # Falls back to the lexical path when no singleton type is available — for a
+      # top-level constant the two coincide, so nothing is lost there. Either way
+      # a leading `::` is dropped, so an absolute spelling (`::Current.user`) keys
+      # the same slot as the relative one, exactly as the read side does.
+      def resolved_const_name(node)
+        type = type_of(node)
+        return type.name.to_s.sub(/\A::/, "") if type.is_a?(AST::Types::Name::Singleton)
+
+        lexical_const_name(node)&.sub(/\A::/, "")
+      end
+
+      # `(:const nil :Current)` / `(:const (:const nil :A) :B)` => "Current" / "A::B".
+      def lexical_const_name(node)
+        return nil unless node.is_a?(Parser::AST::Node) && node.type == :const
+
+        parent, name = node.children
+        parent ? "#{lexical_const_name(parent)}::#{name}" : name.to_s
+      end
+
       def type_of(node)
         @typing.type_of(node: node)
       rescue Typing::UnknownNodeError
