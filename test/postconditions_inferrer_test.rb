@@ -428,9 +428,15 @@ class PostconditionsInferrerTest < Minitest::Test
       def named?: (String) -> bool
     end
 
+    class Account
+      def label: () -> String
+    end
+
     class Current
       def self.user: () -> User?
       def self.user=: (User?) -> User?
+      def self.account: () -> Account?
+      def self.banned: () -> Account?
       def self.instance: () -> Current
       def user=: (User?) -> void
       def author_name=: (String?) -> String?
@@ -767,6 +773,151 @@ class PostconditionsInferrerTest < Minitest::Test
 
     entry = entries.find { |e| e.method_name == :authenticate_user }
     assert(entry.nil? || (entry.conditional_const_returns.empty? && entry.conditional_returns.empty?))
+  end
+
+  # felixefelip/steep#105 gap 1c. `A && B` is truthy only if BOTH are, so a
+  # conjunction proves everything its conjuncts do.
+  def test_a_conjunction_proves_both_of_its_conjuncts
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.account && Current.user
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal ["Current.account", "Current.user"], entry.conditional_const_returns.keys.sort
+  end
+
+  def test_a_conjunction_mixes_self_method_and_constant_facts
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user && Current.account
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal [:current_user], entry.conditional_returns.keys
+    assert_equal ["Current.account"], entry.conditional_const_returns.keys
+  end
+
+  def test_a_conjunction_composes_with_safe_navigation
+    # The shape a real authorization callback has.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.account && Current.user&.maybe_name
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal ["Current.account", "Current.user"], entry.conditional_const_returns.keys.sort
+  end
+
+  def test_a_conjunction_nests
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.account && Current.user && current_user
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal ["Current.account", "Current.user"], entry.conditional_const_returns.keys.sort
+    assert_equal [:current_user], entry.conditional_returns.keys
+  end
+
+  # A DISJUNCTION distributes to nothing: `A || B` truthy says only that at least
+  # one of them was, and there is no way to tell which. Distributing it the way
+  # `&&` distributes would be plainly unsound.
+  def test_a_disjunction_proves_nothing
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.account || Current.user
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert(entry.nil? || entry.conditional_const_returns.empty?)
+  end
+
+  # An un-decodable conjunct is SKIPPED, not fatal — it says nothing, which is no
+  # reason to discard what its neighbour says.
+  def test_an_undecodable_conjunct_does_not_sink_the_condition
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          holder = Current.account
+          unless Current.user && holder
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal ["Current.user"], entry.conditional_const_returns.keys
+  end
+
+  # A NEGATED conjunct proves its operand FALSY, which is the opposite of present.
+  # The `!` unwrap that turns `if !x` into "x is truthy here" is a property of the
+  # whole condition, and re-applying it per conjunct would invert the fact — the
+  # one shape in this feature that could silently produce a wrong proof.
+  def test_a_negated_conjunct_proves_nothing_about_its_operand
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.user && !Current.banned
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal ["Current.user"], entry.conditional_const_returns.keys
+  end
+
+  # ... while the whole condition being negated still distributes: `!(A && B)`
+  # is falsy exactly when `A && B` is truthy, so the unhalted exit has both.
+  def test_a_negated_conjunction_still_distributes
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          if !(Current.account && Current.user)
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal ["Current.account", "Current.user"], entry.conditional_const_returns.keys.sort
   end
 
   # felixefelip/steep#100. A handler with no halt at all writes the constant on EVERY
