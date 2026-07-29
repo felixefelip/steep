@@ -661,7 +661,7 @@ module TypeConstructionHelper
   TypeInference = Steep::TypeInference #: singleton(TypeInference)
 
   # @rbs (Subtyping::Check, Source, ?cursor: untyped, ?contracts: Steep::Contracts::Store, ?postconditions: Steep::Postconditions::Store, ?callbacks: Steep::Callbacks::Store) { (TypeConstruction, Typing) -> void } -> void
-  def with_standard_construction(checker, source, cursor: nil, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, delegation_registry: Steep::Project::DelegationRegistry.new, constructor_bindings: Steep::Project::ConstructorBindingRegistry.new, return_forwarding: Steep::Project::ReturnForwardingRegistry.new, return_alias: Steep::Project::ReturnAliasRegistry.new)
+  def with_standard_construction(checker, source, cursor: nil, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, delegation_registry: Steep::Project::DelegationRegistry.new, constructor_bindings: Steep::Project::ConstructorBindingRegistry.new, return_forwarding: Steep::Project::ReturnForwardingRegistry.new, return_alias: Steep::Project::ReturnAliasRegistry.new, record_branch_envs: false)
     annotations = source.annotations(block: source.node, factory: checker.factory, context: nil)
     resolver = RBS::Resolver::ConstantResolver.new(builder: checker.factory.definition_builder)
     const_env = ConstantEnv.new(factory: checker.factory, context: nil, resolver: resolver)
@@ -734,7 +734,7 @@ module TypeConstructionHelper
         source.buffer.loc_to_pos(cursor)
       end
 
-    typing = Typing.new(source: source, root_context: context, cursor: loc)
+    typing = Typing.new(source: source, root_context: context, cursor: loc, record_branch_envs: record_branch_envs)
 
     construction = TypeConstruction.new(checker: checker,
                                         source: source,

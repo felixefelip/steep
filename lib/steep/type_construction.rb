@@ -2013,6 +2013,11 @@ module Steep
             interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: constr.typing, config: builder_config, postconditions: postconditions, self_type: constr.self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
 
+            # Keep what the interpreter just concluded, so a later pass reads the
+            # checker's own answer about this condition instead of re-deriving it
+            # from the AST. No-op unless the typing was asked to record.
+            constr.typing.record_branch_envs(node, entry: constr.context.type_env, truthy: truthy.env, falsy: falsy.env)
+
             if true_clause
               true_pair =
                 constr
