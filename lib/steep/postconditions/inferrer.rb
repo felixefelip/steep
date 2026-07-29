@@ -433,8 +433,8 @@ module Steep
       # Yields `[fact, gate]` for every fact every top-level guard clause proves.
       # The two collectors share the walk and each keeps the facts it owns.
       def each_guard_fact(body)
-        each_statement(body) do |stmt|
-          guard = negative_presence_guard(stmt) or next
+        each_statement(body) do |stmt, terminal|
+          guard = negative_presence_guard(stmt, terminal: terminal) or next
           facts, gate = guard
           facts.each { |fact| yield fact, gate }
         end
@@ -758,13 +758,13 @@ module Steep
       # that halts and returns. Independent of what the clause's condition tests
       # — item 3's write isn't in the clause, it just shares the exit gate.
       def method_halt_gate(body)
-        each_statement(body) do |stmt|
+        each_statement(body) do |stmt, terminal|
           next unless stmt.is_a?(Parser::AST::Node) && stmt.type == :if
 
           _, true_clause, false_clause = stmt.children
           abort_clause = true_clause || false_clause
           next unless abort_clause && (true_clause.nil? ^ false_clause.nil?)
-          next unless clause_returns?(abort_clause)
+          next unless clause_returns?(abort_clause, terminal: terminal)
 
           gate = halting_gate(abort_clause) and return gate
         end
@@ -812,7 +812,11 @@ module Steep
       # `facts` is a LIST because one condition can prove several things — a
       # conjunction proves each conjunct (felixefelip/steep#105 gap 1c). Each is
       # tagged by what it names, so the collectors can take the ones they own.
-      def negative_presence_guard(node)
+      #
+      # `terminal` says the guard is the last statement of its method, which is a
+      # second way for the aborting branch to end it (gap 2) — see
+      # `clause_returns?`.
+      def negative_presence_guard(node, terminal: false)
         return nil unless node.is_a?(Parser::AST::Node) && node.type == :if
 
         cond, true_clause, false_clause = node.children
@@ -822,7 +826,7 @@ module Steep
         return nil if facts.empty?
         abort_clause = true_clause || false_clause
         return nil unless abort_clause && (true_clause.nil? ^ false_clause.nil?)
-        return nil unless clause_returns?(abort_clause)
+        return nil unless clause_returns?(abort_clause, terminal: terminal)
 
         gate = halting_gate(abort_clause) or return nil
         [facts, gate]
@@ -910,7 +914,21 @@ module Steep
         end
       end
 
-      def clause_returns?(clause)
+      # Whether taking `clause` ends the method — the property a guard needs, so
+      # that the code AFTER it runs only on the other branch.
+      #
+      # An explicit `return` says so anywhere. felixefelip/steep#105 gap 2 adds the
+      # other way: when the guard is the method's FINAL statement there is nothing
+      # left to run, so falling off the end is exactly a return.
+      #
+      # `terminal` is doing all the work in that second case and has to stay exact.
+      # A halting clause that is NOT last does not end the method — execution
+      # continues past the `if` — so treating one as a guard would prove a fact on
+      # a path that keeps going. This is the only place in the guard grammar where
+      # being too permissive yields a WRONG proof rather than a missing one.
+      def clause_returns?(clause, terminal: false)
+        return true if terminal
+
         walk_nodes(clause) { |n| return true if n.type == :return }
         false
       end
@@ -976,12 +994,16 @@ module Steep
         remaining.size == 1 ? remaining.first : AST::Types::Union.build(types: remaining)
       end
 
-      # Yields each top-level statement of a (possibly `:begin`) body.
+      # Yields each top-level statement of a (possibly `:begin`) body, along with
+      # whether it is the LAST one — the position at which falling off the end is
+      # indistinguishable from returning. Callers that don't care take one param
+      # and the flag is dropped.
       def each_statement(body)
         if body.type == :begin
-          body.children.each { |c| yield c if c.is_a?(Parser::AST::Node) }
+          statements = body.children.select { |c| c.is_a?(Parser::AST::Node) }
+          statements.each_with_index { |c, i| yield c, i == statements.size - 1 }
         else
-          yield body
+          yield body, true
         end
       end
 

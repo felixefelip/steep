@@ -584,6 +584,102 @@ class PostconditionsInferrerTest < Minitest::Test
     assert_nil spec[:gate_via]
   end
 
+  # felixefelip/steep#105 gap 2. No explicit `return`: the guard IS the method's
+  # last statement, so falling off the end is exactly a return.
+  def test_a_guard_that_is_the_final_statement_needs_no_explicit_return
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user
+            redirect_to
+          end
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_returns[:current_user]
+    refute_nil spec, "the final statement ends the method, so the guard halts"
+    assert_equal [:redirect_to], spec[:gate_via]
+  end
+
+  def test_a_final_guard_without_a_return_proves_a_constant_too
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.user
+            redirect_to
+          end
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_const_returns["Current.user"]
+    refute_nil spec
+    assert_equal "::User", spec[:type].to_s
+  end
+
+  # THE BOUNDARY. Identical clause, but something follows it, so taking the clause
+  # does NOT end the method — execution continues past the `if`, and the code after
+  # runs on both branches. Proving `current_user` present here would be a fact
+  # about a path that keeps going: the one shape in this feature where being too
+  # permissive is unsound rather than merely incomplete.
+  def test_a_halting_clause_that_is_not_last_proves_nothing
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user
+            redirect_to
+          end
+          no_return
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert(entry.nil? || entry.conditional_returns.empty?)
+  end
+
+  # ... and an explicit `return` still rescues exactly that case, because then the
+  # clause does end the method wherever it sits.
+  def test_a_non_final_clause_with_an_explicit_return_still_proves
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user
+            redirect_to
+            return
+          end
+          no_return
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_returns[:current_user]
+    refute_nil spec
+  end
+
+  # The whole shape a real authorization callback has, in one method: a conjunction
+  # of const-rooted tests, one through `&.`, halting inside a block, with no
+  # `return` because the guard is the method's last statement.
+  def test_the_composite_authorization_guard_shape
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.account && Current.user&.maybe_name
+            with_format do |_format|
+              redirect_to
+            end
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    refute_nil entry, "expected the composite guard to prove something"
+    assert_equal ["Current.account", "Current.user"], entry.conditional_const_returns.keys.sort
+    assert_equal [:with_format, :redirect_to], entry.conditional_const_returns["Current.user"][:gate_via]
+  end
+
   def test_infers_conditional_const_return_from_guarded_write
     # felixefelip/steep#68 item 3. `unless current_user; halt; return; end`
     # followed by a top-level `Current.user = current_user` (non-nil past the
@@ -1216,9 +1312,19 @@ class PostconditionsInferrerTest < Minitest::Test
     assert(entry.nil? || entry.conditional_const_returns.empty?)
   end
 
-  def test_no_conditional_return_without_return_in_guard
-    # A guard that narrows but doesn't halt (no `return`) proves nothing about
-    # a later exit — the method falls through either way.
+  # Was `test_no_conditional_return_without_return_in_guard`, asserting that a
+  # guard with no `return` proved nothing "because the method falls through either
+  # way". felixefelip/steep#105 gap 2 is precisely that falling through is not a
+  # third possibility when the guard is LAST: there is nothing to fall through to,
+  # so both branches end the method and the gate is exact.
+  #
+  # The old rationale survives, narrowed to the case it actually describes — a
+  # clause with code after it — which `test_a_halting_clause_that_is_not_last_
+  # proves_nothing` pins.
+  #
+  # Here the clause writes the gate ivar directly, so this is also the implicit
+  # return composed with the `gate_ivar` path rather than `gate_via`.
+  def test_a_final_guard_writing_its_gate_directly_needs_no_return
     entries = infer_cr_for(<<~RUBY)
       class CRGuardHost
         def no_return
@@ -1229,7 +1335,8 @@ class PostconditionsInferrerTest < Minitest::Test
       end
     RUBY
 
-    entry = entries.find { |e| e.method_name == :no_return }
-    assert(entry.nil? || entry.conditional_returns.empty?)
+    spec = entries.find { |e| e.method_name == :no_return }.conditional_returns[:current_user]
+    refute_nil spec
+    assert_equal :@halted, spec[:gate_ivar]
   end
 end
