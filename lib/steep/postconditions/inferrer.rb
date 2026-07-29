@@ -828,11 +828,26 @@ module Steep
         [facts, gate]
       end
 
-      # What a truthy condition proves, as a list of tagged facts:
+      # What a guard's condition proves on the exit that did NOT halt.
       #
-      #   `unless current_user`            => [{ self_method: :current_user }]
-      #   `unless Current.user`            => [{ const_path: "Current.user" }]
-      #   `unless Current.user&.active?`   => [{ const_path: "Current.user" }]
+      # `unless X` and `if !X` both abort when `X` is falsy, so both leave `X`
+      # TRUTHY on the surviving exit — which is why the `!` is unwrapped here and
+      # the rest of the walk reasons purely about truth. That unwrap belongs to the
+      # WHOLE condition and must not be re-applied to its parts: a negated conjunct
+      # (`A && !B`) proves `B` falsy, the opposite of present, and unwrapping it
+      # would invert the fact. Hence the split — `truthy_facts` never unwraps.
+      def presence_condition_facts(cond)
+        node = cond
+        node = node.children[0] if node.is_a?(Parser::AST::Node) && node.type == :send && node.children[1] == :! && node.children[0]
+        truthy_facts(node)
+      end
+
+      # The facts implied by `node` being truthy, as a list of tagged facts:
+      #
+      #   `current_user`                => [{ self_method: :current_user }]
+      #   `Current.user`                => [{ const_path: "Current.user" }]
+      #   `Current.user&.active?`       => [{ const_path: "Current.user" }]
+      #   `Current.account && ...`      => the facts of BOTH conjuncts
       #
       # The first two are the value being tested directly. The third is
       # felixefelip/steep#105 gap 1b: `x&.foo` evaluates to nil whenever `x` is
@@ -841,12 +856,22 @@ module Steep
       # the RECEIVER; the send through it is only the reason we are looking, which
       # is why its arguments are irrelevant.
       #
+      # The fourth is gap 1c: `A && B` is truthy only if both are, so it proves
+      # everything either conjunct does. A conjunct that decodes to nothing is
+      # SKIPPED — it says nothing, which is no reason to discard what its
+      # neighbour says. `||` is deliberately absent: a truthy disjunction says only
+      # that at least one operand was, with no way to tell which.
+      #
       # Anything else (a literal, a send whose receiver names no slot) yields no
       # fact.
-      def presence_condition_facts(cond)
-        node = cond
-        node = node.children[0] if node.is_a?(Parser::AST::Node) && node.type == :send && node.children[1] == :! && node.children[0]
+      def truthy_facts(node)
         return [] unless node.is_a?(Parser::AST::Node)
+
+        # Parentheses, and more generally a sequence: its value — and so its truth
+        # — is the LAST expression's. `!(A && B)` puts one of these in the way.
+        return truthy_facts(node.children.last) if node.type == :begin
+
+        return node.children.flat_map { |child| truthy_facts(child) } if node.type == :and
 
         # A safe-navigated call: the proof is about what it was called ON.
         return slot_facts(node.children[0]) if node.type == :csend
