@@ -286,6 +286,72 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  BG_RBS = <<~RBS
+    class User
+    end
+
+    class BGBase
+      @halted: bool
+      def redirect_to: () -> void
+      def with_format: () ?{ (untyped) -> untyped } -> untyped
+    end
+
+    class BGController < BGBase
+      def current_user: () -> User?
+      def authenticate_user: () -> void
+    end
+  RBS
+
+  BG_RUBY = <<~RUBY
+    class BGBase
+      def redirect_to
+        @halted = true
+      end
+
+      def with_format(&block)
+        block&.call(:html)
+      end
+    end
+
+    class BGController < BGBase
+      def authenticate_user
+        unless current_user
+          with_format do |_format|
+            redirect_to
+          end
+          return
+        end
+      end
+    end
+  RUBY
+
+  # felixefelip/steep#105 gap 3. The halt is two frames in — inside a block, of a
+  # method that writes nothing itself. The clause's first self-send is therefore
+  # `with_format`, and keying the gate on it left nothing to resolve, so the whole
+  # spec was dropped and the guard proved nothing. With candidates, `with_format`
+  # resolves to no ivar, `redirect_to` resolves to `@halted`, and the fact lands.
+  #
+  # This is `respond_to { |f| f.html { redirect_to ... } }` with the framework
+  # names removed — the shape a real authorization callback halts with.
+  def test_runner_resolves_a_gate_whose_halt_is_nested_in_a_block
+    in_tmpdir do
+      write("sig/bg.rbs", BG_RBS)
+      write("app/bg.rb", BG_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      entry = reparsed.lookup_instance("BGController", :authenticate_user)
+      refute_nil entry
+      spec = entry.conditional_returns[:current_user]
+      refute_nil spec, "the block-nested halt should still resolve a gate"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::User", spec[:type].to_s
+    end
+  end
+
   def test_runner_resolves_conditional_return_gate_through_inheritance
     in_tmpdir do
       write("sig/cr.rbs", CR_RBS)

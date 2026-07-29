@@ -916,18 +916,32 @@ module Steep
       end
 
       # How the abort clause halts: a direct ivar write (`{ gate_ivar: }`) or,
-      # failing that, the first self-method it calls (`{ gate_via: }`, resolved
-      # to that method's written ivar by the Runner). nil if it does neither.
+      # failing that, the self-methods it calls (`{ gate_via: }`, a list the Runner
+      # resolves to the first one that actually writes an ivar). nil if neither.
+      #
+      # felixefelip/steep#105 gap 3: this used to commit to the FIRST self-send,
+      # and no position is reliably the halt. `respond_to { redirect_to }` puts it
+      # last (the first is the block-taking method, which writes nothing);
+      # `redirect_to root_path` puts it first (the second is an argument). Guessing
+      # wrong is not unsound — the flow's halt check tests a different ivar, so the
+      # fact simply never applies — but it silently dropped the whole proof.
+      #
+      # Offering candidates in source order lets the Runner decide with the
+      # information it has and the inferrer does not: which of them writes what.
       def halting_gate(clause)
         walk_nodes(clause) do |n|
           return { gate_ivar: n.children[0] } if n.type == :ivasgn
         end
+
+        candidates = [] #: Array[Symbol]
         walk_nodes(clause) do |n|
           next unless n.type == :send
           receiver = n.children[0]
-          return { gate_via: n.children[1] } if receiver.nil? || receiver.type == :self
+          candidates << n.children[1] if receiver.nil? || receiver.type == :self
         end
-        nil
+        return nil if candidates.empty?
+
+        { gate_via: candidates.uniq }
       end
 
       # The declared return type of `self.<method>`, with `nil` subtracted —

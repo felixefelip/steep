@@ -447,6 +447,7 @@ class PostconditionsInferrerTest < Minitest::Test
 
       def current_user: () -> User?
       def redirect_to: () -> void
+      def with_format: () ?{ (untyped) -> untyped } -> untyped
       def authenticate_user: () -> void
       def no_return: () -> void
       def proven_user: () -> User
@@ -537,7 +538,50 @@ class PostconditionsInferrerTest < Minitest::Test
     spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_returns[:current_user]
     refute_nil spec
     assert_nil spec[:gate_ivar]
-    assert_equal :redirect_to, spec[:gate_via]
+    assert_equal [:redirect_to], spec[:gate_via]
+  end
+
+  # felixefelip/steep#105 gap 3. The halt sits inside a block, so the clause calls
+  # TWO self-methods: the block-taking one and the halting one. Neither position is
+  # reliably the halt — `respond_to { redirect_to }` puts it last, `redirect_to
+  # root_path` puts it first — so the inferrer offers both, in source order, and
+  # the Runner keeps whichever actually writes an ivar.
+  def test_gate_candidates_include_a_block_nested_halt
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user
+            with_format do |_format|
+              redirect_to
+            end
+            return
+          end
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_returns[:current_user]
+    refute_nil spec
+    assert_equal [:with_format, :redirect_to], spec[:gate_via]
+  end
+
+  # A direct ivar write still wins outright: it names the gate with no resolution
+  # needed, so no candidate list is offered.
+  def test_a_direct_ivar_write_is_the_gate_without_candidates
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user
+            @halted = true
+            return
+          end
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_returns[:current_user]
+    assert_equal :@halted, spec[:gate_ivar]
+    assert_nil spec[:gate_via]
   end
 
   def test_infers_conditional_const_return_from_guarded_write
@@ -558,7 +602,7 @@ class PostconditionsInferrerTest < Minitest::Test
 
     spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_const_returns["Current.user"]
     refute_nil spec, "expected a conditional const return for Current.user"
-    assert_equal :redirect_to, spec[:gate_via]
+    assert_equal [:redirect_to], spec[:gate_via]
     assert_equal "::User", spec[:type].to_s
   end
 
@@ -580,7 +624,7 @@ class PostconditionsInferrerTest < Minitest::Test
 
     spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_const_returns["Current.user"]
     refute_nil spec, "expected the tested constant to be proven on the unhalted exit"
-    assert_equal :redirect_to, spec[:gate_via]
+    assert_equal [:redirect_to], spec[:gate_via]
     assert_equal "::User", spec[:type].to_s
   end
 
