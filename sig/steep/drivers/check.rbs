@@ -64,6 +64,15 @@ module Steep
 
       def with_daemon_connection: [T] () { (LanguageServer::Protocol::Transport::Io::Reader, LanguageServer::Protocol::Transport::Io::Writer) -> T } -> T
 
+      # Compacts this process's heap so the workers forked from it can share the pages
+      # instead of copying them.
+      def compact_heap_before_fork: () -> void
+
+      def malloc_trim: () -> void
+
+      # Whether Fiddle could be loaded, quietly.
+      def load_fiddle: () -> bool
+
       def with_local_server: [T] (Project) { (LanguageServer::Protocol::Transport::Io::Reader, LanguageServer::Protocol::Transport::Io::Writer) -> T } -> T
 
       def print_typecheck_result: (project: Project, diagnostic_notifications: Array[untyped], error_messages: Array[String]) -> Integer
