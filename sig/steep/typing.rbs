@@ -69,6 +69,8 @@ module Steep
 
     attr_reader branch_envs: Hash[Parser::AST::Node, branch_env_record]
 
+    @record_branch_envs: bool
+
     def initialize: (source: Source, root_context: Context, ?parent: Typing?, ?parent_last_update: Integer?, ?source_index: Index::SourceIndex?, cursor: Integer?, ?record_branch_envs: bool) -> void
 
     def add_error: (Diagnostic::Ruby::Base error) -> void
