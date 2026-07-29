@@ -36,6 +36,9 @@ module Steep
         @factory = subtyping.factory
         @definition_builder = subtyping.factory.definition_builder
         @return_establishment_inferrer = ReturnEstablishmentInferrer.new(typing, subtyping)
+        # Empty unless the type check ran with `record_branch_envs: true`; the
+        # guard collector falls back to reading the AST when it is.
+        @branch_envs = typing.branch_envs
       end
 
       def infer
@@ -820,30 +823,110 @@ module Steep
         return nil unless node.is_a?(Parser::AST::Node) && node.type == :if
 
         cond, true_clause, false_clause = node.children
-        # `unless X` parses as `if X (nil-then) (else)`, so the aborting body is
-        # whichever clause exists; require exactly one, guarded on the bare cond.
-        facts = presence_condition_facts(cond)
-        return nil if facts.empty?
+        # `unless X` parses as `if X (nil-then) (else)` and `if X` as
+        # `(if X (then) nil)`, so the aborting body is whichever clause exists;
+        # require exactly one. WHICH one decides the polarity below.
         abort_clause = true_clause || false_clause
         return nil unless abort_clause && (true_clause.nil? ^ false_clause.nil?)
         return nil unless clause_returns?(abort_clause, terminal: terminal)
+
+        facts = guard_facts(node, cond, aborts_on_truthy: !true_clause.nil?)
+        return nil if facts.empty?
 
         gate = halting_gate(abort_clause) or return nil
         [facts, gate]
       end
 
-      # What a guard's condition proves on the exit that did NOT halt.
+      # What a guard proves on the exit that did NOT halt.
       #
-      # `unless X` and `if !X` both abort when `X` is falsy, so both leave `X`
-      # TRUTHY on the surviving exit — which is why the `!` is unwrapped here and
-      # the rest of the walk reasons purely about truth. That unwrap belongs to the
-      # WHOLE condition and must not be re-applied to its parts: a negated conjunct
-      # (`A && !B`) proves `B` falsy, the opposite of present, and unwrapping it
-      # would invert the fact. Hence the split — `truthy_facts` never unwraps.
-      def presence_condition_facts(cond)
-        node = cond
-        node = node.children[0] if node.is_a?(Parser::AST::Node) && node.type == :send && node.children[1] == :! && node.children[0]
-        truthy_facts(node)
+      # Primary source is the checker itself: `typing.branch_envs` holds the envs
+      # `LogicTypeInterpreter` computed for this very `if`, so the surviving
+      # branch's narrowing IS the answer — no second implementation of truthiness,
+      # and `present?`/`blank?`/`&&`/`nil?` all come for free because the
+      # interpreter already partitions each union component by its declared return
+      # type.
+      #
+      # The syntactic reading is UNIONED in rather than used only as a fallback,
+      # for one structural reason: `x&.foo` narrows `x` in the env only when `x` is
+      # a local variable. For a constant path (`Current.user&.active?`) the `:csend`
+      # synthesis joins the env back to its pre-call state (`type_construction.rb`,
+      # `when :csend`) precisely because the call may not have happened — and that
+      # join drops the receiver's pure-call registration before the interpreter can
+      # refine it. So the env genuinely does not hold that fact, and reading the
+      # AST is covering a hole rather than duplicating a working answer. Both
+      # readings are polarity-aware, so the union is additive, never contradictory.
+      def guard_facts(if_node, cond, aborts_on_truthy:)
+        # Abort in the THEN clause => the surviving exit is the falsy one.
+        surviving = aborts_on_truthy ? :falsy : :truthy
+        env_facts = env_guard_facts(if_node, surviving) || []
+        (env_facts + syntactic_guard_facts(cond, aborts_on_truthy: aborts_on_truthy)).uniq
+      end
+
+      # The slots the surviving branch narrowed to non-nil, read off the recorded
+      # envs. `entry` is the env after the condition was synthesized, so a pure
+      # call in the condition is registered in both and the diff is exactly what
+      # the branch proved. nil (not `[]`) when nothing was recorded, so the caller
+      # can tell "not available" from "proves nothing".
+      def env_guard_facts(if_node, surviving)
+        record = @branch_envs[if_node] or return nil
+
+        entry_env = record[:entry]
+        surviving_env = record[surviving]
+        return [] unless entry_env && surviving_env
+
+        facts = [] #: Array[untyped]
+        surviving_env.pure_method_calls.each_key do |send_node|
+          before = entry_env[send_node] or next
+          after = surviving_env[send_node] or next
+          next unless nilable_type?(before) && !nilable_type?(after)
+
+          facts.concat(slot_facts(send_node))
+        end
+        facts
+      end
+
+      def nilable_type?(type)
+        case type
+        when AST::Types::Nil
+          true
+        when AST::Types::Union
+          type.types.any? {|t| t.is_a?(AST::Types::Nil) }
+        else
+          false
+        end
+      end
+
+      # The AST reading. Polarity is explicit here because
+      # it is the one thing this cannot ask anyone about:
+      #
+      #   abort in ELSE (`unless X`)  => survives when X is TRUTHY  => facts of X
+      #   abort in THEN (`if !X`)     => survives when !X is falsy  => facts of X
+      #   abort in THEN (`if X`)      => survives when X is FALSY   => nothing
+      #
+      # The third line is why the `!` unwrap is conditional: unwrapping
+      # unconditionally proved the condition TRUE on the exit where it is false.
+      # The unwrap also belongs to the WHOLE condition and must not reach its
+      # parts — a negated conjunct (`A && !B`) proves `B` falsy, the opposite of
+      # present — which is why `truthy_facts` never unwraps.
+      def syntactic_guard_facts(cond, aborts_on_truthy:)
+        if aborts_on_truthy
+          if inner = negation_operand(cond)
+            truthy_facts(inner)
+          else
+            []
+          end
+        else
+          truthy_facts(cond)
+        end
+      end
+
+      # `!X` => X, unwrapping parentheses. nil when `node` is not a negation.
+      def negation_operand(node)
+        return nil unless node.is_a?(Parser::AST::Node)
+        return negation_operand(node.children.last) if node.type == :begin
+        return nil unless node.type == :send && node.children[1] == :! && node.children[0]
+
+        node.children[0]
       end
 
       # The facts implied by `node` being truthy, as a list of tagged facts:

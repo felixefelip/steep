@@ -65,11 +65,19 @@ module Steep
 
     attr_reader source_index: Index::SourceIndex
 
-    def initialize: (source: Source, root_context: Context, ?parent: Typing?, ?parent_last_update: Integer?, ?source_index: Index::SourceIndex?, cursor: Integer?) -> void
+    type branch_env_record = { entry: TypeInference::TypeEnv, truthy: TypeInference::TypeEnv, falsy: TypeInference::TypeEnv }
+
+    attr_reader branch_envs: Hash[Parser::AST::Node, branch_env_record]
+
+    def initialize: (source: Source, root_context: Context, ?parent: Typing?, ?parent_last_update: Integer?, ?source_index: Index::SourceIndex?, cursor: Integer?, ?record_branch_envs: bool) -> void
 
     def add_error: (Diagnostic::Ruby::Base error) -> void
 
     def observe_contract_call_site: (key: String, satisfied: bool) -> void
+
+    def record_branch_envs: (Parser::AST::Node node, entry: TypeInference::TypeEnv, truthy: TypeInference::TypeEnv, falsy: TypeInference::TypeEnv) -> void
+
+    def record_branch_envs?: () -> bool
 
     def add_typing: (Parser::AST::Node node, AST::Types::t `type`, top) -> void
 

@@ -245,7 +245,10 @@ module Steep
 
         signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
         status = signature_service.status
-        return [] unless status.is_a?(Services::SignatureService::LoadedStatus)
+        # Two values, like the happy-path return below: `run` destructures this,
+        # and a bare `[]` gave it `nil, nil` — which took the whole inference pass
+        # down with a TypeError whenever ONE target failed to load its signatures.
+        return [[], []] unless status.is_a?(Services::SignatureService::LoadedStatus)
 
         subtyping = status.subtyping
         resolver = status.constant_resolver
@@ -284,7 +287,10 @@ module Steep
             delegation_registry: @project.delegation_registry,
             constructor_bindings: @project.constructor_binding_registry,
             return_forwarding: @project.return_forwarding_registry,
-            return_alias: @project.return_alias_registry
+            return_alias: @project.return_alias_registry,
+            # The guard collector reads these back instead of re-deriving from the
+            # AST what a condition proves.
+            record_branch_envs: true
           )
 
           out.concat(Inferrer.infer(source, typing, subtyping))

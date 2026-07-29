@@ -394,7 +394,10 @@ module Steep
         delegation_registry:,
         constructor_bindings:,
         return_forwarding:,
-        return_alias:
+        return_alias:,
+        # Opt-in: only the inference passes that consume `typing.branch_envs` ask
+        # for them. The check driver and the LSP leave this false and pay nothing.
+        record_branch_envs: false
       )
         annotations = source.annotations(block: source.node, factory: subtyping.factory, context: nil)
 
@@ -494,7 +497,7 @@ module Steep
           variable_context: TypeInference::Context::TypeVariableContext.empty
         )
 
-        typing = Typing.new(source: source, root_context: context, cursor: cursor)
+        typing = Typing.new(source: source, root_context: context, cursor: cursor, record_branch_envs: record_branch_envs)
 
         if unknown_self_type && source.node
           typing.add_error(

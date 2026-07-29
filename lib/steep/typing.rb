@@ -165,6 +165,15 @@ module Steep
     # Consumed by Contracts::Runner to close preconditions over the self-call
     # graph.
     attr_reader :precondition_obligations
+    # The type envs around each `if` node: `{ entry:, truthy:, falsy: }` keyed by
+    # the `:if` node itself. The three are already computed while checking the
+    # branches (`LogicTypeInterpreter#eval` runs on every condition); this keeps
+    # the references instead of dropping them, so a later pass can READ what the
+    # checker concluded about a condition rather than re-deriving it from the AST.
+    #
+    # Empty unless `record_branch_envs` — the normal check and the LSP pay
+    # nothing, and the retained envs live only as long as one file's `Typing`.
+    attr_reader :branch_envs
     attr_reader :typing
     attr_reader :parent
     attr_reader :parent_last_update
@@ -176,7 +185,7 @@ module Steep
     attr_reader :source_index
     attr_reader :cursor_context
 
-    def initialize(source:, root_context:, parent: nil, parent_last_update: parent&.last_update, source_index: nil, cursor:)
+    def initialize(source:, root_context:, parent: nil, parent_last_update: parent&.last_update, source_index: nil, cursor:, record_branch_envs: parent&.record_branch_envs? || false)
       @source = source
 
       @parent = parent
@@ -187,6 +196,8 @@ module Steep
       @errors = []
       @contract_call_sites = []
       @precondition_obligations = []
+      @record_branch_envs = record_branch_envs
+      (@branch_envs = {}).compare_by_identity
       (@typing = {}).compare_by_identity
       @root_context = root_context
       (@method_calls = {}).compare_by_identity
@@ -209,6 +220,19 @@ module Steep
 
     def observe_precondition_obligation(key:, expr:)
       precondition_obligations << { key: key, expr: expr }
+    end
+
+    # `entry` is the env AFTER the condition is synthesized (so a pure call in the
+    # condition is already registered) and BEFORE either branch narrows it — the
+    # baseline a consumer diffs the surviving branch against.
+    def record_branch_envs(node, entry:, truthy:, falsy:)
+      return unless record_branch_envs?
+
+      branch_envs[node] = { entry: entry, truthy: truthy, falsy: falsy }
+    end
+
+    def record_branch_envs?
+      @record_branch_envs
     end
 
     def add_typing(node, type, _context)
@@ -303,7 +327,8 @@ module Steep
         parent: self,
         root_context: root_context,
         source_index: source_index.new_child,
-        cursor: cursor_context.index
+        cursor: cursor_context.index,
+        record_branch_envs: record_branch_envs?
       )
       @should_update = true
 
@@ -327,6 +352,7 @@ module Steep
       end
 
       parent.method_calls.merge!(method_calls)
+      parent.branch_envs.merge!(branch_envs)
 
       errors.each do |error|
         parent.add_error error
