@@ -858,21 +858,21 @@ module Steep
       def guard_facts(if_node, cond, aborts_on_truthy:)
         # Abort in the THEN clause => the surviving exit is the falsy one.
         surviving = aborts_on_truthy ? :falsy : :truthy
-        env_facts = env_guard_facts(if_node, surviving) || []
+        env_facts = env_guard_facts(if_node, surviving)
         (env_facts + syntactic_guard_facts(cond, aborts_on_truthy: aborts_on_truthy)).uniq
       end
 
       # The slots the surviving branch narrowed to non-nil, read off the recorded
       # envs. `entry` is the env after the condition was synthesized, so a pure
       # call in the condition is registered in both and the diff is exactly what
-      # the branch proved. nil (not `[]`) when nothing was recorded, so the caller
-      # can tell "not available" from "proves nothing".
+      # the branch proved. `[]` covers both "nothing was recorded" and "the branch
+      # proved nothing": the caller unions the syntactic reading in either case,
+      # so it has no use for the distinction.
       def env_guard_facts(if_node, surviving)
-        record = @branch_envs[if_node] or return nil
+        record = @branch_envs[if_node] or return []
 
         entry_env = record[:entry]
         surviving_env = record[surviving]
-        return [] unless entry_env && surviving_env
 
         facts = [] #: Array[untyped]
         surviving_env.pure_method_calls.each_key do |send_node|

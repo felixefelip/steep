@@ -50,6 +50,7 @@ class PostconditionsGuardBranchEnvTest < Minitest::Test
 
     class GBController
       def redirect_to: (untyped) -> void
+      def current_user: () -> GBUser?
       def present_guard: () -> void
       def blank_guard: () -> void
       def bare_guard: () -> void
@@ -57,6 +58,7 @@ class PostconditionsGuardBranchEnvTest < Minitest::Test
       def inverted_guard: () -> void
       def method_call_guard: () -> void
       def safe_nav_guard: () -> void
+      def self_method_guard: () -> void
     end
   RBS
 
@@ -113,6 +115,12 @@ class PostconditionsGuardBranchEnvTest < Minitest::Test
           redirect_to :login
         end
       end
+
+      def self_method_guard
+        unless current_user.present?
+          redirect_to :login
+        end
+      end
     end
   RUBY
 
@@ -120,6 +128,13 @@ class PostconditionsGuardBranchEnvTest < Minitest::Test
     entries.each_with_object({}) do |entry, hash|
       next if entry.conditional_const_returns.empty?
       hash[entry.method_name] = entry.conditional_const_returns.transform_values {|spec| spec[:type].to_s }
+    end
+  end
+
+  def self_returns(entries)
+    entries.each_with_object({}) do |entry, hash|
+      next if entry.conditional_returns.empty?
+      hash[entry.method_name] = entry.conditional_returns.transform_values {|spec| spec[:type].to_s }
     end
   end
 
@@ -147,6 +162,16 @@ class PostconditionsGuardBranchEnvTest < Minitest::Test
     assert_equal({ "GBCurrent.user" => "::GBUser" }, facts[:safe_nav_guard])
   end
 
+  # The same reading, for a fact the guard names as a SELF METHOD rather than a
+  # constant path — the `conditional_returns` half of the collector. Both halves
+  # consume `guard_facts`, so this pins that the env-derived fact reaches the one
+  # keyed by method name too.
+  def test_reads_branch_envs_for_self_methods
+    facts = self_returns(infer_for(SOURCE, record_branch_envs: true))
+
+    assert_equal({ current_user: "::GBUser" }, facts[:self_method_guard])
+  end
+
   # Without the recorded envs the syntactic fallback still handles the shapes it
   # always did, and — the fix — no longer inverts the polarity of `if X; halt; end`.
   def test_syntactic_fallback
@@ -158,5 +183,27 @@ class PostconditionsGuardBranchEnvTest < Minitest::Test
     assert_nil facts[:present_guard]
     assert_nil facts[:blank_guard]
     assert_equal({ "GBCurrent.user" => "::GBUser" }, facts[:safe_nav_guard])
+
+    # `current_user.present?` is a predicate on the slot, not the slot itself, so
+    # the AST reading has nothing to name — this fact exists only in the env.
+    assert_nil self_returns(infer_for(SOURCE, record_branch_envs: false))[:self_method_guard]
+  end
+
+  # The cost claim: the envs are retained only for the pass that asks for them,
+  # so the check driver and the LSP keep paying nothing.
+  def test_records_only_when_asked
+    with_checker(RBS_FIXTURE) do |checker|
+      source = parse_ruby(SOURCE)
+
+      with_standard_construction(checker, source, record_branch_envs: false) do |construction, typing|
+        construction.synthesize(source.node)
+        assert_empty typing.branch_envs
+      end
+
+      with_standard_construction(checker, source, record_branch_envs: true) do |construction, typing|
+        construction.synthesize(source.node)
+        refute_empty typing.branch_envs
+      end
+    end
   end
 end
