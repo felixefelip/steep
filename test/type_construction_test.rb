@@ -7869,6 +7869,47 @@ end
     end
   end
 
+  # A hint that says nothing about the method's type variable must not pin it.
+  # `untyped` (and any supertype of the return, like `Object`) makes the
+  # return/hint relation succeed without constraining the variable, and solving
+  # an unconstrained variable answers `untyped` — so the block's own return type
+  # is what has to determine it.
+  def test_block_generic_with_uninformative_hint
+    with_checker(<<-RBS) do |checker|
+class UninformativeHintBlock
+  def untyped_hint: () -> untyped
+  def object_hint: () -> Object
+  def array_hint: () -> Array[Integer?]
+end
+    RBS
+
+      {
+        untyped_hint: "::Array[::String]",
+        object_hint: "::Array[::String]",
+        # A hint that *does* constrain the variable still wins: `Integer?`, not
+        # the block body's narrower `::Integer`.
+        array_hint: "::Array[(::Integer | nil)]"
+      }.each do |method_name, expected|
+        body = method_name == :array_hint ? "1" : '"a"'
+
+        source = parse_ruby(<<-RUBY)
+class UninformativeHintBlock
+  def #{method_name}
+    [1].map { #{body} }
+  end
+end
+        RUBY
+
+        with_standard_construction(checker, source) do |construction, typing|
+          construction.synthesize(source.node)
+
+          block = dig(source.node, 2, 2)
+          assert_equal parse_type(expected), typing.type_of(node: block), method_name.to_s
+        end
+      end
+    end
+  end
+
   def test_bool_typing
     with_checker() do |checker|
       source = parse_ruby(<<-RUBY)

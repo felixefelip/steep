@@ -5086,8 +5086,27 @@ module Steep
             if hint && !fvs.empty?
               if hint.free_variables.subset?(self_type.free_variables)
                 if check_relation(sub_type: method_type.type.return_type, super_type: hint, constraints: constraints).success?
-                  method_type, solved, s = apply_solution(errors, node: node, method_type: method_type) do
-                    constraints.solution(checker, variables: fvs, context: ccontext)
+                  # Solve only the variables the hint actually constrained. A hint
+                  # that says nothing about a variable — `untyped`, or any supertype
+                  # of the return like `Object` — still makes the relation succeed,
+                  # and `Constraints#solution` answers an unconstrained variable with
+                  # `untyped`. Solving over all of `fvs` therefore *pins* the block's
+                  # type variable to `untyped` here, before the block body is even
+                  # typed, and the body's real type is discarded:
+                  #
+                  #     def bar        # `() -> untyped`, or no RBS at all
+                  #       [1].map { "a" }   # => Array[untyped], not Array[String]
+                  #     end
+                  #
+                  # Same filter the post-block solution below applies, for the same
+                  # reason: an unconstrained variable is one the *block* still has to
+                  # determine.
+                  hint_fvs = fvs.select {|var| constraints.has_constraint?(var) }.to_set
+
+                  unless hint_fvs.empty?
+                    method_type, solved, s = apply_solution(errors, node: node, method_type: method_type) do
+                      constraints.solution(checker, variables: hint_fvs, context: ccontext)
+                    end
                   end
                 end
 
