@@ -160,17 +160,27 @@ module Steep
         end
       end
 
-      # Resolve each spec whose gate is expressed `via` a self-method to the ivar
-      # that method actually writes (via item 1's self-call edges, which carry
-      # the declaring class so an inherited `redirect_to` resolves correctly),
-      # then drop any spec left without a gate ivar.
+      # Resolve each spec whose gate is expressed `via` self-methods to the ivar one
+      # of them actually writes (via item 1's self-call edges, which carry the
+      # declaring class so an inherited `redirect_to` resolves correctly), then drop
+      # any spec left without a gate ivar.
+      #
+      # The inferrer offers CANDIDATES in source order because no position in the
+      # abort clause is reliably the halt (felixefelip/steep#105 gap 3); which of
+      # them writes an ivar is known here and not there. First one that resolves
+      # wins — a candidate that writes nothing (`respond_to`, a path helper) simply
+      # falls through.
       def resolve_gates!(specs, entry, effects)
         specs.each_value do |spec|
           next if spec[:gate_ivar]
 
-          via = spec[:gate_via] or next
-          dep = entry.self_call_deps.find { |d| d.end_with?("##{via}") }
-          spec[:gate_ivar] = dep && effects[dep]&.first
+          candidates = Array(spec[:gate_via])
+          next if candidates.empty?
+
+          spec[:gate_ivar] = candidates.filter_map { |via|
+            dep = entry.self_call_deps.find { |d| d.end_with?("##{via}") }
+            dep && effects[dep]&.first
+          }.first
         end
         specs.reject! { |_, spec| spec[:gate_ivar].nil? }
       end
