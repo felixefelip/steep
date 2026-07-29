@@ -35,6 +35,8 @@ module Steep
     # its definer. Under the project's whole-program (closed-world) assumption, intersecting a
     # method's entry facts over its observed call sites is treated as sound.
     class MethodEntryInferrer
+      include TypedNodeUtils
+
       # One flow: `events` is an ordered list of `:call` / `:const_write` / `:halt` events,
       # and `owner` is the `"Class#method"` whose body this flow is (nil for a top-level
       # flow with no enclosing class). The Runner seeds a flow with `owner`'s own entry
@@ -187,7 +189,7 @@ module Steep
 
         case node.type
         when :class, :module
-          name = const_lexical_name(node.children[0])
+          name = lexical_const_name(node.children[0])
           inner = name ? nesting + [name] : nesting
           body = node.type == :class ? node.children[2] : node.children[1]
           each_method_def(body, inner, &block) if body
@@ -311,7 +313,7 @@ module Steep
         return nil unless mname.to_s.end_with?("=") && mname != :==
         return nil unless receiver.is_a?(Parser::AST::Node) && receiver.type == :const
 
-        base = const_receiver_name(receiver) or return nil
+        base = resolved_const_name(receiver) or return nil
         rhs = args.last
         return nil unless rhs.is_a?(Parser::AST::Node)
 
@@ -384,24 +386,6 @@ module Steep
         }
       end
 
-      # The full resolved name of a constant receiver (`Foo` inside `Example4` => `Example4::Foo`),
-      # read off its singleton type so it keys the setter entry / entry-fact map by identity — the
-      # same resolution `TypeConstruction#resolved_const_name_string` uses on the read side. Falls
-      # back to the lexical path when the type is unavailable.
-      def const_receiver_name(receiver)
-        type = (@typing.type_of(node: receiver) rescue nil)
-        if type.is_a?(AST::Types::Name::Singleton)
-          return type.name.to_s.sub(/\A::/, "")
-        end
-        const_lexical_name(receiver)
-      end
-
-      def const_lexical_name(node)
-        return nil unless node.is_a?(Parser::AST::Node) && node.type == :const
-        parent, name = node.children
-        parent ? "#{const_lexical_name(parent)}::#{name}" : name.to_s
-      end
-
       # Whether a written value is provably non-nil (so the const can be asserted present). A
       # nilable or untyped RHS => false: nothing is established, and it invalidates instead.
       def nonnil_rhs?(rhs)
@@ -424,7 +408,7 @@ module Steep
 
         case node.type
         when :class, :module
-          name = const_lexical_name(node.children[0])
+          name = lexical_const_name(node.children[0])
           inner = name ? nesting + [name] : nesting
           body = node.type == :class ? node.children[2] : node.children[1]
           walk_defs(body, inner, &block) if body

@@ -4154,13 +4154,17 @@ module Steep
     # felixefelip/steep#68 item 3 — APPLY (lookup half). The recorded
     # constant conditional-return for a `Const.attr` read node, or nil. The
     # receiver must be a bare constant (`Current`), so the path is unambiguous.
+    #
+    # Resolved, not lexical: the env is seeded with the sidecar's key verbatim,
+    # and the sidecar is written under the resolved name, so `Registry.user` read
+    # inside `Outer` has to look up `Outer::Registry.user`.
     def conditional_const_return_spec(node, receiver)
       return nil if context.type_env.conditional_const_returns.empty?
       return nil unless node.type == :send
       return nil unless receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
 
-      const_name = RBS::TypeName.parse(constant_path_string(receiver)) rescue (return nil)
-      context.type_env.conditional_const_returns["#{const_name.to_s.sub(/\A::/, "")}.#{node.children[1]}"]
+      base = resolved_const_name_string(receiver) or return nil
+      context.type_env.conditional_const_returns["#{base}.#{node.children[1]}"]
     end
 
     # `(:const nil :Current)` / `(:const (:const nil :A) :B)` => "Current" / "A::B".

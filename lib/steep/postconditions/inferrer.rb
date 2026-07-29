@@ -732,6 +732,10 @@ module Steep
 
       # `Current.user = <rhs>` => `["Current.user", rhs_node]`, else nil. The
       # receiver must be a constant (self/ivar writes are items 1/2's job).
+      #
+      # Keyed by the RESOLVED name, not the source spelling: `Registry.user =` in
+      # `Outer::Host` keys `Outer::Registry.user`, which is what the read side
+      # looks up. Written lexically it keyed `Registry.user` and never applied.
       def const_attr_write(node)
         return nil unless node.is_a?(Parser::AST::Node) && node.type == :send
 
@@ -741,7 +745,7 @@ module Steep
         receiver = node.children[0]
         return nil unless receiver.is_a?(Parser::AST::Node) && receiver.type == :const
 
-        const_name = extract_const_name(receiver) or return nil
+        const_name = resolved_const_name(receiver) or return nil
         rhs = node.children[2] or return nil
 
         ["#{const_name}.#{method.to_s.chomp("=")}", rhs]

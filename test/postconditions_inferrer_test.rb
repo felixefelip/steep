@@ -458,6 +458,23 @@ class PostconditionsInferrerTest < Minitest::Test
       def value=: ((Marked & Marked::Validated)? value) -> void
       def other=: (String?) -> void
     end
+
+    module Outer
+      class Registry
+        def self.user: () -> User?
+        def self.user=: (User?) -> User?
+      end
+
+      class Host
+        @halted: bool
+
+        def current_user: () -> User?
+        def redirect_to: () -> void
+        def proven_user: () -> User
+        def guarded: () -> void
+        def plain: () -> void
+      end
+    end
   RBS
 
   def infer_cr_for(ruby)
@@ -554,6 +571,66 @@ class PostconditionsInferrerTest < Minitest::Test
     refute_nil entry, "expected an entry for the populating handler"
     assert_equal "::User", entry.const_establishments["Current.user"].to_s
     assert_empty entry.conditional_const_returns, "no halt gate, so nothing conditional"
+  end
+
+  # A constant written by its SHORT name from inside the namespace that encloses
+  # it. `Registry` in `Outer::Host` is `Outer::Registry`, and that is the name the
+  # read side resolves (`TypeConstruction#resolved_const_name_string`) and the name
+  # every other sidecar key uses. Keyed by the source spelling, the fact is written
+  # under `Registry.user`, looked up under `Outer::Registry.user`, and never applies
+  # — the guard proves nothing, silently.
+  #
+  # Invisible in the dummy for a long time because `Current` is top-level, where the
+  # two spellings coincide. An engine's `MyEngine::Current` is where it bites.
+  def test_conditional_const_return_is_keyed_by_the_resolved_name
+    entries = infer_cr_for(<<~RUBY)
+      module Outer
+        class Host
+          def guarded
+            unless current_user
+              redirect_to
+              return
+            end
+            Registry.user = current_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :guarded }
+    refute_nil entry, "expected an entry for the guard"
+    assert_equal ["Outer::Registry.user"], entry.conditional_const_returns.keys
+  end
+
+  def test_const_establishment_is_keyed_by_the_resolved_name
+    entries = infer_cr_for(<<~RUBY)
+      module Outer
+        class Host
+          def plain
+            Registry.user = proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :plain }
+    refute_nil entry, "expected an entry for the populating handler"
+    assert_equal ["Outer::Registry.user"], entry.const_establishments.keys
+  end
+
+  # The fallback still has to hold: an unresolvable receiver (no singleton type in
+  # the typing) keeps its lexical spelling rather than dropping the fact.
+  def test_const_establishment_keeps_the_lexical_name_for_a_top_level_constant
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def set_current_user
+          Current.user = proven_user
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :set_current_user }
+    assert_equal ["Current.user"], entry.const_establishments.keys
   end
 
   def test_no_unconditional_const_establishment_when_the_method_halts
