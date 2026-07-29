@@ -555,6 +555,124 @@ class PostconditionsInferrerTest < Minitest::Test
     assert_equal "::User", spec[:type].to_s
   end
 
+  # felixefelip/steep#105 gap 1. The guard TESTS the constant instead of writing
+  # it — no assignment anywhere, the proof is the condition itself. This is the
+  # commoner shape by far: a guard normally asserts what someone else already
+  # populated, which is exactly what an authorization callback does.
+  def test_infers_conditional_const_return_from_a_guard_that_tests_the_constant
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.user
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_const_returns["Current.user"]
+    refute_nil spec, "expected the tested constant to be proven on the unhalted exit"
+    assert_equal :redirect_to, spec[:gate_via]
+    assert_equal "::User", spec[:type].to_s
+  end
+
+  # Keyed by identity, like every other const fact (#106).
+  def test_a_tested_constant_is_keyed_by_its_resolved_name
+    entries = infer_cr_for(<<~RUBY)
+      module Outer
+        class Host
+          def guarded
+            unless Registry.user
+              redirect_to
+              return
+            end
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :guarded }
+    refute_nil entry, "expected an entry for the guard"
+    assert_equal ["Outer::Registry.user"], entry.conditional_const_returns.keys
+  end
+
+  # A self-method condition still proves what it always proved, and proves
+  # nothing about any constant.
+  def test_a_self_method_guard_still_proves_only_the_self_method
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal [:current_user], entry.conditional_returns.keys
+    assert_empty entry.conditional_const_returns
+  end
+
+  # Nothing to prove: `Current.instance` is declared non-nil already, so the
+  # guard adds no information and must not emit a fact.
+  def test_no_const_return_when_the_tested_attribute_is_not_nilable
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.instance
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert(entry.nil? || entry.conditional_const_returns.empty?)
+  end
+
+  # The receiver has to be a CONSTANT. A guard on a local's attribute names no
+  # slot the caller could look up, so it proves nothing here.
+  def test_no_const_return_when_the_tested_receiver_is_not_a_constant
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          holder = Current.instance
+          unless holder.user
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert(entry.nil? || entry.conditional_const_returns.empty?)
+  end
+
+  # A write past the guard is more specific than the test before it (it carries
+  # the written value's type), so it stays the one that reports.
+  def test_a_guarded_write_wins_over_the_test_of_the_same_path
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.user
+            redirect_to
+            return
+          end
+          Current.user = proven_user
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_const_returns["Current.user"]
+    refute_nil spec
+    assert_equal "::User", spec[:type].to_s
+  end
+
   # felixefelip/steep#100. A handler with no halt at all writes the constant on EVERY
   # exit, so the establishment is unconditional — there is no gate to key it on, which is
   # exactly why it used to be dropped.

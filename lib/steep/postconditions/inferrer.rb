@@ -420,15 +420,24 @@ module Steep
         return {} unless body
 
         result = {} #: Hash[Symbol, untyped]
-        each_statement(body) do |stmt|
-          guard = negative_presence_guard(stmt) or next
-          method, gate = guard
+        each_guard_fact(body) do |fact, gate|
+          method = fact[:self_method] or next
           next if result.key?(method)
 
           nonnil = nonnil_return_of_self_method(method, class_name, singleton: singleton) or next
           result[method] = gate.merge(type: nonnil)
         end
         result
+      end
+
+      # Yields `[fact, gate]` for every fact every top-level guard clause proves.
+      # The two collectors share the walk and each keeps the facts it owns.
+      def each_guard_fact(body)
+        each_statement(body) do |stmt|
+          guard = negative_presence_guard(stmt) or next
+          facts, gate = guard
+          facts.each { |fact| yield fact, gate }
+        end
       end
 
       # felixefelip/steep#68 (item 3) — the constant-rooted proof. A guard that
@@ -445,22 +454,54 @@ module Steep
       # proves `Current.user` non-nil on the unhalted exit, gated by the same
       # halt ivar as the self-method case. Keyed by the `"Const.attr"` path.
       #
+      # felixefelip/steep#105 gap 1 adds the other half: a guard that TESTS the
+      # constant proves it just as well, with no write anywhere:
+      #
+      #   def ensure_access
+      #     unless Current.user
+      #       redirect_to
+      #       return
+      #     end
+      #   end
+      #
+      # That is the commoner of the two — a guard normally asserts what someone
+      # else already populated, which is what an authorization callback does —
+      # and it used to prove nothing at all, because the collector only ever
+      # looked at writes.
+      #
       # => Hash[String, { gate_ivar: Symbol?, gate_via: Symbol?, type: }]
       def collect_conditional_const_returns(def_node)
         body = def_node.children[2]
         return {} unless body
 
-        gate = method_halt_gate(body) or return {}
-
         result = {} #: Hash[String, untyped]
-        each_statement(body) do |stmt|
-          write = const_attr_write(stmt) or next
-          const_path, rhs = write
+
+        # Writes first: a write is more specific than a test, since it carries
+        # the written value's own type rather than the declaration's.
+        if (gate = method_halt_gate(body))
+          each_statement(body) do |stmt|
+            write = const_attr_write(stmt) or next
+            const_path, rhs = write
+            next if result.key?(const_path)
+
+            type = nonnil_value_type(rhs) or next
+            result[const_path] = gate.merge(type: type)
+          end
+        end
+
+        each_guard_fact(body) do |fact, gate|
+          const_path = fact[:const_path] or next
           next if result.key?(const_path)
 
-          type = nonnil_value_type(rhs) or next
-          result[const_path] = gate.merge(type: type)
+          const_name, attr = const_path.split(".", 2)
+          next unless const_name && attr
+          # The attribute is a singleton method of the constant, so its declared
+          # return type — minus nil — is what the test proves. `nil` back means
+          # the declaration was not nilable to begin with: nothing to prove.
+          nonnil = nonnil_return_of_self_method(attr.to_sym, const_name, singleton: true) or next
+          result[const_path] = gate.merge(type: nonnil)
         end
+
         result
       end
 
@@ -762,36 +803,58 @@ module Steep
         type
       end
 
-      # Matches `unless <self.method>; <halts>; return; end` (or the
-      # `if !<self.method>` spelling) and returns `[method, gate]`, where `gate`
+      # Matches `unless <presence test>; <halts>; return; end` (or the
+      # `if !<presence test>` spelling) and returns `[facts, gate]`, where `gate`
       # is `{ gate_ivar: }` or `{ gate_via: }`. The aborting branch must both
       # halt (write an ivar directly, or call a self-method that does) and
       # `return`.
+      #
+      # `facts` is a LIST because one condition can prove several things — a
+      # conjunction proves each conjunct (felixefelip/steep#105 gap 1c). Each is
+      # tagged by what it names, so the collectors can take the ones they own.
       def negative_presence_guard(node)
         return nil unless node.is_a?(Parser::AST::Node) && node.type == :if
 
         cond, true_clause, false_clause = node.children
         # `unless X` parses as `if X (nil-then) (else)`, so the aborting body is
         # whichever clause exists; require exactly one, guarded on the bare cond.
-        method = presence_condition_method(cond) or return nil
+        facts = presence_condition_facts(cond)
+        return nil if facts.empty?
         abort_clause = true_clause || false_clause
         return nil unless abort_clause && (true_clause.nil? ^ false_clause.nil?)
         return nil unless clause_returns?(abort_clause)
 
         gate = halting_gate(abort_clause) or return nil
-        [method, gate]
+        [facts, gate]
       end
 
-      # `current_user` in `unless current_user` / `if !current_user` — the bare
-      # self-send being tested for presence. Returns the method name or nil.
-      def presence_condition_method(cond)
+      # What a truthy condition proves, as a list of tagged facts:
+      #
+      #   `unless current_user`   => [{ self_method: :current_user }]
+      #   `unless Current.user`   => [{ const_path: "Current.user" }]
+      #
+      # Both are a no-argument send; they differ only in the receiver. A self
+      # receiver names a method of the enclosing class, a constant receiver names
+      # a slot any caller can address — and the constant path is RESOLVED (#106),
+      # so it keys by identity like every other const fact.
+      #
+      # Anything else (a local's attribute, a send with arguments, a literal)
+      # names nothing the caller could look up, and yields no fact.
+      def presence_condition_facts(cond)
         node = cond
         node = node.children[0] if node.is_a?(Parser::AST::Node) && node.type == :send && node.children[1] == :! && node.children[0]
-        return nil unless node.is_a?(Parser::AST::Node) && node.type == :send
-        return nil unless node.children[0].nil? || node.children[0].type == :self
-        return nil unless node.children[2..].to_a.empty? # no args
+        return [] unless node.is_a?(Parser::AST::Node) && node.type == :send
+        return [] unless node.children[2..].to_a.empty? # no args
 
-        node.children[1]
+        receiver = node.children[0]
+        if receiver.nil? || receiver.type == :self
+          [{ self_method: node.children[1] }]
+        elsif receiver.type == :const
+          base = resolved_const_name(receiver) or return []
+          [{ const_path: "#{base}.#{node.children[1]}" }]
+        else
+          []
+        end
       end
 
       def clause_returns?(clause)
