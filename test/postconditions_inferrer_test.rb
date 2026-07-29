@@ -425,6 +425,7 @@ class PostconditionsInferrerTest < Minitest::Test
     class User
       def full_name: () -> String
       def maybe_name: () -> String?
+      def named?: (String) -> bool
     end
 
     class Current
@@ -671,6 +672,101 @@ class PostconditionsInferrerTest < Minitest::Test
     spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_const_returns["Current.user"]
     refute_nil spec
     assert_equal "::User", spec[:type].to_s
+  end
+
+  # felixefelip/steep#105 gap 1b. `x&.foo` evaluates to nil whenever `x` is nil, so a
+  # TRUTHY `x&.foo` proves `x` non-nil — exactly, with no knowledge of what `foo`
+  # returns or whether it is nilable itself. The fact is about the RECEIVER; the send
+  # through it is only the reason we are looking.
+  def test_infers_conditional_const_return_from_a_safe_navigation_test
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.user&.maybe_name
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_const_returns["Current.user"]
+    refute_nil spec, "expected the safe-navigated receiver to be proven"
+    assert_equal "::User", spec[:type].to_s
+  end
+
+  def test_infers_conditional_return_from_a_safe_navigation_test_on_a_self_method
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user&.maybe_name
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_returns[:current_user]
+    refute_nil spec, "expected the safe-navigated self-method to be proven"
+    assert_equal "::User", spec[:type].to_s
+  end
+
+  # The whole chain is truthy only if every link was non-nil, so the innermost
+  # nameable slot is proven. Only that one is keyed — `Current.user.maybe_name` is
+  # not a slot a caller could look up.
+  def test_a_safe_navigation_chain_proves_its_innermost_slot
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.user&.maybe_name&.upcase
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert_equal ["Current.user"], entry.conditional_const_returns.keys
+  end
+
+  # Arguments to the safe-navigated call are irrelevant: whatever `named?` does with
+  # them, it ran at all only because the receiver was non-nil. (Contrast the DIRECT
+  # test, where a send with arguments names no slot and is rejected.)
+  def test_a_safe_navigation_test_ignores_the_arguments_of_the_call
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless Current.user&.named?("jo")
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    spec = entries.find { |e| e.method_name == :authenticate_user }.conditional_const_returns["Current.user"]
+    refute_nil spec
+    assert_equal "::User", spec[:type].to_s
+  end
+
+  # The receiver still has to be a nameable slot. A local proves nothing.
+  def test_no_fact_when_the_safe_navigated_receiver_is_a_local
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          holder = Current.user
+          unless holder&.maybe_name
+            redirect_to
+            return
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    assert(entry.nil? || (entry.conditional_const_returns.empty? && entry.conditional_returns.empty?))
   end
 
   # felixefelip/steep#100. A handler with no halt at all writes the constant on EVERY

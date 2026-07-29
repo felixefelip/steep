@@ -830,20 +830,48 @@ module Steep
 
       # What a truthy condition proves, as a list of tagged facts:
       #
-      #   `unless current_user`   => [{ self_method: :current_user }]
-      #   `unless Current.user`   => [{ const_path: "Current.user" }]
+      #   `unless current_user`            => [{ self_method: :current_user }]
+      #   `unless Current.user`            => [{ const_path: "Current.user" }]
+      #   `unless Current.user&.active?`   => [{ const_path: "Current.user" }]
       #
-      # Both are a no-argument send; they differ only in the receiver. A self
-      # receiver names a method of the enclosing class, a constant receiver names
-      # a slot any caller can address — and the constant path is RESOLVED (#106),
-      # so it keys by identity like every other const fact.
+      # The first two are the value being tested directly. The third is
+      # felixefelip/steep#105 gap 1b: `x&.foo` evaluates to nil whenever `x` is
+      # nil, so a truthy `x&.foo` proves `x` non-nil — exactly, with no knowledge
+      # of what `foo` returns or whether it is nilable itself. The fact is about
+      # the RECEIVER; the send through it is only the reason we are looking, which
+      # is why its arguments are irrelevant.
       #
-      # Anything else (a local's attribute, a send with arguments, a literal)
-      # names nothing the caller could look up, and yields no fact.
+      # Anything else (a literal, a send whose receiver names no slot) yields no
+      # fact.
       def presence_condition_facts(cond)
         node = cond
         node = node.children[0] if node.is_a?(Parser::AST::Node) && node.type == :send && node.children[1] == :! && node.children[0]
-        return [] unless node.is_a?(Parser::AST::Node) && node.type == :send
+        return [] unless node.is_a?(Parser::AST::Node)
+
+        # A safe-navigated call: the proof is about what it was called ON.
+        return slot_facts(node.children[0]) if node.type == :csend
+
+        return [] unless node.type == :send
+        # A DIRECT test names the slot itself, so it must BE one — a no-argument
+        # read, not an arbitrary call that happens to return something truthy.
+        return [] unless node.children[2..].to_a.empty?
+
+        slot_facts(node)
+      end
+
+      # The fact naming `node` as a slot a caller could look up, or `[]`.
+      #
+      # A self receiver names a method of the enclosing class; a constant receiver
+      # names a slot any caller can address, RESOLVED (#106) so it keys by identity
+      # like every other const fact. A local, an ivar or a literal names nothing.
+      #
+      # A `csend` recurses into its own receiver: `a&.b&.c` is truthy only if every
+      # link was non-nil, so the innermost nameable slot is proven. Only that one is
+      # keyed — the intermediate hops are not slots a caller could look up.
+      def slot_facts(node)
+        return [] unless node.is_a?(Parser::AST::Node)
+        return slot_facts(node.children[0]) if node.type == :csend
+        return [] unless node.type == :send
         return [] unless node.children[2..].to_a.empty? # no args
 
         receiver = node.children[0]
