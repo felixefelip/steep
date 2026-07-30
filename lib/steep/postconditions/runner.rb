@@ -130,6 +130,13 @@ module Steep
         # whether the enclosing method happened to redirect.
         resolved.each_value { |entry| expand_transitive_const_establishments(entry, resolved) }
 
+        # felixefelip/steep#117 gap 3a: lift what a callee establishes into its
+        # CALLER, transitively. The two expansions above walk from a write to the
+        # SETTER's siblings; this one walks the CALL GRAPH, so an establishment no
+        # longer stops at the frame that performs the write. Runs after them, so
+        # what propagates upward is each callee's already-expanded set.
+        close_const_establishments(resolved)
+
         # felixefelip/rbs_infer#71 (piece 1): gate the UNCONDITIONAL establishment
         # (`Const.attr =` proves a sibling non-nil for the rest of the frame) on a
         # confirmed delegation. An instance setter's `establishes_consts` fires at
@@ -231,6 +238,43 @@ module Steep
 
             entry.const_establishments[other_path] = other_type
           end
+        end
+      end
+
+      # felixefelip/steep#117 gap 3a. Merges each callee's `const_establishments`
+      # into its callers', to a fixpoint, over the every-exit call edges
+      # (`unconditional_call_deps`). A caller that unconditionally calls a method
+      # which establishes `Const.attr` establishes it too — that is the whole
+      # content of the rule, and it is what lets a chain of plain handlers carry a
+      # fact up to the frame that can act on it.
+      #
+      # Mirrors `close_ivar_effects`: sets only grow and the (method, const-path)
+      # space is finite, so a cycle in the call graph terminates instead of
+      # looping. Only the edges the inferrer deemed unconditional are followed —
+      # a call inside an `if`, or after something that can halt, is not one, so
+      # nothing here has to reason about branches.
+      #
+      # An establishment already present is never overwritten: the caller's own
+      # write carries the written value's type and is more specific than what it
+      # would inherit, the same precedence the expansions above apply.
+      def close_const_establishments(resolved)
+        loop do
+          changed = false
+
+          resolved.each_value do |entry|
+            entry.unconditional_call_deps.each do |dep|
+              callee = resolved[dep] or next
+
+              callee.const_establishments.each do |path, type|
+                next if entry.const_establishments.key?(path)
+
+                entry.const_establishments[path] = type
+                changed = true
+              end
+            end
+          end
+
+          break unless changed
         end
       end
 

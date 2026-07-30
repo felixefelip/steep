@@ -51,12 +51,21 @@ module Steep
           returns_establishes = @return_establishment_inferrer.establishments(def_node)
           may_write = collect_ivar_writes(def_node, class_name, singleton: singleton)
           self_call_deps = collect_self_call_deps(def_node)
+          unconditional_call_deps = collect_unconditional_call_deps(def_node)
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
           conditional_const_returns = collect_conditional_const_returns(def_node)
           const_establishments = collect_const_establishments(def_node)
           establishes_consts = collect_establishes_consts(def_node, singleton: singleton)
           delegates_to_instance = singleton_delegates_to_instance?(def_node, class_name, singleton: singleton)
+          # `unconditional_call_deps` is deliberately NOT part of this condition,
+          # unlike `self_call_deps`. Its receiver is unrestricted, so `1 + 2` is an
+          # edge (`Integer#+`) and counting it would mint an entry for practically
+          # every method in a project, only for `empty?` to drop them all after the
+          # fixpoint — with the closures paying for them in between. A self-call
+          # edge already keeps a caller alive, which covers every unconditional dep
+          # that is a self-send; a caller whose ONLY content is an establishing call
+          # on ANOTHER object gets no entry, and so lifts nothing (felixefelip/steep#117).
           if ivars.empty? && when_true_ivars.empty? && returns_establishes.empty? &&
              may_write.empty? && self_call_deps.empty? && returns_ivar.nil? &&
              conditional_returns.empty? && conditional_const_returns.empty? &&
@@ -79,6 +88,7 @@ module Steep
             returns_establishes: returns_establishes,
             may_write_ivars: may_write,
             self_call_deps: self_call_deps,
+            unconditional_call_deps: unconditional_call_deps,
             returns_ivar: returns_ivar,
             conditional_returns: conditional_returns,
             conditional_const_returns: conditional_const_returns,
@@ -379,6 +389,65 @@ module Steep
           end
         end
         deps
+      end
+
+      # felixefelip/steep#117 gap 3a. The `"Owner#method"` of the calls this method
+      # makes on EVERY exit, so the Runner can lift what those callees establish
+      # into this method's own `const_establishments`. Without it an establishment
+      # stops at the frame that performs the write — `Current.session =` lives in
+      # `set_current_session`, and the caller one frame up proved nothing.
+      #
+      # This is NOT a subset of `self_call_deps`; it differs on both axes:
+      #
+      #   * Only TOP-LEVEL statements count, the same boundary
+      #     `collect_const_establishments` draws and for the same reason — a call
+      #     inside an `if` runs on some exits and not others. `self_call_deps` uses
+      #     `walk_sends` (any depth, block bodies included), which is right for
+      #     "may write" and wrong for "does establish". A method that can halt
+      #     contributes nothing at all: past the halt the rest is unreached.
+      #   * The RECEIVER is unrestricted. A constant is global state, so
+      #     `Registry.new.populate` establishes `Registry.thing` exactly as a
+      #     self-send would — the same reason
+      #     `Runner#apply_call_const_establishments` is not same-self gated, unlike
+      #     the ivar effects beside it.
+      def collect_unconditional_call_deps(def_node)
+        body = def_node.children[2]
+        return Set[] unless body
+        return Set[] if method_halt_gate(body)
+
+        deps = Set.new #: Set[String]
+        each_statement(body) do |stmt|
+          send_node = unconditional_send(stmt) or next
+
+          call = @typing.call_of(node: send_node) rescue nil
+          next unless call.is_a?(TypeInference::MethodCall::Typed)
+
+          call.method_decls.each do |decl|
+            method_name = decl.method_name
+            next unless method_name.respond_to?(:type_name)
+
+            owner = method_name.type_name.to_s.sub(/\A::/, "")
+            deps << "#{owner}##{method_name.method_name}"
+          end
+        end
+        deps
+      end
+
+      # The call a top-level statement makes unconditionally: the statement IS the
+      # send (`set_current_session session`), or it assigns the send's result
+      # (`ok = set_current_session session`, `@ok = …`). `&.` is refused in either
+      # position, since `x&.establish` does not run when `x` is nil.
+      def unconditional_send(stmt)
+        return nil unless stmt.is_a?(Parser::AST::Node)
+
+        node =
+          case stmt.type
+          when :send then stmt
+          when :lvasgn, :ivasgn, :gvasgn, :cvasgn then stmt.children[1]
+          when :casgn then stmt.children[2]
+          end
+
+        node.is_a?(Parser::AST::Node) && node.type == :send ? node : nil
       end
 
       # felixefelip/steep#68 (item 2), the halt-check link. A method whose body
@@ -1212,7 +1281,7 @@ module Steep
       # (felixefelip/steep#68). `self_call_deps` are the call-graph edges the
       # Runner closes over to compute the transitive part; they are not
       # serialized.
-      attr_reader :may_write_ivars, :self_call_deps
+      attr_reader :may_write_ivars, :self_call_deps, :unconditional_call_deps
       # felixefelip/steep#68 item 2. `returns_ivar`: this method transparently
       # reads that ivar (halt-check getter). `conditional_returns`:
       # { method => { gate_ivar:, type: } } self-methods proven non-nil on the
@@ -1230,7 +1299,7 @@ module Steep
       # unconditional sibling of `conditional_const_returns`.
       attr_reader :const_establishments
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -1241,6 +1310,7 @@ module Steep
         @returns_establishes = returns_establishes
         @may_write_ivars = may_write_ivars
         @self_call_deps = self_call_deps
+        @unconditional_call_deps = unconditional_call_deps
         @returns_ivar = returns_ivar
         @conditional_returns = conditional_returns
         @conditional_const_returns = conditional_const_returns
@@ -1257,6 +1327,7 @@ module Steep
           when_true_ivars: when_true_ivars, when_true_self_type_string: when_true_self_type_string,
           returns_establishes: returns_establishes,
           may_write_ivars: ivars, self_call_deps: self_call_deps,
+          unconditional_call_deps: unconditional_call_deps,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: establishes_consts, const_establishments: const_establishments,
@@ -1273,6 +1344,7 @@ module Steep
           when_true_ivars: when_true_ivars, when_true_self_type_string: when_true_self_type_string,
           returns_establishes: returns_establishes,
           may_write_ivars: may_write_ivars, self_call_deps: self_call_deps,
+          unconditional_call_deps: unconditional_call_deps,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: consts, const_establishments: const_establishments,

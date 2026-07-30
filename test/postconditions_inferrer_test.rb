@@ -1283,6 +1283,89 @@ class PostconditionsInferrerTest < Minitest::Test
            "a read of the attribute proves nothing when the body never stored the param in it"
   end
 
+  # felixefelip/steep#117 gap 3a. The every-exit call edges the Runner follows to
+  # lift a callee's establishment into its caller. Distinct from `self_call_deps`
+  # on both axes: top-level statements only, and any receiver.
+  def test_collects_an_unconditional_call_dep
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          set_current_user
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    refute_nil entry
+    assert_includes entry.unconditional_call_deps, "CRGuardHost#set_current_user"
+  end
+
+  def test_collects_an_unconditional_call_dep_from_an_assignment
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          user = proven_user
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    refute_nil entry
+    assert_includes entry.unconditional_call_deps, "CRGuardHost#proven_user"
+  end
+
+  def test_no_unconditional_call_dep_for_a_conditional_call
+    # The soundness boundary, and the shape that motivated the gap: a call inside
+    # an `if` runs on some exits and not others, so it establishes nothing.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          if current_user
+            set_current_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    refute_includes(entry&.unconditional_call_deps || Set[], "CRGuardHost#set_current_user")
+  end
+
+  def test_no_unconditional_call_dep_for_a_safe_navigated_call
+    # `current_user&.full_name` does not run when the receiver is nil.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          current_user&.full_name
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    refute_includes(entry&.unconditional_call_deps || Set[], "User#full_name")
+  end
+
+  def test_no_unconditional_call_deps_when_the_method_can_halt
+    # Past a halt the later statements are not reached, so nothing in the body is
+    # on every exit. Same gate `collect_const_establishments` applies.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate_user
+          unless current_user
+            @halted = true
+            return
+          end
+
+          set_current_user
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate_user }
+    refute_nil entry
+    assert_empty entry.unconditional_call_deps
+  end
+
   def test_infers_establishes_consts_from_instance_setter_override
     # felixefelip/steep#68 item 5. An instance setter override that does
     # `self.author_name = value&.full_name` establishes `author_name` non-nil
