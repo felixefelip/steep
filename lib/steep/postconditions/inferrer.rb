@@ -556,6 +556,11 @@ module Steep
       # source), so setting `user` to a non-nil value sets `author_name` too.
       # Keyed by attribute name; the Runner promotes these to the constant
       # (`Current.author_name`) at each `Current.user = <non-nil>` write site.
+      #
+      # The sibling's right-hand side may also read the attribute BEING SET
+      # instead of the param (`self.identity = session.identity` inside
+      # `def session=`), which is the ordinary way to write a `CurrentAttributes`
+      # override — see `own_attr_guarded_nonnil_type` (felixefelip/steep#117).
       # => Hash[Symbol(attr), AST::Types::t]
       def collect_establishes_consts(def_node, singleton:)
         return {} unless def_node.children[0].to_s.end_with?("=") && def_node.children[0] != :==
@@ -564,6 +569,13 @@ module Steep
         body = def_node.children[2] or return {}
 
         result = {} #: Hash[Symbol, untyped]
+
+        # The param's non-nil type when the setter writes its OWN backing with the
+        # bare param. Computed FIRST because it does double duty: it is the
+        # own-attribute establishment recorded at the bottom, and it is the licence
+        # for the sibling establishment to read the attribute rather than the param.
+        own_attr = def_node.children[0].to_s.chomp("=").to_sym
+        own_type = own_attribute_establishment_type(body, param, own_attr)
 
         # Side-effect establishments — `self.<other> = <param>.<method>` writes a
         # SIBLING attribute non-nil whenever the param is. Instance setters only:
@@ -574,7 +586,9 @@ module Steep
           walk_nodes(body) do |n|
             write = self_attr_write(n) or next
             attr, rhs = write
-            type = param_guarded_nonnil_type(rhs, param) or next
+            type = param_guarded_nonnil_type(rhs, param) ||
+                   own_attr_guarded_nonnil_type(rhs, own_attr, own_type)
+            next unless type
             result[attr] = type
           end
         end
@@ -587,10 +601,7 @@ module Steep
         # ACTUAL argument being non-nil at every `Const.<attr> = ...` site — so
         # storing the non-nil type holds even when the param is declared nilable
         # (a `Const.<attr> = nil` write establishes nothing). felixefelip/steep#76.
-        own_attr = def_node.children[0].to_s.chomp("=").to_sym
-        if (type = own_attribute_establishment_type(body, param, own_attr))
-          result[own_attr] ||= type
-        end
+        result[own_attr] ||= own_type if own_type
 
         result
       end
@@ -710,6 +721,55 @@ module Steep
         recv_type = type_of(recv) or return nil
         ret = resolve_method_return(subtract_nil(recv_type), rhs.children[1]) or return nil
         subtract_nil(ret) == ret ? ret : nil
+      end
+
+      # felixefelip/steep#117. `param_guarded_nonnil_type` for the spelling that
+      # reads the attribute BEING SET instead of the param:
+      #
+      #   def session=(value)
+      #     super(value)
+      #     self.identity = session.identity   # `session` IS `value` at this point
+      #   end
+      #
+      # which is how a `CurrentAttributes` override is ordinarily written, and how
+      # the app that motivated this writes it. `own_type` is the param's non-nil
+      # type as returned by `own_attribute_establishment_type`, so it is non-nil
+      # only when the body already wrote its own backing with the bare param — and
+      # that write is exactly what makes the read and the param the same object.
+      # A setter that stores something else (`@session = value.presence`) leaves
+      # `own_type` nil and proves nothing here.
+      #
+      # Resolution goes through `own_type` and never through the reader's own
+      # declared type, which is routinely `untyped`: a generated
+      # `def session; @session; end` sidecar carries no type for the attribute, so
+      # `type_of(rhs)` — what `param_guarded_nonnil_type` tries first — would
+      # refuse every one of these.
+      def own_attr_guarded_nonnil_type(rhs, own_attr, own_type)
+        return nil unless own_type
+        return nil unless rhs.is_a?(Parser::AST::Node) && (rhs.type == :send || rhs.type == :csend)
+        return nil unless own_attr_read?(rhs.children[0], own_attr)
+
+        ret = resolve_method_return(own_type, rhs.children[1]) or return nil
+        subtract_nil(ret) == ret ? ret : nil
+      end
+
+      # The three spellings of reading the attribute a setter sets: the bare reader
+      # (`session`), the explicit receiver (`self.session`), and the backing ivar
+      # (`@session`). An argument-taking send of the same name is a different
+      # method, not the reader.
+      def own_attr_read?(node, own_attr)
+        return false unless node.is_a?(Parser::AST::Node)
+
+        case node.type
+        when :send
+          receiver, name, *args = node.children
+          name == own_attr && args.empty? &&
+            (receiver.nil? || (receiver.is_a?(Parser::AST::Node) && receiver.type == :self))
+        when :ivar
+          node.children[0] == :"@#{own_attr}"
+        else
+          false
+        end
       end
 
       # The return type of `method` resolved on `type` (walking union/
