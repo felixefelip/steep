@@ -463,6 +463,12 @@ class PostconditionsInferrerTest < Minitest::Test
     end
 
     class MarkedHost
+      @value: (Marked & Marked::Validated)?
+
+      # The reader is deliberately `untyped`: a generated attribute sidecar
+      # (`def value; @value; end`) carries no type for the attribute, which is
+      # what the own-attribute-read establishment has to work around.
+      def value: () -> untyped
       def value=: ((Marked & Marked::Validated)? value) -> void
       def other=: (String?) -> void
     end
@@ -1205,6 +1211,76 @@ class PostconditionsInferrerTest < Minitest::Test
     entry = entries.find { |e| e.method_name == :value= }
     refute_nil entry, "expected an entry for the setter"
     assert_equal "::String", entry.establishes_consts[:other].to_s
+  end
+
+  # felixefelip/steep#117. The sibling write reads the attribute BEING SET rather
+  # than the param — `self.identity = session.identity` inside `def session=`,
+  # which is how a `CurrentAttributes` override is ordinarily written. The read is
+  # the param, because `super(v)` just stored it; the reader's own declared type is
+  # `untyped` and must not be consulted.
+  def test_establishes_from_a_read_of_the_attribute_being_set
+    entries = infer_cr_for(<<~RUBY)
+      class MarkedHost
+        def value=(v)
+          super(v)
+          self.other = value.name
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :value= }
+    refute_nil entry, "expected an entry for the setter"
+    assert_equal "::String", entry.establishes_consts[:other].to_s
+    # The own attribute is established by the same `super(v)` that licenses the above.
+    assert_equal "(::Marked & ::Marked::Validated)", entry.establishes_consts[:value].to_s
+  end
+
+  def test_establishes_from_an_explicit_self_read_of_the_attribute_being_set
+    entries = infer_cr_for(<<~RUBY)
+      class MarkedHost
+        def value=(v)
+          super(v)
+          self.other = self.value.name
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :value= }
+    refute_nil entry, "expected an entry for the setter"
+    assert_equal "::String", entry.establishes_consts[:other].to_s
+  end
+
+  def test_establishes_from_a_backing_ivar_read_of_the_attribute_being_set
+    entries = infer_cr_for(<<~RUBY)
+      class MarkedHost
+        def value=(v)
+          @value = v
+          self.other = @value.name
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :value= }
+    refute_nil entry, "expected an entry for the setter"
+    assert_equal "::String", entry.establishes_consts[:other].to_s
+  end
+
+  def test_no_establishes_from_own_attribute_read_without_writing_the_backing
+    # No `super(v)` and no `@value = v`, so nothing says the attribute holds the
+    # param — the read could be anything, and the establishment must be refused.
+    # This is the gate: it is what keeps the rule from asserting a fact the body
+    # never established.
+    entries = infer_cr_for(<<~RUBY)
+      class MarkedHost
+        def value=(v)
+          self.other = value.name
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :value= }
+    refute entry&.establishes_consts&.key?(:other),
+           "a read of the attribute proves nothing when the body never stored the param in it"
   end
 
   def test_infers_establishes_consts_from_instance_setter_override
