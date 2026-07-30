@@ -399,54 +399,6 @@ module Steep
         socket&.close
       end
 
-      # The typecheck workers are FORKED from this process, so they inherit its heap —
-      # and by the time they are, the two inference passes `#run` performs have left
-      # that heap large and fragmented. A fragmented heap is one the workers cannot
-      # share: each page holds a few live objects among the dead, so every worker's own
-      # GC dirties nearly all of them and copy-on-write turns nearly all of them
-      # private.
-      #
-      # Compacting first packs the live objects — the parsed RBS environment above all
-      # — into far fewer pages, which the workers then READ without copying. Measured
-      # on a ~1400-file project with 10 workers: 12.1 GiB of unique memory across the
-      # tree became 3.7 GiB, and the run got slightly faster for not swapping.
-      #
-      # Note this is the opposite of freeing the environment before forking: the
-      # workers WANT to inherit it. Forking from a lean master instead measured 6.4
-      # GiB, because then each worker loads its own private copy.
-      def compact_heap_before_fork
-        GC.start(full_mark: true, immediate_sweep: true)
-        GC.compact
-        malloc_trim
-      end
-
-      # Returns the freed pages to the OS. glibc-only and reached through Fiddle, so
-      # both the platform and the library are optional — the compaction above is what
-      # matters, and it has already happened.
-      def malloc_trim
-        return unless load_fiddle
-
-        libc = Fiddle.dlopen(nil)
-        Fiddle::Function.new(libc["malloc_trim"], [Fiddle::TYPE_SIZE_T], Fiddle::TYPE_INT).call(0)
-      rescue Fiddle::DLError
-        Steep.logger.debug { "malloc_trim is unavailable on this platform" }
-      end
-
-      # Fiddle stopped being a default gem in Ruby 4.0, where requiring it warns even
-      # when it does resolve. Neither the warning nor a failure is worth surfacing for
-      # an optional optimization, so keep both quiet.
-      def load_fiddle
-        verbose = $VERBOSE
-        $VERBOSE = nil
-        require "fiddle"
-        true
-      rescue LoadError
-        Steep.logger.debug { "Fiddle is unavailable; skipped returning freed pages to the OS" }
-        false
-      ensure
-        $VERBOSE = verbose
-      end
-
       def with_local_server(project)
         client_read, server_write = IO.pipe
         server_read, client_write = IO.pipe

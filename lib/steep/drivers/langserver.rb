@@ -40,6 +40,8 @@ module Steep
         infer_contracts(@project)
         infer_postconditions(@project)
 
+        compact_heap_before_fork
+
         interaction_worker = Server::WorkerProcess.start_worker(:interaction, name: "interaction", steepfile: project.steepfile_path, steep_command: jobs_option.steep_command)
         typecheck_workers = Server::WorkerProcess.start_typecheck_workers(steepfile: project.steepfile_path, args: [], steep_command: jobs_option.steep_command, count: jobs_option.jobs_count_value)
 
