@@ -171,21 +171,31 @@ module Steep
             }
           end
         end
-        unless entry.when_true_ivars.empty?
+        unless entry.when_true_ivars.empty? && entry.when_true_consts.empty?
           row["when_true"] = serialize_branch(
             ivars: entry.when_true_ivars,
-            self_type_string: entry.when_true_self_type_string
+            self_type_string: entry.when_true_self_type_string,
+            consts: entry.when_true_consts
           )
         end
         row
       end
 
-      def serialize_branch(ivars:, self_type_string:)
+      # `consts` are the constant attributes established on the truthy exit
+      # (felixefelip/steep#117 gap 3b), keyed by `Const.attr` like every other
+      # const fact. `Branch` does not parse them back yet — 3c consumes them
+      # in-process, from the same Runner pass that infers them — but they are
+      # written because a fact nobody can see is a fact nobody can check.
+      def serialize_branch(ivars:, self_type_string:, consts: {})
         branch = {
           "ivars" => ivars.sort_by { |k, _| k.to_s }.each_with_object({}) do |(name, type), hash|
             hash[name.to_s] = type.to_s
           end
         }
+        branch.delete("ivars") if ivars.empty?
+        unless consts.empty?
+          branch["consts"] = consts.sort.each_with_object({}) { |(path, type), hash| hash[path] = type.to_s }
+        end
         if self_type_string.is_a?(String) && !self_type_string.empty?
           branch["self"] = self_type_string
         end

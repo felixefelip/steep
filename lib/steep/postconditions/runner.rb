@@ -137,6 +137,14 @@ module Steep
         # what propagates upward is each callee's already-expanded set.
         close_const_establishments(resolved)
 
+        # felixefelip/steep#117 gap 3b: the same lift for the TRUTHY-exit edges.
+        # Runs AFTER the unconditional closure, so a clause calling a method that
+        # only establishes transitively still gets the fact — and needs no
+        # fixpoint of its own, since a truthy-exit fact is never lifted further
+        # (a caller invoking such a method unconditionally establishes nothing;
+        # it would have to test the result first).
+        lift_when_true_consts(resolved)
+
         # felixefelip/rbs_infer#71 (piece 1): gate the UNCONDITIONAL establishment
         # (`Const.attr =` proves a sibling non-nil for the rest of the frame) on a
         # confirmed delegation. An instance setter's `establishes_consts` fires at
@@ -275,6 +283,35 @@ module Steep
           end
 
           break unless changed
+        end
+      end
+
+      # felixefelip/steep#117 gap 3b. Resolves the calls a truthy-only clause
+      # makes against what those callees establish, so
+      #
+      #   def resume_session
+      #     if session = find_session_by_cookie
+      #       set_current_session session
+      #     end
+      #   end
+      #
+      # carries `Current.session` on its truthy exit. The clause containing a
+      # CALL rather than a write is the common case — which is why this needs
+      # 3a's closure to have run first, and why 3b is worth nothing without it.
+      #
+      # A fact the clause writes directly is never overwritten: it carries the
+      # written value's own type, the same precedence used throughout.
+      def lift_when_true_consts(resolved)
+        resolved.each_value do |entry|
+          entry.when_true_call_deps.each do |dep|
+            callee = resolved[dep] or next
+
+            callee.const_establishments.each do |path, type|
+              next if entry.when_true_consts.key?(path)
+
+              entry.when_true_consts[path] = type
+            end
+          end
         end
       end
 
