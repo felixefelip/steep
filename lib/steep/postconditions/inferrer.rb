@@ -992,6 +992,13 @@ module Steep
 
         method = node.children[1]
         return nil unless method.to_s.end_with?("=") && method != :==
+        # An indexed write is not an attribute write. `ENV["KEY"] = value` would
+        # key the path `ENV.[]`, which names no reader and asserts nothing about
+        # any particular key — a fact that cannot be true or false. `[]=` also
+        # takes two arguments, so `children[2]` below would be the KEY rather
+        # than the written value. `walk_attr_writes` excludes it for the same
+        # reason; only #117 gap 3b, reading inside a clause, ever reached one.
+        return nil if method == :[]=
 
         receiver = node.children[0]
         return nil unless receiver.is_a?(Parser::AST::Node) && receiver.type == :const

@@ -438,6 +438,7 @@ class PostconditionsInferrerTest < Minitest::Test
       def self.account: () -> Account?
       def self.banned: () -> Account?
       def self.instance: () -> Current
+      def self.[]=: (String, User) -> void
       def user=: (User?) -> void
       def author_name=: (String?) -> String?
     end
@@ -1319,6 +1320,25 @@ class PostconditionsInferrerTest < Minitest::Test
 
     entry = entries.find { |e| e.method_name == :resume }
     assert_equal "::User", entry&.when_true_consts&.[]("Current.user").to_s
+  end
+
+  def test_no_when_true_const_for_an_indexed_write
+    # `ENV["KEY"] = value` is not an attribute write. It surfaced here because
+    # gap 3b is the first collector to read inside a clause, and it keyed the
+    # meaningless path `ENV.[]` in a real project.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def resume
+          if current_user
+            Current["key"] = proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :resume }
+    refute entry&.when_true_consts&.keys&.any? { |path| path.include?("[]") },
+           "an indexed write must not key a const attribute path"
   end
 
   def test_collects_a_when_true_call_dep
