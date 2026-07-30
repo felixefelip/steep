@@ -158,6 +158,81 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   RUBY
 
+  CONST_LIFT_RBS = <<~RBS
+    class CEThing
+    end
+
+    class CEStore
+      def self.thing: () -> CEThing?
+      def self.thing=: (CEThing?) -> CEThing?
+    end
+
+    class CEController
+      def thing: () -> CEThing
+      def write_it: () -> bool
+      def one_hop: () -> void
+      def two_hops: () -> void
+      def assigned_hop: () -> void
+      def branch_hop: () -> void
+    end
+  RBS
+
+  # felixefelip/steep#117 gap 3a: an establishment is lifted into the CALLER over
+  # every-exit call edges, so it no longer stops at the frame holding the write.
+  # `branch_hop` is the boundary — and the shape that motivated the gap, a
+  # `resume_session` whose establisher is called inside an `if` establishes on
+  # some exits only.
+  CONST_LIFT_RUBY = <<~RUBY
+    class CEController
+      def write_it
+        CEStore.thing = thing
+        true
+      end
+
+      def one_hop
+        write_it
+      end
+
+      def two_hops
+        one_hop
+      end
+
+      def assigned_hop
+        ok = write_it
+      end
+
+      def branch_hop
+        if thing
+          write_it
+        end
+      end
+    end
+  RUBY
+
+  def test_runner_lifts_const_establishments_into_callers
+    in_tmpdir do
+      write("sig/ce.rbs", CONST_LIFT_RBS)
+      write("app/ce.rb", CONST_LIFT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      # The direct write (#100).
+      assert_equal "::CEThing", by_method[:write_it].const_establishments["CEStore.thing"].to_s
+      # One hop: the caller establishes what its callee does.
+      assert_equal "::CEThing", by_method[:one_hop].const_establishments["CEStore.thing"].to_s
+      # Two hops — the fixpoint, not a single lookahead.
+      assert_equal "::CEThing", by_method[:two_hops].const_establishments["CEStore.thing"].to_s
+      # The call is the value of an assignment, still on every exit.
+      assert_equal "::CEThing", by_method[:assigned_hop].const_establishments["CEStore.thing"].to_s
+      # A call inside an `if` runs on some exits only, so it lifts NOTHING — and
+      # the entry is dropped entirely, having no other fact to carry.
+      refute by_method[:branch_hop]&.const_establishments&.key?("CEStore.thing"),
+             "a conditional call must not establish unconditionally"
+    end
+  end
+
   def test_runner_closes_may_write_over_self_call_graph
     in_tmpdir do
       write("sig/mw.rbs", MAY_WRITE_RBS)
