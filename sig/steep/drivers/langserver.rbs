@@ -17,6 +17,9 @@ module Steep
 
       attr_accessor refork: bool
 
+      # Whether to re-infer the sidecars at startup. Off starts from the stores on disk.
+      attr_accessor inference: bool
+
       include Utils::DriverHelper
 
       def initialize: (stdout: untyped, stderr: untyped, stdin: untyped) -> void
