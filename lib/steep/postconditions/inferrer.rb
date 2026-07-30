@@ -52,6 +52,7 @@ module Steep
           may_write = collect_ivar_writes(def_node, class_name, singleton: singleton)
           self_call_deps = collect_self_call_deps(def_node)
           unconditional_call_deps = collect_unconditional_call_deps(def_node)
+          when_true_consts, when_true_call_deps = collect_when_true_facts(def_node)
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
           conditional_const_returns = collect_conditional_const_returns(def_node)
@@ -89,6 +90,8 @@ module Steep
             may_write_ivars: may_write,
             self_call_deps: self_call_deps,
             unconditional_call_deps: unconditional_call_deps,
+            when_true_consts: when_true_consts,
+            when_true_call_deps: when_true_call_deps,
             returns_ivar: returns_ivar,
             conditional_returns: conditional_returns,
             conditional_const_returns: conditional_const_returns,
@@ -418,19 +421,94 @@ module Steep
         deps = Set.new #: Set[String]
         each_statement(body) do |stmt|
           send_node = unconditional_send(stmt) or next
-
-          call = @typing.call_of(node: send_node) rescue nil
-          next unless call.is_a?(TypeInference::MethodCall::Typed)
-
-          call.method_decls.each do |decl|
-            method_name = decl.method_name
-            next unless method_name.respond_to?(:type_name)
-
-            owner = method_name.type_name.to_s.sub(/\A::/, "")
-            deps << "#{owner}##{method_name.method_name}"
-          end
+          collect_call_keys(send_node, deps)
         end
         deps
+      end
+
+      # The `"Owner#method"` keys a call resolves to, added to `deps`. The owner
+      # comes from the typed call, so an inherited method resolves to the class
+      # that declares it — which is how the entry store is keyed.
+      def collect_call_keys(send_node, deps)
+        call = @typing.call_of(node: send_node) rescue nil
+        return unless call.is_a?(TypeInference::MethodCall::Typed)
+
+        call.method_decls.each do |decl|
+          method_name = decl.method_name
+          next unless method_name.respond_to?(:type_name)
+
+          owner = method_name.type_name.to_s.sub(/\A::/, "")
+          deps << "#{owner}##{method_name.method_name}"
+        end
+      end
+
+      # felixefelip/steep#117 gap 3b. What the method establishes on its TRUTHY
+      # exit only — the const counterpart of `when_true_ivars`.
+      #
+      #   def resume_session
+      #     if session = find_session_by_cookie
+      #       set_current_session session      # establishes Current.session
+      #     end
+      #   end
+      #
+      # Returns `[writes, call_deps]`: the constant writes the clause performs at
+      # its own top level, and the calls it makes there — the latter being the
+      # common case, since the establishing write usually lives one frame down
+      # (the Runner resolves them against what those callees establish).
+      #
+      # Soundness does NOT require the clause's value to be truthy. What matters
+      # is that every OTHER way out is falsy, so a truthy return can only have
+      # come from the clause. Hence the three requirements:
+      #
+      #   * the `if` is the method's LAST statement — anything after it decides
+      #     the return value instead;
+      #   * it has exactly ONE clause. `if c; A; end` and `unless c; A; end` both
+      #     qualify (the missing branch is an implicit `nil`); an `else` gives a
+      #     second way to produce a truthy value;
+      #   * the method contains no `return`, which would be a third.
+      def collect_when_true_facts(def_node)
+        body = def_node.children[2]
+        return [{}, Set[]] unless body
+        return [{}, Set[]] if contains_return?(body)
+
+        clause = truthy_only_clause(body) or return [{}, Set[]]
+
+        writes = {} #: Hash[String, untyped]
+        deps = Set.new #: Set[String]
+
+        each_statement(clause) do |stmt|
+          if (write = const_attr_write(stmt))
+            const_path, rhs = write
+            next if writes.key?(const_path)
+
+            type = nonnil_value_type(rhs) or next
+            writes[const_path] = type
+          elsif (send_node = unconditional_send(stmt))
+            collect_call_keys(send_node, deps)
+          end
+        end
+
+        [writes, deps]
+      end
+
+      # The single clause of a body whose last statement is a one-armed `if`, or
+      # nil when the body has another way to return truthy.
+      def truthy_only_clause(body)
+        last = nil #: Parser::AST::Node?
+        each_statement(body) { |stmt, is_last| last = stmt if is_last }
+        return nil unless last.is_a?(Parser::AST::Node) && last.type == :if
+
+        _cond, true_clause, false_clause = last.children
+        return nil unless true_clause.nil? ^ false_clause.nil?
+
+        true_clause || false_clause
+      end
+
+      def contains_return?(node)
+        return false unless node.is_a?(Parser::AST::Node)
+        return true if node.type == :return
+
+        node.children.any? { |child| contains_return?(child) }
       end
 
       # The call a top-level statement makes unconditionally: the statement IS the
@@ -914,6 +992,13 @@ module Steep
 
         method = node.children[1]
         return nil unless method.to_s.end_with?("=") && method != :==
+        # An indexed write is not an attribute write. `ENV["KEY"] = value` would
+        # key the path `ENV.[]`, which names no reader and asserts nothing about
+        # any particular key — a fact that cannot be true or false. `[]=` also
+        # takes two arguments, so `children[2]` below would be the KEY rather
+        # than the written value. `walk_attr_writes` excludes it for the same
+        # reason; only #117 gap 3b, reading inside a clause, ever reached one.
+        return nil if method == :[]=
 
         receiver = node.children[0]
         return nil unless receiver.is_a?(Parser::AST::Node) && receiver.type == :const
@@ -1282,6 +1367,7 @@ module Steep
       # Runner closes over to compute the transitive part; they are not
       # serialized.
       attr_reader :may_write_ivars, :self_call_deps, :unconditional_call_deps
+      attr_reader :when_true_consts, :when_true_call_deps
       # felixefelip/steep#68 item 2. `returns_ivar`: this method transparently
       # reads that ivar (halt-check getter). `conditional_returns`:
       # { method => { gate_ivar:, type: } } self-methods proven non-nil on the
@@ -1299,7 +1385,7 @@ module Steep
       # unconditional sibling of `conditional_const_returns`.
       attr_reader :const_establishments
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -1311,6 +1397,8 @@ module Steep
         @may_write_ivars = may_write_ivars
         @self_call_deps = self_call_deps
         @unconditional_call_deps = unconditional_call_deps
+        @when_true_consts = when_true_consts
+        @when_true_call_deps = when_true_call_deps
         @returns_ivar = returns_ivar
         @conditional_returns = conditional_returns
         @conditional_const_returns = conditional_const_returns
@@ -1328,6 +1416,7 @@ module Steep
           returns_establishes: returns_establishes,
           may_write_ivars: ivars, self_call_deps: self_call_deps,
           unconditional_call_deps: unconditional_call_deps,
+          when_true_consts: when_true_consts, when_true_call_deps: when_true_call_deps,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: establishes_consts, const_establishments: const_establishments,
@@ -1345,6 +1434,7 @@ module Steep
           returns_establishes: returns_establishes,
           may_write_ivars: may_write_ivars, self_call_deps: self_call_deps,
           unconditional_call_deps: unconditional_call_deps,
+          when_true_consts: when_true_consts, when_true_call_deps: when_true_call_deps,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: consts, const_establishments: const_establishments,
@@ -1358,7 +1448,8 @@ module Steep
       # gate an instance setter's establishments, not a serialized fact — so it
       # does NOT keep an entry alive, but a surviving `establishes_consts` does.
       def empty?
-        ivars.empty? && when_true_ivars.empty? && returns_establishes.empty? &&
+        ivars.empty? && when_true_ivars.empty? && when_true_consts.empty? &&
+          returns_establishes.empty? &&
           may_write_ivars.empty? && returns_ivar.nil? && conditional_returns.empty? &&
           conditional_const_returns.empty? && establishes_consts.empty? &&
           const_establishments.empty?

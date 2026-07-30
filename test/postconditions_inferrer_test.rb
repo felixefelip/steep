@@ -438,6 +438,7 @@ class PostconditionsInferrerTest < Minitest::Test
       def self.account: () -> Account?
       def self.banned: () -> Account?
       def self.instance: () -> Current
+      def self.[]=: (String, User) -> void
       def user=: (User?) -> void
       def author_name=: (String?) -> String?
     end
@@ -1281,6 +1282,135 @@ class PostconditionsInferrerTest < Minitest::Test
     entry = entries.find { |e| e.method_name == :value= }
     refute entry&.establishes_consts&.key?(:other),
            "a read of the attribute proves nothing when the body never stored the param in it"
+  end
+
+  # felixefelip/steep#117 gap 3b. A one-armed `if` as the last statement: a truthy
+  # return can only have come from the clause, since every other way out is the
+  # implicit `nil`.
+  def test_collects_a_when_true_const_write
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def resume
+          if current_user
+            Current.user = proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :resume }
+    refute_nil entry
+    assert_equal "::User", entry.when_true_consts["Current.user"].to_s
+    # NOT unconditional — the clause may not run.
+    refute entry.const_establishments.key?("Current.user")
+  end
+
+  def test_collects_a_when_true_const_write_from_an_unless
+    # `unless c; A; end` is the same shape with the clauses swapped: the missing
+    # branch is still an implicit `nil`.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def resume
+          unless current_user
+            Current.user = proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :resume }
+    assert_equal "::User", entry&.when_true_consts&.[]("Current.user").to_s
+  end
+
+  def test_no_when_true_const_for_an_indexed_write
+    # `ENV["KEY"] = value` is not an attribute write. It surfaced here because
+    # gap 3b is the first collector to read inside a clause, and it keyed the
+    # meaningless path `ENV.[]` in a real project.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def resume
+          if current_user
+            Current["key"] = proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :resume }
+    refute entry&.when_true_consts&.keys&.any? { |path| path.include?("[]") },
+           "an indexed write must not key a const attribute path"
+  end
+
+  def test_collects_a_when_true_call_dep
+    # The clause holds a CALL, which is the common case — the Runner resolves it
+    # against what the callee establishes.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def resume
+          if current_user
+            set_current_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :resume }
+    refute_nil entry
+    assert_includes entry.when_true_call_deps, "CRGuardHost#set_current_user"
+  end
+
+  def test_no_when_true_const_when_the_if_has_an_else
+    # The `else` is a second way to return truthy, so a truthy result no longer
+    # implies the clause ran.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def resume
+          if current_user
+            Current.user = proven_user
+          else
+            proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :resume }
+    refute entry&.when_true_consts&.key?("Current.user")
+  end
+
+  def test_no_when_true_const_when_the_method_can_return_early
+    # An early `return` is a third way out, and it can carry a truthy value.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def resume
+          return proven_user if current_user
+
+          if current_user
+            Current.user = proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :resume }
+    refute entry&.when_true_consts&.key?("Current.user")
+  end
+
+  def test_no_when_true_const_when_the_if_is_not_the_last_statement
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def resume
+          if current_user
+            Current.user = proven_user
+          end
+
+          proven_user
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :resume }
+    refute entry&.when_true_consts&.key?("Current.user")
   end
 
   # felixefelip/steep#117 gap 3a. The every-exit call edges the Runner follows to

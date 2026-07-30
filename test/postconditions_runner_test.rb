@@ -233,6 +233,80 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  # felixefelip/steep#117 gap 3b, in the shape that motivated it: the clause holds
+  # a CALL, so the fact only appears once 3a's closure has given the callee its
+  # establishment. `always_hop` is the contrast — an unconditional call is an
+  # unconditional establishment, not a truthy-exit one.
+  WHEN_TRUE_RUBY = <<~RUBY
+    class CEController
+      def write_it
+        CEStore.thing = thing
+        true
+      end
+
+      def truthy_hop
+        if thing
+          write_it
+        end
+      end
+
+      def always_hop
+        write_it
+      end
+
+      def with_else
+        if thing
+          write_it
+        else
+          thing
+        end
+      end
+    end
+  RUBY
+
+  WHEN_TRUE_RBS = <<~RBS
+    class CEThing
+    end
+
+    class CEStore
+      def self.thing: () -> CEThing?
+      def self.thing=: (CEThing?) -> CEThing?
+    end
+
+    class CEController
+      def thing: () -> CEThing
+      def write_it: () -> bool
+      def truthy_hop: () -> void
+      def always_hop: () -> void
+      def with_else: () -> void
+    end
+  RBS
+
+  def test_runner_lifts_when_true_consts_from_a_truthy_only_clause
+    in_tmpdir do
+      write("sig/wt.rbs", WHEN_TRUE_RBS)
+      write("app/wt.rb", WHEN_TRUE_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      # The clause's call resolves to what the callee establishes.
+      assert_equal "::CEThing", by_method[:truthy_hop].when_true_consts["CEStore.thing"].to_s
+      # …and it is NOT claimed unconditionally, which is the whole point.
+      refute by_method[:truthy_hop].const_establishments.key?("CEStore.thing")
+
+      # An unconditional call is an unconditional establishment (3a), and has
+      # nothing to say about the truthy exit specifically.
+      assert_equal "::CEThing", by_method[:always_hop].const_establishments["CEStore.thing"].to_s
+      assert_empty by_method[:always_hop].when_true_consts
+
+      # With an `else`, a truthy return no longer implies the clause ran.
+      refute by_method[:with_else]&.when_true_consts&.key?("CEStore.thing"),
+             "an else clause is a second way to return truthy"
+    end
+  end
+
   def test_runner_closes_may_write_over_self_call_graph
     in_tmpdir do
       write("sig/mw.rbs", MAY_WRITE_RBS)
