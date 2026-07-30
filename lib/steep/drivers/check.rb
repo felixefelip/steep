@@ -409,6 +409,8 @@ module Steep
         server_reader = LSP::Transport::Io::Reader.new(server_read)
         server_writer = LSP::Transport::Io::Writer.new(server_write)
 
+        compact_heap_before_fork
+
         typecheck_workers = Server::WorkerProcess.start_typecheck_workers(
           steepfile: project.steepfile_path,
           args: command_line_patterns,

@@ -33,6 +33,15 @@ module Steep
 
         def keep_diagnostic?: (untyped diagnostic, severity_level: Diagnostic::LSPFormatter::severity) -> bool
 
+        # Compacts this process's heap so the workers forked from it can share the
+        # pages instead of copying them. Call immediately before forking.
+        def compact_heap_before_fork: () -> void
+
+        def malloc_trim: () -> void
+
+        # Whether Fiddle could be loaded, quietly.
+        def load_fiddle: () -> bool
+
         DEFAULT_CLI_LSP_INITIALIZE_PARAMS: Hash[Symbol, untyped]
       end
     end
