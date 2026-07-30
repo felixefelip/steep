@@ -37,8 +37,18 @@ module Steep
       def run
         @project = load_config()
 
-        infer_contracts(@project)
+        # Postconditions first, then the reload, then contracts — the same order and the
+        # same reason as `Drivers::Check#run`: contract enforcement observes call sites
+        # whose satisfaction can depend on a postcondition establishment (`x = build`
+        # importing `x.attr` non-nil so a later `x.save` satisfies `requires self.attr`),
+        # so it has to see the freshly written store.
+        #
+        # Inferring contracts FIRST, as this did, read the store from the previous run,
+        # which let the editor's diagnostics disagree with `steep check`'s on exactly
+        # those call sites.
         infer_postconditions(@project)
+        @project.reload_postconditions!
+        infer_contracts(@project)
 
         compact_heap_before_fork
 
