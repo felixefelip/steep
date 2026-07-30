@@ -376,6 +376,9 @@ Options:
 BANNER
           handle_steepfile_option(opts, command)
           opts.on("--refork") { command.refork = true }
+          opts.on("--[no-]inference", "Infer the contract/postcondition sidecars at startup (default: true). `--no-inference` starts from the stores already on disk, answering in seconds instead of minutes.") do |value|
+            command.inference = value
+          end
           handle_jobs_option command.jobs_option, opts
           handle_logging_options opts
         end.parse!(argv)

@@ -10,6 +10,14 @@ module Steep
       attr_reader :jobs_option
       attr_accessor :refork
 
+      # Whether to re-infer the contract/postcondition sidecars at startup.
+      #
+      # On by default, which is what a first run needs. Off is for an editor: the
+      # sidecars are project output, written by `steep check` and normally committed, so
+      # re-deriving them on every window open buys a fresher store at the price of
+      # answering nothing at all for minutes (felixefelip/steep#114).
+      attr_accessor :inference
+
       include Utils::DriverHelper
 
       def initialize(stdout:, stderr:, stdin:)
@@ -20,6 +28,7 @@ module Steep
         @type_check_queue = Queue.new
         @jobs_option = Utils::JobsOption.new(jobs_count_modifier: -1)
         @refork = false
+        @inference = true
       end
 
       def writer
@@ -37,18 +46,22 @@ module Steep
       def run
         @project = load_config()
 
-        # Postconditions first, then the reload, then contracts — the same order and the
-        # same reason as `Drivers::Check#run`: contract enforcement observes call sites
-        # whose satisfaction can depend on a postcondition establishment (`x = build`
-        # importing `x.attr` non-nil so a later `x.save` satisfies `requires self.attr`),
-        # so it has to see the freshly written store.
-        #
-        # Inferring contracts FIRST, as this did, read the store from the previous run,
-        # which let the editor's diagnostics disagree with `steep check`'s on exactly
-        # those call sites.
-        infer_postconditions(@project)
-        @project.reload_postconditions!
-        infer_contracts(@project)
+        if inference
+          # Postconditions first, then the reload, then contracts — the same order and
+          # the same reason as `Drivers::Check#run`: contract enforcement observes call
+          # sites whose satisfaction can depend on a postcondition establishment
+          # (`x = build` importing `x.attr` non-nil so a later `x.save` satisfies
+          # `requires self.attr`), so it has to see the freshly written store.
+          #
+          # Inferring contracts FIRST, as this did, read the store from the previous
+          # run, which let the editor's diagnostics disagree with `steep check`'s on
+          # exactly those call sites.
+          infer_postconditions(@project)
+          @project.reload_postconditions!
+          infer_contracts(@project)
+        else
+          Steep.logger.info { "Skipping sidecar inference; using the stores already on disk" }
+        end
 
         compact_heap_before_fork
 
