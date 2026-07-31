@@ -404,6 +404,33 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  # A method defined in two places — a reopen, a concern and its host, a sidecar
+  # modelling app code — merges into one entry. The fields added by #119, #120
+  # and #122 were left out of that merge, which did not keep the first entry's:
+  # it reset them to empty, so the facts vanished exactly when a second
+  # definition existed.
+  def test_runner_keeps_the_new_fact_fields_when_a_method_is_defined_twice
+    in_tmpdir do
+      write("sig/dj.rbs", DISJ_RBS.sub("class DJController\n", "class DJController\n      @scratch: Integer?\n"))
+      write("app/dj.rb", DISJ_RUBY)
+      write("app/dj_reopen.rb", <<~RUBY)
+        class DJController
+          def truthy_only
+            @scratch = 1
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      assert_equal ["DJStore.thing"], by_method[:truthy_only].when_true_consts.keys
+      # And the chain that reads them is unaffected by the second definition.
+      refute_nil by_method[:run].conditional_const_returns["DJStore.thing"]
+    end
+  end
+
   def test_runner_closes_may_write_over_self_call_graph
     in_tmpdir do
       write("sig/mw.rbs", MAY_WRITE_RBS)

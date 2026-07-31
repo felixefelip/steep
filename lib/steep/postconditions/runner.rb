@@ -829,6 +829,15 @@ module Steep
               returns_establishes: merged_establishes,
               may_write_ivars: existing.may_write_ivars | entry.may_write_ivars,
               self_call_deps: existing.self_call_deps | entry.self_call_deps,
+              # Same union/merge as their siblings above. Omitting them did not
+              # keep the first entry's — it silently reset them to empty, so a
+              # method defined in two places (a reopen, a concern and its host,
+              # a sidecar modelling app code) lost every fact #119, #120 and
+              # #122 infer.
+              unconditional_call_deps: existing.unconditional_call_deps | entry.unconditional_call_deps,
+              when_true_consts: existing.when_true_consts.merge(entry.when_true_consts),
+              when_true_call_deps: existing.when_true_call_deps | entry.when_true_call_deps,
+              disjunction_chains: existing.disjunction_chains | entry.disjunction_chains,
               returns_ivar: existing.returns_ivar || entry.returns_ivar,
               conditional_returns: existing.conditional_returns.merge(entry.conditional_returns),
               conditional_const_returns: existing.conditional_const_returns.merge(entry.conditional_const_returns),
