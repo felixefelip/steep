@@ -307,6 +307,103 @@ class PostconditionsRunnerTest < Minitest::Test
     end
   end
 
+  DISJ_RBS = <<~RBS
+    class DJThing
+    end
+
+    class DJStore
+      def self.thing: () -> DJThing?
+      def self.thing=: (DJThing?) -> DJThing?
+    end
+
+    class DJController
+      @halted: bool
+
+      def thing: () -> DJThing
+      def flag?: () -> bool
+      def run: () -> void
+      def loose: () -> void
+      def truthy_only: () -> void
+      def or_halt: () -> void
+      def give_up: () -> void
+      def halt: () -> void
+    end
+  RBS
+
+  # felixefelip/steep#117 gap 3c. `a || b || c` where `c` always halts: an exit
+  # that did not halt means `a` or `b` answered, so what BOTH establish holds.
+  # `truthy_only` establishes on its truthy exit (3b), `or_halt` on its unhalted
+  # exit (the two-clause guard) — different routes, same conclusion.
+  DISJ_RUBY = <<~RUBY
+    class DJController
+      def run
+        truthy_only || or_halt || give_up
+      end
+
+      def loose
+        truthy_only || or_halt || flag?
+      end
+
+      def truthy_only
+        if flag?
+          DJStore.thing = thing
+        end
+      end
+
+      def or_halt
+        if flag?
+          DJStore.thing = thing
+        else
+          halt
+        end
+      end
+
+      def give_up
+        halt
+      end
+
+      def halt
+        @halted = true
+      end
+    end
+  RUBY
+
+  def test_runner_proves_a_const_across_a_disjunction_whose_last_operand_halts
+    in_tmpdir do
+      write("sig/dj.rbs", DISJ_RBS)
+      write("app/dj.rb", DISJ_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      spec = by_method[:run].conditional_const_returns["DJStore.thing"]
+      refute_nil spec, "expected the chain to prove the const on its unhalted exit"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::DJThing", spec[:type].to_s
+
+      # `loose` ends in `flag?`, which halts nothing: every operand returning
+      # falsy is then an exit that established nothing, so the chain proves
+      # nothing.
+      refute by_method[:loose]&.conditional_const_returns&.key?("DJStore.thing"),
+             "a chain whose last operand does not halt proves nothing"
+    end
+  end
+
+  def test_runner_drops_a_disjunction_fact_when_one_operand_establishes_nothing
+    in_tmpdir do
+      write("sig/dj.rbs", DISJ_RBS)
+      write("app/dj.rb", DISJ_RUBY.sub("truthy_only || or_halt || give_up", "truthy_only || flag? || give_up"))
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      # It is an INTERSECTION: `flag?` answering means nothing was established.
+      refute by_method[:run]&.conditional_const_returns&.key?("DJStore.thing")
+    end
+  end
+
   def test_runner_closes_may_write_over_self_call_graph
     in_tmpdir do
       write("sig/mw.rbs", MAY_WRITE_RBS)

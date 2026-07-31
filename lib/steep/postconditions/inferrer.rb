@@ -53,6 +53,7 @@ module Steep
           self_call_deps = collect_self_call_deps(def_node)
           unconditional_call_deps = collect_unconditional_call_deps(def_node)
           when_true_consts, when_true_call_deps = collect_when_true_facts(def_node)
+          disjunction_chains = collect_disjunction_operands(def_node)
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
           conditional_const_returns = collect_conditional_const_returns(def_node)
@@ -92,6 +93,7 @@ module Steep
             unconditional_call_deps: unconditional_call_deps,
             when_true_consts: when_true_consts,
             when_true_call_deps: when_true_call_deps,
+            disjunction_chains: disjunction_chains,
             returns_ivar: returns_ivar,
             conditional_returns: conditional_returns,
             conditional_const_returns: conditional_const_returns,
@@ -1029,6 +1031,50 @@ module Steep
         end
       end
 
+      # felixefelip/steep#117 gap 3c. The operands of a `||` chain written as a
+      # top-level statement, in order, each as the `"Owner#method"` keys it
+      # resolves to:
+      #
+      #   def require_authentication
+      #     resume_session || authenticate_by_bearer_token || request_authentication
+      #   end
+      #
+      # The Runner turns these into a fact: if the LAST operand always halts,
+      # then an exit that did not halt means an earlier operand returned truthy,
+      # so whatever they all establish on such an exit holds. The last operand
+      # carrying the halt is not a detail — without it, every operand returning
+      # falsy is an exit that halted nothing and established nothing.
+      #
+      # Only plain sends qualify. An operand that is itself an expression
+      # (`a && b`, a literal, an assignment) names no method to look facts up on.
+      def collect_disjunction_operands(def_node)
+        body = def_node.children[2]
+        return [] unless body
+
+        chains = [] #: Array[Array[Set[String]]]
+        each_statement(body) do |stmt|
+          next unless stmt.is_a?(Parser::AST::Node) && stmt.type == :or
+
+          operands = flatten_disjunction(stmt).map do |operand|
+            next nil unless operand.is_a?(Parser::AST::Node) && operand.type == :send
+
+            keys = Set.new #: Set[String]
+            collect_call_keys(operand, keys)
+            keys.empty? ? nil : keys
+          end
+          chains << operands if operands.size >= 2 && !operands.include?(nil)
+        end
+        chains
+      end
+
+      # `(or (or a b) c)` -> [a, b, c].
+      def flatten_disjunction(node)
+        return [node] unless node.is_a?(Parser::AST::Node) && node.type == :or
+
+        left, right = node.children
+        flatten_disjunction(left) + flatten_disjunction(right)
+      end
+
       def method_halt_gate(body)
         each_statement(body) do |stmt, terminal|
           next unless stmt.is_a?(Parser::AST::Node) && stmt.type == :if
@@ -1429,7 +1475,7 @@ module Steep
       # Runner closes over to compute the transitive part; they are not
       # serialized.
       attr_reader :may_write_ivars, :self_call_deps, :unconditional_call_deps
-      attr_reader :when_true_consts, :when_true_call_deps
+      attr_reader :when_true_consts, :when_true_call_deps, :disjunction_chains
       # felixefelip/steep#68 item 2. `returns_ivar`: this method transparently
       # reads that ivar (halt-check getter). `conditional_returns`:
       # { method => { gate_ivar:, type: } } self-methods proven non-nil on the
@@ -1447,7 +1493,7 @@ module Steep
       # unconditional sibling of `conditional_const_returns`.
       attr_reader :const_establishments
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -1461,6 +1507,7 @@ module Steep
         @unconditional_call_deps = unconditional_call_deps
         @when_true_consts = when_true_consts
         @when_true_call_deps = when_true_call_deps
+        @disjunction_chains = disjunction_chains
         @returns_ivar = returns_ivar
         @conditional_returns = conditional_returns
         @conditional_const_returns = conditional_const_returns
@@ -1479,6 +1526,7 @@ module Steep
           may_write_ivars: ivars, self_call_deps: self_call_deps,
           unconditional_call_deps: unconditional_call_deps,
           when_true_consts: when_true_consts, when_true_call_deps: when_true_call_deps,
+          disjunction_chains: disjunction_chains,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: establishes_consts, const_establishments: const_establishments,
@@ -1497,6 +1545,7 @@ module Steep
           may_write_ivars: may_write_ivars, self_call_deps: self_call_deps,
           unconditional_call_deps: unconditional_call_deps,
           when_true_consts: when_true_consts, when_true_call_deps: when_true_call_deps,
+          disjunction_chains: disjunction_chains,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: consts, const_establishments: const_establishments,

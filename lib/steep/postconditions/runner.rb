@@ -145,6 +145,12 @@ module Steep
         # it would have to test the result first).
         lift_when_true_consts(resolved)
 
+        # felixefelip/steep#117 gap 3c: what a `||` chain of handlers proves on
+        # the exit that did not halt. Runs last of the const passes, so each
+        # operand's facts are already complete — including the ones 3a and 3b
+        # lifted into it.
+        apply_disjunction_facts(resolved)
+
         # felixefelip/rbs_infer#71 (piece 1): gate the UNCONDITIONAL establishment
         # (`Const.attr =` proves a sibling non-nil for the rest of the frame) on a
         # confirmed delegation. An instance setter's `establishes_consts` fires at
@@ -313,6 +319,84 @@ module Steep
             end
           end
         end
+      end
+
+      # felixefelip/steep#117 gap 3c. A `||` chain of handlers:
+      #
+      #   def require_authentication
+      #     resume_session || authenticate_by_bearer_token || request_authentication
+      #   end
+      #
+      # If the LAST operand always halts, then an exit that did NOT halt means an
+      # earlier operand returned truthy — so whatever ALL of them establish on
+      # such an exit holds for the chain. The fact is halt-gated, like every
+      # other fact about an unhalted exit, and lands in the same slot.
+      #
+      # The last operand's halt is what makes this sound rather than plausible:
+      # without it, every operand returning falsy is an exit that halted nothing
+      # and established nothing, and the fact would be a lie on that path.
+      #
+      # It is an INTERSECTION because the chain does not say which operand
+      # answered. One operand with nothing to offer empties it, which is the
+      # correct answer and not a limitation to work around.
+      def apply_disjunction_facts(resolved)
+        resolved.each_value do |entry|
+          entry.disjunction_chains.each do |operands|
+            *earlier, last = operands
+
+            gate_ivar = always_halting_ivar(last, resolved) or next
+
+            per_operand = earlier.map { |keys| unhalted_truthy_facts(keys, resolved, gate_ivar) }
+            next if per_operand.empty? || per_operand.any?(&:empty?)
+
+            common = per_operand.reduce do |acc, facts|
+              acc.select { |path, spec| facts[path] && facts[path][:type].to_s == spec[:type].to_s }
+            end
+
+            common.each do |path, spec|
+              next if entry.conditional_const_returns.key?(path)
+
+              entry.conditional_const_returns[path] = { gate_ivar: gate_ivar, type: spec[:type] }
+            end
+          end
+        end
+      end
+
+      # The ivar an operand ALWAYS sets truthy, i.e. the one that says it halted
+      # — directly (`def halt; @halted = true; end`, an unconditional ivar
+      # refinement to a truthy literal) or through the every-exit calls it makes
+      # (`def deny; halt; end`). nil when nothing proves it always halts, which
+      # is the conservative answer: the chain then proves nothing.
+      def always_halting_ivar(keys, resolved, seen = Set.new)
+        keys.each do |key|
+          next unless seen.add?(key)
+
+          entry = resolved[key] or next
+          entry.ivars.each { |name, type| return name if type.to_s == "true" }
+
+          found = always_halting_ivar(entry.unconditional_call_deps, resolved, seen)
+          return found if found
+        end
+        nil
+      end
+
+      # What an operand establishes on an exit that is both truthy and unhalted:
+      # what it always establishes, what it establishes on its truthy exit (3b),
+      # and what it establishes on its unhalted exit under the SAME gate.
+      def unhalted_truthy_facts(keys, resolved, gate_ivar)
+        facts = {} #: Hash[String, untyped]
+        keys.each do |key|
+          entry = resolved[key] or next
+
+          entry.const_establishments.each { |path, type| facts[path] ||= { type: type } }
+          entry.when_true_consts.each { |path, type| facts[path] ||= { type: type } }
+          entry.conditional_const_returns.each do |path, spec|
+            next unless spec[:gate_ivar] == gate_ivar
+
+            facts[path] ||= { type: spec[:type] }
+          end
+        end
+        facts
       end
 
       def infer_for_target(target)
