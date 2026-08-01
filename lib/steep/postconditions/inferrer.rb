@@ -639,6 +639,33 @@ module Steep
           end
         end
 
+        # felixefelip/rbs_infer#144. A two-clause `if` where one side ESTABLISHES
+        # and the other HALTS:
+        #
+        #   if token?
+        #     Current.identity = identity      # establishes
+        #   else
+        #     request_http_token_authentication # halts
+        #   end
+        #
+        # Leaving the method without having halted means the establishing clause
+        # ran — the same "unhalted exit" the gate above expresses, so it keys the
+        # same slot. No other collector here covers it: the one-armed guard shapes
+        # are `method_halt_gate`'s business, and `when_true_consts` refuses a
+        # two-clause `if` precisely because a truthy return no longer says which
+        # clause ran. A halt is what distinguishes the two branches, and that is
+        # what makes this provable where truthiness was not.
+        each_halting_alternative(body) do |establishing, gate|
+          each_statement(establishing) do |stmt|
+            write = const_attr_write(stmt) or next
+            const_path, rhs = write
+            next if result.key?(const_path)
+
+            type = nonnil_value_type(rhs) or next
+            result[const_path] = gate.merge(type: type)
+          end
+        end
+
         each_guard_fact(body) do |fact, gate|
           const_path = fact[:const_path] or next
           next if result.key?(const_path)
@@ -967,6 +994,41 @@ module Steep
       # The halt gate of a method: the gate of the first top-level guard-clause
       # that halts and returns. Independent of what the clause's condition tests
       # — item 3's write isn't in the clause, it just shares the exit gate.
+      # Yields `[establishing_clause, gate]` for every top-level two-clause `if`
+      # whose OTHER clause halts. Both polarities are tried, since nothing in the
+      # shape says which side is which — `if c; establish; else; halt; end` and
+      # its mirror read the same.
+      #
+      # The halting clause needs no `return`, unlike the one-armed guard: it IS
+      # the end of its branch, so falling out of it leaves the method with the
+      # gate set, and the caller's halt check is what stops there.
+      #
+      # `halting_gate` is deliberately loose — any self-send is a candidate — so
+      # a clause that merely logs would offer a gate too. That is filtered later
+      # rather than here: `Runner#resolve_gates!` drops a spec whose `gate_via`
+      # resolves to no ivar once the may-write closure is known, which is the
+      # same protection every other gate in this file relies on.
+      def each_halting_alternative(body)
+        each_statement(body) do |stmt|
+          next unless stmt.is_a?(Parser::AST::Node) && stmt.type == :if
+
+          _cond, true_clause, false_clause = stmt.children
+          next unless true_clause && false_clause
+
+          # Both pairings are offered, and the const writes decide which one is
+          # real: `halting_gate` answers for any self-send, so the establishing
+          # clause can look halting too (`Current.user = proven_user` calls
+          # `proven_user`). Committing to a polarity here picked the wrong clause
+          # whenever it did.
+          if (gate = halting_gate(false_clause))
+            yield true_clause, gate
+          end
+          if (gate = halting_gate(true_clause))
+            yield false_clause, gate
+          end
+        end
+      end
+
       def method_halt_gate(body)
         each_statement(body) do |stmt, terminal|
           next unless stmt.is_a?(Parser::AST::Node) && stmt.type == :if

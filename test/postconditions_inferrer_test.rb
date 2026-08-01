@@ -447,6 +447,7 @@ class PostconditionsInferrerTest < Minitest::Test
       @halted: bool
 
       def current_user: () -> User?
+      def flag?: () -> bool
       def redirect_to: () -> void
       def with_format: () ?{ (untyped) -> untyped } -> untyped
       def authenticate_user: () -> void
@@ -1282,6 +1283,85 @@ class PostconditionsInferrerTest < Minitest::Test
     entry = entries.find { |e| e.method_name == :value= }
     refute entry&.establishes_consts&.key?(:other),
            "a read of the attribute proves nothing when the body never stored the param in it"
+  end
+
+  # felixefelip/rbs_infer#144. A two-clause `if` where one side establishes and
+  # the other halts. Leaving without having halted means the establishing clause
+  # ran, so the fact keys the halt-gated slot — the same one a guard clause uses.
+  def test_collects_a_const_return_from_a_halting_alternative
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate
+          if current_user
+            Current.user = proven_user
+          else
+            @halted = true
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate }
+    refute_nil entry
+    spec = entry.conditional_const_returns["Current.user"]
+    refute_nil spec, "expected Current.user proven on the unhalted exit"
+    assert_equal :@halted, spec[:gate_ivar]
+    assert_equal "::User", spec[:type].to_s
+    # NOT unconditional: the halting branch establishes nothing.
+    refute entry.const_establishments.key?("Current.user")
+  end
+
+  def test_collects_a_const_return_when_the_halting_clause_comes_first
+    # Nothing in the shape says which side is which; the mirror reads the same.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate
+          if current_user
+            @halted = true
+          else
+            Current.user = proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate }
+    assert_equal :@halted, entry&.conditional_const_returns&.dig("Current.user", :gate_ivar)
+  end
+
+  def test_no_const_return_from_a_halting_alternative_writing_a_nilable_value
+    # The condition tests something else, so `current_user` is NOT narrowed at
+    # the write and may be nil — taking the establishing clause proves nothing.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate
+          if flag?
+            Current.user = current_user
+          else
+            @halted = true
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate }
+    refute entry&.conditional_const_returns&.key?("Current.user")
+  end
+
+  def test_no_const_return_from_a_one_armed_if_that_never_halts
+    # One clause, no halt anywhere: nothing distinguishes the exits.
+    entries = infer_cr_for(<<~RUBY)
+      class CRGuardHost
+        def authenticate
+          if current_user
+            Current.user = proven_user
+          end
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :authenticate }
+    refute entry&.conditional_const_returns&.key?("Current.user")
   end
 
   # felixefelip/steep#117 gap 3b. A one-armed `if` as the last statement: a truthy
