@@ -1881,8 +1881,21 @@ class PostconditionsRunnerTest < Minitest::Test
   # The chain below is written top-down on purpose: a single pass in definition
   # order would prove nothing.
   BT_RBS = <<~RBS
+    class BTUser
+    end
+
+    class BTRegistry
+      def self.user: () -> BTUser?
+      def self.user=: (BTUser?) -> BTUser?
+    end
+
     class BTBlocks
       @halted: bool
+
+      def from_gated: () -> untyped
+      def from_ungated: () -> untyped
+      def from_nothing: () -> untyped
+      def lookup: (String) -> BTUser?
 
       def top: () { (String) -> untyped } -> untyped
       def middle: () { (String) -> untyped } -> untyped
@@ -1930,6 +1943,34 @@ class PostconditionsRunnerTest < Minitest::Test
 
       def or_without_the_block(&login)
         middle(&login) || unrelated || deny
+      end
+
+      def from_gated
+        or_halt do |token|
+          if user = lookup(token)
+            BTRegistry.user = user
+          end
+        end
+      end
+
+      def from_ungated
+        direct do |token|
+          if user = lookup(token)
+            BTRegistry.user = user
+          end
+        end
+      end
+
+      def from_nothing
+        unrelated do |token|
+          if user = lookup(token)
+            BTRegistry.user = user
+          end
+        end
+      end
+
+      def lookup(token)
+        BTUser.new if token.empty?
       end
 
       def deny
@@ -2015,6 +2056,58 @@ class PostconditionsRunnerTest < Minitest::Test
       by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
 
       assert_nil by_method[:or_without_the_block]&.conditional_block_truthy
+    end
+  end
+
+  # felixefelip/rbs_infer#144 stage 3, the call site — what all of it was for.
+  # The write happens INSIDE the block, and the caller learns it only because
+  # the callee's answer is known to be its block's.
+  #
+  # The callee's fact decides the shape: `or_halt` proves it only of the exit
+  # that did not halt, so the caller's fact carries the same gate.
+  def test_runner_turns_what_a_block_established_into_a_fact_about_the_caller
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      spec = by_method[:from_gated].conditional_const_returns["BTRegistry.user"]
+      refute_nil spec, "expected the block's establishment to reach the caller"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::BTUser", spec[:type].to_s
+    end
+  end
+
+  # An UNGATED callee (`direct` simply calls the block) proves it of every
+  # truthy exit, so the caller's fact needs no halt check either.
+  def test_runner_needs_no_gate_when_the_callee_needs_none
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert_equal "::BTUser", by_method[:from_ungated].when_true_consts["BTRegistry.user"].to_s
+      refute by_method[:from_ungated].conditional_const_returns.key?("BTRegistry.user")
+    end
+  end
+
+  # `unrelated` never calls its block, so a truthy answer says nothing about it
+  # — and the block may not have run at all.
+  def test_runner_proves_nothing_from_a_block_the_callee_may_ignore
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      entry = by_method[:from_nothing]
+      refute entry&.when_true_consts&.key?("BTRegistry.user")
+      refute entry&.conditional_const_returns&.key?("BTRegistry.user")
     end
   end
 end

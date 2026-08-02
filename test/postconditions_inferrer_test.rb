@@ -28,6 +28,34 @@ class PostconditionsInferrerTest < Minitest::Test
       def set_default_name: () -> String
     end
 
+    class IUBlockUser
+    end
+
+    class IUBlockRegistry
+      def self.user: () -> IUBlockUser?
+      def self.user=: (IUBlockUser?) -> IUBlockUser?
+    end
+
+    class IUBlockSite
+      def from_token: () -> untyped
+      def with_token: () { (String) -> untyped } -> untyped
+      def lookup: (String) -> IUBlockUser?
+    end
+
+    class IUNested
+      def from_token: () -> untyped
+      def with_token: () { (String) -> untyped } -> untyped
+      def lookup: (String) -> IUNested::User?
+    end
+
+    class IUNested::User
+    end
+
+    class IUNested::Registry
+      def self.user: () -> IUNested::User?
+      def self.user=: (IUNested::User?) -> IUNested::User?
+    end
+
     class IUBlocks
       def direct: () { (String) -> untyped } -> untyped
       def wrapped: () { (String) -> untyped } -> untyped
@@ -1821,5 +1849,49 @@ class PostconditionsInferrerTest < Minitest::Test
 
     refute proven
     assert_empty deps
+  end
+
+  # felixefelip/rbs_infer#144 stage 3, the collection half: what the block
+  # establishes on its truthy exit, and which callee it was handed to. Whether
+  # that callee's answer IS its block's is the Runner's lookup.
+  def test_it_reads_what_a_block_establishes_at_a_call_site
+    entry = block_entry(<<~RUBY, :from_token)
+      class IUBlockSite
+        def from_token
+          with_token do |token|
+            if user = lookup(token)
+              IUBlockRegistry.user = user
+            end
+          end
+        end
+      end
+    RUBY
+
+    refute_nil entry, "expected an entry for the call site"
+    sites = entry.block_call_establishments
+    assert_equal 1, sites.size
+    assert_equal Set["IUBlockSite#with_token"], sites.first[:keys]
+    assert_equal ["IUBlockRegistry.user"], sites.first[:consts].keys
+  end
+
+  # The dummy writes it with a NESTED registry referenced by its short name,
+  # which is what an app actually looks like — and what the flat fixture above
+  # does not exercise.
+  def test_it_reads_a_call_site_whose_registry_is_a_nested_constant
+    entry = block_entry(<<~RUBY, :from_token)
+      class IUNested
+        def from_token
+          with_token do |token|
+            if user = lookup(token)
+              Registry.user = user
+            end
+          end
+        end
+      end
+    RUBY
+
+    refute_nil entry, "expected an entry for the call site"
+    assert_equal 1, entry.block_call_establishments.size
+    assert_equal ["IUNested::Registry.user"], entry.block_call_establishments.first[:consts].keys
   end
 end
