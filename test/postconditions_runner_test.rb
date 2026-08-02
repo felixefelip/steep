@@ -1882,11 +1882,18 @@ class PostconditionsRunnerTest < Minitest::Test
   # order would prove nothing.
   BT_RBS = <<~RBS
     class BTBlocks
+      @halted: bool
+
       def top: () { (String) -> untyped } -> untyped
       def middle: () { (String) -> untyped } -> untyped
       def direct: () { (String) -> untyped } -> untyped
       def sideways: () ?{ (String) -> untyped } -> untyped
       def unrelated: () ?{ (String) -> untyped } -> untyped
+      def or_halt: () { (String) -> untyped } -> untyped
+      def or_carry_on: () ?{ (String) -> untyped } -> untyped
+      def or_without_the_block: () ?{ (String) -> untyped } -> untyped
+      def deny: () -> void
+      def halt: () -> void
       def fetch: () -> String
     end
   RBS
@@ -1911,6 +1918,26 @@ class PostconditionsRunnerTest < Minitest::Test
 
       def unrelated(&login)
         fetch
+      end
+
+      def or_halt(&login)
+        middle(&login) || deny
+      end
+
+      def or_carry_on(&login)
+        middle(&login) || fetch
+      end
+
+      def or_without_the_block(&login)
+        middle(&login) || unrelated || deny
+      end
+
+      def deny
+        halt
+      end
+
+      def halt
+        @halted = true
       end
     end
   RUBY
@@ -1941,6 +1968,53 @@ class PostconditionsRunnerTest < Minitest::Test
 
       refute by_method[:sideways]&.when_true_block_truthy
       refute by_method[:unrelated]&.when_true_block_truthy
+    end
+  end
+
+  # felixefelip/rbs_infer#144 stage 2b. `middle(&login) || deny`, where `deny`
+  # halts: a truthy answer is `middle`'s unless `deny` answered, and `deny` never
+  # returns without halting. So on the UNHALTED exit the answer is the block's,
+  # and the fact is gated like every other fact about such an exit.
+  def test_runner_proves_block_truthiness_across_a_disjunction_that_ends_in_a_halt
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert_equal :@halted, by_method[:or_halt].conditional_block_truthy
+      # Gated, NOT unconditional: `deny` answering is a truthy return the block
+      # had no part in.
+      refute by_method[:or_halt].when_true_block_truthy
+    end
+  end
+
+  # `fetch` halts nothing, so the tail answering truthy is an exit where the
+  # block was never called — the fact would be a lie on exactly that path.
+  def test_runner_proves_nothing_when_the_disjunction_tail_does_not_halt
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert_nil by_method[:or_carry_on]&.conditional_block_truthy
+    end
+  end
+
+  # The chain does not say WHICH operand answered, so an operand that never
+  # received the block would make the fact a claim about somebody else's.
+  def test_runner_proves_nothing_when_an_operand_did_not_get_the_block
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert_nil by_method[:or_without_the_block]&.conditional_block_truthy
     end
   end
 end

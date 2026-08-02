@@ -171,6 +171,12 @@ module Steep
             }
           end
         end
+        # felixefelip/rbs_infer#144 stage 2b: the same fact, held only by the
+        # exit that did not halt — so it sits beside the other gated facts
+        # rather than in the truthy branch.
+        if entry.conditional_block_truthy
+          row["conditional_block_truthy"] = { "gate_ivar" => entry.conditional_block_truthy.to_s }
+        end
         unless entry.when_true_ivars.empty? && entry.when_true_consts.empty? && !entry.when_true_block_truthy
           branch = serialize_branch(
             ivars: entry.when_true_ivars,

@@ -152,6 +152,25 @@ class PostconditionsWriterTest < Minitest::Test
     assert_equal({ "block_truthy" => true }, row["when_true"])
   end
 
+  # Stage 2b. Held only by the exit that did not halt, so it sits beside the
+  # other gated facts rather than in the truthy branch — the same split
+  # `conditional_const_returns` has from `when_true.consts`.
+  def test_dump_serializes_halt_gated_block_truthiness_separately
+    entry = InferredEntry.new(
+      class_name: "BTToken",
+      method_name: :authenticate_or_request,
+      singleton: false,
+      conditional_block_truthy: :@__rbs_infer__performed
+    )
+
+    raw = YAML.safe_load(Writer.dump([entry]))
+    row = raw["postconditions"].find { |r| r["class"] == "BTToken" }
+
+    refute_nil row
+    assert_equal({ "gate_ivar" => "@__rbs_infer__performed" }, row["conditional_block_truthy"])
+    refute row.key?("when_true"), "the gated fact is not a claim about every truthy exit"
+  end
+
   def test_dump_omits_block_truthiness_when_it_was_not_proven
     entry = InferredEntry.new(
       class_name: "BTToken",
