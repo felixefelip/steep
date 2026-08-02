@@ -27,6 +27,17 @@ class PostconditionsInferrerTest < Minitest::Test
       def no_assign: () -> void
       def set_default_name: () -> String
     end
+
+    class IUBlocks
+      def direct: () { (String) -> untyped } -> untyped
+      def wrapped: () { (String) -> untyped } -> untyped
+      def yields: () { (String) -> untyped } -> untyped
+      def forwards: () { (String) -> untyped } -> untyped
+      def guarded: () ?{ (String) -> untyped } -> untyped
+      def early: () { (String) -> untyped } -> untyped
+      def ignores: () ?{ (String) -> untyped } -> untyped
+      def fetch: () -> String
+    end
   RBS
 
   def infer_for(ruby)
@@ -1707,5 +1718,108 @@ class PostconditionsInferrerTest < Minitest::Test
     spec = entries.find { |e| e.method_name == :no_return }.conditional_returns[:current_user]
     refute_nil spec
     assert_equal :@halted, spec[:gate_ivar]
+  end
+
+  # felixefelip/rbs_infer#144 stage 2 — "a truthy return means the block answered
+  # truthy". The link a caller needs before it can believe anything a block
+  # established; without it the block is a wall.
+
+  def block_entry(ruby, method)
+    infer_for(ruby).find { |entry| entry.method_name == method }
+  end
+
+  # An entry can exist for reasons of its own (a self-call edge, an ivar write),
+  # so what these assert is the FACT, never the entry's existence.
+  def block_facts(ruby, method)
+    entry = block_entry(ruby, method)
+    entry ? [entry.when_true_block_truthy, entry.block_forward_deps] : [false, Set[]]
+  end
+
+  def test_the_methods_value_being_the_blocks_call_proves_it
+    entry = block_entry(<<~RUBY, :direct)
+      class IUBlocks
+        def direct(&login)
+          login.call("t")
+        end
+      end
+    RUBY
+
+    assert entry.when_true_block_truthy
+    assert_empty entry.block_forward_deps
+  end
+
+  def test_a_yield_in_value_position_proves_it_too
+    entry = block_entry(<<~RUBY, :yields)
+      class IUBlocks
+        def yields
+          yield "t"
+        end
+      end
+    RUBY
+
+    assert entry.when_true_block_truthy
+  end
+
+  # `unless token.empty?` only adds a FALSY way out, which cannot weaken a fact
+  # about a truthy return. This is the shape Rails' own `Token.authenticate` has.
+  def test_a_one_armed_guard_around_the_call_does_not_break_it
+    entry = block_entry(<<~RUBY, :wrapped)
+      class IUBlocks
+        def wrapped(&login)
+          token = fetch
+          unless token.empty?
+            login.call(token)
+          end
+        end
+      end
+    RUBY
+
+    assert entry.when_true_block_truthy
+  end
+
+  # The forwarder states nothing on its own: it records the edge, and the Runner
+  # walks it. Both halves matter — a premature `true` here would be a claim about
+  # a callee nobody looked at.
+  def test_forwarding_the_block_records_an_edge_rather_than_a_fact
+    entry = block_entry(<<~RUBY, :forwards)
+      class IUBlocks
+        def forwards(&login)
+          direct(&login)
+        end
+      end
+    RUBY
+
+    refute entry.when_true_block_truthy
+    assert_equal Set["IUBlocks#direct"], entry.block_forward_deps
+  end
+
+  def test_a_block_that_is_not_the_methods_value_proves_nothing
+    proven, deps = block_facts(<<~RUBY, :ignores)
+      class IUBlocks
+        def ignores(&login)
+          login.call("t")
+          fetch
+        end
+      end
+    RUBY
+
+    refute proven
+    assert_empty deps
+  end
+
+  # A `return` elsewhere means the last statement is no longer what a truthy exit
+  # returned — the same disqualification `when_true_consts` makes.
+  def test_an_early_return_disqualifies_the_method
+    proven, deps = block_facts(<<~RUBY, :early)
+      class IUBlocks
+        def early(&login)
+          return "done" if fetch.empty?
+          login.call("t")
+        end
+      end
+    RUBY
+
+    refute proven
+    assert_empty deps
   end
 end

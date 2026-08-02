@@ -54,6 +54,7 @@ module Steep
           unconditional_call_deps = collect_unconditional_call_deps(def_node)
           when_true_consts, when_true_call_deps = collect_when_true_facts(def_node)
           disjunction_chains = collect_disjunction_operands(def_node)
+          when_true_block_truthy, block_forward_deps = collect_block_truthy(def_node)
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
           conditional_const_returns = collect_conditional_const_returns(def_node)
@@ -68,10 +69,17 @@ module Steep
           # edge already keeps a caller alive, which covers every unconditional dep
           # that is a self-send; a caller whose ONLY content is an establishing call
           # on ANOTHER object gets no entry, and so lifts nothing (felixefelip/steep#117).
+          # `block_forward_deps` keeps an entry alive though it states nothing
+          # yet: a pure forwarder (`def authenticate_with_http_token(&p);
+          # Token.authenticate(self, &p); end`) is the middle of the chain, and
+          # dropping it before the fixpoint breaks the link it exists to carry.
+          # Unlike `unconditional_call_deps` this costs little — the edge only
+          # exists when a method's VALUE is a call it also handed its block to.
           if ivars.empty? && when_true_ivars.empty? && returns_establishes.empty? &&
              may_write.empty? && self_call_deps.empty? && returns_ivar.nil? &&
              conditional_returns.empty? && conditional_const_returns.empty? &&
-             establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance
+             establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance &&
+             !when_true_block_truthy && block_forward_deps.empty?
             next
           end
 
@@ -94,6 +102,8 @@ module Steep
             when_true_consts: when_true_consts,
             when_true_call_deps: when_true_call_deps,
             disjunction_chains: disjunction_chains,
+            when_true_block_truthy: when_true_block_truthy,
+            block_forward_deps: block_forward_deps,
             returns_ivar: returns_ivar,
             conditional_returns: conditional_returns,
             conditional_const_returns: conditional_const_returns,
@@ -491,6 +501,100 @@ module Steep
         end
 
         [writes, deps]
+      end
+
+      # felixefelip/rbs_infer#144 stage 2. Whether a truthy return of this method
+      # can only have come from its BLOCK answering truthy.
+      #
+      #   def authenticate(controller, &login_procedure)
+      #     token, options = token_and_options(controller.request)
+      #     unless token.blank?
+      #       login_procedure.call(token, options)   # the method's value IS the block's
+      #     end
+      #   end
+      #
+      # This is the link a caller needs before it can believe anything the block
+      # established: `foo { Current.identity = identity }` returning truthy says
+      # the block ran AND answered truthy, so the block's own facts hold. Without
+      # it the block is a wall — what happens inside is invisible to the caller,
+      # which is the whole reason felixefelip/rbs_infer#144 exists.
+      #
+      # Returns `[proven, forward_deps]`. Proven when the method's value is the
+      # block's own call; otherwise the calls that value is FORWARDED to together
+      # with the block (`Token.authenticate(self, &login_procedure)`), which the
+      # Runner closes over — the fact travels a delegation chain the same way
+      # `when_true_call_deps` does.
+      #
+      # A `return` anywhere disqualifies the method, as it does for
+      # `when_true_consts`: the last statement is no longer what a truthy exit
+      # returned.
+      def collect_block_truthy(def_node)
+        body = def_node.children[2]
+        return [false, Set[]] unless body
+        return [false, Set[]] if contains_return?(body)
+
+        value = returned_value(body) or return [false, Set[]]
+        block_name = block_param_name(def_node)
+
+        return [true, Set[]] if block_value?(value, block_name)
+
+        deps = Set.new #: Set[String]
+        collect_call_keys(value, deps) if forwards_block?(value, block_name)
+        [false, deps]
+      end
+
+      # The expression a truthy exit returned: the body's last statement, or —
+      # when that is a one-armed `if` — the clause's own last statement. The
+      # guard only adds a FALSY way out (`unless token.blank?` yields nil), which
+      # cannot weaken a fact about a truthy return.
+      def returned_value(body)
+        last = last_statement(body)
+        return nil unless last
+
+        if last.type == :if && (clause = truthy_only_clause(body))
+          last_statement(clause)
+        else
+          last
+        end
+      end
+
+      def last_statement(node)
+        found = nil #: Parser::AST::Node?
+        each_statement(node) { |stmt, is_last| found = stmt if is_last }
+        found.is_a?(Parser::AST::Node) ? found : nil
+      end
+
+      def block_param_name(def_node)
+        args = def_node.children[1]
+        return nil unless args.is_a?(Parser::AST::Node)
+
+        blockarg = args.children.find { |arg| arg.is_a?(Parser::AST::Node) && arg.type == :blockarg }
+        blockarg&.children&.first&.to_s
+      end
+
+      # `yield`, `block.call(…)`, `block.(…)` — the block's value becoming the
+      # method's.
+      def block_value?(node, block_name)
+        return true if node.type == :yield
+        return false unless node.type == :send && node.children[1] == :call
+
+        reads_block?(node.children[0], block_name)
+      end
+
+      # `callee(&block)` in value position: this method's answer is the callee's,
+      # and the block it answered with is ours.
+      def forwards_block?(node, block_name)
+        return false unless node.type == :send
+
+        node.children.any? do |child|
+          child.is_a?(Parser::AST::Node) && child.type == :block_pass &&
+            reads_block?(child.children[0], block_name)
+        end
+      end
+
+      def reads_block?(node, block_name)
+        block_name && node.is_a?(Parser::AST::Node) && node.type == :lvar &&
+          node.children[0].to_s == block_name
       end
 
       # The single clause of a body whose last statement is a one-armed `if`, or
@@ -1492,8 +1596,13 @@ module Steep
       # writes non-nil on EVERY exit, because nothing in it can halt first. The
       # unconditional sibling of `conditional_const_returns`.
       attr_reader :const_establishments
+      # felixefelip/rbs_infer#144 stage 2. `when_true_block_truthy`: a truthy
+      # return of this method means the block it was given answered truthy.
+      # `block_forward_deps` are the call-graph edges the Runner closes over to
+      # carry that along a delegation chain; they are not serialized.
+      attr_reader :when_true_block_truthy, :block_forward_deps
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -1508,6 +1617,8 @@ module Steep
         @when_true_consts = when_true_consts
         @when_true_call_deps = when_true_call_deps
         @disjunction_chains = disjunction_chains
+        @when_true_block_truthy = when_true_block_truthy
+        @block_forward_deps = block_forward_deps
         @returns_ivar = returns_ivar
         @conditional_returns = conditional_returns
         @conditional_const_returns = conditional_const_returns
@@ -1527,6 +1638,7 @@ module Steep
           unconditional_call_deps: unconditional_call_deps,
           when_true_consts: when_true_consts, when_true_call_deps: when_true_call_deps,
           disjunction_chains: disjunction_chains,
+          when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: establishes_consts, const_establishments: const_establishments,
@@ -1546,6 +1658,7 @@ module Steep
           unconditional_call_deps: unconditional_call_deps,
           when_true_consts: when_true_consts, when_true_call_deps: when_true_call_deps,
           disjunction_chains: disjunction_chains,
+          when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: consts, const_establishments: const_establishments,
@@ -1563,7 +1676,13 @@ module Steep
           returns_establishes.empty? &&
           may_write_ivars.empty? && returns_ivar.nil? && conditional_returns.empty? &&
           conditional_const_returns.empty? && establishes_consts.empty? &&
-          const_establishments.empty?
+          const_establishments.empty? && !when_true_block_truthy
+      end
+
+      # The Runner's fixpoint proving the fact one link further along the chain.
+      # `block_forward_deps` is the edge; this is what travels it.
+      def prove_block_truthy!
+        @when_true_block_truthy = true
       end
 
       def ==(other)
