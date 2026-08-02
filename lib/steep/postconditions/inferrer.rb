@@ -55,6 +55,7 @@ module Steep
           when_true_consts, when_true_call_deps = collect_when_true_facts(def_node)
           disjunction_chains = collect_disjunction_operands(def_node)
           when_true_block_truthy, block_forward_deps = collect_block_truthy(def_node)
+          block_disjunction = collect_block_disjunction(def_node)
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
           conditional_const_returns = collect_conditional_const_returns(def_node)
@@ -79,7 +80,7 @@ module Steep
              may_write.empty? && self_call_deps.empty? && returns_ivar.nil? &&
              conditional_returns.empty? && conditional_const_returns.empty? &&
              establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance &&
-             !when_true_block_truthy && block_forward_deps.empty?
+             !when_true_block_truthy && block_forward_deps.empty? && block_disjunction.empty?
             next
           end
 
@@ -104,6 +105,7 @@ module Steep
             disjunction_chains: disjunction_chains,
             when_true_block_truthy: when_true_block_truthy,
             block_forward_deps: block_forward_deps,
+            block_disjunction: block_disjunction,
             returns_ivar: returns_ivar,
             conditional_returns: conditional_returns,
             conditional_const_returns: conditional_const_returns,
@@ -541,6 +543,50 @@ module Steep
         deps = Set.new #: Set[String]
         collect_call_keys(value, deps) if forwards_block?(value, block_name)
         [false, deps]
+      end
+
+      # felixefelip/rbs_infer#144 stage 2b. The value-position `||` this method
+      # answers with, as operand key sets — `[*earlier, last]`, the shape
+      # `disjunction_chains` already uses:
+      #
+      #   def authenticate_or_request_with_http_token(realm = "Application", message = nil, &login_procedure)
+      #     authenticate_with_http_token(&login_procedure) || request_http_token_authentication(realm, message)
+      #   end
+      #
+      # A truthy answer here is the LEFT operand's — or the right one's, which
+      # halts. So the fact it leads to is halt-gated, and proving the tail halts
+      # is the Runner's job: it needs the resolved entries.
+      #
+      # Recorded only when EVERY earlier operand received this method's block.
+      # The chain does not say which one answered, so an operand that never got
+      # the block would make the fact a claim about somebody else's.
+      #
+      # Value position matters here in a way it does not for `disjunction_chains`
+      # (#122): a `||` in the middle of a body says what RAN, which is enough for
+      # an establishment, but nothing about what the method ANSWERED.
+      def collect_block_disjunction(def_node)
+        body = def_node.children[2]
+        return [] unless body
+        return [] if contains_return?(body)
+
+        value = returned_value(body)
+        return [] unless value&.type == :or
+
+        block_name = block_param_name(def_node) or return []
+
+        operands = flatten_disjunction(value).map do |operand|
+          next nil unless operand.is_a?(Parser::AST::Node) && operand.type == :send
+
+          keys = Set.new #: Set[String]
+          collect_call_keys(operand, keys)
+          keys.empty? ? nil : [keys, forwards_block?(operand, block_name)]
+        end
+        return [] if operands.size < 2 || operands.include?(nil)
+
+        *earlier, last = operands
+        return [] unless earlier.all? { |(_keys, forwards)| forwards }
+
+        earlier.map { |(keys, _forwards)| keys } + [last[0]]
       end
 
       # The expression a truthy exit returned: the body's last statement, or —
@@ -1601,8 +1647,14 @@ module Steep
       # `block_forward_deps` are the call-graph edges the Runner closes over to
       # carry that along a delegation chain; they are not serialized.
       attr_reader :when_true_block_truthy, :block_forward_deps
+      # felixefelip/rbs_infer#144 stage 2b. `block_disjunction`: the operand key
+      # sets of the value-position `||` this method answers with, tail last —
+      # the Runner proves the tail halts. `conditional_block_truthy`: the gate
+      # ivar under which the block-truthiness fact holds, i.e. on the exit that
+      # did NOT halt.
+      attr_reader :block_disjunction, :conditional_block_truthy
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -1619,6 +1671,8 @@ module Steep
         @disjunction_chains = disjunction_chains
         @when_true_block_truthy = when_true_block_truthy
         @block_forward_deps = block_forward_deps
+        @block_disjunction = block_disjunction
+        @conditional_block_truthy = conditional_block_truthy
         @returns_ivar = returns_ivar
         @conditional_returns = conditional_returns
         @conditional_const_returns = conditional_const_returns
@@ -1639,6 +1693,7 @@ module Steep
           when_true_consts: when_true_consts, when_true_call_deps: when_true_call_deps,
           disjunction_chains: disjunction_chains,
           when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
+          block_disjunction: block_disjunction, conditional_block_truthy: conditional_block_truthy,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: establishes_consts, const_establishments: const_establishments,
@@ -1659,6 +1714,7 @@ module Steep
           when_true_consts: when_true_consts, when_true_call_deps: when_true_call_deps,
           disjunction_chains: disjunction_chains,
           when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
+          block_disjunction: block_disjunction, conditional_block_truthy: conditional_block_truthy,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: consts, const_establishments: const_establishments,
@@ -1676,13 +1732,18 @@ module Steep
           returns_establishes.empty? &&
           may_write_ivars.empty? && returns_ivar.nil? && conditional_returns.empty? &&
           conditional_const_returns.empty? && establishes_consts.empty? &&
-          const_establishments.empty? && !when_true_block_truthy
+          const_establishments.empty? && !when_true_block_truthy && conditional_block_truthy.nil?
       end
 
       # The Runner's fixpoint proving the fact one link further along the chain.
       # `block_forward_deps` is the edge; this is what travels it.
       def prove_block_truthy!
         @when_true_block_truthy = true
+      end
+
+      # The same fact, but only of the exit that did not halt (stage 2b).
+      def prove_block_truthy_unless_halted!(gate_ivar)
+        @conditional_block_truthy = gate_ivar
       end
 
       def ==(other)

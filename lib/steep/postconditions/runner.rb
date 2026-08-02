@@ -158,6 +158,11 @@ module Steep
         # facts the block itself established.
         close_block_truthy(resolved)
 
+        # felixefelip/rbs_infer#144 stage 2b: the same fact for a method that
+        # answers with a `||` whose tail halts. Runs after the closure above, so
+        # the earlier operands already carry whatever the chain gave them.
+        apply_disjunction_block_truthy(resolved)
+
         # felixefelip/rbs_infer#71 (piece 1): gate the UNCONDITIONAL establishment
         # (`Const.attr =` proves a sibling non-nil for the rest of the frame) on a
         # confirmed delegation. An instance setter's `establishes_consts` fires at
@@ -338,6 +343,38 @@ module Steep
           end
 
           break unless changed
+        end
+      end
+
+      # felixefelip/rbs_infer#144 stage 2b.
+      #
+      #   authenticate_with_http_token(&login_procedure) || request_http_token_authentication(realm, message)
+      #
+      # A truthy answer is the LEFT operand's — unless the right one answered,
+      # and the right one halts. So on the exit that did NOT halt, a truthy
+      # return is the block's, and the fact is halt-gated like every other fact
+      # about an unhalted exit.
+      #
+      # The tail's halt is what makes this sound rather than plausible, exactly
+      # as in #122: without it, the tail answering truthy is an exit where the
+      # block was never even called, and the fact would be a lie on that path.
+      # `always_halting_ivar` is the same proof, reused.
+      #
+      # Every earlier operand must carry the fact, because the chain does not say
+      # which one answered — and the Inferrer has already refused a chain whose
+      # earlier operands did not all receive this method's block.
+      def apply_disjunction_block_truthy(resolved)
+        resolved.each_value do |entry|
+          next if entry.when_true_block_truthy || entry.conditional_block_truthy
+          next if entry.block_disjunction.empty?
+
+          *earlier, last = entry.block_disjunction
+          next if earlier.empty?
+
+          gate_ivar = always_halting_ivar(last, resolved) or next
+          next unless earlier.all? { |keys| keys.any? { |key| resolved[key]&.when_true_block_truthy } }
+
+          entry.prove_block_truthy_unless_halted!(gate_ivar)
         end
       end
 
@@ -874,6 +911,8 @@ module Steep
               disjunction_chains: existing.disjunction_chains | entry.disjunction_chains,
               when_true_block_truthy: existing.when_true_block_truthy || entry.when_true_block_truthy,
               block_forward_deps: existing.block_forward_deps | entry.block_forward_deps,
+              block_disjunction: existing.block_disjunction.empty? ? entry.block_disjunction : existing.block_disjunction,
+              conditional_block_truthy: existing.conditional_block_truthy || entry.conditional_block_truthy,
               returns_ivar: existing.returns_ivar || entry.returns_ivar,
               conditional_returns: existing.conditional_returns.merge(entry.conditional_returns),
               conditional_const_returns: existing.conditional_const_returns.merge(entry.conditional_const_returns),
