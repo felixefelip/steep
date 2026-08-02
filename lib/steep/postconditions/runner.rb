@@ -151,6 +151,13 @@ module Steep
         # lifted into it.
         apply_disjunction_facts(resolved)
 
+        # felixefelip/rbs_infer#144 stage 2: carry "a truthy return means the
+        # block answered truthy" down the delegation chain. Independent of the
+        # const passes above — it proves nothing about constants, it says whose
+        # answer a truthy return IS, which is what lets a caller believe the
+        # facts the block itself established.
+        close_block_truthy(resolved)
+
         # felixefelip/rbs_infer#71 (piece 1): gate the UNCONDITIONAL establishment
         # (`Const.attr =` proves a sibling non-nil for the rest of the frame) on a
         # confirmed delegation. An instance setter's `establishes_consts` fires at
@@ -307,6 +314,33 @@ module Steep
       #
       # A fact the clause writes directly is never overwritten: it carries the
       # written value's own type, the same precedence used throughout.
+      # felixefelip/rbs_infer#144 stage 2. The fact travels the delegation chain:
+      #
+      #   def authenticate_with_http_token(&login_procedure)
+      #     Token.authenticate(self, &login_procedure)
+      #   end
+      #
+      # This method hands the callee both its block AND its answer, so if the
+      # callee's truthy return means the block answered truthy, so does this
+      # one's. Rails is three deep, and nothing orders the entries, so it repeats
+      # to a fixpoint — sets only grow and the fact is a single boolean, so it
+      # terminates.
+      def close_block_truthy(resolved)
+        loop do
+          changed = false
+
+          resolved.each_value do |entry|
+            next if entry.when_true_block_truthy
+            next unless entry.block_forward_deps.any? { |dep| resolved[dep]&.when_true_block_truthy }
+
+            entry.prove_block_truthy!
+            changed = true
+          end
+
+          break unless changed
+        end
+      end
+
       def lift_when_true_consts(resolved)
         resolved.each_value do |entry|
           entry.when_true_call_deps.each do |dep|
@@ -838,10 +872,16 @@ module Steep
               when_true_consts: existing.when_true_consts.merge(entry.when_true_consts),
               when_true_call_deps: existing.when_true_call_deps | entry.when_true_call_deps,
               disjunction_chains: existing.disjunction_chains | entry.disjunction_chains,
+              when_true_block_truthy: existing.when_true_block_truthy || entry.when_true_block_truthy,
+              block_forward_deps: existing.block_forward_deps | entry.block_forward_deps,
               returns_ivar: existing.returns_ivar || entry.returns_ivar,
               conditional_returns: existing.conditional_returns.merge(entry.conditional_returns),
               conditional_const_returns: existing.conditional_const_returns.merge(entry.conditional_const_returns),
               establishes_consts: existing.establishes_consts.merge(entry.establishes_consts),
+              # Left out when its siblings were fixed, and silently reset to
+              # empty ever since — the same #100 facts the comment above
+              # describes, lost for any method defined in two places.
+              const_establishments: existing.const_establishments.merge(entry.const_establishments),
               delegates_to_instance: existing.delegates_to_instance || entry.delegates_to_instance
             )
           else

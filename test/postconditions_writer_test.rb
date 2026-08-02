@@ -132,4 +132,37 @@ class PostconditionsWriterTest < Minitest::Test
     assert_empty parsed.unconditional.ivar_type_strings
     assert_equal [:post, :user], parsed.unconditional.returns_establishes.sort
   end
+
+  # felixefelip/rbs_infer#144 stage 2. The fact belongs to the truthy branch — it
+  # is only ever true of a truthy exit — and it is written although no consumer
+  # reads it back yet (that is stage 3), on the same grounds as the `consts` in
+  # that branch: a fact nobody can see is a fact nobody can check.
+  def test_dump_serializes_block_truthiness_on_the_truthy_branch
+    entry = InferredEntry.new(
+      class_name: "BTToken",
+      method_name: :authenticate,
+      singleton: false,
+      when_true_block_truthy: true
+    )
+
+    raw = YAML.safe_load(Writer.dump([entry]))
+    row = raw["postconditions"].find { |r| r["class"] == "BTToken" }
+
+    refute_nil row, "expected the entry to be emitted"
+    assert_equal({ "block_truthy" => true }, row["when_true"])
+  end
+
+  def test_dump_omits_block_truthiness_when_it_was_not_proven
+    entry = InferredEntry.new(
+      class_name: "BTToken",
+      method_name: :forwards,
+      singleton: false,
+      may_write_ivars: Set[:@x]
+    )
+
+    raw = YAML.safe_load(Writer.dump([entry]))
+    row = raw["postconditions"].find { |r| r["class"] == "BTToken" }
+
+    refute row.key?("when_true"), "an unproven fact is not a branch"
+  end
 end

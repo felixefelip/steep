@@ -171,12 +171,18 @@ module Steep
             }
           end
         end
-        unless entry.when_true_ivars.empty? && entry.when_true_consts.empty?
-          row["when_true"] = serialize_branch(
+        unless entry.when_true_ivars.empty? && entry.when_true_consts.empty? && !entry.when_true_block_truthy
+          branch = serialize_branch(
             ivars: entry.when_true_ivars,
             self_type_string: entry.when_true_self_type_string,
             consts: entry.when_true_consts
           )
+          # felixefelip/rbs_infer#144 stage 2. Not a refinement like its
+          # neighbours — it names WHOSE answer a truthy return is, which is what
+          # a call site needs before it can believe the block's own facts. It
+          # belongs in this branch because it is only true of a truthy exit.
+          branch["block_truthy"] = true if entry.when_true_block_truthy
+          row["when_true"] = branch
         end
         row
       end

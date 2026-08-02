@@ -320,6 +320,7 @@ class PostconditionsRunnerTest < Minitest::Test
       @halted: bool
 
       def thing: () -> DJThing
+      def always: () -> void
       def flag?: () -> bool
       def run: () -> void
       def loose: () -> void
@@ -348,6 +349,10 @@ class PostconditionsRunnerTest < Minitest::Test
         if flag?
           DJStore.thing = thing
         end
+      end
+
+      def always
+        DJStore.thing = thing
       end
 
       def or_halt
@@ -418,6 +423,10 @@ class PostconditionsRunnerTest < Minitest::Test
           def truthy_only
             @scratch = 1
           end
+
+          def always
+            @scratch = 2
+          end
         end
       RUBY
       project = setup_project(steepfile: FIXTURE_STEEPFILE)
@@ -428,6 +437,9 @@ class PostconditionsRunnerTest < Minitest::Test
       assert_equal ["DJStore.thing"], by_method[:truthy_only].when_true_consts.keys
       # And the chain that reads them is unaffected by the second definition.
       refute_nil by_method[:run].conditional_const_returns["DJStore.thing"]
+      # `const_establishments` (#100) was left out when its siblings were fixed,
+      # and was reset to empty by the very same mechanism.
+      assert_equal ["DJStore.thing"], by_method[:always].const_establishments.keys
     end
   end
 
@@ -1860,6 +1872,75 @@ class PostconditionsRunnerTest < Minitest::Test
 
       refute name_partition && name_partition[:ivars].key?(:@name),
              "an ivar a callee may write cannot survive to the dispatch"
+    end
+  end
+
+  # felixefelip/rbs_infer#144 stage 2. "A truthy return means the block answered
+  # truthy" travels the delegation chain — Rails is three deep, and entries
+  # arrive in whatever order the files do, so the closure runs to a fixpoint.
+  # The chain below is written top-down on purpose: a single pass in definition
+  # order would prove nothing.
+  BT_RBS = <<~RBS
+    class BTBlocks
+      def top: () { (String) -> untyped } -> untyped
+      def middle: () { (String) -> untyped } -> untyped
+      def direct: () { (String) -> untyped } -> untyped
+      def sideways: () ?{ (String) -> untyped } -> untyped
+      def unrelated: () ?{ (String) -> untyped } -> untyped
+      def fetch: () -> String
+    end
+  RBS
+
+  BT_RUBY = <<~RUBY
+    class BTBlocks
+      def top(&login)
+        middle(&login)
+      end
+
+      def middle(&login)
+        direct(&login)
+      end
+
+      def direct(&login)
+        login.call("t")
+      end
+
+      def sideways(&login)
+        unrelated(&login)
+      end
+
+      def unrelated(&login)
+        fetch
+      end
+    end
+  RUBY
+
+  def test_runner_carries_block_truthiness_down_a_delegation_chain
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert by_method[:direct].when_true_block_truthy, "the method whose value IS the block's call"
+      assert by_method[:middle].when_true_block_truthy, "one forward away"
+      assert by_method[:top].when_true_block_truthy, "two forwards away"
+    end
+  end
+
+  # Forwarding into a callee with nothing to say proves nothing: `unrelated`
+  # never calls the block, so a truthy `sideways` says nothing about it.
+  def test_runner_proves_nothing_by_forwarding_into_a_method_without_the_fact
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      refute by_method[:sideways]&.when_true_block_truthy
+      refute by_method[:unrelated]&.when_true_block_truthy
     end
   end
 end
