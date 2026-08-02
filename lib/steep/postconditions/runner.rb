@@ -502,10 +502,9 @@ module Steep
       # acting on the controller it was handed.
       #
       # The two halves are collected apart because neither is knowable alone:
-      # the callee records which methods it calls on which parameter (by NAME,
-      # since a parameter is usually `untyped`), and the caller records where it
-      # passed `self`. Put together, `host.halt` IS `self.halt` — the caller's
-      # own method, resolved in the caller's own class, where the type is known.
+      # the callee records the calls it makes on each parameter, and the caller
+      # records where it passed `self`. Put together, a call on that parameter
+      # is a call on the caller itself.
       #
       # A fixpoint: a method proven to halt this way can itself be the `halt`
       # somebody else reaches. It terminates because the proofs only accumulate
@@ -534,17 +533,28 @@ module Steep
           callee = resolved[key] or next
 
           indices.each do |index|
-            names = callee.param_call_names[index] or next
+            (callee.param_call_deps[index] || []).each do |call_keys|
+              found = call_always_halts(call_keys, resolved) or next
 
-            names.each do |name|
-              # Resolved in the CALLER's class: the argument was `self`, so the
-              # method the callee names is this entry's own.
-              found = always_halting_ivar(Set["#{entry.class_name}##{name}"], resolved)
-              return found if found
+              return found
             end
           end
         end
         nil
+      end
+
+      # The ivar a single call on the parameter ALWAYS sets, or nil.
+      #
+      # Every declaration it could dispatch to has to halt, and on the same
+      # ivar. A parameter typed `(Alpha | Beta)` resolves `host.halt` to both
+      # `Alpha#halt` and `Beta#halt`; if only one of them halts, the call halts
+      # only for some callers, and the chain gating on it would be a lie for the
+      # rest.
+      def call_always_halts(call_keys, resolved)
+        ivars = call_keys.map { |key| always_halting_ivar(Set[key], resolved) }
+        return nil if ivars.empty? || ivars.any?(&:nil?)
+
+        ivars.uniq.size == 1 ? ivars.first : nil
       end
 
       # The ivar an operand ALWAYS sets truthy, i.e. the one that says it halted
@@ -1031,7 +1041,7 @@ module Steep
               block_disjunction: existing.block_disjunction.empty? ? entry.block_disjunction : existing.block_disjunction,
               conditional_block_truthy: existing.conditional_block_truthy || entry.conditional_block_truthy,
               block_call_establishments: existing.block_call_establishments + entry.block_call_establishments,
-              param_call_names: existing.param_call_names.merge(entry.param_call_names),
+              param_call_deps: existing.param_call_deps.merge(entry.param_call_deps),
               self_arg_calls: existing.self_arg_calls.merge(entry.self_arg_calls),
               halts_via_param: existing.halts_via_param || entry.halts_via_param,
               returns_ivar: existing.returns_ivar || entry.returns_ivar,

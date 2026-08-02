@@ -1884,6 +1884,11 @@ class PostconditionsRunnerTest < Minitest::Test
   # to a module function, which halts what it was handed. Neither frame proves
   # it alone — `deny` writes nothing on its own `self`, and `refuse` writes
   # nothing at all — which is the shape the framework itself has.
+  #
+  # `host` is TYPED here, and that is load-bearing: the callee half records the
+  # declarations `host.halt` dispatches to, so an `untyped` parameter resolves
+  # to nothing and the proof never starts. Rails is exactly that case, which is
+  # why the framework chain is still out of reach.
   PH_RBS = <<~RBS
     class PHThing
     end
@@ -1909,8 +1914,8 @@ class PostconditionsRunnerTest < Minitest::Test
     end
 
     class PHResponder
-      def self.deny: (untyped host) -> void
-      def self.note: (untyped host) -> void
+      def self.deny: (PHController host) -> void
+      def self.note: (PHController host) -> void
     end
   RBS
 
