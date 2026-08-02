@@ -57,7 +57,7 @@ module Steep
           when_true_block_truthy, block_forward_deps = collect_block_truthy(def_node)
           block_disjunction = collect_block_disjunction(def_node)
           block_call_establishments = collect_block_call_establishments(def_node)
-          param_call_names = collect_param_call_names(def_node)
+          param_call_deps = collect_param_call_deps(def_node)
           self_arg_calls = collect_self_arg_calls(def_node)
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
@@ -84,7 +84,7 @@ module Steep
              conditional_returns.empty? && conditional_const_returns.empty? &&
              establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance &&
              !when_true_block_truthy && block_forward_deps.empty? && block_disjunction.empty? &&
-             block_call_establishments.empty? && param_call_names.empty? && self_arg_calls.empty?
+             block_call_establishments.empty? && param_call_deps.empty? && self_arg_calls.empty?
             next
           end
 
@@ -111,7 +111,7 @@ module Steep
             block_forward_deps: block_forward_deps,
             block_disjunction: block_disjunction,
             block_call_establishments: block_call_establishments,
-            param_call_names: param_call_names,
+            param_call_deps: param_call_deps,
             self_arg_calls: self_arg_calls,
             returns_ivar: returns_ivar,
             conditional_returns: conditional_returns,
@@ -447,19 +447,22 @@ module Steep
         deps
       end
 
-      # felixefelip/steep#126, the callee half. The methods this one calls
+      # felixefelip/steep#126, the callee half. The calls this method makes
       # UNCONDITIONALLY on one of its own parameters:
       #
-      #   def self.deny(host, message)   # => { 0 => Set["record", "halt"] }
-      #     host.record(message)
+      #   def self.deny(host, message)   # => { 0 => [Set["Example19#record"],
+      #     host.record(message)         #             Set["Example19#halt"]] }
       #     host.halt
       #   end
       #
-      # By NAME, not by resolved declaration, because a parameter is usually
-      # `untyped` — `host.halt` resolves to nothing at all here, which is why
-      # `collect_call_keys` cannot serve. The name is enough: the caller passing
-      # `self` knows its own class, and that is where the lookup happens.
-      def collect_param_call_names(def_node)
+      # One entry per CALL, not one flat set, because the caller has to ask
+      # "does this call always halt" of each call separately. Flattening would
+      # mix `record` in with `halt` and make the question unanswerable.
+      #
+      # Each entry holds every declaration that call could dispatch to — a
+      # parameter typed `(Alpha | Beta)` yields both `Alpha#halt` and
+      # `Beta#halt`, and the Runner requires all of them to halt.
+      def collect_param_call_deps(def_node)
         body = def_node.children[2]
         return {} unless body
         return {} if method_halt_gate(body)
@@ -467,14 +470,17 @@ module Steep
         names = positional_param_names(def_node)
         return {} if names.empty?
 
-        result = {} #: Hash[Integer, Set[String]]
+        result = {} #: Hash[Integer, Array[Set[String]]]
         each_statement(body) do |stmt|
           send_node = unconditional_send(stmt) or next
           receiver = send_node.children[0]
           next unless receiver.is_a?(Parser::AST::Node) && receiver.type == :lvar
 
           index = names.index(receiver.children[0].to_s) or next
-          (result[index] ||= Set.new) << send_node.children[1].to_s
+          keys = call_entry_keys(send_node)
+          next if keys.empty?
+
+          (result[index] ||= []) << keys.to_set
         end
         result
       end
@@ -1801,15 +1807,15 @@ module Steep
       # was passed to. Structural input for the Runner, not a serialized fact:
       # what comes OUT of it is an ordinary const fact.
       attr_reader :block_call_establishments
-      # felixefelip/steep#126. `param_call_names`: `{ index => Set[name] }`, the
-      # methods this one calls unconditionally on that parameter.
+      # felixefelip/steep#126. `param_call_deps`: `{ index => [Set[key]] }`, one
+      # entry per unconditional call this method makes on that parameter.
       # `self_arg_calls`: `{ entry_key => Set[index] }`, the calls it makes
       # passing `self` at those positions. `halts_via_param`: the ivar the
       # Runner proved this method sets on its own `self` by handing itself to
       # such a callee — the halt neither side could see alone.
-      attr_reader :param_call_names, :self_arg_calls, :halts_via_param
+      attr_reader :param_call_deps, :self_arg_calls, :halts_via_param
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_names: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_deps: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -1829,7 +1835,7 @@ module Steep
         @block_disjunction = block_disjunction
         @conditional_block_truthy = conditional_block_truthy
         @block_call_establishments = block_call_establishments
-        @param_call_names = param_call_names
+        @param_call_deps = param_call_deps
         @self_arg_calls = self_arg_calls
         @halts_via_param = halts_via_param
         @returns_ivar = returns_ivar
@@ -1854,7 +1860,7 @@ module Steep
           when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
           block_disjunction: block_disjunction, conditional_block_truthy: conditional_block_truthy,
           block_call_establishments: block_call_establishments,
-          param_call_names: param_call_names, self_arg_calls: self_arg_calls,
+          param_call_deps: param_call_deps, self_arg_calls: self_arg_calls,
           halts_via_param: halts_via_param,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
@@ -1878,7 +1884,7 @@ module Steep
           when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
           block_disjunction: block_disjunction, conditional_block_truthy: conditional_block_truthy,
           block_call_establishments: block_call_establishments,
-          param_call_names: param_call_names, self_arg_calls: self_arg_calls,
+          param_call_deps: param_call_deps, self_arg_calls: self_arg_calls,
           halts_via_param: halts_via_param,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
