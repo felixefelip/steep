@@ -145,6 +145,11 @@ module Steep
         # it would have to test the result first).
         lift_when_true_consts(resolved)
 
+        # felixefelip/steep#126: a method that halts by handing `self` to
+        # somebody who halts it. Runs before every pass that asks whether
+        # something halts — 2b and 3c both do.
+        close_param_halts(resolved)
+
         # felixefelip/rbs_infer#144 stage 2: carry "a truthy return means the
         # block answered truthy" down the delegation chain. Independent of the
         # const passes above — it proves nothing about constants, it says whose
@@ -482,6 +487,66 @@ module Steep
         end
       end
 
+      # felixefelip/steep#126. The halt that neither frame can see alone.
+      #
+      #   def refuse
+      #     Responder.deny(self, "denied")     # hands ITSELF over
+      #   end
+      #
+      #   def self.deny(host, message)         # self here is the module
+      #     host.halt                          # halts the ARGUMENT
+      #   end
+      #
+      # `deny` writes nothing on its own `self`, so nothing proved `refuse`
+      # halts — and the framework's own code has exactly this shape, one module
+      # acting on the controller it was handed.
+      #
+      # The two halves are collected apart because neither is knowable alone:
+      # the callee records which methods it calls on which parameter (by NAME,
+      # since a parameter is usually `untyped`), and the caller records where it
+      # passed `self`. Put together, `host.halt` IS `self.halt` — the caller's
+      # own method, resolved in the caller's own class, where the type is known.
+      #
+      # A fixpoint: a method proven to halt this way can itself be the `halt`
+      # somebody else reaches. It terminates because the proofs only accumulate
+      # and each entry takes one.
+      def close_param_halts(resolved)
+        loop do
+          changed = false
+
+          resolved.each_value do |entry|
+            next if entry.halts_via_param
+
+            ivar = param_halt_ivar(entry, resolved) or next
+
+            entry.prove_halts_via_param!(ivar)
+            changed = true
+          end
+
+          break unless changed
+        end
+      end
+
+      # The ivar a method sets on its own `self` by passing itself to a callee
+      # that halts that parameter, or nil.
+      def param_halt_ivar(entry, resolved)
+        entry.self_arg_calls.each do |key, indices|
+          callee = resolved[key] or next
+
+          indices.each do |index|
+            names = callee.param_call_names[index] or next
+
+            names.each do |name|
+              # Resolved in the CALLER's class: the argument was `self`, so the
+              # method the callee names is this entry's own.
+              found = always_halting_ivar(Set["#{entry.class_name}##{name}"], resolved)
+              return found if found
+            end
+          end
+        end
+        nil
+      end
+
       # The ivar an operand ALWAYS sets truthy, i.e. the one that says it halted
       # — directly (`def halt; @halted = true; end`, an unconditional ivar
       # refinement to a truthy literal) or through the every-exit calls it makes
@@ -493,6 +558,9 @@ module Steep
 
           entry = resolved[key] or next
           entry.ivars.each { |name, type| return name if type.to_s == "true" }
+          # felixefelip/steep#126: the same proof, reached by handing `self` to
+          # a callee that halts it.
+          return entry.halts_via_param if entry.halts_via_param
 
           found = always_halting_ivar(entry.unconditional_call_deps, resolved, seen)
           return found if found
@@ -963,6 +1031,9 @@ module Steep
               block_disjunction: existing.block_disjunction.empty? ? entry.block_disjunction : existing.block_disjunction,
               conditional_block_truthy: existing.conditional_block_truthy || entry.conditional_block_truthy,
               block_call_establishments: existing.block_call_establishments + entry.block_call_establishments,
+              param_call_names: existing.param_call_names.merge(entry.param_call_names),
+              self_arg_calls: existing.self_arg_calls.merge(entry.self_arg_calls),
+              halts_via_param: existing.halts_via_param || entry.halts_via_param,
               returns_ivar: existing.returns_ivar || entry.returns_ivar,
               conditional_returns: existing.conditional_returns.merge(entry.conditional_returns),
               conditional_const_returns: existing.conditional_const_returns.merge(entry.conditional_const_returns),

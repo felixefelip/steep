@@ -1880,6 +1880,85 @@ class PostconditionsRunnerTest < Minitest::Test
   # arrive in whatever order the files do, so the closure runs to a fixpoint.
   # The chain below is written top-down on purpose: a single pass in definition
   # order would prove nothing.
+  # felixefelip/steep#126. The halt lands on an ARGUMENT: `refuse` hands itself
+  # to a module function, which halts what it was handed. Neither frame proves
+  # it alone — `deny` writes nothing on its own `self`, and `refuse` writes
+  # nothing at all — which is the shape the framework itself has.
+  PH_RBS = <<~RBS
+    class PHThing
+    end
+
+    class PHStore
+      def self.thing: () -> PHThing?
+      def self.thing=: (PHThing?) -> PHThing?
+    end
+
+    class PHController
+      @halted: bool
+
+      def thing: () -> PHThing
+
+      def run: () -> void
+      def loose: () -> void
+      def refuse: () -> void
+      def refuse_other: () -> void
+      def establish: () -> void
+      def flag?: () -> bool
+      def halt: () -> void
+      def record: () -> void
+    end
+
+    class PHResponder
+      def self.deny: (untyped host) -> void
+      def self.note: (untyped host) -> void
+    end
+  RBS
+
+  PH_RUBY = <<~RUBY
+    class PHController
+      def run
+        establish || refuse
+      end
+
+      # `note` only records — nothing it calls on the host halts, so the chain
+      # proves nothing.
+      def loose
+        establish || refuse_other
+      end
+
+      def establish
+        if flag?
+          PHStore.thing = thing
+        end
+      end
+
+      def refuse
+        PHResponder.deny(self)
+      end
+
+      def refuse_other
+        PHResponder.note(self)
+      end
+
+      def halt
+        @halted = true
+      end
+
+      def record
+      end
+    end
+
+    class PHResponder
+      def self.deny(host)
+        host.halt
+      end
+
+      def self.note(host)
+        host.record
+      end
+    end
+  RUBY
+
   BT_RBS = <<~RBS
     class BTUser
     end
@@ -2108,6 +2187,41 @@ class PostconditionsRunnerTest < Minitest::Test
       entry = by_method[:from_nothing]
       refute entry&.when_true_consts&.key?("BTRegistry.user")
       refute entry&.conditional_const_returns&.key?("BTRegistry.user")
+    end
+  end
+
+  # felixefelip/steep#126. `refuse` hands `self` to `PHResponder.deny`, which
+  # halts what it was handed. Neither frame states it: `deny` writes nothing on
+  # its own `self`, and `refuse` writes nothing at all. Together they do, and
+  # the `||` above can then be gated.
+  def test_runner_proves_a_halt_that_lands_on_an_argument
+    in_tmpdir do
+      write("sig/ph.rbs", PH_RBS)
+      write("app/ph.rb", PH_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      # The proof itself is internal — it is consumed by the passes that ask
+      # whether something halts, and never serialized — so what is asserted is
+      # its effect: the chain gets gated, which nothing else here could do.
+      spec = by_method[:run].conditional_const_returns["PHStore.thing"]
+      refute_nil spec, "expected the chain to be gated on that halt"
+      assert_equal :@halted, spec[:gate_ivar]
+    end
+  end
+
+  # `note` calls `record` on the host, and `record` halts nothing — passing
+  # yourself to somebody proves nothing on its own.
+  def test_runner_proves_nothing_when_the_callee_does_not_halt_what_it_was_handed
+    in_tmpdir do
+      write("sig/ph.rbs", PH_RBS)
+      write("app/ph.rb", PH_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      refute by_method[:loose]&.conditional_const_returns&.key?("PHStore.thing")
     end
   end
 end
