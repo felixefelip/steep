@@ -56,6 +56,7 @@ module Steep
           disjunction_chains = collect_disjunction_operands(def_node)
           when_true_block_truthy, block_forward_deps = collect_block_truthy(def_node)
           block_disjunction = collect_block_disjunction(def_node)
+          block_call_establishments = collect_block_call_establishments(def_node)
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
           conditional_const_returns = collect_conditional_const_returns(def_node)
@@ -80,7 +81,8 @@ module Steep
              may_write.empty? && self_call_deps.empty? && returns_ivar.nil? &&
              conditional_returns.empty? && conditional_const_returns.empty? &&
              establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance &&
-             !when_true_block_truthy && block_forward_deps.empty? && block_disjunction.empty?
+             !when_true_block_truthy && block_forward_deps.empty? && block_disjunction.empty? &&
+             block_call_establishments.empty?
             next
           end
 
@@ -106,6 +108,7 @@ module Steep
             when_true_block_truthy: when_true_block_truthy,
             block_forward_deps: block_forward_deps,
             block_disjunction: block_disjunction,
+            block_call_establishments: block_call_establishments,
             returns_ivar: returns_ivar,
             conditional_returns: conditional_returns,
             conditional_const_returns: conditional_const_returns,
@@ -481,7 +484,14 @@ module Steep
       #     second way to produce a truthy value;
       #   * the method contains no `return`, which would be a third.
       def collect_when_true_facts(def_node)
-        body = def_node.children[2]
+        when_true_facts(def_node.children[2])
+      end
+
+      # Split out from the above so a BLOCK's body can be asked the same
+      # question — what it establishes when it answers truthy — which is what a
+      # call site needs before it can believe anything the block did
+      # (felixefelip/rbs_infer#144 stage 3).
+      def when_true_facts(body)
         return [{}, Set[]] unless body
         return [{}, Set[]] if contains_return?(body)
 
@@ -543,6 +553,51 @@ module Steep
         deps = Set.new #: Set[String]
         collect_call_keys(value, deps) if forwards_block?(value, block_name)
         [false, deps]
+      end
+
+      # felixefelip/rbs_infer#144 stage 3, the call site — where all of it was
+      # heading.
+      #
+      #   def from_token
+      #     with_token do |token|
+      #       if user = lookup(token)
+      #         Registry.user = user
+      #       end
+      #     end
+      #   end
+      #
+      # `with_token`'s answer IS the block's (stage 2), so a truthy return of
+      # THIS method means the block ran and answered truthy — and what the block
+      # establishes on its own truthy exit therefore holds here.
+      #
+      # Two halves, and neither is knowable alone: what the block establishes is
+      # read here, from its body; whether the callee's answer is its block's is
+      # the callee's own fact, which only the Runner can look up. So this records
+      # `[{ keys:, consts: }]` and stops. Whether the resulting fact needs a halt
+      # check is the callee's to say too — `with_token` answering
+      # `fetch_token(&block) || deny` proves it only of the unhalted exit.
+      def collect_block_call_establishments(def_node)
+        body = def_node.children[2]
+        return [] unless body
+        return [] if contains_return?(body)
+
+        value = returned_value(body)
+        return [] unless value&.type == :block
+
+        send_node, _args, block_body = value.children
+        return [] unless send_node.is_a?(Parser::AST::Node) && send_node.type == :send
+
+        consts, _deps = when_true_facts(block_body)
+        return [] if consts.empty?
+
+        # The call is asked of the BLOCK node, not the `send` inside it: a call
+        # that takes a block is recorded by Steep against the whole `:block`,
+        # and asking the bare send answers nothing.
+        keys = Set.new #: Set[String]
+        collect_call_keys(value, keys)
+        return [] if keys.empty?
+
+        [{ keys: keys, consts: consts }]
       end
 
       # felixefelip/rbs_infer#144 stage 2b. The value-position `||` this method
@@ -1653,8 +1708,13 @@ module Steep
       # ivar under which the block-truthiness fact holds, i.e. on the exit that
       # did NOT halt.
       attr_reader :block_disjunction, :conditional_block_truthy
+      # felixefelip/rbs_infer#144 stage 3: `[{ keys:, consts: }]` — what a block
+      # passed at a call site establishes on its truthy exit, and which callee it
+      # was passed to. Structural input for the Runner, not a serialized fact:
+      # what comes OUT of it is an ordinary const fact.
+      attr_reader :block_call_establishments
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -1673,6 +1733,7 @@ module Steep
         @block_forward_deps = block_forward_deps
         @block_disjunction = block_disjunction
         @conditional_block_truthy = conditional_block_truthy
+        @block_call_establishments = block_call_establishments
         @returns_ivar = returns_ivar
         @conditional_returns = conditional_returns
         @conditional_const_returns = conditional_const_returns
@@ -1694,6 +1755,7 @@ module Steep
           disjunction_chains: disjunction_chains,
           when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
           block_disjunction: block_disjunction, conditional_block_truthy: conditional_block_truthy,
+          block_call_establishments: block_call_establishments,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: establishes_consts, const_establishments: const_establishments,
@@ -1715,6 +1777,7 @@ module Steep
           disjunction_chains: disjunction_chains,
           when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
           block_disjunction: block_disjunction, conditional_block_truthy: conditional_block_truthy,
+          block_call_establishments: block_call_establishments,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: consts, const_establishments: const_establishments,

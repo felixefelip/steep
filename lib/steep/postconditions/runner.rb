@@ -145,12 +145,6 @@ module Steep
         # it would have to test the result first).
         lift_when_true_consts(resolved)
 
-        # felixefelip/steep#117 gap 3c: what a `||` chain of handlers proves on
-        # the exit that did not halt. Runs last of the const passes, so each
-        # operand's facts are already complete — including the ones 3a and 3b
-        # lifted into it.
-        apply_disjunction_facts(resolved)
-
         # felixefelip/rbs_infer#144 stage 2: carry "a truthy return means the
         # block answered truthy" down the delegation chain. Independent of the
         # const passes above — it proves nothing about constants, it says whose
@@ -162,6 +156,18 @@ module Steep
         # answers with a `||` whose tail halts. Runs after the closure above, so
         # the earlier operands already carry whatever the chain gave them.
         apply_disjunction_block_truthy(resolved)
+
+        # felixefelip/rbs_infer#144 stage 3: spend those facts at the call site,
+        # turning what a BLOCK established into an ordinary const fact about the
+        # method that passed it.
+        apply_block_call_establishments(resolved)
+
+        # felixefelip/steep#117 gap 3c: what a `||` chain of handlers proves on
+        # the exit that did not halt. Runs last of the const passes, so each
+        # operand's facts are already complete — including the ones 3a and 3b
+        # lifted into it, and now the ones a block established (#144 stage 3),
+        # which is what carries a fact from INSIDE a block out to the chain.
+        apply_disjunction_facts(resolved)
 
         # felixefelip/rbs_infer#71 (piece 1): gate the UNCONDITIONAL establishment
         # (`Const.attr =` proves a sibling non-nil for the rest of the frame) on a
@@ -376,6 +382,49 @@ module Steep
 
           entry.prove_block_truthy_unless_halted!(gate_ivar)
         end
+      end
+
+      # felixefelip/rbs_infer#144 stage 3. The Inferrer read what the block
+      # establishes; the callee says whose answer a truthy return is. Together:
+      #
+      #   from_token returns truthy
+      #     => with_token's answer was its block's        (stage 2)
+      #     => the block ran and answered truthy
+      #     => what the block established holds           (stage 3)
+      #
+      # The callee's fact decides the SHAPE of the result. Ungated
+      # (`when_true_block_truthy`) makes it a truthy-exit fact; halt-gated
+      # (`conditional_block_truthy`) makes it a fact about the unhalted exit,
+      # under the callee's own gate — a `||` whose tail halts cannot prove more
+      # than that, and the block's establishment inherits the limit.
+      #
+      # Every resolved callee must carry the fact: a union receiver whose halves
+      # disagree says nothing about whose answer came back.
+      def apply_block_call_establishments(resolved)
+        resolved.each_value do |entry|
+          entry.block_call_establishments.each do |site|
+            callees = site[:keys].filter_map { |key| resolved[key] }
+            next if callees.empty?
+
+            if callees.all?(&:when_true_block_truthy)
+              site[:consts].each { |path, type| entry.when_true_consts[path] ||= type }
+            elsif (gate = common_block_truthy_gate(callees))
+              site[:consts].each do |path, type|
+                entry.conditional_const_returns[path] ||= { gate_ivar: gate, type: type }
+              end
+            end
+          end
+        end
+      end
+
+      # The one gate every callee agrees on, or nil. Callees gated differently
+      # leave no single check a caller could make.
+      def common_block_truthy_gate(callees)
+        gates = callees.map { |callee| callee.conditional_block_truthy || callee.when_true_block_truthy }
+        return nil if gates.any? { |gate| gate.nil? || gate == false }
+
+        symbols = gates.grep(Symbol).uniq
+        symbols.size == 1 ? symbols.first : nil
       end
 
       def lift_when_true_consts(resolved)
@@ -913,6 +962,7 @@ module Steep
               block_forward_deps: existing.block_forward_deps | entry.block_forward_deps,
               block_disjunction: existing.block_disjunction.empty? ? entry.block_disjunction : existing.block_disjunction,
               conditional_block_truthy: existing.conditional_block_truthy || entry.conditional_block_truthy,
+              block_call_establishments: existing.block_call_establishments + entry.block_call_establishments,
               returns_ivar: existing.returns_ivar || entry.returns_ivar,
               conditional_returns: existing.conditional_returns.merge(entry.conditional_returns),
               conditional_const_returns: existing.conditional_const_returns.merge(entry.conditional_const_returns),
