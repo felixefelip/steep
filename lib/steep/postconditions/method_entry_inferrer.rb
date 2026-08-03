@@ -223,16 +223,20 @@ module Steep
         events = [] #: Array[Hash[Symbol, untyped]]
         statements(body).each do |stmt|
           if (cw = const_write_event(stmt))
+            # A constant write's RHS runs first for the same reason an ivar write's does,
+            # and used to be dropped: `Sink.last = Bar.new.greet` recorded the write alone,
+            # so `greet` — which nothing else in the flow reaches — was cut off from the
+            # facts established above it and its body was checked as if none of them had
+            # run. felixefelip/steep#91 gave `@x = <rhs>` this treatment; constant writes
+            # never had it (felixefelip/rbs_infer#168).
+            record_rhs_calls(events, stmt.children.last)
             events << cw
           elsif (iw = ivar_write_event(stmt))
             # The RHS runs BEFORE the assignment, so its calls are part of the flow and are
             # recorded first — `@posts = recent_posts` both carries the accumulated facts to
             # `recent_posts`'s entry and then establishes `@posts`. Emitting only the write
             # would silently drop every call hidden on the right-hand side.
-            each_call_send(stmt.children[1]) do |send_node|
-              next if send_node.children[1].to_s.end_with?("=")
-              call = call_event(send_node) and events << call
-            end
+            record_rhs_calls(events, stmt.children.last)
             events << iw
           elsif halt_statement?(stmt)
             events << { kind: :halt }
@@ -246,6 +250,16 @@ module Steep
           end
         end
         events
+      end
+
+      # The calls of an assignment's right-hand side (its last child, for both shapes),
+      # appended in evaluation order. A setter send is skipped: the write itself is the
+      # event, and `x.y = v` is not a call into `y=` as far as the flow is concerned.
+      def record_rhs_calls(events, rhs)
+        each_call_send(rhs) do |send_node|
+          next if send_node.children[1].to_s.end_with?("=")
+          call = call_event(send_node) and events << call
+        end
       end
 
       # A `return if <cond>` / `return unless <cond>` guard clause — the halt check that, in a
