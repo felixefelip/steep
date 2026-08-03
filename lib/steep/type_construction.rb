@@ -336,7 +336,15 @@ module Steep
                        TypeInference::MethodCall::MethodContext.new(
                          method_name: SingletonMethodName.new(type_name: module_context.class_name, method_name: method_name)
                        )
-                     when AST::Types::Name::Instance, AST::Types::Intersection
+                     # A union joins the intersection here rather than getting a
+                     # branch of its own: this context records WHICH METHOD is
+                     # being checked, built from `module_context.class_name`, and
+                     # never reads `self_type` itself. A module mixed into two
+                     # classes has two possible selves — one at a time, which is
+                     # a union — and its methods are still methods of the module
+                     # being defined. Raising instead left the method untyped,
+                     # silently (felixefelip/steep#130).
+                     when AST::Types::Name::Instance, AST::Types::Intersection, AST::Types::Union
                        TypeInference::MethodCall::MethodContext.new(
                          method_name: InstanceMethodName.new(type_name: module_context.class_name, method_name: method_name)
                        )

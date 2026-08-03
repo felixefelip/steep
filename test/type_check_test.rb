@@ -4925,6 +4925,46 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  # felixefelip/steep#130. A module mixed into two classes has two possible
+  # selves — one at a time, which is a union. `for_new_method` raised
+  # `Unexpected self_type` on one, and the method came out untyped with no
+  # diagnostic to say why. An intersection cannot stand in: no object is both
+  # an `Admin` and a `Guest`.
+  def test_type_instance_annotation_accepts_a_union_of_hosts
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Admin
+            def label: () -> String
+          end
+
+          class Guest
+            def label: () -> String
+          end
+
+          module Greeting
+            def greet: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module Greeting
+            # @type instance: (Admin & Greeting) | (Guest & Greeting)
+            def greet
+              label
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_type_instance_annotation_imports_ivars_from_intersection_type
     run_type_check_test(
       signatures: {
