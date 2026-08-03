@@ -30,6 +30,11 @@ class PostconditionsMethodEntryInferrerTest < Minitest::Test
       def foo_name: () -> String?
     end
 
+    class MSink
+      def self.last: () -> String?
+      def self.last=: (String? value) -> void
+    end
+
     class MRun
       def run: () -> void
     end
@@ -289,6 +294,36 @@ class PostconditionsMethodEntryInferrerTest < Minitest::Test
     refute_nil write_index
     assert foo_index < write_index, "the RHS call runs before the assignment"
     assert_equal :@bar, events[write_index][:name]
+  end
+
+  def test_const_write_records_its_rhs_calls_before_the_write
+    # `Const.attr = <rhs>` is a `:const_write` event, and the RHS runs FIRST — so its calls
+    # belong to the flow, in that order. Recording only the write cut every callee reachable
+    # ONLY from the right-hand side out of the flow: `foo_name` here never saw `MFoo.name`
+    # established one line above, and its body was checked as if that write had not run.
+    sequences = sequences_for(<<~RUBY)
+      class MRun
+        def run
+          MFoo.name = "x"
+          MSink.last = MBar.new.foo_name
+        end
+      end
+    RUBY
+
+    events = sequences[0].events
+    kinds = events.map { |e| e[:kind] }
+
+    foo_index = events.index { |e| e[:kind] == :call && e[:method_name] == :foo_name }
+    sink_index = events.index { |e| e[:kind] == :const_write && e[:base] == "MSink" }
+
+    refute_nil foo_index, "the RHS call must be recorded"
+    refute_nil sink_index
+    assert foo_index < sink_index, "the RHS call runs before the assignment"
+    # The write it is the RHS of is still the write, not a call into `last=`.
+    assert_nil events.find { |e| e[:kind] == :call && e[:method_name] == :last= }
+    # And the earlier write is still ahead of both, so `foo_name` sees it.
+    assert_equal :const_write, kinds[0]
+    assert_equal "MFoo", events[0][:base]
   end
 
   def test_nilable_const_write_is_not_nonnil
