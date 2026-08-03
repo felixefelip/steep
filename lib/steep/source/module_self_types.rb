@@ -30,10 +30,11 @@ module Steep
     # Sidecar format (keyed by project-relative source path):
     #
     #   "app/models/search/record/sqlite.rb":
-    #     anchor: "SQLite"
-    #     annotations:
-    #       - "# @type self: singleton(Search::Record) & singleton(Search::Record::SQLite)"
-    #       - "# @type instance: Search::Record & Search::Record::SQLite"
+    #     modules:
+    #       - anchor: "SQLite"
+    #         annotations:
+    #           - "# @type self: singleton(Search::Record) & singleton(Search::Record::SQLite)"
+    #           - "# @type instance: Search::Record & Search::Record::SQLite"
     #   "app/models/post/taggable.rb":
     #     blocks:
     #       - call: "class_methods"
@@ -44,6 +45,12 @@ module Steep
     # comment for a nested module lands *inside* that module's body (a trailing
     # end-of-file comment would bind to the enclosing scope instead).
     #
+    # `modules` is a LIST because one file can declare several, each with its own
+    # self type: a framework transcription reopens `Token`, `Token::ControllerMethods`
+    # and their wrapper in one file, and only one of them is a mixin. A single
+    # `anchor`/`annotations` pair at the top level is still read, so a sidecar
+    # written by an older generator keeps working.
+    #
     # Block injection relies on the upstream `@implements` annotation — legacy
     # (absent from the current `manual/annotations.md`, but still parsed and
     # handled: `TypeConstruction#for_block` reads it to rebind the block body's
@@ -53,15 +60,25 @@ module Steep
       DEFAULT_SIDECAR_PATH = "sig/generated/.steep_module_self_types.yml"
 
       class << self
-        # The sidecar entry for `path` (`{ "anchor" => ..., "annotations" =>
-        # [...] }`), or nil. Keys are project-relative; an absolute path matches
-        # by its tail.
+        # The sidecar entry for `path`, or nil. Keys are project-relative; an
+        # absolute path matches by its tail.
         def entry_for(path)
           table = load_table
           return nil if table.empty?
 
           key = path.to_s
           table[key] || table[relative(key)] || table.find { |k, _| key.end_with?("/#{k}") }&.last
+        end
+
+        # The `{anchor:, annotations:}` pairs of an entry, one per module the
+        # file declares. A top-level `anchor`/`annotations` pair is read as a
+        # single-element list, so a sidecar from a generator that predates
+        # `modules` still applies.
+        def self_types_of(entry)
+          modules = Array(entry["modules"])
+          return modules if modules.any?
+
+          entry["anchor"] ? [entry] : []
         end
 
         # Places `annotations` at the scope named `anchor`. A module nested in a
@@ -272,14 +289,21 @@ module Steep
 
         # Inserts the lines, indented one level past the declaration, right
         # before the node's closing `end`.
+        # Spliced in BYTES, because that is what Prism counts: a `start_offset`
+        # measured in bytes indexed into a String is a character index, and one
+        # multi-byte character anywhere above the anchor slides the insertion
+        # point down — past the module's own `end` and into its parent's body,
+        # where the annotation binds to the wrong scope and silently does
+        # nothing. `inject_blocks` splices by byte for the same reason.
         def insert_in_body(source_code, node, annotation_lines)
           return append_at_end(source_code, annotation_lines) unless node.respond_to?(:end_keyword_loc) && node.end_keyword_loc
 
           indent = " " * (node.location.start_column + 2)
           block = annotation_lines.map { |line| "#{indent}#{line}\n" }.join
-          end_offset = node.end_keyword_loc.start_offset
-          line_start = (source_code.rindex("\n", end_offset) || -1) + 1
-          source_code[0...line_start] + block + source_code[line_start..]
+          bytes = source_code.b
+          line_start = (bytes.rindex("\n".b, node.end_keyword_loc.start_offset) || -1) + 1
+
+          (bytes[0...line_start] + block.b + bytes[line_start..]).force_encoding(source_code.encoding)
         end
 
         def append_at_end(source_code, annotation_lines)
