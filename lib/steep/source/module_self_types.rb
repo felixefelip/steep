@@ -289,14 +289,21 @@ module Steep
 
         # Inserts the lines, indented one level past the declaration, right
         # before the node's closing `end`.
+        # Spliced in BYTES, because that is what Prism counts: a `start_offset`
+        # measured in bytes indexed into a String is a character index, and one
+        # multi-byte character anywhere above the anchor slides the insertion
+        # point down — past the module's own `end` and into its parent's body,
+        # where the annotation binds to the wrong scope and silently does
+        # nothing. `inject_blocks` splices by byte for the same reason.
         def insert_in_body(source_code, node, annotation_lines)
           return append_at_end(source_code, annotation_lines) unless node.respond_to?(:end_keyword_loc) && node.end_keyword_loc
 
           indent = " " * (node.location.start_column + 2)
           block = annotation_lines.map { |line| "#{indent}#{line}\n" }.join
-          end_offset = node.end_keyword_loc.start_offset
-          line_start = (source_code.rindex("\n", end_offset) || -1) + 1
-          source_code[0...line_start] + block + source_code[line_start..]
+          bytes = source_code.b
+          line_start = (bytes.rindex("\n".b, node.end_keyword_loc.start_offset) || -1) + 1
+
+          (bytes[0...line_start] + block.b + bytes[line_start..]).force_encoding(source_code.encoding)
         end
 
         def append_at_end(source_code, annotation_lines)
