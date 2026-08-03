@@ -53,11 +53,13 @@ module Steep
       end
 
       if ENV["STEEP_MODULE_CONVENTION"] && path.to_s.end_with?(".rb") && (entry = ModuleSelfTypes.entry_for(path))
-        if entry["anchor"]
+        ModuleSelfTypes.self_types_of(entry).each do |mod|
+          next unless mod["anchor"]
+
           source_code = ModuleSelfTypes.inject(
             source_code,
-            annotations: Array(entry["annotations"]),
-            anchor: entry["anchor"].to_s
+            annotations: Array(mod["annotations"]),
+            anchor: mod["anchor"].to_s
           )
         end
         if entry["blocks"]

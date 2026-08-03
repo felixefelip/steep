@@ -292,6 +292,30 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     end
   end
 
+  # --- self_types_of: one file can declare several modules ---
+
+  def test_self_types_of_reads_every_module_of_an_entry
+    entry = {
+      "modules" => [
+        { "anchor" => "ControllerMethods", "annotations" => ["# @type instance: A & B"] },
+        { "anchor" => "Token", "annotations" => ["# @type instance: C & D"] }
+      ]
+    }
+
+    assert_equal %w[ControllerMethods Token], M.self_types_of(entry).map { |m| m["anchor"] }
+  end
+
+  # A sidecar written before `modules` existed still applies.
+  def test_self_types_of_reads_a_top_level_anchor_as_one_module
+    entry = { "anchor" => "SQLite", "annotations" => ["# @type instance: A & B"] }
+
+    assert_equal [entry], M.self_types_of(entry)
+  end
+
+  def test_self_types_of_is_empty_for_a_blocks_only_entry
+    assert_empty M.self_types_of({ "blocks" => [{ "call" => "class_methods" }] })
+  end
+
   def test_entry_for_nil_without_sidecar
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
