@@ -40,6 +40,9 @@ class PostconditionsInferrerTest < Minitest::Test
       def from_token: () -> untyped
       def with_token: () { (String) -> untyped } -> untyped
       def lookup: (String) -> IUBlockUser?
+      def bearer?: () -> bool
+      def json?: () -> bool
+      def refuse: () -> untyped
     end
 
     class IUNested
@@ -1893,5 +1896,86 @@ class PostconditionsInferrerTest < Minitest::Test
     refute_nil entry, "expected an entry for the call site"
     assert_equal 1, entry.block_call_establishments.size
     assert_equal ["IUNested::Registry.user"], entry.block_call_establishments.first[:consts].keys
+  end
+
+  # felixefelip/rbs_infer#144, the shape an app actually writes — two
+  # conditionals deep, with the inner alternative being the 401. Unwrapping one
+  # one-armed `if` was enough for the fixtures and is not enough for Fizzy.
+  #
+  # The `else` is why this needs a gate at all: with one, a truthy return could
+  # be the alternative's — unless the alternative halts, which is a fact about
+  # `refuse` and therefore the Runner's to prove. So the calls are recorded as
+  # candidates and nothing is claimed here.
+  def test_it_reads_a_call_site_two_conditionals_deep_with_a_halting_else
+    entry = block_entry(<<~RUBY, :from_token)
+      class IUBlockSite
+        def from_token
+          if bearer?
+            if json?
+              with_token do |token|
+                if user = lookup(token)
+                  IUBlockRegistry.user = user
+                end
+              end
+            else
+              refuse
+            end
+          end
+        end
+      end
+    RUBY
+
+    refute_nil entry, "expected an entry for the call site"
+    site = entry.block_call_establishments.first
+    refute_nil site, "expected the nested call site to be read"
+    assert_equal Set["IUBlockSite#with_token"], site[:keys]
+    assert_equal ["IUBlockRegistry.user"], site[:consts].keys
+    assert_equal Set["IUBlockSite#refuse"], site[:halt_keys]
+  end
+
+  # `if guard then halt else block end` is the same proof written the other way
+  # round — and `unless` spells it exactly like that.
+  def test_either_arm_may_be_the_one_carrying_the_block
+    entry = block_entry(<<~RUBY, :from_token)
+      class IUBlockSite
+        def from_token
+          if bearer?
+            refuse
+          else
+            with_token do |token|
+              if user = lookup(token)
+                IUBlockRegistry.user = user
+              end
+            end
+          end
+        end
+      end
+    RUBY
+
+    site = entry&.block_call_establishments&.first
+    refute_nil site, "expected the block in the else arm to be read"
+    assert_equal Set["IUBlockSite#refuse"], site[:halt_keys]
+  end
+
+  # An alternative that calls nothing cannot halt, so there is no candidate to
+  # offer and the site is refused here rather than left for the Runner.
+  def test_a_two_armed_if_whose_alternative_calls_nothing_proves_nothing
+    entry = block_entry(<<~RUBY, :from_token)
+      class IUBlockSite
+        def from_token
+          if json?
+            with_token do |token|
+              if user = lookup(token)
+                IUBlockRegistry.user = user
+              end
+            end
+          else
+            "denied"
+          end
+        end
+      end
+    RUBY
+
+    assert_empty(entry&.block_call_establishments || [])
   end
 end

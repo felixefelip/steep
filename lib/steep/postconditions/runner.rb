@@ -403,6 +403,14 @@ module Steep
       # under the callee's own gate — a `||` whose tail halts cannot prove more
       # than that, and the block's establishment inherits the limit.
       #
+      # The SITE can be gated too: an `else` that renders a 401 is what makes
+      # reaching the block the only unhalted way out, and the Inferrer can only
+      # name the calls that alternative makes — whether one of them always halts
+      # is the callee's own fact, resolved here. A site gate downgrades an
+      # otherwise ungated callee to the same halt-gated shape; two gates that
+      # disagree leave no single check a caller could make, so nothing is
+      # recorded rather than a fact nobody can spend.
+      #
       # Every resolved callee must carry the fact: a union receiver whose halves
       # disagree says nothing about whose answer came back.
       def apply_block_call_establishments(resolved)
@@ -411,13 +419,33 @@ module Steep
             callees = site[:keys].filter_map { |key| resolved[key] }
             next if callees.empty?
 
-            if callees.all?(&:when_true_block_truthy)
-              site[:consts].each { |path, type| entry.when_true_consts[path] ||= type }
-            elsif (gate = common_block_truthy_gate(callees))
-              site[:consts].each do |path, type|
-                entry.conditional_const_returns[path] ||= { gate_ivar: gate, type: type }
-              end
+            halt_keys = site[:halt_keys]
+            site_gate = nil #: Symbol?
+            if halt_keys && !halt_keys.empty?
+              site_gate = always_halting_ivar(halt_keys, resolved) or next
             end
+
+            if callees.all?(&:when_true_block_truthy)
+              record_block_call_facts(entry, site, site_gate)
+              next
+            end
+
+            gate = common_block_truthy_gate(callees) or next
+            next if site_gate && site_gate != gate
+
+            record_block_call_facts(entry, site, gate)
+          end
+        end
+      end
+
+      # Ungated, what the block established is a fact about this method's truthy
+      # exit; gated, one about its unhalted exit.
+      def record_block_call_facts(entry, site, gate)
+        site[:consts].each do |path, type|
+          if gate
+            entry.conditional_const_returns[path] ||= { gate_ivar: gate, type: type }
+          else
+            entry.when_true_consts[path] ||= type
           end
         end
       end
