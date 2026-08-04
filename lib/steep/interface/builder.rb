@@ -226,6 +226,25 @@ module Steep
           if bound = config.upper_bound(type.name)
             self_shape(bound, config)&.update(type: type)
           end
+        # A composite self type distributes over its components *as a self
+        # shape* — each member keeps `self` unsubstituted, because `self` names
+        # the receiver as a whole, not the member that happens to host the
+        # method. Falling through to `raw_shape` substituted `self` with the
+        # hosting component, so `def m: () -> self` inherited from one member
+        # returned that member's concrete type: a module annotated
+        # `@type instance: Card & Card::Eventable` (the shape every module
+        # self-type annotation takes) had `update!: () -> self` return `::Card`,
+        # which then fails `::Card <: self` against its own declared `-> self`.
+        when AST::Types::Intersection
+          shapes = type.types.map do |ty|
+            self_shape(ty, config) or return
+          end
+          intersection_shape(type, shapes)
+        when AST::Types::Union
+          shapes = type.types.map do |ty|
+            self_shape(ty, config) or return
+          end
+          union_shape(type, shapes)
         else
           raw_shape(type, config)
         end

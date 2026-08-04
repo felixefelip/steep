@@ -147,9 +147,11 @@ class InterfaceBuilderTest < Minitest::Test
         assert_equal [parse_method_type("() -> (::_Foo | self)")], shape.methods[:itself].method_types
       end
 
+      # A composite self type leaves `self` abstract, exactly as a singular one
+      # does — the member hosting the method is not what `self` names.
       builder.shape(parse_type("self"), config(self_type: parse_type("::_Foo | ::_Bar"))).tap do |shape|
         assert_equal parse_type("::_Foo | ::_Bar"), shape.type
-        assert_equal [parse_method_type("() -> (::_Foo | ::_Bar)")], shape.methods[:itself].method_types
+        assert_equal [parse_method_type("() -> self")], shape.methods[:itself].method_types
       end
     end
   end
@@ -215,9 +217,14 @@ end
         assert_equal [parse_method_type("(::String) -> self")], shape.methods[:f].method_types
       end
 
+      # As with a union, an intersection self type keeps `self` abstract. This
+      # is the shape a module self-type annotation takes
+      # (`@type instance: Card & Card::Eventable`); substituting the hosting
+      # member here made every inherited `-> self` method return that member's
+      # concrete type, which then failed its own `-> self` declaration.
       builder.shape(parse_type("self"), config(self_type: parse_type("::_Foo & ::_Bar"))).tap do |shape|
         assert_equal parse_type("::_Foo & ::_Bar"), shape.type
-        assert_equal [parse_method_type("(::String) -> ::_Bar")], shape.methods[:f].method_types
+        assert_equal [parse_method_type("(::String) -> self")], shape.methods[:f].method_types
       end
     end
   end
@@ -422,7 +429,7 @@ end
         assert_equal(
           shape.methods[:try].method_types,
           [
-            parse_method_type("[T] () { (::Integer | ::String) -> T } -> T"),
+            parse_method_type("[T] () { (self) -> T } -> T"),
           ]
         )
       end
