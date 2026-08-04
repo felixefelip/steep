@@ -1979,7 +1979,13 @@ class PostconditionsRunnerTest < Minitest::Test
       def from_gated: () -> untyped
       def from_ungated: () -> untyped
       def from_nothing: () -> untyped
+      def from_nested: () -> untyped
+      def from_nested_ungated_callee: () -> untyped
+      def from_nested_else_carries: () -> untyped
+      def from_nested_without_a_halt: () -> untyped
       def lookup: (String) -> BTUser?
+      def bearer?: () -> bool
+      def json?: () -> bool
 
       def top: () { (String) -> untyped } -> untyped
       def middle: () { (String) -> untyped } -> untyped
@@ -2051,6 +2057,64 @@ class PostconditionsRunnerTest < Minitest::Test
             BTRegistry.user = user
           end
         end
+      end
+
+      def from_nested
+        if bearer?
+          if json?
+            or_halt do |token|
+              if user = lookup(token)
+                BTRegistry.user = user
+              end
+            end
+          else
+            deny
+          end
+        end
+      end
+
+      def from_nested_ungated_callee
+        if json?
+          direct do |token|
+            if user = lookup(token)
+              BTRegistry.user = user
+            end
+          end
+        else
+          deny
+        end
+      end
+
+      def from_nested_else_carries
+        if json?
+          deny
+        else
+          direct do |token|
+            if user = lookup(token)
+              BTRegistry.user = user
+            end
+          end
+        end
+      end
+
+      def from_nested_without_a_halt
+        if json?
+          direct do |token|
+            if user = lookup(token)
+              BTRegistry.user = user
+            end
+          end
+        else
+          fetch
+        end
+      end
+
+      def bearer?
+        fetch.empty?
+      end
+
+      def json?
+        fetch.empty?
       end
 
       def lookup(token)
@@ -2190,6 +2254,78 @@ class PostconditionsRunnerTest < Minitest::Test
       by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
 
       entry = by_method[:from_nothing]
+      refute entry&.when_true_consts&.key?("BTRegistry.user")
+      refute entry&.conditional_const_returns&.key?("BTRegistry.user")
+    end
+  end
+
+  # felixefelip/rbs_infer#144, the shape an app writes: the block call two
+  # conditionals deep, and the inner `else` is the 401. Both gates are the same
+  # ivar here — the callee's `||` tail and this method's own `else` halt the same
+  # way — so one check covers them.
+  def test_runner_reads_a_call_site_two_conditionals_deep_with_a_halting_else
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      spec = by_method[:from_nested].conditional_const_returns["BTRegistry.user"]
+      refute_nil spec, "expected the nested block's establishment to reach the caller"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::BTUser", spec[:type].to_s
+    end
+  end
+
+  # `direct` needs no gate of its own, but the `else` still means a truthy
+  # return could be `deny`'s — so the site's own halt gates what the callee left
+  # ungated, and the fact lands in the conditional slot rather than the
+  # unconditional one.
+  def test_runner_gates_an_ungated_callee_on_the_sites_own_halt
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      entry = by_method[:from_nested_ungated_callee]
+      refute entry.when_true_consts.key?("BTRegistry.user"),
+             "an else that may answer truthy cannot prove it of every truthy exit"
+      assert_equal :@halted, entry.conditional_const_returns["BTRegistry.user"][:gate_ivar]
+    end
+  end
+
+  # The same proof written the other way round — the halt in the `if`, the block
+  # in the `else`.
+  def test_runner_reads_the_block_from_either_arm
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      spec = by_method[:from_nested_else_carries].conditional_const_returns["BTRegistry.user"]
+      refute_nil spec
+      assert_equal :@halted, spec[:gate_ivar]
+    end
+  end
+
+  # `fetch` halts nothing, so the `else` is an ordinary way to return truthy
+  # having established nothing — exactly the path the fact would be a lie on.
+  # The Inferrer offered the candidate; refusing it is the Runner's call, since
+  # only it knows what `fetch` does.
+  def test_runner_proves_nothing_when_the_alternative_does_not_halt
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      entry = by_method[:from_nested_without_a_halt]
       refute entry&.when_true_consts&.key?("BTRegistry.user")
       refute entry&.conditional_const_returns&.key?("BTRegistry.user")
     end

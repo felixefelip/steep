@@ -667,16 +667,16 @@ module Steep
       # Two halves, and neither is knowable alone: what the block establishes is
       # read here, from its body; whether the callee's answer is its block's is
       # the callee's own fact, which only the Runner can look up. So this records
-      # `[{ keys:, consts: }]` and stops. Whether the resulting fact needs a halt
-      # check is the callee's to say too — `with_token` answering
+      # `[{ keys:, consts:, halt_keys: }]` and stops. Whether the resulting fact
+      # needs a halt check is the callee's to say too — `with_token` answering
       # `fetch_token(&block) || deny` proves it only of the unhalted exit.
       def collect_block_call_establishments(def_node)
         body = def_node.children[2]
         return [] unless body
         return [] if contains_return?(body)
 
-        value = returned_value(body)
-        return [] unless value&.type == :block
+        value, halt_keys = block_value_with_gate(body)
+        return [] unless value
 
         send_node, _args, block_body = value.children
         return [] unless send_node.is_a?(Parser::AST::Node) && send_node.type == :send
@@ -691,7 +691,83 @@ module Steep
         collect_call_keys(value, keys)
         return [] if keys.empty?
 
-        [{ keys: keys, consts: consts }]
+        [{ keys: keys, consts: consts, halt_keys: halt_keys }]
+      end
+
+      # The `:block` a truthy exit answered with, however deep the conditionals
+      # around it — and the calls whose halt is what makes reaching it the only
+      # unhalted way out. `[block_node, halt_keys]`, or `nil` when no block is
+      # the method's value.
+      #
+      # An app does not write the shape a fixture does. Fizzy's is two levels,
+      # and the inner alternative is the 401:
+      #
+      #   def authenticate_by_bearer_token
+      #     if request.authorization.to_s.include?("Bearer")
+      #       if bearer_token_authenticatable_request?
+      #         authenticate_or_request_with_http_token do |token|
+      #           Current.identity = identity if identity = Identity.find_by_...
+      #         end
+      #       else
+      #         request_http_token_authentication          # halts
+      #       end
+      #     end
+      #   end
+      #
+      # A ONE-armed `if` is descended through for free: the guard only adds a
+      # FALSY way out, which cannot weaken a fact about a truthy return — the
+      # same reasoning `returned_value` already makes.
+      #
+      # A TWO-armed one is not free, and refusing it outright would be right in
+      # general: with an `else`, the block may never run and a truthy return
+      # could be the alternative's. What rescues this one is that the
+      # alternative HALTS — so either the block ran and answered, or nothing
+      # returned at all. That makes the fact hold on the unhalted exit rather
+      # than unconditionally, which is the shape felixefelip/steep#121 already
+      # models for a constant write, and the halt itself is the Runner's to
+      # prove: it may be reached through a callee, or land on an argument
+      # (felixefelip/steep#126), neither of which is visible from one body.
+      #
+      # Both arms are tried as the carrier. `if guard then halt else block end`
+      # is the same proof written the other way round, and Ruby's `unless`
+      # spells it exactly like that.
+      def block_value_with_gate(node, halt_keys = Set.new)
+        last = last_statement(node)
+        return nil unless last
+        return [last, halt_keys] if last.type == :block
+        return nil unless last.type == :if
+
+        _cond, true_clause, false_clause = last.children
+
+        if true_clause.nil? ^ false_clause.nil?
+          block_value_with_gate(true_clause || false_clause, halt_keys)
+        elsif true_clause && false_clause
+          [[true_clause, false_clause], [false_clause, true_clause]].each do |carrier, alternative|
+            keys = halting_candidate_keys(alternative)
+            next if keys.empty?
+
+            found = block_value_with_gate(carrier, halt_keys | keys)
+            return found if found
+          end
+          nil
+        end
+      end
+
+      # The calls an alternative makes unconditionally, as candidates for "this
+      # arm halts". Every one of them is a candidate and not a claim: the Runner
+      # answers which — if any — always halts, since that is a fact about the
+      # callee. A call that halts anywhere at this arm's top level halts the arm,
+      # so the position within it does not matter.
+      def halting_candidate_keys(node)
+        keys = Set.new #: Set[String]
+        return keys unless node.is_a?(Parser::AST::Node)
+
+        each_statement(node) do |stmt, _is_last|
+          send_node = unconditional_send(stmt) or next
+
+          collect_call_keys(send_node, keys)
+        end
+        keys
       end
 
       # felixefelip/rbs_infer#144 stage 2b. The value-position `||` this method
