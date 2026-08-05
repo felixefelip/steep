@@ -4999,6 +4999,82 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  # A concern's method declared `-> self` and returning a `-> self` call
+  # inherited from the host: the composite self type must not collapse to the
+  # host, or the body types as `::Card` and fails `::Card <: self` against its
+  # own declaration.
+  def test_type_instance_annotation_keeps_self_through_an_intersection
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Card
+            include Card::Eventable
+
+            def update!: (*untyped) -> self
+
+            module Eventable
+              def touch_last_active_at: () -> self
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Card
+            module Eventable
+              # @type instance: Card & Card::Eventable
+              def touch_last_active_at
+                update!(1)
+              end
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_instance_annotation_keeps_self_through_a_union
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module Reloadable
+            def refresh: () -> self
+          end
+
+          class Admin
+            include Reloadable
+            def reload: () -> self
+          end
+
+          class Guest
+            include Reloadable
+            def reload: () -> self
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module Reloadable
+            # @type instance: (Admin & Reloadable) | (Guest & Reloadable)
+            def refresh
+              reload
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_type_instance_annotation_imports_inherited_ivars
     run_type_check_test(
       signatures: {
