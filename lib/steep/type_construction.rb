@@ -211,6 +211,78 @@ module Steep
       []
     end
 
+    # The super of `method_name` as seen from a HOST named by the self type,
+    # rather than from the module the method is written in.
+    #
+    # `super` is resolved from the ancestors of wherever the method is DEFINED.
+    # For a mixin that chain is the module and its own includes, so a method in
+    # `Filter::Fields` never sees `Filter`'s `include Filter::GeneratedAttributeMethods`
+    # — `def creator_id; super || false; end` read `untyped` even though the column
+    # accessor it overrides is typed. This is not specific to ActiveSupport::Concern
+    # or to `included do`; it is every mixin whose method overrides one the host
+    # gets from somewhere else.
+    #
+    # nil (leaving the caller's behaviour unchanged) whenever the self type names
+    # no usable host, the host's chain has no entry for the module, or the hosts
+    # disagree — see the union note below.
+    def super_method_through_self_type(method_name)
+      module_context or return nil
+      own_name = module_context.class_name or return nil
+      instance_type = module_context.instance_type or return nil
+
+      supers = self_type_host_names(instance_type, own_name).filter_map do |host|
+        super_method_in_host(host, own_name, method_name)
+      end.uniq
+
+      # Two hosts mean two chains, and one `RBS::Definition::Method` cannot say
+      # "whichever of these self is". Answering with one host's super would type
+      # the other host's `super` as a method it does not have, so a disagreement
+      # keeps the pre-existing `untyped` instead. (Identical supers are not a
+      # disagreement — `uniq` above.)
+      supers.first if supers.size == 1
+    end
+
+    # The class names an instance self type names, minus the module's own — the
+    # annotated type is `Host & Mod` (a union of those when the module has several
+    # hosts), so the hosts are its class components.
+    def self_type_host_names(type, own_name)
+      names =
+        case type
+        when AST::Types::Union, AST::Types::Intersection
+          type.types.flat_map { |t| self_type_host_names(t, own_name) }
+        when AST::Types::Name::Instance
+          [type.name]
+        else
+          []
+        end
+
+      names.uniq.reject { |name| name == own_name }
+    end
+
+    # Walks the host's method chain to the entry the MODULE contributes and
+    # returns what sits behind it.
+    #
+    # Taking `build_instance(host).methods[name].super_method` directly is off by
+    # one whenever the host (or a module mixed in closer than this one) overrides
+    # the method too: the top entry is then the host's and its super is this
+    # module's own, so `super` would be typed as the very method being checked.
+    def super_method_in_host(host, own_name, method_name)
+      entry = checker.factory.definition_builder.build_instance(host).methods[method_name]
+
+      while entry
+        return entry.super_method if entry.defined_in == own_name
+
+        entry = entry.super_method
+      end
+
+      nil
+    rescue RBS::BaseError
+      # A host the environment cannot build (a generic applied wrongly, a name
+      # only the annotation mentions) contributes no super rather than raising
+      # out of an unrelated method's type check.
+      nil
+    end
+
     def for_new_method(method_name, node, args:, self_type:, definition:)
       annots = source.annotations(block: node, factory: checker.factory, context: nesting)
       definition_method_type = if definition
@@ -260,6 +332,19 @@ module Steep
                          end
                        end
                      end
+
+      # A module's own ancestors end at the module, so a method it defines has no
+      # super — but at runtime the method runs on an instance of the HOST, and
+      # `super` walks the host's chain from the module's position. The self type
+      # is what names that host, and `super` was the one thing not reading it: an
+      # ordinary send in the same body resolves against `Host & Mod`, while
+      # `super` resolved against `Mod` alone and fell back to `untyped`.
+      #
+      # Only as a FALLBACK. When the module's own chain answers, that answer is
+      # already correct and more specific: what sits behind `Mod` in the host's
+      # ancestors is whatever `Mod` itself includes, and nothing the host mixes in
+      # can be inserted between them.
+      super_method ||= super_method_through_self_type(method_name)
 
       if definition && method_type
         variable_context = TypeInference::Context::TypeVariableContext.new(method_type.type_params, parent_context: self.variable_context)
