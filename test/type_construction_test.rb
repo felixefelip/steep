@@ -8806,6 +8806,198 @@ end
     end
   end
 
+  # `X.class_eval do ... end` reopens `X`: the block's default definee is the
+  # receiver, so a `def` inside defines `X`'s instance method. Both halves already
+  # existed and were only ever connected by hand — the block's `self` is bound to the
+  # receiver by `class_eval`'s own signature, and `for_block` already enters a module
+  # context when `@implements` says to. Without deriving it the defs landed in
+  # whatever context the block was written in (at top level, `::Object`), and `super`
+  # inside one had nothing to resolve against.
+  def test_block_implicit_implements_from_class_eval
+    with_checker <<-EOF do |checker|
+module TestCevalSlots
+  def slot: () -> String?
+end
+
+class TestCeval
+  include TestCevalSlots
+
+  def self.class_eval: () { () -> void } -> void
+
+  def by_class_eval: () -> Integer
+  def slot: () -> String
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestCeval.class_eval do
+  def by_class_eval
+    2
+  end
+
+  def slot
+    super || "default"
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # The `super` reaching the included module is the load-bearing half: it only
+        # resolves if the def belongs to `TestCeval`, whose ancestors have the module.
+        assert_equal parse_type("(::String | nil)"),
+                     typing.type_of(node: dig(source.node, 2, 1, 2, 0))
+        assert_no_error typing
+      end
+    end
+  end
+
+  # `module_eval` is an alias, so a fix that keyed on one name would miss it.
+  def test_block_implicit_implements_from_module_eval
+    with_checker <<-EOF do |checker|
+class TestMeval
+  def self.module_eval: () { () -> void } -> void
+
+  def by_module_eval: () -> Symbol
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestMeval.module_eval do
+  def by_module_eval
+    :three
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # `instance_eval` binds the block's self the same way but its default definee is the
+  # receiver's SINGLETON class, so the same treatment would attribute the def to the
+  # instance side — the wrong half. It keeps the pre-existing behaviour.
+  def test_block_no_implicit_implements_from_instance_eval
+    with_checker <<-EOF do |checker|
+class TestIeval
+  def self.instance_eval: () { () -> void } -> void
+
+  def self.by_instance_eval: () -> Float
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestIeval.instance_eval do
+  def by_instance_eval
+    4.0
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, errors.first
+        end
+      end
+    end
+  end
+
+  # `obj.class_eval` reopens whatever class `obj` happens to be — not decidable from
+  # the shape, so it is left alone.
+  def test_block_no_implicit_implements_from_value_receiver
+    with_checker <<-EOF do |checker|
+class TestValueEval
+  def class_eval: () { () -> void } -> void
+  def by_value_receiver: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestValueEval.new.class_eval do
+  def by_value_receiver
+    1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, errors.first
+        end
+      end
+    end
+  end
+
+  # Entering a generic class needs its type parameters bound, which `for_class` sets
+  # up and a block does not: `TestGenericEval` where `TestGenericEval[Elem]` is
+  # required. Declining leaves the ordinary call typing.
+  def test_block_no_implicit_implements_for_a_generic_class
+    with_checker <<-EOF do |checker|
+class TestGenericEval[Elem]
+  def self.class_eval: () { () -> void } -> void
+
+  def by_generic_eval: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestGenericEval.class_eval do
+  def by_generic_eval
+    1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, errors.first
+        end
+      end
+    end
+  end
+
+  # An explicit annotation is the author overriding what the call shape says, which is
+  # the point of writing it, so it wins.
+  def test_block_explicit_implements_wins_over_the_call_shape
+    with_checker <<-EOF do |checker|
+class TestOverridden
+  def elsewhere: () -> Integer
+end
+
+class TestReceiver
+  def self.class_eval: () { () -> void } -> void
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestReceiver.class_eval do
+  # @implements TestOverridden
+
+  def elsewhere
+    1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_block_implements_singleton
     with_checker <<-EOF do |checker|
 class Object
