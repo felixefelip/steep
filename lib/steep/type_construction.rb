@@ -3363,6 +3363,8 @@ module Steep
         block_block_hint: block_hint,
         block_annotations: block_annotations,
         block_self_hint: self_hint,
+        # A lambda has no receiver to reopen.
+        implicit_implements: nil,
         node_type_hint: nil
       )
 
@@ -5229,6 +5231,7 @@ module Steep
                 block_block_hint: nil,
                 block_annotations: block_annotations,
                 block_self_hint: method_type.block.self_type,
+                implicit_implements: implicit_block_reopen(node),
                 node_type_hint: method_type.type.return_type
               )
 
@@ -5600,6 +5603,10 @@ module Steep
         block_block_hint: nil,
         block_annotations: block_annotations,
         block_self_hint: nil,
+        # Reached when the call has no block type to zip against (an untyped
+        # receiver, an unresolved overload). The reopen is a property of the call
+        # SHAPE, not of the method type, so it still holds here.
+        implicit_implements: implicit_block_reopen(node),
         node_type_hint: nil
       )
 
@@ -5649,7 +5656,58 @@ module Steep
       end
     end
 
-    def for_block(body_node, block_params:, block_param_hint:, block_next_type:, block_block_hint:, block_annotations:, node_type_hint:, block_self_hint:)
+    # `class_eval`/`module_eval` reopen the receiver: the block's default definee is
+    # the receiver, so a `def` inside defines the receiver's INSTANCE method. That is
+    # the same operation as writing the body inside `class X ... end`.
+    #
+    # `instance_eval` is deliberately absent. Its block self is bound the same way
+    # (`[self: self]` in both signatures), but its default definee is the receiver's
+    # SINGLETON class, so giving it this treatment would attribute the def to the
+    # instance side — the wrong half.
+    MODULE_REOPENING_METHODS = Set[:class_eval, :module_eval].freeze
+
+    # The `@implements` a `X.class_eval do ... end` block states implicitly, or nil
+    # when the call is not that shape.
+    #
+    # Steep already knew both halves of this and only ever connected them by hand.
+    # The block's `self` is already the receiver — `class_eval`'s signature binds it
+    # (`[self: self]`) — and `for_block` already enters a module context for a block
+    # when told to, which is what `# @implements X` does. Without deriving it, the
+    # defs landed in whatever context the block was written in: at top level, on
+    # `::Object`, reported as "not declared in RBS", and `super` inside one had
+    # nothing to resolve against.
+    #
+    # Only a CONSTANT receiver is read, because only then is the definee decidable.
+    # `obj.class_eval` reopens whatever class `obj` happens to be, and the string form
+    # (`class_eval "def x; end"`) has no block and no readable body at all — the
+    # genuinely undecidable cases, left alone.
+    def implicit_block_reopen(node)
+      send_node, _params, _body = node.children
+      return nil unless send_node.type == :send
+
+      receiver, method_name, *args = send_node.children
+      return nil unless MODULE_REOPENING_METHODS.include?(method_name)
+      return nil unless args.empty?
+      return nil unless receiver.is_a?(Parser::AST::Node) && receiver.type == :const
+
+      type_name = module_name_from_node(receiver.children[0], receiver.children[1]) or return nil
+      absolute = checker.factory.absolute_type_name(type_name, context: nesting) or return nil
+
+      env = checker.factory.definition_builder.env
+      return nil unless env.class_entry(absolute, normalized: true)
+
+      # A generic class reopened this way would need its type parameters bound, which
+      # is what `for_class` sets up and a block does not: entering it with no args
+      # would build `Array` where `Array[Elem]` is required. Declining leaves the
+      # ordinary call typing, which is what happened before.
+      return nil unless checker.factory.definition_builder.build_instance(absolute).type_params_decl.empty?
+
+      AST::Annotation::Implements::Module.new(name: type_name, args: [])
+    rescue RBS::BaseError
+      nil
+    end
+
+    def for_block(body_node, block_params:, block_param_hint:, block_next_type:, block_block_hint:, block_annotations:, node_type_hint:, block_self_hint:, implicit_implements:)
       block_param_pairs = block_param_hint && block_params.zip(block_param_hint, block_block_hint, factory: checker.factory)
 
       # @type var param_types_hash: Hash[Symbol?, AST::Types::t]
@@ -5742,8 +5800,10 @@ module Steep
       self_type = block_self_hint || self.self_type
       module_context = self.module_context
 
-      if implements = block_annotations.implement_module_annotation
-        module_context = default_module_context(implements.name, nesting: nesting)
+      # An explicit `@implements` on the block wins: it is the author overriding what
+      # the call shape says, which is the whole point of writing it.
+      if implements = block_annotations.implement_module_annotation&.name || implicit_implements
+        module_context = default_module_context(implements, nesting: nesting)
         self_type = module_context.module_type
       end
 
