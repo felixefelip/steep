@@ -5688,9 +5688,9 @@ module Steep
       receiver, method_name, *args = send_node.children
       return nil unless MODULE_REOPENING_METHODS.include?(method_name)
       return nil unless args.empty?
-      return nil unless receiver.is_a?(Parser::AST::Node) && receiver.type == :const
+      return nil unless receiver.is_a?(Parser::AST::Node)
 
-      type_name = module_name_from_node(receiver.children[0], receiver.children[1]) or return nil
+      type_name = reopened_class_name(receiver) or return nil
       absolute = checker.factory.absolute_type_name(type_name, context: nesting) or return nil
 
       env = checker.factory.definition_builder.env
@@ -5704,6 +5704,29 @@ module Steep
 
       AST::Annotation::Implements::Module.new(name: type_name, args: [])
     rescue RBS::BaseError
+      nil
+    end
+
+    # The class the receiver denotes, taken from its TYPE rather than from its spelling.
+    #
+    # A constant's type is `singleton(X)` — and so is that of any variable or parameter
+    # holding the class. Reading the constant NODE recognised only the spelling and
+    # missed every case where the class arrives as a VALUE, which is exactly how Ruby's
+    # own `included` hook hands it over:
+    #
+    #   def self.included(base)
+    #     base.class_eval do ... end     # reopens the includer
+    #   end
+    #
+    # `base` is typed `singleton(Includer)` as soon as anything calls the hook, so the
+    # type says what the spelling cannot. A union of singletons (a module with several
+    # hosts) is not a `Name::Singleton` and declines here, which is the same answer the
+    # disagreeing-hosts case gets everywhere else.
+    def reopened_class_name(receiver)
+      type = typing.type_of(node: receiver)
+      type.is_a?(AST::Types::Name::Singleton) ? type.name : nil
+    rescue Steep::Typing::UnknownNodeError
+      # The receiver has not been typed yet (or at all) — nothing to read.
       nil
     end
 
