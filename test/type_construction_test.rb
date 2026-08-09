@@ -4810,6 +4810,205 @@ EOF
     end
   end
 
+  # A mixin's own ancestors end at the mixin, so a method it defines has no super
+  # there — but at runtime it runs on an instance of the host and `super` walks the
+  # HOST's chain from the mixin's position. The self type names that host, and it
+  # is what `super` has to read: an ordinary send in the same body already resolves
+  # against `Host & Mod`, while `super` resolved against `Mod` alone and fell back
+  # to `untyped` (`def creator_id; super || false; end` over a typed column
+  # accessor). Not specific to ActiveSupport::Concern — any mixin overriding a
+  # method the host gets elsewhere.
+  def test_super_in_module_resolves_through_self_type
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperStore
+  include TestSuperMod
+end
+
+module TestSuperStore
+  def foo: () -> Integer
+end
+
+module TestSuperMod
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  # @type instance: TestSuperHost & TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("::Integer"), typing.type_of(node: dig(source.node, 1, 2))
+        assert_empty typing.errors
+      end
+    end
+  end
+
+  # Taking `build_instance(host).methods[name].super_method` directly is off by one
+  # when the host overrides the method too: the top entry is then the host's and its
+  # super is this module's own, so `super` would be typed as the method being checked.
+  def test_super_in_module_skips_the_host_own_override
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperStore
+  include TestSuperMod
+
+  def foo: () -> String
+end
+
+module TestSuperStore
+  def foo: () -> Integer
+end
+
+module TestSuperMod
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  # @type instance: TestSuperHost & TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("::Integer"), typing.type_of(node: dig(source.node, 1, 2))
+      end
+    end
+  end
+
+  # The host chain is a FALLBACK. What sits behind a module in the host's ancestors
+  # is whatever that module itself includes, and nothing the host mixes in can be
+  # inserted between them — so the module's own answer stays, and stays first.
+  def test_super_in_module_prefers_its_own_ancestors
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperHostSide
+  include TestSuperMod
+end
+
+module TestSuperHostSide
+  def foo: () -> String
+end
+
+module TestSuperInner
+  def foo: () -> Integer
+end
+
+module TestSuperMod
+  include TestSuperInner
+
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  # @type instance: TestSuperHost & TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("::Integer"), typing.type_of(node: dig(source.node, 1, 2))
+      end
+    end
+  end
+
+  # Two hosts mean two chains, and one `RBS::Definition::Method` cannot say
+  # "whichever of these self is". Answering with one host's super would type the
+  # other host's `super` as a method it does not have, so a disagreement keeps the
+  # pre-existing behaviour.
+  def test_super_in_module_declines_when_hosts_disagree
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperStore
+  include TestSuperMod
+end
+
+class TestSuperOther
+  include TestSuperOtherStore
+  include TestSuperMod
+end
+
+module TestSuperStore
+  def foo: () -> Integer
+end
+
+module TestSuperOtherStore
+  def foo: () -> Symbol
+end
+
+module TestSuperMod
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  # @type instance: TestSuperHost & TestSuperMod | TestSuperOther & TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("untyped"), typing.type_of(node: dig(source.node, 1, 2))
+      end
+    end
+  end
+
+  # Without a self type there is no host to read, so the diagnostic stays.
+  def test_super_in_module_without_a_self_type
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperStore
+  include TestSuperMod
+end
+
+module TestSuperStore
+  def foo: () -> Integer
+end
+
+module TestSuperMod
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("untyped"), typing.type_of(node: dig(source.node, 1, 2))
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::UnexpectedSuper, errors.first
+        end
+      end
+    end
+  end
+
   def test_super_missing_required_block
     with_checker <<-EOF do |checker|
 class TestSuper
