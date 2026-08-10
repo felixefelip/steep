@@ -9108,6 +9108,51 @@ end
     end
   end
 
+  # The class can arrive as a VALUE rather than as a spelling, which is exactly how
+  # Ruby's own `included` hook hands it over. `base` is typed `singleton(Includer)` as
+  # soon as anything calls the hook, so the TYPE says what the constant node cannot.
+  def test_block_implicit_implements_from_a_singleton_typed_receiver
+    with_checker <<-EOF do |checker|
+module TestBaseSlots
+  def slot: () -> String?
+end
+
+module TestBaseHookable
+  def self.included: (singleton(TestBaseHost) base) -> void
+end
+
+class TestBaseHost
+  include TestBaseSlots
+  include TestBaseHookable
+
+  def self.class_eval: () { () -> void } -> void
+
+  def slot: () -> String
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+module TestBaseHookable
+  def self.included(base)
+    base.class_eval do
+      def slot
+        super || "default"
+      end
+    end
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("(::String | nil)"),
+                     typing.type_of(node: dig(source.node, 1, 3, 2, 2, 0))
+        assert_no_error typing
+      end
+    end
+  end
+
   # `obj.class_eval` reopens whatever class `obj` happens to be — not decidable from
   # the shape, so it is left alone.
   def test_block_no_implicit_implements_from_value_receiver
