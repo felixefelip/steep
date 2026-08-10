@@ -3504,7 +3504,10 @@ module Steep
       nil
     end
 
-    def type_send_interface(node, interface:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:)
+    # `send_dispatch:` is the literal-name `send` this call came from, or nil for an
+    # ordinary call (felixefelip/steep#137). Required rather than defaulted: a call site
+    # that forgot it would silently report the unresolved name as a missing `send`.
+    def type_send_interface(node, interface:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:, send_dispatch:)
       method = interface.methods[method_name]
 
       if method
@@ -3842,13 +3845,30 @@ module Steep
           end
         end
 
+        error =
+          if send_dispatch
+            Diagnostic::Ruby::UnresolvedSend.new(
+              node: node,
+              location: send_dispatch.name_node.location.expression,
+              type: interface&.type || receiver_type,
+              method: method_name,
+              spelling: send_dispatch.spelling,
+              # `send`/`__send__` ignore visibility, so reaching this branch through one of
+              # them means the name resolves nowhere at all.
+              private_method: !send_dispatch.reaches_private? &&
+                declares_private_method?(receiver_type, method_name)
+            )
+          else
+            Diagnostic::Ruby::NoMethod.new(node: node, method: method_name, type: interface&.type || receiver_type)
+          end
+
         constr.add_call(
           TypeInference::MethodCall::NoMethodError.new(
             node: node,
             context: context.call_context,
             method_name: method_name,
             receiver_type: receiver_type,
-            error: Diagnostic::Ruby::NoMethod.new(node: node, method: method_name, type: interface&.type || receiver_type)
+            error: error
           )
         )
       end
@@ -3899,6 +3919,17 @@ module Steep
         receiver_type = self_type
       end
       private = receiver.nil? || receiver.type == :self
+
+      # felixefelip/steep#137. A literal-name `send` is a call to that method, so replace
+      # the three things that describe *which* call this is and let the rest of the method
+      # run unchanged. The name literal is synthesized here because it stops being an
+      # argument: nothing downstream would type it otherwise.
+      if (dispatch = send_dispatch(receiver_type: receiver_type, method_name: method_name, arguments: arguments))
+        _, constr = constr.synthesize(dispatch.name_node)
+        method_name = dispatch.method_name
+        arguments = dispatch.arguments
+        private = dispatch.reaches_private?
+      end
 
       # Delegation chain narrowing (felixefelip/steep#32). If the
       # called method's source body is a forward delegate
@@ -3959,7 +3990,8 @@ module Steep
               block_params: block_params,
               block_body: block_body,
               tapp: tapp,
-              hint: hint
+              hint: hint,
+              send_dispatch: dispatch
             )
           else
             constr = constr.synthesize_children(node, skips: [receiver])
@@ -4001,6 +4033,114 @@ module Steep
       else
         shape
       end
+    end
+
+    # The three spellings of one dispatch, mapped to whether it reaches private methods.
+    # `__send__` is the one a defensive library uses, precisely because `send` can be
+    # overridden; `public_send` respects visibility, which is the whole reason it exists.
+    SEND_SPELLINGS = { send: true, __send__: true, public_send: false } #: Hash[Symbol, bool]
+
+    # Where the language's own spellings are declared: `__send__` on `BasicObject`,
+    # `send` as `Kernel`'s alias of it, `public_send` on `Kernel`. A `send` declared
+    # anywhere else — `Ractor#send`, a socket's, an app's message bus — is an ordinary
+    # method that happens to share the name, and its first argument is a value.
+    SEND_OWNERS = Set[
+      RBS::TypeName.parse("::BasicObject"),
+      RBS::TypeName.parse("::Kernel"),
+      RBS::TypeName.parse("::Object")
+    ] #: Set[RBS::TypeName]
+
+    # The call a literal-name `send` stands for (felixefelip/steep#137).
+    class SendDispatch
+      # The literal that names the method, so the diagnostic can point at it rather than
+      # at the `send` selector.
+      attr_reader :name_node
+
+      # The method actually called, and the arguments it actually receives — the name
+      # literal dropped.
+      attr_reader :method_name
+      attr_reader :arguments
+
+      # How the call was written, for the message.
+      attr_reader :spelling
+
+      def initialize(name_node:, method_name:, arguments:, spelling:, reaches_private:)
+        @name_node = name_node
+        @method_name = method_name
+        @arguments = arguments
+        @spelling = spelling
+        @reaches_private = reaches_private
+      end
+
+      # Whether the dispatch ignores visibility, as `send`/`__send__` do.
+      def reaches_private?
+        @reaches_private
+      end
+    end
+
+    # felixefelip/steep#137. `recv.send(:foo, ...)` with a LITERAL name is a call to
+    # `foo`: the receiver's type is known and the name is right there, so the only thing
+    # the spelling adds over `recv.foo(...)` is that it ignores visibility. Not a corner
+    # of the language either — it is how MRI invokes the mixin hooks, since `rb_funcall`
+    # dispatches by name and `append_features`/`included` are private on `Module`.
+    #
+    # Returns the call it stands for, or nil when this is not that shape. Two ways it is
+    # not: the name is computed (`send(name)`), which no static analysis decides, or the
+    # `send` being called is not the language's.
+    #
+    # Deliberately not a node rewrite. The same node is typed; only the method name, the
+    # argument list and the visibility handed to the ordinary dispatch path change, so
+    # arity, overload resolution, block checking, special methods and the return type all
+    # come from the machinery every other call already goes through.
+    def send_dispatch(receiver_type:, method_name:, arguments:)
+      return nil unless receiver_type
+
+      reaches_private = SEND_SPELLINGS[method_name]
+      return nil if reaches_private.nil?
+
+      name_node = arguments.first or return nil
+      dispatched = literal_method_name(name_node) or return nil
+      return nil unless core_send?(receiver_type, method_name)
+
+      SendDispatch.new(
+        name_node: name_node,
+        method_name: dispatched,
+        arguments: arguments.drop(1),
+        spelling: method_name,
+        reaches_private: reaches_private
+      )
+    end
+
+    # The method name an argument spells, when it spells one at all. A symbol or string
+    # literal names a method; `:"a#{b}"`, a variable and a constant do not, and nothing
+    # static says which method they mean.
+    def literal_method_name(node)
+      case node.type
+      when :sym
+        node.children[0]
+      when :str
+        node.children[0].to_sym
+      end
+    end
+
+    # Whether the `send` being called is the language's, and not a method of the same name
+    # the receiver declares. Also what keeps this off an `untyped` receiver: there is no
+    # shape to ask, so there is no dispatch to read.
+    def core_send?(receiver_type, method_name)
+      entry = calculate_interface(receiver_type, method_name, private: true)
+      return false unless entry
+
+      defs = entry.overloads.flat_map(&:method_defs)
+      return false if defs.empty?
+
+      defs.all? {|defn| SEND_OWNERS.include?(defn.defined_in) }
+    end
+
+    # Whether the receiver has the method but declares it private — the difference between
+    # `public_send` naming nothing and `public_send` naming a door it cannot use.
+    def declares_private_method?(receiver_type, method_name)
+      entry = calculate_interface(receiver_type, method_name, private: true)
+      entry ? entry.private_method? : false
     end
 
     # Phase 1 of "type subtraction on attribute write" (issue felixefelip/steep#1).

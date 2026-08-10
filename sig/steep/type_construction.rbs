@@ -211,7 +211,8 @@ module Steep
       block_params: Parser::AST::Node?,
       block_body: Parser::AST::Node?,
       tapp: AST::Node::TypeApplication?,
-      hint: Types::t?
+      hint: Types::t?,
+      send_dispatch: SendDispatch?
     ) -> Pair
 
     # The third step to type check method calls, which tries all of the overloads defined for the method
@@ -272,6 +273,54 @@ module Steep
     #
     def calculate_interface: (AST::Types::t `type`, private: bool) -> Interface::Shape?
                            | (AST::Types::t `type`, Symbol method_name, private: bool) -> Interface::Shape::Entry?
+
+    # The spellings of `send`, mapped to whether the dispatch reaches private methods
+    # (felixefelip/steep#137).
+    SEND_SPELLINGS: Hash[Symbol, bool]
+
+    # The types that declare those spellings, so a same-named method of the receiver's own
+    # (`Ractor#send`) is not read as a dispatch.
+    SEND_OWNERS: Set[RBS::TypeName]
+
+    # The call a literal-name `send` stands for.
+    class SendDispatch
+      attr_reader name_node: Parser::AST::Node
+
+      attr_reader method_name: Symbol
+
+      attr_reader arguments: Array[Parser::AST::Node]
+
+      attr_reader spelling: Symbol
+
+      @reaches_private: bool
+
+      def initialize: (
+        name_node: Parser::AST::Node,
+        method_name: Symbol,
+        arguments: Array[Parser::AST::Node],
+        spelling: Symbol,
+        reaches_private: bool
+      ) -> void
+
+      def reaches_private?: () -> bool
+    end
+
+    # Returns the call a literal-name `send` stands for, or `nil` when the shape is not
+    # that: a computed name, or a `send` the receiver declares itself.
+    def send_dispatch: (
+      receiver_type: AST::Types::t?,
+      method_name: Symbol,
+      arguments: Array[Parser::AST::Node]
+    ) -> SendDispatch?
+
+    # The method name a node spells, for a symbol or string literal; `nil` otherwise.
+    def literal_method_name: (Parser::AST::Node node) -> Symbol?
+
+    # Whether `method_name` on `receiver_type` is the language's `send`/`__send__`/`public_send`.
+    def core_send?: (AST::Types::t receiver_type, Symbol method_name) -> bool
+
+    # Whether the receiver has the method but declares it private.
+    def declares_private_method?: (AST::Types::t receiver_type, Symbol method_name) -> bool
 
     def expand_self: (AST::Types::t `type`) -> AST::Types::t
 

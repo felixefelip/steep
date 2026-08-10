@@ -1966,6 +1966,36 @@ test.rb:1:0: [error] Cannot find compatible overloading of method `+` of type `:
 | - | - | - | - | - |
 | error | error | error | information | - |
 
+<a name='Ruby::UnresolvedSend'></a>
+## Ruby::UnresolvedSend
+
+A `send`, `__send__` or `public_send` written with a literal method name that the
+receiver cannot be called with.
+
+### Ruby
+
+```ruby
+Post.new.send(:no_such_method)      # no method by that name
+Post.new.public_send(:private_one)  # resolves, but public_send respects visibility
+```
+
+### Diagnostic
+
+```
+app/models/post.rb:1:14: [error] `send` names `no_such_method`, which type `::Post` does not have
+│ Diagnostic ID: Ruby::UnresolvedSend
+│
+└ Post.new.send(:no_such_method)
+               ~~~~~~~~~~~~~~~~
+```
+
+
+### Severity
+
+| all_error | strict | default | lenient | silent |
+| - | - | - | - | - |
+| error | error | error | information | - |
+
 <a name='Ruby::UnsatisfiableConstraint'></a>
 ## Ruby::UnsatisfiableConstraint
 

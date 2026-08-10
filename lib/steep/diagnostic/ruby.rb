@@ -1121,6 +1121,48 @@ module Steep
         end
       end
 
+      # A `send`/`__send__`/`public_send` spelled with a literal name (felixefelip/steep#137)
+      # naming a method the receiver cannot be called with: either no method by that name
+      # at all, or — for `public_send`, which respects visibility — a private one, which is
+      # a `NoMethodError` at runtime even though the name resolves. Two situations, two
+      # messages: the second one is not "no such method", it is "not through this door".
+      #
+      # `NoMethod`'s judgment, under an ID of its own so a project can tune it separately.
+      # `send` is reached for precisely where the method is not statically obvious —
+      # runtime-defined methods, an app's own attributes, private API from outside — and
+      # `send(:x) if respond_to?(:x)` is careful code this reports, because a guard puts
+      # nothing in the RBS.
+      class UnresolvedSend < Base
+        attr_reader :type
+        attr_reader :method
+
+        # How the call was spelled (`send` / `__send__` / `public_send`), because the fix
+        # differs: for the first two the method has to exist, for the last it also has to
+        # be public.
+        attr_reader :spelling
+
+        def initialize(node:, location:, type:, method:, spelling:, private_method:)
+          super(node: node, location: location)
+          @type = type
+          @method = method
+          @spelling = spelling
+          @private_method = private_method
+        end
+
+        # Whether the name resolved and only visibility stopped the call.
+        def private_method?
+          @private_method
+        end
+
+        def header_line
+          if private_method?
+            "`#{spelling}` cannot call `#{method}` on `#{type}`, which declares it private"
+          else
+            "`#{spelling}` names `#{method}`, which type `#{type}` does not have"
+          end
+        end
+      end
+
       ALL = ObjectSpace.each_object(Class).with_object([]) do |klass, array|
         if klass < Base
           array << klass
@@ -1193,6 +1235,7 @@ module Steep
             UnreachableBranch => :hint,
             UnreachableValueBranch => :hint,
             UnresolvedOverloading => :error,
+            UnresolvedSend => :error,
             UnsatisfiableConstraint => :hint,
             UnsupportedSyntax => :hint,
           }
@@ -1258,6 +1301,7 @@ module Steep
             UnreachableBranch => :information,
             UnreachableValueBranch => :warning,
             UnresolvedOverloading => :error,
+            UnresolvedSend => :error,
             UnsatisfiableConstraint => :error,
             UnsupportedSyntax => :information,
           }
@@ -1324,6 +1368,7 @@ module Steep
             UnreachableBranch => :hint,
             UnreachableValueBranch => :hint,
             UnresolvedOverloading => :information,
+            UnresolvedSend => :information,
             UnsatisfiableConstraint => :hint,
             UnsupportedSyntax => :hint,
           }
