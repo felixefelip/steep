@@ -22,7 +22,13 @@ class InterfaceTest < Minitest::Test
       assert_equal method_params("(?String | Integer | nil) -> untyped"),
                    method_params("(String) -> untyped") + method_params("(?Integer) -> untyped")
 
-      assert_equal method_params("(?String | Integer | nil, *Integer) -> untyped"),
+      # felixefelip/steep#139: a REST is not a position that can be absent — it collects,
+      # and every value it collects was passed. Compare the union merge of the same pair
+      # (`|`, below), which never added the `nil`, and the `?String` variant next to this
+      # one, which does not either: the `nil` tracked "was required on one side", not
+      # "may be absent", and it leaked into `Array[T?]` when a def collected the position
+      # into its own `*rest`.
+      assert_equal method_params("(?String | Integer, *Integer) -> untyped"),
                    method_params("(String) -> untyped") + method_params("(*Integer) -> untyped")
 
       assert_equal method_params("(?String | nil) -> untyped"),
@@ -40,7 +46,9 @@ class InterfaceTest < Minitest::Test
       assert_equal method_params("(?String) -> untyped"),
                    method_params("(?String) -> untyped") + method_params("() -> untyped")
 
-      assert_equal method_params("(?String | Integer | nil, *String) -> untyped"),
+      # The same as above in the other direction (felixefelip/steep#139), and the same
+      # contrast one assertion down: `(*String) + (?Integer)` never added the `nil`.
+      assert_equal method_params("(?String | Integer, *String) -> untyped"),
                    method_params("(*String) -> untyped") + method_params("(Integer) -> untyped")
 
       assert_equal method_params("(?String | Integer, *String) -> untyped"),
@@ -487,10 +495,11 @@ class InterfaceTest < Minitest::Test
       assert_equal parse_method_type("(?String | nil) -> untyped"),
                    parse_method_type("(String) -> untyped") + parse_method_type("() -> untyped")
 
-      assert_equal parse_method_type("(?String | Symbol | nil, *Symbol) -> untyped"),
+      # felixefelip/steep#139 — see `test_method_type_params_plus`.
+      assert_equal parse_method_type("(?String | Symbol, *Symbol) -> untyped"),
                    parse_method_type("(String) -> untyped") + parse_method_type("(*Symbol) -> untyped")
 
-      assert_equal parse_method_type("(?String | Symbol | nil, *Symbol) -> (Array | Hash)"),
+      assert_equal parse_method_type("(?String | Symbol, *Symbol) -> (Array | Hash)"),
                    parse_method_type("(String) -> Hash") + parse_method_type("(*Symbol) -> Array")
 
       assert_equal parse_method_type("(name: String | Symbol, ?email: String | Array | nil, ?age: Integer | Object | nil, **Array | Object) -> void"),
