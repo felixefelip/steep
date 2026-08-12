@@ -372,10 +372,6 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     M.reset!
   end
 
-  private
-
-  # --- inject_defs (felixefelip/rbs_infer#221) -------------------------------
-
   NARROWED = <<~RUBY
     class Example23
       module Foo
@@ -414,6 +410,25 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     assert_equal 1, twice.lines.count { |l| l.include?("@type self:") }
   end
 
+  # The sidecar is the only untrusted input here, so a wrong shape is checked
+  # for by name instead of caught by a blanket rescue — and it is logged, not
+  # swallowed.
+  def test_inject_defs_leaves_the_source_alone_for_a_malformed_sidecar
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: ["bazinga"], anchor: "Foo")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "bazinga" => 42 }, anchor: "Foo")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "bazinga" => "  " }, anchor: "Foo")
+  end
+
+  # A bug in this file has to surface, which a blanket rescue would have turned
+  # into "the annotation silently stopped being placed".
+  def test_inject_defs_does_not_swallow_an_unexpected_error
+    M.stub(:find_target_scope, ->(*) { raise "boom" }) do
+      assert_raises(RuntimeError) do
+        M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+      end
+    end
+  end
+
   def test_inject_defs_ignores_an_unknown_anchor_or_method
     assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::X)" }, anchor: "Nope")
     assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "nope" => "singleton(::X)" }, anchor: "Foo")
@@ -450,6 +465,8 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
 
     assert_equal source, M.inject_defs(source, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
   end
+
+  private
 
   def with_sidecar(table)
     Dir.mktmpdir do |dir|

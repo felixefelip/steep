@@ -168,15 +168,35 @@ module Steep
         # line and every reported line number stays aligned with the real file.
         # A method whose signature line has no room (an inline body) is skipped
         # rather than shifted, which also makes this idempotent.
+        #
+        # No blanket `rescue` here, unlike the two above. `Source.parse` runs on
+        # every file of every driver, so an exception escaping it aborts the
+        # check — which is what those rescues are guarding against. But the only
+        # thing that can raise here is the SIDECAR being shaped wrong, and that
+        # is checked for by name below, with a line in the log. Everything after
+        # it walks a Prism parse of the very string it then slices, so anything
+        # raising there is a bug in this file, and swallowing it would turn one
+        # into "the annotation silently stopped being placed".
         def inject_defs(source_code, defs:, anchor:)
-          return source_code if defs.nil? || defs.empty?
+          return source_code if defs.nil?
+          unless defs.is_a?(Hash)
+            warn_malformed("`defs` for #{anchor} is #{defs.class}, expected a Hash")
+            return source_code
+          end
+          return source_code if defs.empty?
 
           node, = find_target_scope(source_code, anchor)
           return source_code unless node
 
           insertions = each_scope_def(node).filter_map do |defn|
             type = defs[defn.name.to_s]
-            next if type.nil? || type.to_s.empty?
+            next if type.nil?
+            # A non-String would be interpolated as its `inspect`-ish form and
+            # land in the source as an unparseable annotation.
+            unless type.is_a?(String) && !type.strip.empty?
+              warn_malformed("self type for #{anchor}##{defn.name} is #{type.inspect}, expected a non-empty String")
+              next
+            end
 
             append_to_line(source_code, def_signature_end(defn), "# @type self: #{type}")
           end
@@ -186,8 +206,6 @@ module Steep
           insertions.sort_by { |i| -i[:offset] }.each_with_object(source_code.dup) do |i, out|
             out.replace(out.byteslice(0, i[:offset]) + i[:text] + out.byteslice(i[:offset]..))
           end
-        rescue StandardError
-          source_code
         end
 
         # Drops the memoized sidecar. The mtime check below makes this mostly
@@ -218,6 +236,13 @@ module Steep
         rescue Psych::Exception, SystemCallError => e
           Steep.logger.warn { "[module_self_types] failed to parse #{sidecar}: #{e.message}" } if defined?(Steep.logger)
           {}
+        end
+
+        # Same channel `parse` uses for a sidecar it cannot read: a malformed
+        # sidecar is the user's to fix, so it is said out loud rather than
+        # swallowed, and it does not stop the check.
+        def warn_malformed(message)
+          Steep.logger.warn { "[module_self_types] #{message}" } if defined?(Steep.logger)
         end
 
         def relative(path)
