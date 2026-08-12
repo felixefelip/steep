@@ -364,6 +364,33 @@ end
     end
   end
 
+  # `self` is a name for a shape, not a shape: expanding it has to happen before
+  # the other side of the relation is decomposed. When `self` stands for a UNION
+  # — which it does for a module mixed into more than one host — the super union
+  # used to be split first, so `self <: (A | B)` was answered by trying
+  # `self <: A` and `self <: B`, expanding `self` to `(A | B)` inside each, and
+  # neither holds. A type was failing to be a subtype of itself
+  # (felixefelip/rbs_infer#221).
+  def test_union_self_against_union
+    with_checker <<-EOS do |checker|
+class Bar
+end
+
+class Other
+end
+    EOS
+
+      union = "(singleton(::Bar) | singleton(::Other))"
+
+      assert_success_check checker, "self", union, self_type: union
+      # Each branch on its own still has to hold on its own.
+      assert_success_check checker, "self", "singleton(::Bar)", self_type: "singleton(::Bar)"
+      assert_fail_check checker, "self", "singleton(::Bar)", self_type: union
+      # And an intersection self keeps working, which shares the moved clause.
+      assert_success_check checker, "self", "::Bar", self_type: "::Bar"
+    end
+  end
+
   def test_interface_block_self
     with_checker <<-EOS do |checker|
 interface _A[X]

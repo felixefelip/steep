@@ -412,6 +412,24 @@ module Steep
                 check_type(rel)
               end
             end
+
+            # Expand a `self` sub_type if no branch took it, the same shape the
+            # sub_type union above uses ("expand if it fails") and for the same
+            # reason: a branch may hold only once the subject is spelled out.
+            #
+            # It has to be LAST, not a clause of its own further down. Branch
+            # first and `self <: (self | nil)` matches `self` literally, which
+            # is the only way that relation holds — expanding first turns it
+            # into `::Foo <: self`, and nothing expands the super side. Expand
+            # first and `self <: (A | B)` where `self` IS `(A | B)` fails every
+            # branch, a type not being a subtype of itself. Both hold in this
+            # order (felixefelip/rbs_infer#221).
+            if relation.sub_type.is_a?(AST::Types::Self) && !self_type.is_a?(AST::Types::Self)
+              rel = Relation.new(sub_type: self_type, super_type: relation.super_type)
+              result.add(rel) do
+                check_type(rel)
+              end
+            end
           end
 
         when relation.sub_type.is_a?(AST::Types::Self) && !self_type.is_a?(AST::Types::Self)
