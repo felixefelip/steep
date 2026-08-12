@@ -466,6 +466,67 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     assert_equal source, M.inject_defs(source, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
   end
 
+  # felixefelip/steep#143. Not an annotation: there is no comment that says "when
+  # this parameter is that, `self` is this", which is why it needs a channel of
+  # its own and is read at check time instead of injected.
+  PATHS_ENTRY = {
+    "modules" => [
+      {
+        "anchor" => "Foo",
+        "annotations" => ["# @type instance: singleton(::Bar)"],
+        "paths" => {
+          "bazinga" => [
+            { "when" => { "module_included" => "singleton(Baz)" }, "self" => "singleton(Bar)" },
+            { "when" => { "module_included" => "singleton(BazOther)" }, "self" => "singleton(BarOther)" }
+          ]
+        }
+      }
+    ]
+  }
+
+  def test_paths_of_reads_the_entries_for_one_method
+    paths = M.paths_of(PATHS_ENTRY, "Foo", :bazinga)
+
+    assert_equal 2, paths.size
+    assert_equal({ "module_included" => "singleton(Baz)" }, paths[0]["when"])
+    assert_equal "singleton(BarOther)", paths[1]["self"]
+  end
+
+  def test_paths_of_is_nil_for_another_anchor_or_method
+    assert_nil M.paths_of(PATHS_ENTRY, "Other", :bazinga)
+    assert_nil M.paths_of(PATHS_ENTRY, "Foo", :bazingado)
+  end
+
+  def test_paths_of_is_nil_without_a_paths_key
+    entry = { "modules" => [{ "anchor" => "Foo", "annotations" => [] }] }
+    assert_nil M.paths_of(entry, "Foo", :bazinga)
+  end
+
+  # The sidecar is the only untrusted input here, and a shape that is wrong is
+  # answered with nil rather than carried into the checker.
+  def test_paths_of_is_nil_for_a_malformed_entry
+    [
+      { "paths" => ["bazinga"] },
+      { "paths" => { "bazinga" => [] } },
+      { "paths" => { "bazinga" => [{ "self" => "singleton(Bar)" }] } },
+      { "paths" => { "bazinga" => [{ "when" => { "x" => "A" } }] } },
+      { "paths" => { "bazinga" => [{ "when" => "x", "self" => "singleton(Bar)" }] } }
+    ].each do |paths|
+      entry = { "modules" => [{ "anchor" => "Foo" }.merge(paths)] }
+      assert_nil M.paths_of(entry, "Foo", :bazinga), paths.inspect
+    end
+  end
+
+  # A sidecar written before `modules` existed still applies.
+  def test_paths_of_reads_a_top_level_anchor
+    entry = {
+      "anchor" => "Foo",
+      "paths" => { "bazinga" => [{ "when" => { "x" => "A" }, "self" => "singleton(Bar)" }] }
+    }
+
+    assert_equal 1, M.paths_of(entry, "Foo", :bazinga)&.size
+  end
+
   private
 
   def with_sidecar(table)
