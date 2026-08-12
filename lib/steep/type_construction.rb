@@ -3507,6 +3507,124 @@ module Steep
     # `send_dispatch:` is the literal-name `send` this call came from, or nil for an
     # ordinary call (felixefelip/steep#137). Required rather than defaulted: a call site
     # that forgot it would silently report the unresolved name as a missing `send`.
+    # Checks a call whose receiver is a union ONE BRANCH AT A TIME, each with the
+    # `self` that branch was declared to travel with. Returns the `Pair` when it
+    # applies and every branch checks; nil otherwise, and the ordinary path runs
+    # untouched.
+    #
+    # Why this exists. Two parameters of one method travel together across its
+    # call sites — `bazinga(Baz)` from `Bar`, `bazinga(BazOther)` from
+    # `BarOther` — and no RBS states that. Checking the call once, the branches'
+    # method types are merged and the parameter comes out contravariant, so
+    # `module_included.bazingado(self)` demands a `self` that satisfies EVERY
+    # branch: `singleton(Bar) & singleton(BarOther)`, a type nothing is. That is
+    # right for a fixed argument, and `self` here is not fixed — it is whichever
+    # host made the call, correlated with the branch
+    # (felixefelip/rbs_infer#231).
+    #
+    # The branch's `self` rides `TypeEnv#refined_self_type`, the same per-branch
+    # slot a predicate's postcondition already uses (felixefelip/steep#25), so
+    # everything downstream — the `:self` node, implicit-self sends — sees it
+    # without knowing where it came from.
+    #
+    # Gated hard: a union receiver, a declared path per branch, and the receiver
+    # written as a plain read of the parameter the paths name. Anything else and
+    # this returns nil, because "the receiver is THIS branch" and "the parameter
+    # was THIS" have to be the same sentence for the pairing to hold.
+    def try_correlated_paths(node:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:, private:, dispatch:)
+      return nil unless receiver_type.is_a?(AST::Types::Union)
+
+      selves = correlated_branch_selves(receiver, receiver_type) or return nil
+
+      # Every branch is checked in its own child typing, and only one of them is
+      # kept: they type the same node, and a saved child is the answer for it.
+      # Which one is arbitrary and says nothing about the others — a branch that
+      # failed has already made the whole thing return nil.
+      results = selves.map do |branch, self_type|
+        child = typing.new_child
+        constr = with_new_typing(child)
+        constr = constr.update_type_env {|env| env.with_refined_self(self_type) }
+
+        interface = constr.calculate_interface(branch, private: private) or return nil
+        pair = constr.type_send_interface(
+          node,
+          interface: interface,
+          receiver: receiver,
+          receiver_type: branch,
+          method_name: method_name,
+          arguments: arguments,
+          block_params: block_params,
+          block_body: block_body,
+          tapp: tapp,
+          hint: hint,
+          send_dispatch: dispatch
+        )
+        return nil unless child.errors.empty?
+
+        [pair, child]
+      end
+
+      pair, child = results.last
+      pair or return nil
+      child.save!
+
+      # The refinement is the branch's, not the caller's: it ends with the call,
+      # exactly as a postcondition's refinement ends with its branch.
+      outer_self = context.type_env.refined_self_type
+      constr = pair.constr.with_new_typing(typing).update_type_env {|env| env.with_refined_self(outer_self) }
+
+      Pair.new(type: AST::Types::Union.build(types: results.map {|branch_pair, _| branch_pair.type }), constr: constr)
+    end
+
+    # `[[branch, self type], ...]` when every branch of the receiver has a path
+    # declaring the `self` that goes with it, else nil.
+    def correlated_branch_selves(receiver, receiver_type)
+      entries = declared_paths or return nil
+      return nil unless receiver.type == :lvar
+
+      parameter = receiver.children[0].to_s
+      branches = receiver_type.types.map do |branch|
+        wanted = normalize_declared_type(branch.to_s)
+        entry = entries.find {|e| normalize_declared_type(e["when"][parameter].to_s) == wanted } or return nil
+        self_type = parse_annotation_type(entry["self"]) or return nil
+        [branch, self_type]
+      end
+      return nil if branches.empty?
+
+      branches
+    end
+
+    # The generator writes a type as the sources spell it (`singleton(Wrap::Baz)`)
+    # and it arrives here resolved (`singleton(::Wrap::Baz)`). The root `::` is
+    # the only difference and it is not one.
+    def normalize_declared_type(string)
+      string.sub(/\A::/, "").sub(/\Asingleton\(::/, "singleton(")
+    end
+
+    # The paths the sidecar declares for the method being checked, or nil. Keyed
+    # by the file, the enclosing module's leaf name and the method name — the
+    # same three things the generator wrote them under.
+    def declared_paths
+      return nil unless ENV["STEEP_MODULE_CONVENTION"]
+
+      method = method_context&.name or return nil
+      path = node_path(source.node) or return nil
+      entry = Source::ModuleSelfTypes.entry_for(path) or return nil
+      anchor = module_context&.module_type&.to_s&.split("::")&.last&.delete_suffix(")") or return nil
+
+      Source::ModuleSelfTypes.paths_of(entry, anchor, method)
+    end
+
+    def node_path(node)
+      node&.location&.expression&.source_buffer&.name
+    end
+
+    def parse_annotation_type(string)
+      checker.factory.type(RBS::Parser.parse_type(string))
+    rescue RBS::ParsingError, RBS::BaseError, StandardError
+      nil
+    end
+
     def type_send_interface(node, interface:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:, send_dispatch:)
       method = interface.methods[method_name]
 
@@ -3943,6 +4061,27 @@ module Steep
       if receiver && (inlined_type_constr = try_delegation_inline(node: node, receiver: receiver, recv_type: receiver_type, method_name: method_name, hint: hint))
         inlined_type, inlined_constr = inlined_type_constr
         return Pair.new(type: inlined_type, constr: inlined_constr)
+      end
+
+      # Correlated paths (felixefelip/steep#143). A union receiver whose
+      # branches were declared to travel with a `self` of their own is checked
+      # one branch at a time, each with that `self`, instead of once against the
+      # branches merged.
+      if receiver
+        correlated = try_correlated_paths(
+          node: node,
+          receiver: receiver,
+          receiver_type: receiver_type,
+          method_name: method_name,
+          arguments: arguments,
+          block_params: block_params,
+          block_body: block_body,
+          tapp: tapp,
+          hint: hint,
+          private: private,
+          dispatch: dispatch
+        )
+        return correlated if correlated
       end
 
       type, constr =

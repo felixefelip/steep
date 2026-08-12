@@ -86,6 +86,36 @@ module Steep
           entry["anchor"] ? [entry] : []
         end
 
+        # The declared PATHS through a method: `[{ "when" => { parameter name
+        # => type }, "self" => type }, ...]`, or nil.
+        #
+        # Unlike everything else here this one is not injected as a comment —
+        # there is no annotation that says "when this parameter is that, `self`
+        # is this", which is exactly why it needs a channel of its own. It is
+        # read at check time, by the send path, when a call's receiver is a
+        # union: each branch is checked with the `self` its path declares
+        # instead of all of them being merged into one method type
+        # (felixefelip/rbs_infer#231, felixefelip/steep#143).
+        #
+        # Two parameters of one method travel together across its call sites,
+        # and nothing in RBS states that: the signature admits every pairing,
+        # while the program only ever makes some. The generator reads which,
+        # and this is where it says so.
+        def paths_of(entry, anchor, method_name)
+          modules = Array(entry["modules"])
+          modules = entry["anchor"] ? [entry] : [] if modules.empty?
+
+          mod = modules.find { |m| m["anchor"].to_s == anchor.to_s } or return nil
+          paths = mod["paths"] or return nil
+          return nil unless paths.is_a?(Hash)
+
+          entries = paths[method_name.to_s]
+          return nil unless entries.is_a?(Array) && !entries.empty?
+          return nil unless entries.all? { |e| e.is_a?(Hash) && e["when"].is_a?(Hash) && e["self"].is_a?(String) }
+
+          entries
+        end
+
         # Places `annotations` at the scope named `anchor`. A module nested in a
         # wrapper class/module gets the lines inserted inside its body; a
         # top-level / compact module gets them appended at end-of-file (which
