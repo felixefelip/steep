@@ -56,6 +56,15 @@ module Steep
         ModuleSelfTypes.self_types_of(entry).each do |mod|
           next unless mod["anchor"]
 
+          # Per-def BEFORE the module-wide lines: this one rides existing lines
+          # and shifts nothing, while `inject` may insert into the body.
+          # Each re-parses, so the order is not load-bearing — it just keeps
+          # the cheaper walk on the smaller source.
+          source_code = ModuleSelfTypes.inject_defs(
+            source_code,
+            defs: mod["defs"],
+            anchor: mod["anchor"].to_s
+          )
           source_code = ModuleSelfTypes.inject(
             source_code,
             annotations: Array(mod["annotations"]),

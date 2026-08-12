@@ -9,7 +9,10 @@ module Steep
     # produced by a framework-aware generator (e.g. rbs_infer). Two kinds:
     #
     #   * `# @type self:` / `# @type instance:` placed inside a module body
-    #     (the `anchor` / `annotations` entry keys); and
+    #     (the `anchor` / `annotations` entry keys);
+    #   * `# @type self:` on ONE method's signature line (the `defs` entry key),
+    #     for when the answer differs per method and the module-wide line above
+    #     cannot carry it — see `inject_defs`; and
     #   * `# @implements <Module>` on a DSL block's opener line plus, per spec,
     #     `# @type self: <Type>` on each method-def line in that block (the
     #     `blocks` entry key) — e.g. an `ActiveSupport::Concern`'s
@@ -35,6 +38,8 @@ module Steep
     #         annotations:
     #           - "# @type self: singleton(Search::Record) & singleton(Search::Record::SQLite)"
     #           - "# @type instance: Search::Record & Search::Record::SQLite"
+    #         defs:
+    #           write: "singleton(Search::Record::Writer)"
     #   "app/models/post/taggable.rb":
     #     blocks:
     #       - call: "class_methods"
@@ -134,6 +139,46 @@ module Steep
 
               block_annotation_insertions(source_code, block, implements, self_annotation)
             end
+          end
+          return source_code if insertions.empty?
+
+          # Back to front so earlier byte offsets stay valid.
+          insertions.sort_by { |i| -i[:offset] }.each_with_object(source_code.dup) do |i, out|
+            out.replace(out.byteslice(0, i[:offset]) + i[:text] + out.byteslice(i[:offset]..))
+          end
+        rescue StandardError
+          source_code
+        end
+
+        # Annotates individual methods of the module named `anchor`:
+        # `defs` is `{ "method name" => "self type" }`, and each named method
+        # gets `# @type self: <type>` on its signature line.
+        #
+        # Why per-def, when the entry already carries a module-wide
+        # `@type instance:`: one line per module cannot answer a question whose
+        # answer varies by method. A module extended by two classes has, as a
+        # module, the union of both — but a method of it that only one of them
+        # ever calls runs with that one as `self`, and the generator is what
+        # knows which. Saying the union there is not wrong, it is unusable: the
+        # generator types the call site with the narrow answer, and the body
+        # then cannot pass its own `self` to it (felixefelip/rbs_infer#221).
+        #
+        # Same placement `inject_blocks` uses, and for the same reason: the
+        # annotation rides the def's existing signature line, so it adds no
+        # line and every reported line number stays aligned with the real file.
+        # A method whose signature line has no room (an inline body) is skipped
+        # rather than shifted, which also makes this idempotent.
+        def inject_defs(source_code, defs:, anchor:)
+          return source_code if defs.nil? || defs.empty?
+
+          node, = find_target_scope(source_code, anchor)
+          return source_code unless node
+
+          insertions = each_scope_def(node).filter_map do |defn|
+            type = defs[defn.name.to_s]
+            next if type.nil? || type.to_s.empty?
+
+            append_to_line(source_code, def_signature_end(defn), "# @type self: #{type}")
           end
           return source_code if insertions.empty?
 
@@ -267,6 +312,17 @@ module Steep
           body.body.each do |stmt|
             yield stmt if stmt.is_a?(Prism::DefNode)
           end
+        end
+
+        # The INSTANCE methods a class/module node declares directly. A `def
+        # self.x` is excluded: its `self` is the module object, which the
+        # module-wide annotation already covers and which no invoker narrows.
+        # Nested scopes have their own context and their own sidecar entry.
+        def each_scope_def(node)
+          body = node.body
+          return [] unless body.is_a?(Prism::StatementsNode)
+
+          body.body.select { |stmt| stmt.is_a?(Prism::DefNode) && stmt.receiver.nil? }
         end
 
         # Every receiverless call named `call_name` that carries a `do … end` /

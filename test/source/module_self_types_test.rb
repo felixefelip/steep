@@ -374,6 +374,83 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
 
   private
 
+  # --- inject_defs (felixefelip/rbs_infer#221) -------------------------------
+
+  NARROWED = <<~RUBY
+    class Example23
+      module Foo
+        def bazinga(module_included)
+          module_included.bazingado(self)
+        end
+
+        def bazingado(base_foo)
+          base_foo
+        end
+      end
+    end
+  RUBY
+
+  def test_inject_defs_annotates_only_the_named_method
+    result = M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+    lines = result.lines
+
+    # Rides the signature line, so nothing shifts.
+    assert_equal NARROWED.lines.size, lines.size
+
+    NARROWED.lines.each_with_index do |orig, i|
+      if orig.include?("def bazinga(")
+        assert_includes lines[i], "# @type self: singleton(::Example23::Bar)"
+        assert lines[i].start_with?(orig.chomp)
+      else
+        assert_equal orig, lines[i]
+      end
+    end
+  end
+
+  def test_inject_defs_is_idempotent
+    once  = M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+    twice = M.inject_defs(once, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+    assert_equal once, twice
+    assert_equal 1, twice.lines.count { |l| l.include?("@type self:") }
+  end
+
+  def test_inject_defs_ignores_an_unknown_anchor_or_method
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::X)" }, anchor: "Nope")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "nope" => "singleton(::X)" }, anchor: "Foo")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: {}, anchor: "Foo")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: nil, anchor: "Foo")
+  end
+
+  # A `def self.x`'s self is the module object, which no invoker narrows and
+  # which the module-wide annotation already covers.
+  def test_inject_defs_leaves_a_singleton_method_alone
+    source = <<~RUBY
+      class Example23
+        module Foo
+          def self.bazinga(x)
+            x
+          end
+        end
+      end
+    RUBY
+
+    assert_equal source, M.inject_defs(source, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+  end
+
+  # A def whose body shares the signature line has nowhere to put the comment
+  # without swallowing the body, so it is skipped rather than shifted.
+  def test_inject_defs_skips_a_def_with_an_inline_body
+    source = <<~RUBY
+      class Example23
+        module Foo
+          def bazinga(x) = x
+        end
+      end
+    RUBY
+
+    assert_equal source, M.inject_defs(source, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+  end
+
   def with_sidecar(table)
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
