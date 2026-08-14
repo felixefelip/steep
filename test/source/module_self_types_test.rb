@@ -185,6 +185,84 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     assert_equal 1, twice.lines.count { |l| l.include?("@implements") }
   end
 
+  # --- inject_blocks: the `in` discriminator ---
+
+  # Two blocks of the SAME call name in one file, each replayed onto a different
+  # class. Without a discriminator both entries land on both blocks, so the
+  # generator has to decline and neither block gets checked against its real
+  # definee.
+  TWO_BAZINGADO = <<~RUBY
+    class Example29
+      module Baz
+        bazingado do
+          def greet
+            "hi"
+          end
+        end
+      end
+
+      module BazOther
+        bazingado do
+          def name_upcase
+            name.upcase
+          end
+        end
+      end
+    end
+  RUBY
+
+  TWO_BLOCKS = [
+    { "call" => "bazingado", "in" => "::Example29::Baz",      "implements" => "::Example29::Bar" },
+    { "call" => "bazingado", "in" => "::Example29::BazOther", "implements" => "::Example29::BarOther" }
+  ].freeze
+
+  def test_inject_blocks_in_picks_the_block_written_in_that_scope
+    lines = M.inject_blocks(TWO_BAZINGADO, blocks: TWO_BLOCKS).lines
+
+    assert_includes lines[2], "@implements ::Example29::Bar"
+    refute_includes lines[2], "BarOther"
+    assert_includes lines[10], "@implements ::Example29::BarOther"
+    assert_equal TWO_BAZINGADO.lines.size, lines.size
+  end
+
+  # The whole point of a scope over a line: `inject` may have added lines to
+  # this source before `inject_blocks` runs, and the discriminator still holds.
+  def test_inject_blocks_in_survives_lines_added_above_the_call
+    shifted = TWO_BAZINGADO.sub("  module Baz\n", "  module Baz\n    # @type instance: Example29::Baz\n")
+    lines = M.inject_blocks(shifted, blocks: TWO_BLOCKS).lines
+
+    assert_includes lines[3], "@implements ::Example29::Bar"
+    assert_includes lines[11], "@implements ::Example29::BarOther"
+  end
+
+  def test_inject_blocks_in_that_matches_no_scope_annotates_nothing
+    result = M.inject_blocks(TWO_BAZINGADO, blocks: [
+      { "call" => "bazingado", "in" => "::Example29::Nowhere", "implements" => "::Example29::Bar" }
+    ])
+
+    assert_equal TWO_BAZINGADO, result
+  end
+
+  # `::A::B` from the sidecar and `A::B` read off the declarations are one scope.
+  def test_inject_blocks_in_matches_regardless_of_the_leading_colons
+    lines = M.inject_blocks(TWO_BAZINGADO, blocks: [
+      { "call" => "bazingado", "in" => "Example29::Baz", "implements" => "::Example29::Bar" }
+    ]).lines
+
+    assert_includes lines[2], "@implements ::Example29::Bar"
+  end
+
+  # Every sidecar written before `in` existed omits it, and a single-block DSL
+  # never needs it: no scope still means every call of that name.
+  def test_inject_blocks_without_in_still_matches_every_call
+    lines = M.inject_blocks(TWO_BAZINGADO, blocks: [
+      { "call" => "bazingado", "implements" => "::Example29::Bar" }
+    ]).lines
+
+    assert_includes lines[2], "@implements ::Example29::Bar"
+    assert_includes lines[10], "@implements ::Example29::Bar"
+  end
+
   def test_inject_blocks_without_self_adds_no_type_self
     result = M.inject_blocks(TAGGABLE, blocks: BLOCKS)
     refute_includes result, "@type self:"

@@ -21,7 +21,9 @@ module Steep
     #     bodies run with <Type> as self (the including class's singleton, so
     #     the includer's scopes/class methods resolve). Both ride on existing
     #     lines, so no line is added and reported line numbers stay aligned
-    #     with the real source.
+    #     with the real source. An optional `in:` picks the calls written inside
+    #     one class/module, for when the file writes that name more than once
+    #     with a different target for each.
     #
     # Steep is framework-agnostic here: it knows nothing about Rails, concerns,
     # or path conventions. It only looks up an entry by path and places the
@@ -45,6 +47,14 @@ module Steep
     #       - call: "class_methods"
     #         implements: "::Post::Taggable::ClassMethods"
     #         self: "singleton(::Post) & singleton(::Post::Taggable)"
+    #   "app/models/example29.rb":
+    #     blocks:
+    #       - call: "bazingado"
+    #         in: "::Example29::Baz"
+    #         implements: "::Example29::Bar"
+    #       - call: "bazingado"
+    #         in: "::Example29::BazOther"
+    #         implements: "::Example29::BarOther"
     #
     # `anchor` is the leaf constant name; it locates the target scope so a
     # comment for a nested module lands *inside* that module's body (a trailing
@@ -162,8 +172,25 @@ module Steep
             implements = "# @implements #{module_name}"
             self_type = spec["self"].to_s
             self_annotation = self_type.empty? ? nil : "# @type self: #{self_type}"
+            # Optional discriminator: the class/module the call is WRITTEN IN. A
+            # name alone cannot tell two blocks apart, and one file can write the
+            # same DSL call twice with a DIFFERENT target for each — a stored
+            # block replayed onto one class here and another there. Without this
+            # both entries land on both blocks, so a generator that cannot say
+            # which is which has to decline and emit nothing at all.
+            #
+            # A LINE would be the obvious key and is the wrong one: `inject`
+            # above may have added lines to this very source before we get here,
+            # so a line measured against the real file no longer points at the
+            # same call. The lexical scope survives any such rewrite.
+            #
+            # Absent, every call of that name matches, which is what a
+            # single-block DSL (`class_methods do`) means and what every sidecar
+            # written before this said.
+            scope = spec["in"].to_s
+            scope = nil if scope.empty?
 
-            find_block_calls(result.value, call_name).flat_map do |call|
+            find_block_calls(result.value, call_name, scope).flat_map do |call|
               block = call.block
               next [] unless block.is_a?(Prism::BlockNode) && block.opening_loc
 
@@ -382,20 +409,53 @@ module Steep
 
         # Every receiverless call named `call_name` that carries a `do … end` /
         # `{ … }` block, anywhere in the tree.
-        def find_block_calls(root, call_name)
+        # Every receiverless `call_name do … end` in the tree, optionally only
+        # those written inside `scope` (a `::`-qualified class/module path, as
+        # the enclosing declarations spell it lexically).
+        def find_block_calls(root, call_name, scope = nil)
           target = call_name.to_sym
+          wanted = scope && normalize_scope(scope)
           found = []
-          walk = lambda do |node|
+          walk = lambda do |node, path|
             return unless node.is_a?(Prism::Node)
 
+            inner = scope_path(node, path)
             if node.is_a?(Prism::CallNode) && node.name == target &&
-               node.receiver.nil? && node.block.is_a?(Prism::BlockNode)
+               node.receiver.nil? && node.block.is_a?(Prism::BlockNode) &&
+               (wanted.nil? || wanted == path)
               found << node
             end
-            node.compact_child_nodes.each { |c| walk.call(c) }
+            node.compact_child_nodes.each { |c| walk.call(c, inner) }
           end
-          walk.call(root)
+          walk.call(root, nil)
           found
+        end
+
+        # `path` extended by `node`'s own name when it opens a scope, else
+        # unchanged. A declaration written qualified (`class A::B`) or absolute
+        # (`class ::A`) names its own path outright.
+        def scope_path(node, path)
+          return path unless node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::ClassNode)
+
+          name = constant_path_source(node.constant_path)
+          return path unless name
+
+          return normalize_scope(name) if name.start_with?("::") || name.include?("::")
+
+          [path, name].compact.join("::")
+        end
+
+        def constant_path_source(cpath)
+          case cpath
+          when Prism::ConstantReadNode then cpath.name.to_s
+          when Prism::ConstantPathNode then cpath.slice
+          end
+        end
+
+        # One spelling for a scope, so `::A::B` from the sidecar and `A::B` read
+        # off the declarations compare equal.
+        def normalize_scope(name)
+          name.to_s.strip.delete_prefix("::")
         end
 
         # Inserts the lines, indented one level past the declaration, right
