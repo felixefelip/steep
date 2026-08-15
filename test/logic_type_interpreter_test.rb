@@ -48,6 +48,50 @@ class LogicTypeInterpreterTest < Minitest::Test
     end
   end
 
+  # `if @x` has to narrow `@x` the way `if x` narrows a local. Before
+  # felixefelip/steep#146 an `:ivar` condition fell through `evaluate_node`'s
+  # `else` and both branches kept the declared `::String?`, so the one test that
+  # names the ivar taught the checker nothing about it.
+  def test_ivar
+    with_checker do |checker|
+      source = parse_ruby("@x")
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      typing.add_typing(dig(source.node), parse_type("::String?"), nil)
+
+      env = type_env.merge(instance_variable_types: { :@x => parse_type("::String?") })
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: source.node)
+
+      assert_equal parse_type("::String"), truthy_result.type
+      assert_equal parse_type("nil"), falsy_result.type
+      assert_equal parse_type("::String"), truthy_result.env[:@x]
+      assert_equal parse_type("nil"), falsy_result.env[:@x]
+    end
+  end
+
+  # A non-nilable ivar has no falsy member, so the falsy branch is unreachable —
+  # the same answer `:lvar` gives, and what makes `else` dead code rather than a
+  # branch typed against a type that cannot occur.
+  def test_ivar_unreachable_falsy_branch
+    with_checker do |checker|
+      source = parse_ruby("@x")
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      typing.add_typing(dig(source.node), parse_type("::String"), nil)
+
+      env = type_env.merge(instance_variable_types: { :@x => parse_type("::String") })
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: source.node)
+
+      refute truthy_result.unreachable
+      assert falsy_result.unreachable
+      assert_equal parse_type("::String"), truthy_result.env[:@x]
+    end
+  end
+
   def test_masgn
     with_checker do |checker|
       source = parse_ruby("a, b = @x")
