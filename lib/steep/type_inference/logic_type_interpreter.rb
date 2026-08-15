@@ -106,6 +106,49 @@ module Steep
 
           return [truthy_result, falsy_result]
 
+        when :ivar
+          # `if @x` narrows `@x`, exactly as `if x` narrows a local.
+          #
+          # `refine_node_type` has had an `:ivar` branch for a while, so the
+          # environment could always hold a refined ivar — but that method
+          # answers "given these truthy/falsy TYPES, refine this node", which is
+          # the path a predicate's receiver takes. The condition of an `if` comes
+          # through HERE, and here `:ivar` fell to the `else`, which returns the
+          # environment untouched. So the one test that mentions the ivar by name
+          # was the one that taught the checker nothing about it:
+          #
+          #     base.class_eval(&@included_block) if @included_block
+          #
+          # still read `@included_block` at its declared `T?` and failed on the
+          # `nil` member — while hoisting it into a local first type-checked.
+          # That is the hand-rolled `ActiveSupport::Concern`, and the same shape
+          # reaches every `@x.foo if @x` (felixefelip/steep#146).
+          #
+          # An ivar is not a local: any call in between can write it, so a
+          # refinement can go stale where a local's cannot. That is the tradeoff
+          # `refine_node_type`'s `:ivar` branch and the postcondition ivar
+          # narrowing already make; this makes the same one for the plainest
+          # spelling of the same question, rather than leaving it the only one
+          # that does not narrow.
+          name = node.children[0]
+          truthy_type, falsy_type = factory.partition_union(type)
+
+          truthy_result =
+            if truthy_type
+              Result.new(type: truthy_type, env: env.refine_types(instance_variable_types: { name => truthy_type }), unreachable: false)
+            else
+              Result.new(type: type, env: env, unreachable: true)
+            end
+
+          falsy_result =
+            if falsy_type
+              Result.new(type: falsy_type, env: env.refine_types(instance_variable_types: { name => falsy_type }), unreachable: false)
+            else
+              Result.new(type: type, env: env, unreachable: true)
+            end
+
+          return [truthy_result, falsy_result]
+
         when :lvasgn
           name, rhs = node.children
           if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
