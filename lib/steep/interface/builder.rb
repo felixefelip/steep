@@ -382,25 +382,32 @@ module Steep
                 end
               end
 
-              method_overloads = {} #: Hash[Shape::MethodOverload, bool]
+              # Keyed by method type, not by overload: what an overload of a union
+              # says is its type, and the defs only record where that type came
+              # from. Two pairs that agree on the type are one overload carrying
+              # both sides' defs — collecting them separately would make the
+              # overload count the *product* over the union's members, since
+              # `MethodOverload` compares by identity and never collapses.
+              defss = {} #: Hash[MethodType, Array[RBS::Definition::Method::TypeDef]]
 
               overloads1.each do |overload1|
                 overloads2.each do |overload2|
                   if overload1.method_type == overload2.method_type
-                    overload = Shape::MethodOverload.new(overload1.method_type, overload1.method_defs + overload2.method_defs)
-                    method_overloads[overload] = true
+                    type = overload1.method_type
                   else
-                    if type = MethodType.union(overload1.method_type, overload2.method_type, subtyping)
-                      overload = Shape::MethodOverload.new(type, overload1.method_defs + overload2.method_defs)
-                      method_overloads[overload] = true
-                    end
+                    type = MethodType.union(overload1.method_type, overload2.method_type, subtyping)
+                    next unless type
                   end
+
+                  defs = defss[type] ||= []
+                  defs.concat(overload1.method_defs)
+                  defs.concat(overload2.method_defs)
                 end
               end
 
-              break nil if method_overloads.empty?
+              break nil if defss.empty?
 
-              method_overloads.keys
+              defss.map {|type, defs| Shape::MethodOverload.new(type, defs) }
             end
           end
         end
