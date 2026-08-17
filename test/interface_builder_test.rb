@@ -484,6 +484,34 @@ end
     end
   end
 
+  # Every member declares `foo` twice with the same type — the shape `| ...`
+  # gives a method already declared upstream. The union has one thing to say
+  # about `foo`, so it must say it once: pairing the members' overloads off
+  # against each other instead would leave 2 ** members of them, which is what
+  # made a 30-member union of module singletons exhaust the machine's memory.
+  def test_shape__union_does_not_multiply_overloads
+    members = 12.times.map {|i| "::C#{i}" }
+
+    with_factory({ "a.rbs" => <<~RBS }) do
+        class Base
+          def foo: (::Integer) -> void
+        end
+
+        #{members.map {|name| "class #{name} < Base\n  def foo: (::Integer) -> void | ...\nend\n" }.join("\n")}
+      RBS
+
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+
+      builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
+        assert_equal [parse_method_type("(::Integer) -> void")], shape.methods[:foo].method_types
+
+        # The collapsed overload still knows every member it came from.
+        defined_in = shape.methods[:foo].overloads.flat_map {|overload| overload.method_defs.map {|defn| defn.defined_in.to_s } }
+        assert_equal (["::Base"] + members).sort, defined_in.uniq.sort
+      end
+    end
+  end
+
   def test_shape__inline__class_singleton
     with_factory({}, { "a.rb" => <<-RUBY }) do
 class Foo
