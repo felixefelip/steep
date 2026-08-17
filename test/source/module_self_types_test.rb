@@ -605,6 +605,84 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     assert_equal 1, M.paths_of(entry, "Foo", :bazinga)&.size
   end
 
+  # --- inject_blocks: the `method` discriminator ---
+
+  # Ruby's own `included` hook: the block is written inside the hook's body and
+  # `class_eval`ed on the parameter, so the call has a receiver and the module
+  # body has no DSL call at all.
+  HOOK = <<~RUBY
+    class Host
+      module Hookable
+        def self.included(base)
+          base.class_eval do
+            def from_hook
+              "hook"
+            end
+          end
+        end
+
+        def self.excluded(base)
+          base.class_eval do
+            def from_excluded
+              "no"
+            end
+          end
+        end
+      end
+    end
+  RUBY
+
+  HOOK_BLOCKS = [{
+    "call" => "class_eval",
+    "in" => "::Host::Hookable",
+    "method" => "included",
+    "implements" => "::Host"
+  }].freeze
+
+  def test_inject_blocks_reads_a_block_inside_a_def
+    result = M.inject_blocks(HOOK, blocks: HOOK_BLOCKS)
+
+    assert_equal HOOK.lines.size, result.lines.size
+    opener = result.lines.find { |l| l.include?("from_hook") ? false : l.include?("class_eval do") && l.include?("@implements") }
+    refute_nil opener, "the hook's class_eval opener must carry @implements"
+    assert_equal 1, result.lines.count { |l| l.include?("@implements") }
+  end
+
+  # `class_eval` names no block. Two of them in one module would both match on
+  # call name and scope alone, and the second one here is replayed nowhere.
+  def test_inject_blocks_annotates_only_the_named_def
+    result = M.inject_blocks(HOOK, blocks: HOOK_BLOCKS)
+
+    annotated = result.lines.each_with_index.select { |l, _| l.include?("@implements") }.map(&:last)
+    excluded_at = result.lines.index { |l| l.include?("def self.excluded") }
+
+    assert_equal 1, annotated.size
+    assert annotated.first < excluded_at, "the annotation must land before `excluded`, not inside it"
+  end
+
+  # Without `method`, a receiver still disqualifies the call — every sidecar
+  # written before this one keeps meaning exactly what it meant.
+  def test_inject_blocks_still_requires_no_receiver_without_method
+    blocks = [HOOK_BLOCKS.first.reject { |key, _| key == "method" }]
+
+    assert_equal HOOK, M.inject_blocks(HOOK, blocks: blocks)
+  end
+
+  def test_inject_blocks_inside_a_def_is_idempotent
+    once  = M.inject_blocks(HOOK, blocks: HOOK_BLOCKS)
+    twice = M.inject_blocks(once, blocks: HOOK_BLOCKS)
+
+    assert_equal once, twice
+    assert_equal 1, twice.lines.count { |l| l.include?("@implements") }
+  end
+
+  # The scope still discriminates: same call, same def name, another module.
+  def test_inject_blocks_inside_a_def_honours_the_scope
+    blocks = [HOOK_BLOCKS.first.merge("in" => "::Host::Other")]
+
+    assert_equal HOOK, M.inject_blocks(HOOK, blocks: blocks)
+  end
+
   private
 
   def with_sidecar(table)

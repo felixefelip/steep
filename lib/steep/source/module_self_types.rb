@@ -146,9 +146,9 @@ module Steep
           append_at_end(source_code, missing)
         end
 
-        # Annotates each receiverless block call named `call`, for every
-        # `blocks` spec (`{ "call" => ..., "implements" => ..., "self" => ...
-        # }`): `# @implements <implements>` on the opener line, and — when
+        # Annotates each block call named `call`, for every `blocks` spec
+        # (`{ "call" => ..., "implements" => ..., "self" => ..., "in" => ...,
+        # "method" => ... }`): `# @implements <implements>` on the opener line, and — when
         # `self` is given — `# @type self: <self>` on each method-def line in
         # the block (see `block_annotation_insertions`). Lets Steep check a DSL
         # block — e.g. `class_methods do … end` — as an implementation of the
@@ -189,8 +189,13 @@ module Steep
             # written before this said.
             scope = spec["in"].to_s
             scope = nil if scope.empty?
+            # The def the call is written inside, when it is not written in the
+            # module body at all. See `find_block_calls`: it both admits a
+            # receiver and keeps the match unique.
+            method = spec["method"].to_s
+            method = nil if method.empty?
 
-            find_block_calls(result.value, call_name, scope).flat_map do |call|
+            find_block_calls(result.value, call_name, scope, method).flat_map do |call|
               block = call.block
               next [] unless block.is_a?(Prism::BlockNode) && block.opening_loc
 
@@ -407,27 +412,42 @@ module Steep
           body.body.select { |stmt| stmt.is_a?(Prism::DefNode) && stmt.receiver.nil? }
         end
 
-        # Every receiverless call named `call_name` that carries a `do … end` /
-        # `{ … }` block, anywhere in the tree.
         # Every receiverless `call_name do … end` in the tree, optionally only
         # those written inside `scope` (a `::`-qualified class/module path, as
         # the enclosing declarations spell it lexically).
-        def find_block_calls(root, call_name, scope = nil)
+        #
+        # `method` lifts the receiverless rule and replaces it: with it, the
+        # call is looked for inside a `def` of that name, and may have any
+        # receiver. That is the OTHER place a later-replayed block is written —
+        # Ruby's own `included` hook, where the block is `base.class_eval do … end`
+        # in the hook's body rather than a DSL call in the module body
+        # (felixefelip/steep#147, felixefelip/rbs_infer#260).
+        #
+        # It is a discriminator as much as a permission. `class_eval` says
+        # nothing about which block is meant — one module can write it in two
+        # methods and replay each onto a different class — so lifting the
+        # receiver rule without a way to tell those apart would land both
+        # entries on both blocks, which is what `scope` exists to prevent one
+        # level up.
+        def find_block_calls(root, call_name, scope = nil, method = nil)
           target = call_name.to_sym
           wanted = scope && normalize_scope(scope)
+          within = method&.to_sym
           found = []
-          walk = lambda do |node, path|
+          walk = lambda do |node, path, enclosing|
             return unless node.is_a?(Prism::Node)
 
             inner = scope_path(node, path)
+            inner_def = node.is_a?(Prism::DefNode) ? node.name : enclosing
             if node.is_a?(Prism::CallNode) && node.name == target &&
-               node.receiver.nil? && node.block.is_a?(Prism::BlockNode) &&
+               (within ? enclosing == within : node.receiver.nil?) &&
+               node.block.is_a?(Prism::BlockNode) &&
                (wanted.nil? || wanted == path)
               found << node
             end
-            node.compact_child_nodes.each { |c| walk.call(c, inner) }
+            node.compact_child_nodes.each { |c| walk.call(c, inner, inner_def) }
           end
-          walk.call(root, nil)
+          walk.call(root, nil, nil)
           found
         end
 
