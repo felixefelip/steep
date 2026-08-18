@@ -166,10 +166,16 @@ module Steep
 
           insertions = blocks.flat_map do |spec|
             call_name = spec["call"].to_s
-            module_name = spec["implements"].to_s
-            next [] if call_name.empty? || module_name.empty?
+            # A LIST is allowed, and joined into ONE comment rather than written
+            # as several. A block replayed onto two classes defines its methods
+            # on both, and the annotation rides the block's opener line — so a
+            # second `# @implements` would be spliced into the first one's text
+            # and neither would parse. `@implements A, B` is the spelling that
+            # fits on the one line there is (felixefelip/steep#149).
+            module_names = Array(spec["implements"]).map(&:to_s).reject(&:empty?)
+            next [] if call_name.empty? || module_names.empty?
 
-            implements = "# @implements #{module_name}"
+            implements = "# @implements #{module_names.join(", ")}"
             self_type = spec["self"].to_s
             self_annotation = self_type.empty? ? nil : "# @type self: #{self_type}"
             # Optional discriminator: the class/module the call is WRITTEN IN. A

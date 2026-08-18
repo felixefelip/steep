@@ -417,6 +417,13 @@ module Steep
       block_body: Parser::AST::Node?
     ) -> AST::Types::t
 
+    # Re-checks `block_body` under every module `@implements` named beyond the
+    # first, reporting only the diagnostics those runs add.
+    def check_reopened_modules: (Parser::AST::Node, hint: AST::Types::t?) -> void
+
+    # What makes two diagnostics the same complaint, for the deduplication above.
+    def error_signature: (Diagnostic::Ruby::Base) -> [Class, Integer?, String]
+
     %a{pure} def nesting: () -> RBS::Resolver::context
 
     def absolute_name: (untyped name) -> untyped

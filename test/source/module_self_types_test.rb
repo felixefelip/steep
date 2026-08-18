@@ -136,6 +136,28 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     "self" => "singleton(::Post) & singleton(::Post::Taggable)"
   }].freeze
 
+  # A block replayed onto two classes needs both names, and there is one line to
+  # put them on — a second `# @implements` would land inside the first one's
+  # text. So the entry may carry a LIST, joined into one comment
+  # (felixefelip/steep#149).
+  def test_inject_blocks_joins_a_list_of_implements_into_one_comment
+    blocks = [{ "call" => "class_methods", "implements" => ["::Wrap::Bar", "::Wrap::BarOther"] }]
+
+    result = M.inject_blocks(TAGGABLE, blocks: blocks)
+
+    assert_includes result, "class_methods do # @implements ::Wrap::Bar, ::Wrap::BarOther"
+    # Still no line added, which is what keeps every reported line number aligned.
+    assert_equal TAGGABLE.lines.size, result.lines.size
+  end
+
+  # The string form is what every sidecar written before the list said, and it
+  # keeps meaning exactly what it meant.
+  def test_inject_blocks_still_takes_a_single_implements_string
+    result = M.inject_blocks(TAGGABLE, blocks: BLOCKS)
+
+    assert_includes result, "class_methods do # @implements ::Post::Taggable::ClassMethods"
+  end
+
   def test_inject_blocks_appends_self_on_each_def_line_without_shifting
     source = <<~RUBY
       module Post

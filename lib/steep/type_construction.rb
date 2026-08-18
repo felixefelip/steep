@@ -6091,8 +6091,16 @@ module Steep
                      node_type_hint
                    end
 
+      # Every module the block names beyond the first. `for_block` enters ONE of
+      # them below — a constructor has one module context — so the rest travel
+      # with the block and `synthesize_block` checks the body against each.
+      reopened_modules = (block_annotations.implement_module_annotation&.names || [])
+                           .drop(1)
+                           .map {|implements| default_module_context(implements, nesting: nesting) }
+
       block_context = TypeInference::Context::BlockContext.new(
-        body_type: block_annotations.block_type
+        body_type: block_annotations.block_type,
+        reopened_modules: reopened_modules
       )
       break_context = TypeInference::Context::BreakContext.new(
         break_type: break_type || AST::Builtin.any_type,
@@ -6147,6 +6155,8 @@ module Steep
       if block_body
         body_type, _, context = synthesize(block_body, hint: block_context&.body_type || block_type_hint)
 
+        check_reopened_modules(block_body, hint: block_context&.body_type || block_type_hint)
+
         if annotated_body_type = block_context&.body_type
           if result = no_subtyping?(sub_type: body_type, super_type: annotated_body_type)
             typing.add_error(
@@ -6168,6 +6178,63 @@ module Steep
       else
         AST::Builtin.nil_type
       end
+    end
+
+    # Re-checks the block body under every module the annotation names beyond the
+    # first, and reports what only those runs find.
+    #
+    # A block replayed onto two classes runs twice at runtime, once per definee,
+    # and its `def`s land on both. One pass can only enter one of them: it types
+    # the body against that class's methods and declares its `def`s against that
+    # class's RBS, and says nothing at all about the other. So the body is
+    # checked once per definee, which is what running it twice means.
+    #
+    # Each extra run goes in its own CHILD typing and the child is never saved:
+    # the nodes are already typed by the first pass, and a second answer for the
+    # same node is not something the typing can hold. Only the ERRORS are
+    # brought back — they are the part that is about the definee rather than
+    # about the node — and only the ones the first pass did not already report,
+    # so a body wrong for both classes is one diagnostic per class rather than
+    # the same one twice.
+    #
+    # Costless for every ordinary block: `reopened_modules` is empty unless the
+    # annotation named more than one module (felixefelip/steep#149).
+    def check_reopened_modules(block_body, hint:)
+      reopened = block_context&.reopened_modules or return
+      return if reopened.empty?
+
+      reported = typing.errors.map {|error| error_signature(error) }.to_set
+
+      # `@implements` binds the block's `self` to the class object — that is what
+      # `class_eval` does — so each extra definee brings its own. But only when
+      # `self` came from the annotation in the first place: an explicit
+      # `@type self:` is the author naming a self that holds for the block
+      # however it is run, and every definee must be checked against THAT.
+      implements_bound_self = module_context&.module_type == self_type
+
+      reopened.each do |reopened_context|
+        child = typing.new_child
+        constr = with(typing: child).update_context do |context|
+          context.with(
+            module_context: reopened_context,
+            self_type: implements_bound_self ? reopened_context.module_type : self_type
+          )
+        end
+
+        constr.synthesize(block_body, hint: hint)
+
+        child.errors.each do |error|
+          typing.add_error(error) if reported.add?(error_signature(error))
+        end
+      end
+    end
+
+    # What makes two diagnostics the same one for the purpose above. Steep's
+    # diagnostics have no `==`, and the pair that matters here — the same
+    # complaint from two definees — differs only in its rendered text, which is
+    # where the definee's name appears.
+    def error_signature(error)
+      [error.class, error.node&.loc&.expression&.begin_pos, error.header_line]
     end
 
     def nesting

@@ -60,7 +60,11 @@ module Steep
         #
         attr_reader body_type: AST::Types::t?
 
-        def initialize: (body_type: AST::Types::t?) -> void
+        # The module contexts the block body must also be checked under, beyond
+        # the one already entered. Empty unless `@implements` named several.
+        attr_reader reopened_modules: Array[ModuleContext]
+
+        def initialize: (body_type: AST::Types::t?, reopened_modules: Array[ModuleContext]) -> void
 
         def subst: (Interface::Substitution) -> BlockContext
       end
