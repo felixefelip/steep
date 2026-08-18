@@ -44,6 +44,25 @@ module Steep
     PARAM = /[A-Z][A-Za-z0-9_]*/
     TYPE_PARAMS = /(\[(?<params>#{PARAM}(,\s*#{PARAM})*)\])?/
 
+    # One entry of an `@implements` list. Wholly NON-CAPTURING, which is what
+    # lets it be both repeated in the `when` pattern and handed to `scan` to
+    # take the list apart again.
+    #
+    # Scanned rather than split on commas: `A[X, Y], B` has commas at two levels
+    # and only the outer ones separate modules. A split cannot see the
+    # difference — it would cut `A[X` from `Y], B` — while matching whole names
+    # keeps each parameter list with the name it belongs to.
+    IMPLEMENTS_NAME = /(?:::)?(?:[A-Z][A-Za-z0-9_]*::)*[A-Z][A-Za-z0-9_]*(?:\[#{PARAM}(?:,\s*#{PARAM})*\])?/
+
+    # One `Name` or `Name[Param, ...]` of an `@implements` list.
+    def parse_implements_name(string)
+      match = /\A(?<name>#{CONST_NAME})#{TYPE_PARAMS}\z/.match(string.strip) or return nil
+      type_name = RBS::TypeName.parse(match[:name] || raise)
+      params = match[:params]&.yield_self {|params| params.split(/,/).map {|param| param.strip.to_sym } } || []
+
+      AST::Annotation::Implements::Module.new(name: type_name, args: params)
+    end
+
     def parse_type(match, name = :type, location:)
       string = match[name] or raise
       st, en = match.offset(name)
@@ -196,14 +215,13 @@ module Steep
           )
         end
 
-      when /@implements\s+(?<name>#{CONST_NAME})#{TYPE_PARAMS}$/
+      when /@implements\s+(?<names>#{IMPLEMENTS_NAME}(\s*,\s*#{IMPLEMENTS_NAME})*)$/
         Regexp.last_match.yield_self do |match|
           match or raise
-          type_name = RBS::TypeName.parse(match[:name] || raise)
-          params = match[:params]&.yield_self {|params| params.split(/,/).map {|param| param.strip.to_sym } } || []
+          names = (match[:names] || raise).scan(IMPLEMENTS_NAME)
+          modules = names.map {|name| parse_implements_name(name) or return nil }
 
-          name = AST::Annotation::Implements::Module.new(name: type_name, args: params)
-          AST::Annotation::Implements.new(name: name, location: location)
+          AST::Annotation::Implements.new(names: modules, location: location)
         end
       end
 

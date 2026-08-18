@@ -103,15 +103,32 @@ module Steep
 
         include Located
 
+        # Every module the annotation names, in the order written.
+        #
+        # A LIST, because one block body can be run against several modules and
+        # `class_eval` is how: a block kept in one place and replayed onto two
+        # classes defines its methods on both, so `# @implements A, B` is the
+        # only honest thing to write over it. Writing two separate `@implements`
+        # comments cannot say it — an annotation rides the block's opener line,
+        # and a second `#` on that line lands inside the first one's text
+        # (felixefelip/steep#149).
+        attr_reader :names
+
+        # The first, which is what a CLASS or MODULE body means by the
+        # annotation: a `class X` has one definee no matter how many names are
+        # written, so the rest are ignored there and only a block reads them all.
         attr_reader :name
 
-        def initialize(name:, location: nil)
+        def initialize(names:, location: nil)
+          raise ArgumentError, "@implements needs at least one module" if names.empty?
+
           @location = location
-          @name = name
+          @names = names
+          @name = names.first
         end
 
         def ==(other)
-          other.is_a?(Implements) && other.name == name
+          other.is_a?(Implements) && other.names == names
         end
       end
 

@@ -23,7 +23,7 @@ class AnnotationCollectionTest < Minitest::Test
         Annotation::InstanceType.new(type: parse_type("String")),
         Annotation::ModuleType.new(type: parse_type("String")),
         Annotation::BreakType.new(type: parse_type("::Object")),
-        Annotation::Implements.new(name: Annotation::Implements::Module.new(name: RBS::TypeName.parse("Object"), args: [])),
+        Annotation::Implements.new(names: [Annotation::Implements::Module.new(name: RBS::TypeName.parse("Object"), args: [])]),
         Annotation::Dynamic.new(names: [
           Annotation::Dynamic::Name.new(name: :foo, kind: :instance),
           Annotation::Dynamic::Name.new(name: :bar, kind: :module),

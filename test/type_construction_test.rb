@@ -9052,6 +9052,112 @@ end
     end
   end
 
+  # A block kept in one place and replayed onto two classes defines its methods
+  # on BOTH, so `@implements` names both and the body is checked once per
+  # definee — which is what running it twice means (felixefelip/steep#149).
+  def test_block_implements_several_modules
+    with_checker <<-EOF do |checker|
+class TestMultiKeeper
+  def self.keep: () { () -> void } -> void
+end
+
+class TestMultiFirst
+  def age: () -> Integer
+end
+
+class TestMultiSecond
+  def age: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestMultiKeeper.keep do # @implements ::TestMultiFirst, ::TestMultiSecond
+  def age
+    31
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # The second definee is genuinely CHECKED, not merely tolerated: a body valid
+  # for the first and not the second is reported, and names the one it fails on.
+  def test_block_implements_several_modules_reports_the_second
+    with_checker <<-EOF do |checker|
+class TestMultiKeeper2
+  def self.keep: () { () -> void } -> void
+end
+
+class TestMultiFirst2
+  def age: () -> Integer
+  def base: () -> Integer
+end
+
+class TestMultiSecond2
+  def age: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestMultiKeeper2.keep do # @implements ::TestMultiFirst2, ::TestMultiSecond2
+  def age
+    base
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal 1, typing.errors.size
+        assert_any!(typing.errors) do |error|
+          assert_instance_of Diagnostic::Ruby::NoMethod, error
+          assert_equal :base, error.method
+        end
+      end
+    end
+  end
+
+  # One diagnostic per definee, not the same one twice: a `def` declared by
+  # neither class is two complaints because there are two classes, while
+  # anything the body says wrong regardless of definee is said once.
+  def test_block_implements_several_modules_reports_each_definee_once
+    with_checker <<-EOF do |checker|
+class TestMultiKeeper3
+  def self.keep: () { () -> void } -> void
+end
+
+class TestMultiFirst3
+end
+
+class TestMultiSecond3
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestMultiKeeper3.keep do # @implements ::TestMultiFirst3, ::TestMultiSecond3
+  def age
+    31
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        undeclared = typing.errors.select {|error| error.is_a?(Diagnostic::Ruby::UndeclaredMethodDefinition) }
+        assert_equal ["::TestMultiFirst3", "::TestMultiSecond3"],
+                     undeclared.map {|error| error.type_name.to_s }.sort
+      end
+    end
+  end
+
   # `module_eval` is an alias, so a fix that keyed on one name would miss it.
   def test_block_implicit_implements_from_module_eval
     with_checker <<-EOF do |checker|

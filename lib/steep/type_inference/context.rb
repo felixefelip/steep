@@ -42,12 +42,27 @@ module Steep
       class BlockContext
         attr_reader :body_type
 
-        def initialize(body_type:)
+        # The module contexts this block body must ALSO be checked under, beyond
+        # the one already entered — `# @implements A, B` names two definees and
+        # a `class_eval`ed block genuinely runs against both, so a body valid
+        # for one and not the other is only caught by checking both.
+        #
+        # Empty for every ordinary block, which is every block that does not
+        # name more than one module. Required rather than defaulted: both
+        # construction sites decide it, and a site that forgot would silently
+        # check one definee and report nothing about the rest
+        # (felixefelip/steep#149).
+        attr_reader :reopened_modules
+
+        def initialize(body_type:, reopened_modules:)
           @body_type = body_type
+          @reopened_modules = reopened_modules
         end
 
         def subst(s)
-          BlockContext.new(body_type: body_type&.subst(s))
+          # `reopened_modules` are module contexts, not types: nothing in them
+          # is substitutable, so they travel unchanged.
+          BlockContext.new(body_type: body_type&.subst(s), reopened_modules: reopened_modules)
         end
       end
 

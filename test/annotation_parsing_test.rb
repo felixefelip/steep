@@ -153,6 +153,29 @@ class AnnotationParsingTest < Minitest::Test
     end
   end
 
+  # A block replayed onto two classes defines its methods on both, and the
+  # annotation has one line to say so (felixefelip/steep#149).
+  def test_implements_several_modules
+    with_factory do |factory|
+      annot = parse_annotation("@implements ::Wrap::Bar, ::Wrap::BarOther", factory: factory)
+      assert_instance_of Annotation::Implements, annot
+      assert_equal [RBS::TypeName.parse("::Wrap::Bar"), RBS::TypeName.parse("::Wrap::BarOther")],
+                   annot.names.map(&:name)
+      # `name` stays the first, which is all a class or module body reads.
+      assert_equal RBS::TypeName.parse("::Wrap::Bar"), annot.name.name
+    end
+  end
+
+  # The commas are at two levels and only the outer ones separate modules, so
+  # the list is scanned for whole names rather than split on `,`.
+  def test_implements_several_modules_with_type_params
+    with_factory do |factory|
+      annot = parse_annotation("@implements Pair[A, B], String", factory: factory)
+      assert_equal [RBS::TypeName.parse("Pair"), RBS::TypeName.parse("String")], annot.names.map(&:name)
+      assert_equal [[:A, :B], []], annot.names.map(&:args)
+    end
+  end
+
   def test_ivar_type
     with_factory do |factory|
       annot = parse_annotation("@type ivar @x: Integer", factory: factory)
