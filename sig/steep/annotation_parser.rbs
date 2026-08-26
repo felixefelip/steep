@@ -31,9 +31,13 @@ module Steep
 
     TYPE_PARAMS: Regexp
 
+    IMPLEMENTS_MODULE: Regexp
+
     IMPLEMENTS_NAME: Regexp
 
-    # One `Name` or `Name[Param, ...]` of an `@implements` list.
+    SINGLETON_NAME: Regexp
+
+    # One `Name`, `Name[Param, ...]` or `singleton(Name)` of an `@implements` list.
     def parse_implements_name: (String) -> AST::Annotation::Implements::Module?
 
     def parse_type: (MatchData, ?Symbol, location: RBS::Location[untyped, untyped]) -> AST::Types::t

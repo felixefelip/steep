@@ -475,7 +475,11 @@ module Steep
           if checker.factory.class_name?(absolute_name) || checker.factory.module_name?(absolute_name)
             AST::Annotation::Implements::Module.new(
               name: absolute_name,
-              args: annotation.name.args
+              args: annotation.name.args,
+              # Carried, not re-derived: this only resolves the NAME, and
+              # dropping the flag here would quietly turn `singleton(::Foo)`
+              # back into `::Foo` — the same name, the other method table.
+              singleton: annotation.name.singleton?
             )
           else
             Steep.logger.error "Unknown class name given to @implements: #{annotation.name.name}"
@@ -499,6 +503,9 @@ module Steep
     def default_module_context(implement_module_name, nesting:)
       if implement_module_name
         module_name = checker.factory.absolute_type_name(implement_module_name.name, context: nesting) or raise
+
+        return singleton_module_context(module_name, implement_module_name, nesting: nesting) if implement_module_name.singleton?
+
         module_args = implement_module_name.args.map {|name| AST::Types::Var.new(name: name) }
 
         instance_def = checker.factory.definition_builder.build_instance(module_name)
@@ -527,6 +534,44 @@ module Steep
           instance_definition: nil
         )
       end
+    end
+
+    # The context a `class << self` body has, named by `@implements
+    # singleton(::Foo)` instead of opened lexically.
+    #
+    # The two are the same claim about the same body: a `def` in either defines
+    # `Foo.bar`, so the DEFINEE — `instance_definition`, which is what a `def`
+    # is checked against — is `Foo`'s singleton, and the `self` inside it is the
+    # class object. `for_sclass` derives exactly this from the type of the
+    # receiver it is opening; here the annotation states it, which a block
+    # reopening a singleton through a value (`base.singleton_class.class_eval`)
+    # needs because the receiver's own type says only `Class`
+    # (felixefelip/steep#152).
+    #
+    # Type ARGUMENTS have nowhere to go and the parser refuses them: a singleton
+    # class is one type whatever its instances are parameterised by.
+    def singleton_module_context(module_name, implement_module_name, nesting:)
+      instance_type = AST::Types::Name::Singleton.new(name: module_name)
+
+      module_type =
+        case checker.factory.env.constant_entry(module_name)
+        when RBS::Environment::ModuleEntry, RBS::Environment::ModuleAliasEntry
+          AST::Builtin::Module.instance_type
+        else
+          AST::Builtin::Class.instance_type
+        end
+
+      TypeInference::Context::ModuleContext.new(
+        instance_type: instance_type,
+        module_type: module_type,
+        implement_name: implement_module_name,
+        nesting: nesting,
+        class_name: module_name,
+        instance_definition: checker.factory.definition_builder.build_singleton(module_name),
+        # `Class`/`Module` is an instance type, so there is no singleton
+        # definition behind it to reopen — the same nil `for_sclass` leaves.
+        module_definition: nil
+      )
     end
 
     def for_module(node, new_module_name)
@@ -6300,6 +6345,13 @@ module Steep
     end
 
     def validate_method_definitions(node, module_name)
+      # `@implements singleton(::Foo)` on a class or module BODY, where the
+      # definee is fixed by the `class` keyword and cannot be a singleton. The
+      # two sets below are read off the instance/module split, which a singleton
+      # context does not have — every class method of Foo would be demanded of
+      # this body. Nothing to validate rather than something wrong to report.
+      return if module_name.singleton?
+
       module_name_1 = module_name.name
       module_entry = checker.factory.env.module_class_entry(module_name_1, normalized: true) or raise
       member_decl_count = module_entry.each_decl.count do |decl|

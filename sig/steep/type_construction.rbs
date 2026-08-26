@@ -92,6 +92,10 @@ module Steep
 
     def default_module_context: (AST::Annotation::Implements::Module? implement_module_name, nesting: RBS::Resolver::context) -> TypeInference::Context::ModuleContext
 
+    # The context a `class << self` body has, named by `@implements singleton(::Foo)`
+    # instead of opened lexically.
+    def singleton_module_context: (RBS::TypeName module_name, AST::Annotation::Implements::Module implement_module_name, nesting: RBS::Resolver::context) -> TypeInference::Context::ModuleContext
+
     def for_module: (untyped node, untyped new_module_name) -> TypeConstruction
 
     def with_module_constr: [T] (untyped node, untyped module_name) { (TypeConstruction) -> T } -> T

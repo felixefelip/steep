@@ -85,19 +85,34 @@ module Steep
           attr_reader :name
           attr_reader :args
 
-          def initialize(name:, args:)
+          # Whether the annotation names the class object's method table rather
+          # than its instances' — `@implements singleton(::Foo)` against
+          # `@implements ::Foo`.
+          #
+          # One name and a flag, rather than a type: `@implements` says which
+          # DEFINEE a body has, and Ruby gives a class exactly two. A block
+          # replayed with `Foo.singleton_class.class_eval` defines `Foo.bar`, and
+          # that is the whole of what this distinguishes
+          # (felixefelip/steep#152).
+          def initialize(name:, args:, singleton: false)
             @name = name
             @args = args
+            @singleton = singleton
+          end
+
+          def singleton?
+            @singleton
           end
 
           def ==(other)
-            other.is_a?(Module) && other.name == name && other.args == args
+            other.is_a?(Module) && other.name == name && other.args == args &&
+              other.singleton? == singleton?
           end
 
           alias eql? ==
 
           def hash
-            self.class.hash ^ name.hash ^ args.hash
+            self.class.hash ^ name.hash ^ args.hash ^ singleton?.hash
           end
         end
 

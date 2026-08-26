@@ -176,6 +176,36 @@ class AnnotationParsingTest < Minitest::Test
     end
   end
 
+  # `singleton(::Foo)` names the class object's method table, which is where a
+  # block reopening a singleton defines its methods (felixefelip/steep#152).
+  def test_implements_singleton
+    with_factory do |factory|
+      annot = parse_annotation("@implements singleton(::Wrap::Bar)", factory: factory)
+      assert_equal RBS::TypeName.parse("::Wrap::Bar"), annot.name.name
+      assert_predicate annot.name, :singleton?
+    end
+  end
+
+  # The parentheses travel with the name, so a list mixing the two forms is
+  # taken apart at the right commas.
+  def test_implements_singleton_in_a_list
+    with_factory do |factory|
+      annot = parse_annotation("@implements ::Wrap::Bar, singleton(::Wrap::BarOther)", factory: factory)
+      assert_equal [RBS::TypeName.parse("::Wrap::Bar"), RBS::TypeName.parse("::Wrap::BarOther")],
+                   annot.names.map(&:name)
+      assert_equal [false, true], annot.names.map(&:singleton?)
+    end
+  end
+
+  # A singleton class is one type however its instances are parameterised, so
+  # arguments inside `singleton(...)` say nothing and are refused rather than
+  # dropped.
+  def test_implements_singleton_rejects_type_args
+    with_factory do |factory|
+      assert_nil parse_annotation("@implements singleton(Pair[A, B])", factory: factory)
+    end
+  end
+
   def test_ivar_type
     with_factory do |factory|
       annot = parse_annotation("@type ivar @x: Integer", factory: factory)
