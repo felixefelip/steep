@@ -57,6 +57,9 @@ module Steep
       #
       def self.union: (MethodType type1, MethodType type2, Subtyping::Check) -> MethodType?
 
+      # Simplifies the return type, absorbing union members another member covers.
+      def simplify_return_type: (Subtyping::Check check) -> MethodType
+
       # Returns a method type which is a sub-type of both `type1` and `type2`.
       #
       # ```

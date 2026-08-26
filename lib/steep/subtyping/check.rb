@@ -182,6 +182,80 @@ module Steep
         end
       end
 
+      # Drops the members of a union that another member already covers: `A | B` where
+      # `B <: A` denotes the same set of values as `A`, so keeping both says one thing
+      # twice.
+      #
+      # Syntactic dedup (`Union.build`) cannot see this — absorption needs the subtyping
+      # relation, which is what this class holds. It matters because a union's method
+      # types are built by FOLDING the members' overloads pairwise: two members whose
+      # overloads differ only in a `self` return type produce a fresh, syntactically
+      # distinct union at every step, so the fold's dedup by method type never fires and
+      # the overload count doubles per member. #148 collapsed the pairs that agree
+      # outright; this collapses the ones that only denote the same type
+      # (felixefelip/steep#150).
+      #
+      # Only a STRICT relation absorbs: `A` covering `B` while `B` also covers `A` (both
+      # `untyped`, or two spellings of one type) would make the result depend on the
+      # order the members happen to arrive in, and Union.build already handles the
+      # equal case.
+      def simplify_union(type)
+        return type unless type.is_a?(AST::Types::Union)
+        return type unless type.types.size > 1
+        # `self`, `instance`, `class` and type variables stand for a type this union does
+        # not know yet — they are substituted per receiver, later. Whether one covers
+        # another is not decidable here, and dropping one would drop the substitution
+        # along with it.
+        return type unless type.free_variables.empty?
+
+        kept = [] #: Array[AST::Types::t]
+
+        type.types.each do |candidate|
+          next if kept.any? {|kept_type| covers_strictly?(kept_type, candidate) }
+          kept.reject! {|kept_type| covers_strictly?(candidate, kept_type) }
+          kept << candidate
+        end
+
+        return type if kept.size == type.types.size
+
+        AST::Types::Union.build(types: kept)
+      end
+
+      # `sub` is a subtype of `sup` and `sup` is not a subtype of `sub`.
+      #
+      # Runs in a NESTED context: shapes are built lazily, from inside a check that is
+      # already running, so `with_context` alone would hand the outer check a cleared
+      # context on the way out (its `ensure` nils the fields rather than restoring them).
+      def covers_strictly?(sup, sub)
+        return false if sup == sub
+
+        subtype?(sub, sup) && !subtype?(sup, sub)
+      end
+
+      def subtype?(sub_type, super_type)
+        saved_self_type = @self_type
+        saved_instance_type = @instance_type
+        saved_class_type = @class_type
+        saved_constraints = @constraints
+        saved_assumptions = @assumptions
+
+        begin
+          check(
+            Relation.new(sub_type: sub_type, super_type: super_type),
+            self_type: AST::Builtin.any_type,
+            instance_type: AST::Builtin.any_type,
+            class_type: AST::Builtin.any_type,
+            constraints: Constraints.empty
+          ).success?
+        ensure
+          @self_type = saved_self_type
+          @instance_type = saved_instance_type
+          @class_type = saved_class_type
+          @constraints = saved_constraints
+          @assumptions = saved_assumptions
+        end
+      end
+
       def check_type(relation)
         if assumptions.size > ABORT_LIMIT
           return Failure(relation, Result::Failure::LoopAbort.new)
