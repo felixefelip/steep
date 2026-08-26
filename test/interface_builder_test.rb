@@ -512,6 +512,40 @@ end
     end
   end
 
+  # The members redeclare `foo` with `| ...`, so each has TWO overloads and the second
+  # one — inherited, typed `-> self` — is a different type in every member. Folding the
+  # members pairwise then produces a method type per subset: `-> (::Base | ::C0)`,
+  # `-> (::Base | ::C1)`, ... doubling with each member, 2 ** 19 of them on the union
+  # that motivated this (a generated `Module#include` in rbs_infer's dummy app).
+  #
+  # They are the same type: `::C0 <: ::Base`, so every combination that picks the
+  # `-> ::Base` overload from any member returns `::Base`. Absorbing the covered
+  # members says that once, and the union is left with the two things it can return.
+  def test_shape__union_absorbs_covered_return_types
+    members = 12.times.map {|i| "::C#{i}" }
+
+    with_factory({ "a.rbs" => <<~RBS }) do
+        class Base
+          def foo: () -> self
+        end
+
+        #{members.map {|name| "class #{name} < Base\n  def foo: () -> ::Base | ...\nend\n" }.join("\n")}
+      RBS
+
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+
+      builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
+        assert_equal(
+          [
+            parse_method_type("() -> ::Base"),
+            parse_method_type("() -> (#{members.join(" | ")})")
+          ].sort_by(&:to_s),
+          shape.methods[:foo].method_types.sort_by(&:to_s)
+        )
+      end
+    end
+  end
+
   def test_shape__inline__class_singleton
     with_factory({}, { "a.rb" => <<-RUBY }) do
 class Foo

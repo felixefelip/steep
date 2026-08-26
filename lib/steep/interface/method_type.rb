@@ -149,9 +149,22 @@ module Steep
           type1,
           type2,
           check,
-          -> (t1, t2) { t1 | t2 },
+          -> (t1, t2) { (t1 | t2)&.then {|method_type| method_type.simplify_return_type(check) } },
           -> (original, generated) { Subtyping::Relation.new(sub_type: original, super_type: generated) }
         )
+      end
+
+      # The union of two method types returns either result, so its return type is the
+      # union of theirs — and a union whose members cover each other says one thing
+      # twice. Left as written, that redundancy is what makes `Builder#union_shape`
+      # grow a method type per SUBSET of the union's members: each fold step unions in
+      # one more member, and a union that keeps every member it was handed is a new,
+      # distinct type every time (felixefelip/steep#150).
+      def simplify_return_type(check)
+        simplified = check.simplify_union(type.return_type)
+        return self if simplified == type.return_type
+
+        with(type: type.with(return_type: simplified))
       end
 
       def self.intersection(type1, type2, check)
