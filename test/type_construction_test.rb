@@ -9158,6 +9158,101 @@ end
     end
   end
 
+  # A block replayed with `Target.singleton_class.class_eval` defines
+  # `Target.age`, so the definee is the singleton and the annotation says which
+  # of the two tables it means (felixefelip/steep#152).
+  def test_block_implements_singleton
+    with_checker <<-EOF do |checker|
+class TestSingletonKeeper
+  def self.keep: () { () -> void } -> void
+end
+
+class TestSingletonHost
+  def self.age: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestSingletonKeeper.keep do # @implements singleton(::TestSingletonHost)
+  def age
+    31
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # The same block, the same class, the other table: `age` is declared on the
+  # class object and not on its instances, so naming the instance side is what
+  # the flag has to keep apart from naming the singleton.
+  def test_block_implements_instance_does_not_take_the_singleton
+    with_checker <<-EOF do |checker|
+class TestSingletonKeeper2
+  def self.keep: () { () -> void } -> void
+end
+
+class TestSingletonHost2
+  def self.age: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestSingletonKeeper2.keep do # @implements ::TestSingletonHost2
+  def age
+    31
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_any!(typing.errors) do |error|
+          assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, error
+          assert_equal "::TestSingletonHost2", error.type_name.to_s
+        end
+      end
+    end
+  end
+
+  # `self` inside the block is the singleton class OBJECT — what
+  # `Target.singleton_class` evaluates to — so a class method of the host is
+  # reached with an implicit receiver from a def in there, exactly as it is
+  # inside `class << self`.
+  def test_block_implements_singleton_resolves_sibling_class_methods
+    with_checker <<-EOF do |checker|
+class TestSingletonKeeper3
+  def self.keep: () { () -> void } -> void
+end
+
+class TestSingletonHost3
+  def self.age: () -> Integer
+  def self.doubled: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestSingletonKeeper3.keep do # @implements singleton(::TestSingletonHost3)
+  def doubled
+    age
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
   # `module_eval` is an alias, so a fix that keyed on one name would miss it.
   def test_block_implicit_implements_from_module_eval
     with_checker <<-EOF do |checker|

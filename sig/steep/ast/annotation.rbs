@@ -71,7 +71,11 @@ module Steep
 
           attr_reader args: Array[Symbol]
 
-          def initialize: (name: RBS::TypeName, args: Array[Symbol]) -> void
+          def initialize: (name: RBS::TypeName, args: Array[Symbol], ?singleton: bool) -> void
+
+          # Whether the annotation names the class object's method table rather
+          # than its instances'.
+          def singleton?: () -> bool
 
           def ==: (untyped other) -> bool
 

@@ -44,23 +44,44 @@ module Steep
     PARAM = /[A-Z][A-Za-z0-9_]*/
     TYPE_PARAMS = /(\[(?<params>#{PARAM}(,\s*#{PARAM})*)\])?/
 
-    # One entry of an `@implements` list. Wholly NON-CAPTURING, which is what
-    # lets it be both repeated in the `when` pattern and handed to `scan` to
-    # take the list apart again.
+    # One module of an `@implements` list, as written.
+    IMPLEMENTS_MODULE = /(?:::)?(?:[A-Z][A-Za-z0-9_]*::)*[A-Z][A-Za-z0-9_]*(?:\[#{PARAM}(?:,\s*#{PARAM})*\])?/
+
+    # One entry of an `@implements` list — a module, or the `singleton(...)` of
+    # one. Wholly NON-CAPTURING, which is what lets it be both repeated in the
+    # `when` pattern and handed to `scan` to take the list apart again.
     #
     # Scanned rather than split on commas: `A[X, Y], B` has commas at two levels
     # and only the outer ones separate modules. A split cannot see the
     # difference — it would cut `A[X` from `Y], B` — while matching whole names
-    # keeps each parameter list with the name it belongs to.
-    IMPLEMENTS_NAME = /(?:::)?(?:[A-Z][A-Za-z0-9_]*::)*[A-Z][A-Za-z0-9_]*(?:\[#{PARAM}(?:,\s*#{PARAM})*\])?/
+    # keeps each parameter list with the name it belongs to. The `singleton(...)`
+    # form brings its own parentheses along for the same reason, and is tried
+    # first so a scan takes the whole of it rather than the name inside it.
+    IMPLEMENTS_NAME = /(?:singleton\(\s*#{IMPLEMENTS_MODULE}\s*\)|#{IMPLEMENTS_MODULE})/
 
-    # One `Name` or `Name[Param, ...]` of an `@implements` list.
+    # `singleton(Name)` — the class object's method table rather than its
+    # instances'. What a block reopening a singleton defines its methods on
+    # (felixefelip/steep#152).
+    SINGLETON_NAME = /\Asingleton\(\s*(?<name>.+?)\s*\)\z/
+
+    # One `Name`, `Name[Param, ...]` or `singleton(Name)` of an `@implements`
+    # list.
     def parse_implements_name(string)
-      match = /\A(?<name>#{CONST_NAME})#{TYPE_PARAMS}\z/.match(string.strip) or return nil
+      string = string.strip
+      singleton = SINGLETON_NAME.match(string)
+      string = (singleton[:name] || raise) if singleton
+
+      match = /\A(?<name>#{CONST_NAME})#{TYPE_PARAMS}\z/.match(string) or return nil
       type_name = RBS::TypeName.parse(match[:name] || raise)
       params = match[:params]&.yield_self {|params| params.split(/,/).map {|param| param.strip.to_sym } } || []
 
-      AST::Annotation::Implements::Module.new(name: type_name, args: params)
+      # A singleton class takes no type arguments of its own: `singleton(Array)`
+      # is one type however `Array` is parameterised. `singleton(Array[Elem])`
+      # is therefore not a stricter spelling of it but a meaningless one, and is
+      # declined rather than silently read as the bare singleton.
+      return nil if singleton && !params.empty?
+
+      AST::Annotation::Implements::Module.new(name: type_name, args: params, singleton: !singleton.nil?)
     end
 
     def parse_type(match, name = :type, location:)
