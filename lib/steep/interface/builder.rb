@@ -382,13 +382,29 @@ module Steep
                 end
               end
 
-              # Keyed by method type, not by overload: what an overload of a union
-              # says is its type, and the defs only record where that type came
-              # from. Two pairs that agree on the type are one overload carrying
-              # both sides' defs — collecting them separately would make the
-              # overload count the *product* over the union's members, since
-              # `MethodOverload` compares by identity and never collapses.
-              defss = {} #: Hash[MethodType, Array[RBS::Definition::Method::TypeDef]]
+              # Keyed by the CALL SHAPE — everything a method type says except its
+              # return: the type parameters, the parameters, and the block. The defs
+              # only record where a type came from, so pairs that land on the same
+              # shape are one overload carrying every side's defs.
+              #
+              # The key has to be the call shape rather than the whole method type,
+              # because an overload set is resolved FIRST-MATCH. Two entries that
+              # accept exactly the same arguments can never both be selected — the
+              # second is unreachable — so keeping it buys no precision and costs the
+              # fold its whole complexity class: each member multiplies the
+              # accumulator instead of merging into it, and the overload count becomes
+              # the *product* over the union's members.
+              #
+              # `singleton(A) | singleton(B) | ...` over 27 ActiveRecord models is
+              # where that stops being theoretical. Each member's `where` has two
+              # overloads (`()` and `(*untyped)`), the four pairs at each fold step
+              # keep all four — the two mixed ones intersect their parameters down to
+              # `()`, colliding with the first — and the set doubles per member:
+              # 2**27 unions of a method type, measured at 5s for 10 members, 55s for
+              # 13, and never finishing for 27. Collapsing on the call shape walks the
+              # members instead, and the type Steep resolves a call to is unchanged,
+              # since it was already reading the first entry only.
+              defss = {} #: Hash[[Array[TypeParam], Function::Params?, Block?], [MethodType, Array[RBS::Definition::Method::TypeDef]]]
 
               overloads1.each do |overload1|
                 overloads2.each do |overload2|
@@ -399,7 +415,7 @@ module Steep
                     next unless type
                   end
 
-                  defs = defss[type] ||= []
+                  _, defs = defss[[type.type_params, type.type.params, type.block]] ||= [type, []]
                   defs.concat(overload1.method_defs)
                   defs.concat(overload2.method_defs)
                 end
@@ -407,7 +423,7 @@ module Steep
 
               break nil if defss.empty?
 
-              defss.map {|type, defs| Shape::MethodOverload.new(type, defs) }
+              defss.each_value.map {|type, defs| Shape::MethodOverload.new(type, defs) }
             end
           end
         end
