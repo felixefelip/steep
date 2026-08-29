@@ -518,9 +518,9 @@ end
   # `-> (::Base | ::C1)`, ... doubling with each member, 2 ** 19 of them on the union
   # that motivated this (a generated `Module#include` in rbs_infer's dummy app).
   #
-  # They are the same type: `::C0 <: ::Base`, so every combination that picks the
-  # `-> ::Base` overload from any member returns `::Base`. Absorbing the covered
-  # members says that once, and the union is left with the two things it can return.
+  # Both overloads take no arguments, so `foo()` is answered by the first and the
+  # second could never be selected — the union has ONE thing to say about `foo()`.
+  # Saying it once is what keeps the fold linear; see the call-shape test below.
   def test_shape__union_absorbs_covered_return_types
     members = 12.times.map {|i| "::C#{i}" }
 
@@ -535,12 +535,38 @@ end
       builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
 
       builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
+        assert_equal [parse_method_type("() -> ::Base")], shape.methods[:foo].method_types
+      end
+    end
+  end
+
+  # Each member declares the two overloads ActiveRecord's `where` has — one taking no
+  # arguments, one taking anything — and every member returns a DIFFERENT type from
+  # both, so nothing absorbs anything. Pairing the overloads off then keeps all four
+  # combinations at every fold step (the two mixed ones intersect their parameters
+  # down to `()`, landing on the same call shape as the first), and the set doubles
+  # per member: 2 ** 27 for the union of models that a Rails app's data-transfer
+  # `record_set_for(model)` infers, which never finishes.
+  #
+  # An overload set is resolved first-match, so two entries taking the same arguments
+  # are one answer, not two: the union returns `A | B | ...` for `where()` and
+  # `A::Rel | B::Rel | ...` for `where(anything)`, and that is all it can return.
+  def test_shape__union_collapses_overloads_by_call_shape
+    members = 20.times.map {|i| "::C#{i}" }
+
+    with_factory({ "a.rbs" => <<~RBS }) do
+        #{members.map {|name| "class #{name}\n  def where: () -> #{name}\n            | (*untyped) -> ::Array[#{name}]\nend\n" }.join("\n")}
+      RBS
+
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+
+      builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
         assert_equal(
           [
-            parse_method_type("() -> ::Base"),
-            parse_method_type("() -> (#{members.join(" | ")})")
-          ].sort_by(&:to_s),
-          shape.methods[:foo].method_types.sort_by(&:to_s)
+            parse_method_type("() -> (#{members.join(" | ")})"),
+            parse_method_type("(*untyped) -> (#{members.map {|name| "::Array[#{name}]" }.join(" | ")})")
+          ],
+          shape.methods[:where].method_types
         )
       end
     end
