@@ -93,6 +93,10 @@ module Steep
 
       def intersection_shape: (AST::Types::t, Array[Shape]) -> Shape?
 
+      # Every member's overloads, first member first, with the ones sharing a call
+      # shape folded into one that returns the intersection of their return types.
+      def intersection_overloads: (Array[Shape::MethodOverload], Array[Shape::MethodOverload]) -> Array[Shape::MethodOverload]
+
       def proc_shape: (AST::Types::Proc, Shape) -> Shape
 
       def tuple_shape: (AST::Types::Tuple) { (AST::Types::Name::Instance) -> Shape? } -> Shape?

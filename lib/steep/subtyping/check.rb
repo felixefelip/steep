@@ -221,6 +221,41 @@ module Steep
         AST::Types::Union.build(types: kept)
       end
 
+      # An intersection is inhabited by a value that satisfies EVERY member, so a member
+      # another member already implies says nothing: `A & A?` is just `A`. The dual of
+      # `simplify_union` — there the wider member absorbs, here the narrower one does.
+      def simplify_intersection(type)
+        return type unless type.is_a?(AST::Types::Intersection)
+        return type unless type.types.size > 1
+        # Same reason as `simplify_union`: `self`, `instance`, `class` and type variables
+        # stand for a type this intersection does not know yet.
+        return type unless type.free_variables.empty?
+
+        kept = [] #: Array[AST::Types::t]
+
+        type.types.each do |candidate|
+          next if kept.any? {|kept_type| covers_strictly?(candidate, kept_type) }
+          kept.reject! {|kept_type| covers_strictly?(kept_type, candidate) }
+          kept << candidate
+        end
+
+        return type if kept.size == type.types.size
+
+        AST::Types::Intersection.build(types: kept)
+      end
+
+      # Collapse whichever composite `type` is, if any.
+      def simplify(type)
+        case type
+        when AST::Types::Union
+          simplify_union(type)
+        when AST::Types::Intersection
+          simplify_intersection(type)
+        else
+          type
+        end
+      end
+
       # `sub` is a subtype of `sup` and `sup` is not a subtype of `sub`.
       #
       # Runs in a NESTED context: shapes are built lazily, from inside a check that is

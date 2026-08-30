@@ -436,15 +436,59 @@ module Steep
 
         shapes.each do |s|
           shape.methods.merge!(s.methods) do |name, old_entry, new_entry|
-            if old_entry.public_method? && new_entry.private_method?
+            case
+            when old_entry.public_method? && new_entry.private_method?
               old_entry
-            else
+            when old_entry.private_method? && new_entry.public_method?
               new_entry
+            else
+              Interface::Shape::Entry.new(method_name: name, private_method: old_entry.private_method?) do
+                intersection_overloads(old_entry.overloads, new_entry.overloads)
+              end
             end
           end
         end
 
         shape
+      end
+
+      # A value typed by an intersection satisfies every member, so every member's
+      # overloads are on it — the merge above used to keep only the last member that
+      # happened to define the name, and the rest were gone.
+      #
+      # What that dropped is not a corner case: `Kernel#class` is baked per type into
+      # `object_shape`, so `@type instance: Filter & Filter::Fields` — the shape every
+      # module self-type annotation takes — answered `self.class` with
+      # `singleton(::Filter::Fields)`, and the host's class methods (a concern's own
+      # `class_methods do` block among them) were not there to call.
+      #
+      # Overloads that accept the same arguments cannot both be selected — resolution is
+      # FIRST-MATCH — so keeping both buys nothing; those fold into one overload whose
+      # return type is the intersection of theirs, which is what the value actually
+      # returns. `Filter & Filter::Validated` therefore keeps answering `creator` with
+      # the marker's `(::User & ::User::Validated)`: `simplify_return_type` drops the
+      # wider `::User?` the intersection implies. Overloads with distinct call shapes are
+      # kept side by side, first member first.
+      def intersection_overloads(overloads1, overloads2)
+        merged = {} #: Hash[[Array[TypeParam], Function::Params?, Block?], Shape::MethodOverload]
+
+        [*overloads1, *overloads2].each do |overload|
+          method_type = overload.method_type
+          key = [method_type.type_params, method_type.type.params, method_type.block] #: [Array[TypeParam], Function::Params?, Block?]
+
+          if existing = merged[key]
+            if intersected = MethodType.intersection(existing.method_type, method_type, subtyping)
+              merged[key] = Shape::MethodOverload.new(
+                intersected,
+                existing.method_defs + overload.method_defs
+              )
+            end
+          else
+            merged[key] = overload
+          end
+        end
+
+        merged.values
       end
 
       def method_name_for(type_def, name)
