@@ -9,7 +9,7 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
 
   # --- inject: placement (the genuinely-Steep behavior) ---
 
-  def test_inject_appends_at_end_for_top_level_module
+  def test_inject_into_top_level_module_goes_inside_body
     source = <<~RUBY
       module Post::Notifiable
         extend ActiveSupport::Concern
@@ -26,13 +26,41 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     self_idx         = lines.index { |l| l.include?("@type self:") }
     instance_idx     = lines.index { |l| l.include?("@type instance:") }
 
-    assert self_idx > module_close_idx
-    assert instance_idx > module_close_idx
-    assert_includes result, CONCERN[0]
-    assert_includes result, CONCERN[1]
+    assert self_idx < module_close_idx, "annotation must be inside the body, not after the module's end"
+    assert instance_idx < module_close_idx
   end
 
-  def test_inject_preserves_original_line_numbers
+  # End-of-file placement bound to the file's SOLE node, which for a one-module
+  # file is the module itself — and stopped being it the moment the file wrote
+  # anything else at the top level, with no error and no annotation in effect
+  # (felixefelip/steep#155).
+  def test_inject_reaches_a_module_a_second_top_level_module_follows
+    source = <<~RUBY
+      module Post::Notifiable
+        def notify
+        end
+      end
+
+      module Post::Notifiable::ClassMethods
+        def default_notifier
+        end
+      end
+    RUBY
+
+    result = M.inject(source, annotations: CONCERN, anchor: "Notifiable")
+    lines = result.lines
+
+    notifiable_open = lines.index { |l| l.include?("module Post::Notifiable\n") }
+    class_methods_open = lines.index { |l| l.include?("module Post::Notifiable::ClassMethods") }
+    self_idx = lines.index { |l| l.include?("@type self:") }
+
+    assert self_idx > notifiable_open
+    assert self_idx < class_methods_open, "annotation must be inside Notifiable, not at end of file"
+  end
+
+  # The annotation is spliced in just above the module's own `end`, so every
+  # line of the body — everything a diagnostic can point at — keeps its number.
+  def test_inject_preserves_the_line_numbers_of_the_body
     source = <<~RUBY
       module Post::Notifiable
         extend ActiveSupport::Concern
@@ -45,7 +73,7 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
 
     result = M.inject(source, annotations: CONCERN, anchor: "Notifiable")
 
-    source.lines.each_with_index do |line, i|
+    source.lines[0..-2].each_with_index do |line, i|
       assert_equal line, result.lines[i], "Line #{i + 1} shifted after annotation"
     end
   end
