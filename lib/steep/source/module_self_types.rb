@@ -126,18 +126,32 @@ module Steep
           entries
         end
 
-        # Places `annotations` at the scope named `anchor`. A module nested in a
-        # wrapper class/module gets the lines inserted inside its body; a
-        # top-level / compact module gets them appended at end-of-file (which
-        # preserves every original line number). Lines already present are
-        # skipped, so it's idempotent. Purely mechanical — no framework
-        # knowledge.
+        # Places `annotations` INSIDE the body of the scope named `anchor`.
+        # Lines already present are skipped, so it's idempotent. Purely
+        # mechanical — no framework knowledge.
+        #
+        # An annotation only binds to the scope it is written in, so the body
+        # is the only placement that always holds. End-of-file used to be used
+        # for a top-level module, to keep every original line number: a
+        # trailing comment binds to the file's sole node, which for a one-module
+        # file IS that module. It stops being that node the moment the file
+        # writes anything else at the top level — a second module, a reopen, the
+        # pseudo-code a generator appends — and then the comments bind to the
+        # file's `begin` instead and the module silently keeps Steep's default
+        # `(::Object & ::TheModule)` self, the very answer the annotation exists
+        # to replace (felixefelip/steep#155). Nothing failed and nothing said so;
+        # a concern's `self.class.some_class_method` just went `untyped`.
+        #
+        # In-body placement costs the module's own `end` line, and any line
+        # after it, a two-line shift — the same cost the nested case has always
+        # paid. A concern file is one module ending at end-of-file, so there is
+        # normally no line after it to move.
         def inject(source_code, annotations:, anchor:)
           missing = annotations.reject { |line| source_code.include?(line) }
           return source_code if missing.empty?
 
-          node, nested = find_target_scope(source_code, anchor)
-          if node && nested
+          node = find_target_scope(source_code, anchor)
+          if node
             insert_in_body(source_code, node, missing)
           else
             append_at_end(source_code, missing)
@@ -253,7 +267,7 @@ module Steep
           end
           return source_code if defs.empty?
 
-          node, = find_target_scope(source_code, anchor)
+          node = find_target_scope(source_code, anchor)
           return source_code unless node
 
           insertions = each_scope_def(node).filter_map do |defn|
@@ -318,34 +332,29 @@ module Steep
           path.start_with?(prefix) ? path[prefix.length..] : path
         end
 
-        # Returns [innermost ModuleNode/ClassNode named `anchor`, nested?] where
-        # nested? is true when the node is enclosed in another class/module.
+        # The innermost ModuleNode/ClassNode named `anchor`, or nil.
         def find_target_scope(source_code, anchor)
           result = Prism.parse(source_code)
-          return [nil, false] unless result.success?
+          return nil unless result.success?
 
           found = nil
-          found_nested = false
           best_depth = -1
-          walk = lambda do |node, depth, enclosed|
+          walk = lambda do |node, depth|
             return unless node.is_a?(Prism::Node)
 
-            is_scope = node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::ClassNode)
-            if is_scope
+            if node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::ClassNode)
               cpath = node.constant_path
               name = cpath.respond_to?(:name) ? cpath.name.to_s : nil
               if name == anchor && depth > best_depth
                 found = node
-                found_nested = enclosed
                 best_depth = depth
               end
             end
 
-            child_enclosed = enclosed || is_scope
-            node.compact_child_nodes.each { |c| walk.call(c, depth + 1, child_enclosed) }
+            node.compact_child_nodes.each { |c| walk.call(c, depth + 1) }
           end
-          walk.call(result.value, 0, false)
-          [found, found_nested]
+          walk.call(result.value, 0)
+          found
         end
 
         # All `{ offset:, text: }` insertions for one annotated DSL block:
