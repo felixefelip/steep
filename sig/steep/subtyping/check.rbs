@@ -59,6 +59,14 @@ module Steep
       # absorbs.
       def simplify_union: (AST::Types::t type) -> AST::Types::t
 
+      # Drops the intersection members another member strictly covers -- the dual of
+      # `simplify_union`. Returns the type unchanged when it is not an intersection,
+      # when it has free variables, or when nothing absorbs.
+      def simplify_intersection: (AST::Types::t type) -> AST::Types::t
+
+      # Collapses whichever composite the type is, if any.
+      def simplify: (AST::Types::t type) -> AST::Types::t
+
       def covers_strictly?: (AST::Types::t sup, AST::Types::t sub) -> bool
 
       def subtype?: (AST::Types::t sub_type, AST::Types::t super_type) -> bool

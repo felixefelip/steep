@@ -204,9 +204,14 @@ end
       RBS
       builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
 
+      # A value of an intersection type satisfies every member, so every member's
+      # overloads are on it — first member first, since resolution is first-match.
       builder.shape(parse_type("::_Foo & ::_Bar"), config).tap do |shape|
         assert_equal parse_type("::_Foo & ::_Bar"), shape.type
-        assert_equal [parse_method_type("(::String) -> ::_Bar")], shape.methods[:f].method_types
+        assert_equal(
+          [parse_method_type("(::Integer) -> ::_Foo"), parse_method_type("(::String) -> ::_Bar")],
+          shape.methods[:f].method_types
+        )
 
         assert shape.methods[:g]
         assert shape.methods[:h]
@@ -214,7 +219,10 @@ end
 
       builder.shape(parse_type("::_Foo & self"), config(self_type: parse_type("::_Bar"))).tap do |shape|
         assert_equal parse_type("::_Foo & self"), shape.type
-        assert_equal [parse_method_type("(::String) -> self")], shape.methods[:f].method_types
+        assert_equal(
+          [parse_method_type("(::Integer) -> ::_Foo"), parse_method_type("(::String) -> self")],
+          shape.methods[:f].method_types
+        )
       end
 
       # As with a union, an intersection self type keeps `self` abstract. This
@@ -224,7 +232,52 @@ end
       # concrete type, which then failed its own `-> self` declaration.
       builder.shape(parse_type("self"), config(self_type: parse_type("::_Foo & ::_Bar"))).tap do |shape|
         assert_equal parse_type("::_Foo & ::_Bar"), shape.type
-        assert_equal [parse_method_type("(::String) -> self")], shape.methods[:f].method_types
+        assert_equal(
+          [parse_method_type("(::Integer) -> self"), parse_method_type("(::String) -> self")],
+          shape.methods[:f].method_types
+        )
+      end
+    end
+  end
+
+  def test_shape__intersection_same_call_shape
+    with_factory({ "a.rbs" => <<~RBS }) do
+        module Fields
+          module ClassMethods
+            def default_values: () -> ::Hash[::Symbol, ::String]
+          end
+        end
+
+        class Filter
+          extend Fields::ClassMethods
+          include Fields
+
+          def creator: () -> ::String?
+        end
+
+        class Filter::Validated
+          def creator: () -> ::String
+        end
+      RBS
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+
+      # Overloads that accept the same arguments cannot both be selected, so they fold
+      # into one whose return type is the intersection of theirs. `Kernel#class` is
+      # baked per type into `object_shape`, so keeping only the last member — as the
+      # merge used to — answered `self.class` under
+      # `@type instance: Filter & Fields` (the shape every module self-type annotation
+      # takes) with `singleton(::Fields)`, and the host's class methods were gone.
+      builder.shape(parse_type("self"), config(self_type: parse_type("::Filter & ::Fields"))).tap do |shape|
+        assert_equal(
+          [parse_method_type("() -> (singleton(::Filter) & singleton(::Fields))")],
+          shape.methods[:class].method_types
+        )
+      end
+
+      # The narrower side absorbs the wider one it implies, so a marker intersection
+      # still answers with the marker's type rather than an unreduced `A & A?`.
+      builder.shape(parse_type("::Filter & ::Filter::Validated"), config).tap do |shape|
+        assert_equal [parse_method_type("() -> ::String")], shape.methods[:creator].method_types
       end
     end
   end
