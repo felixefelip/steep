@@ -903,6 +903,77 @@ Hello.new.foo([])
     end
   end
 
+  def test_overload_untyped_arg_does_not_select_value_keyed_overload
+    with_checker <<-EOF do |checker|
+class Hello
+  def foo: (nil) -> []
+         | [T] (Array[T]) -> Array[T]
+         | [T] (T) -> [T]
+end
+    EOF
+      source = parse_ruby(<<-EOF)
+# @type var x: untyped
+x = (_ = nil)
+Hello.new.foo(x)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # `(nil) -> []` accepts `x` only because `untyped` is compatible with
+        # everything; the next overload matches on more than that, and its
+        # answer is the useful one — `[]` would make every element `bot`.
+        assert_equal parse_type("::Array[untyped]"), typing.type_of(node: source.node)
+        assert_empty typing.errors
+      end
+    end
+  end
+
+  def test_overload_nil_arg_selects_value_keyed_overload
+    with_checker <<-EOF do |checker|
+class Hello
+  def foo: (nil) -> []
+         | [T] (Array[T]) -> Array[T]
+         | [T] (T) -> [T]
+end
+    EOF
+      source = parse_ruby(<<-EOF)
+Hello.new.foo(nil)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("[ ]"), typing.type_of(node: source.node)
+        assert_empty typing.errors
+      end
+    end
+  end
+
+  def test_overload_untyped_arg_keeps_first_when_every_overload_is_value_keyed
+    with_checker <<-EOF do |checker|
+class Hello
+  def foo: (:foo) -> Integer
+         | (:bar) -> String
+end
+    EOF
+      source = parse_ruby(<<-EOF)
+# @type var x: untyped
+x = (_ = nil)
+Hello.new.foo(x)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # Nothing to prefer: both overloads are keyed on a value the argument is
+        # not known to have, so declaration order still decides.
+        assert_equal parse_type("::Integer"), typing.type_of(node: source.node)
+        assert_empty typing.errors
+      end
+    end
+  end
+
   def test_ivar_types
     with_checker do |checker|
       source = parse_ruby(<<-EOF)

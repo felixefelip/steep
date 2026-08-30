@@ -237,6 +237,27 @@ module Steep
       hint: Types::t?
     ) -> [TypeInference::MethodCall::t, TypeConstruction]?
 
+    # True when `overload` accepted the call only because an `untyped` argument is
+    # compatible with a parameter keyed on a value — `nil`, or a literal.
+    #
+    # Such an overload is held back so another one, matching on more than
+    # `untyped`'s universal compatibility, can win instead.
+    #
+    def untyped_arg_matched_value_param?: (
+      Parser::AST::Node node,
+      Interface::Shape::MethodOverload overload,
+      Array[Parser::AST::Node] arguments,
+      Typing typing
+    ) -> bool
+
+    # A type that names values rather than a set of them: `nil`, a literal, or a union of those
+    #
+    def value_keyed_type?: (AST::Types::t) -> bool
+
+    # True when `node` is typed `untyped`, looking through the parent typings too
+    #
+    def untyped_node?: (Parser::AST::Node node, typing: Typing) -> bool
+
     # The core to type check method calls, which implements type checking arguments including blocks and type inference
     #
     # * `receiver_type` and `method_name` are only used for error reporting

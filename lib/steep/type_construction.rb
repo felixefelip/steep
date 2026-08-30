@@ -5103,6 +5103,13 @@ module Steep
       # @type var fails: Array[[TypeInference::MethodCall::t, TypeConstruction]]
       fails = []
 
+      # An overload that succeeded only because an `untyped` argument is
+      # compatible with the value it is keyed on. Held aside rather than
+      # returned, so a later overload that matches on more than that wins
+      # instead; if none does, this one is still the answer.
+      # @type var deferred: [TypeInference::MethodCall::t, TypeConstruction]?
+      deferred = nil
+
       method.overloads.each do |overload|
         Steep.logger.tagged overload.method_type.to_s do
           typing.new_child() do |child_typing|
@@ -5130,16 +5137,30 @@ module Steep
             )
 
             if call.is_a?(TypeInference::MethodCall::Typed)
-              constr.typing.save!
-              return [
-                call,
-                update_type_env { constr.context.type_env }
-              ]
+              if untyped_arg_matched_value_param?(node, overload, arguments, constr.typing)
+                deferred ||= [call, constr]
+              else
+                constr.typing.save!
+                return [
+                  call,
+                  update_type_env { constr.context.type_env }
+                ]
+              end
             else
               fails << [call, constr]
             end
           end
         end
+      end
+
+      if deferred
+        call, constr = deferred
+        constr.typing.save!
+
+        return [
+          call,
+          update_type_env { constr.context.type_env }
+        ]
       end
 
       non_arity_errors = fails.reject do |call, _|
@@ -5171,6 +5192,94 @@ module Steep
       else
         nil
       end
+    end
+
+    # True when `overload` accepted the call only because an `untyped` argument is
+    # compatible with a parameter keyed on a *value* — `nil`, or a literal like
+    # `true` or `:sym`.
+    #
+    # Such a parameter says "the caller passed exactly this value", which an
+    # `untyped` expression is never known to have done: `untyped` matches it the
+    # way it matches everything else, so the overload is picked on a fact nobody
+    # established. When another overload matches on more than that, it is the
+    # better answer — the value-keyed one is usually the degenerate case:
+    #
+    #     def self?.Array: (nil) -> []
+    #                    | [T] (array[T] | _ToA[T] array_like) -> Array[T]
+    #                    | [T] (T ele) -> [T]
+    #
+    # `Array(untyped)` took `(nil) -> []`, the empty tuple, whose element type is
+    # `bot`; every consumer downstream then inherits `bot` — `.filter(&:present?)`
+    # on it asks for a `^(bot) -> boolish` block, which nothing can supply. Held
+    # back, the call answers `::Array[untyped]` instead.
+    #
+    # A real `nil` argument still selects the overload: its type is `nil`, not
+    # `untyped`, so nothing here fires. So does an `untyped` argument when *every*
+    # matching overload is value-keyed — they are all deferred, and the first one
+    # is restored, preserving the declaration order.
+    #
+    # Only positional parameters are inspected: an argument list with a splat does
+    # not map to parameters one-for-one, and answers `false`.
+    def untyped_arg_matched_value_param?(node, overload, arguments, typing)
+      method_type = overload.method_type
+      params = method_type.type.params or return false
+
+      # Runs on every successful dispatch, so answer the overwhelmingly common
+      # case — no parameter is keyed on a value at all — before mapping any
+      # argument to a parameter.
+      value_keyed = false
+      params.positional_params&.each do |param|
+        if value_keyed_type?(param.type)
+          value_keyed = true
+          break
+        end
+      end
+      return false unless value_keyed
+
+      args = TypeInference::SendArgs.new(node: node, arguments: arguments, type: method_type)
+      positional = args.positional_arg
+
+      while (value, positional = positional.next())
+        case value
+        when TypeInference::SendArgs::PositionalArgs::NodeParamPair
+          if value_keyed_type?(value.param.type) && untyped_node?(value.node, typing: typing)
+            return true
+          end
+        when TypeInference::SendArgs::PositionalArgs::SplatArg
+          return false
+        end
+      end
+
+      false
+    end
+
+    # A type that names values rather than a set of them: `nil`, a literal, or a
+    # union of those.
+    def value_keyed_type?(type)
+      case type
+      when AST::Types::Nil, AST::Types::Literal
+        true
+      when AST::Types::Union
+        type.types.all? {|ty| value_keyed_type?(ty) }
+      else
+        false
+      end
+    end
+
+    # `Typing#has_type?` reads one level only — an argument typed while checking an
+    # earlier overload lives in a parent typing until `save!` merges it — so walk up.
+    def untyped_node?(node, typing:)
+      current = typing #: Typing?
+
+      while current
+        if current.has_type?(node)
+          return current.type_of(node: node).is_a?(AST::Types::Any)
+        end
+
+        current = current.parent
+      end
+
+      false
     end
 
     def with_child_typing()
