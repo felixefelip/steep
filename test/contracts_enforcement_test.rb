@@ -321,6 +321,126 @@ class ContractsEnforcementTest < Minitest::Test
     end
   end
 
+  # The same shape as the two above, except the contracted method is defined in
+  # an included MODULE (a Rails concern) rather than on the class itself. The
+  # contract is inferred under the module's name (`Post::Exportable#greet`),
+  # while the call site's receiver is a `(Post & Post::Validated)` — a type
+  # whose own names are `Post` and `Post::Validated` and never the module the
+  # method actually lives on.
+  MODULE_MARKER_RBS = <<~RBS
+    class User
+      def name: () -> String
+    end
+
+    module Post::Exportable
+      def greet: () -> String
+    end
+
+    class Post
+      include Post::Exportable
+
+      def user: () -> User?
+    end
+
+    class Post::Validated
+      def user: () -> User
+    end
+  RBS
+
+  def test_enforced_when_the_contracted_method_comes_from_an_included_module
+    in_tmpdir do
+      write("sig/module_marker.rbs", MODULE_MARKER_RBS + <<~RBS)
+        class Client
+          def run: (Post & Post::Validated) -> void
+        end
+      RBS
+      write("app/module_marker.rb", <<~RUBY)
+        module Post::Exportable
+          # @type self: singleton(Post) & singleton(Post::Exportable)
+          # @type instance: Post & Post::Exportable
+
+          def greet
+            user.name
+            "ok"
+          end
+        end
+
+        class Post
+          include Post::Exportable
+
+          def user
+            nil
+          end
+        end
+
+        class Client
+          def run(post)
+            post.greet
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: STEEPFILE)
+
+      contracts = Contracts::Runner.run(project)
+      greet = contracts.find { |c| c.key == "Post::Exportable#greet" }
+      refute_nil greet, "expected a contract inferred for Post::Exportable#greet, got #{contracts.map(&:key).inspect}"
+      assert greet.enforced,
+             "the sole caller's (Post & Post::Validated) receiver reaches the module's method — enforced"
+
+      typing = type_check_file(project, "app/module_marker.rb", store_of(contracts))
+      assert_empty typing.errors.grep(Diagnostic::Ruby::NoMethod),
+                   "enforced contract narrows the module body, so `user.name` is clean"
+      assert_empty typing.errors.grep(Diagnostic::Ruby::PreconditionUnsatisfied),
+                   "the marker-refined receiver satisfies the precondition — no PreconditionUnsatisfied"
+    end
+  end
+
+  # The other half: without the marker the module's contract must stay
+  # unenforced. The call site is now VISIBLE (that is the fix), so this pins
+  # that seeing it does not mean accepting it — an unsatisfied caller is
+  # counted, and the body keeps reporting the error the precondition hid.
+  def test_not_enforced_when_the_module_method_caller_lacks_the_marker
+    in_tmpdir do
+      write("sig/module_marker.rbs", MODULE_MARKER_RBS + <<~RBS)
+        class Client
+          def run: (Post) -> void
+        end
+      RBS
+      write("app/module_marker.rb", <<~RUBY)
+        module Post::Exportable
+          # @type self: singleton(Post) & singleton(Post::Exportable)
+          # @type instance: Post & Post::Exportable
+
+          def greet
+            user.name
+            "ok"
+          end
+        end
+
+        class Post
+          include Post::Exportable
+
+          def user
+            nil
+          end
+        end
+
+        class Client
+          def run(post)
+            post.greet
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: STEEPFILE)
+
+      contracts = Contracts::Runner.run(project)
+      greet = contracts.find { |c| c.key == "Post::Exportable#greet" }
+      refute_nil greet, "expected a contract inferred for Post::Exportable#greet"
+      refute greet.enforced,
+             "the caller passes a bare Post, which does not prove self.user — not enforced"
+    end
+  end
+
   def test_not_enforced_when_caller_receiver_lacks_the_marker
     in_tmpdir do
       write("sig/marker.rbs", MARKER_RBS + <<~RBS)

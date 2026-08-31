@@ -3703,7 +3703,7 @@ module Steep
           end
 
           if call.is_a?(TypeInference::MethodCall::Typed)
-            constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name)
+            constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
 
             # Phase 1: type subtraction on attribute write for intersection
             # receivers (issue felixefelip/steep#1). When an attribute write
@@ -7330,7 +7330,7 @@ module Steep
       end
     end
 
-    def check_precondition_at_call_site(node, receiver, receiver_type, method_name)
+    def check_precondition_at_call_site(node, receiver, receiver_type, method_name, call:)
       return if contracts.empty?
 
       # A `Klass.new(...)` call site: the constructed instance's `initialize`
@@ -7352,7 +7352,21 @@ module Steep
       return unless receiver.nil? || receiver.type == :self ||
         narrowable_pure_receiver?(receiver) || return_forwarding_receiver?(receiver)
 
-      target_names = precondition_target_type_names(receiver_type)
+      # A contract is keyed by the type whose SOURCE declares the method, and for
+      # a concern that is the MODULE. The receiver's own type never carries that
+      # name: `(Post & Post::Validated)` decomposes to `Post` and
+      # `Post::Validated`, while `greet` lives on `Post::Exportable`. So a call
+      # to a concern's method matched no contract, was never observed as a call
+      # site, and `Enforcement` saw `seen: 0` — never enforced however precisely
+      # the receiver's marker proved the precondition (felixefelip/steep#157).
+      #
+      # The call's `method_decls` name the ancestor the method actually resolved
+      # in, which is the same reading `lookup_unconditional_postcondition_entry`
+      # already does for the postconditions sidecar. Appended rather than
+      # substituted: the receiver's own names stay first, so a method the class
+      # itself declares keeps matching exactly as before.
+      target_names = precondition_target_type_names(receiver_type) +
+        contract_declaring_type_names(call)
       return if target_names.empty?
 
       contract = target_names.filter_map do |name|
@@ -7537,6 +7551,18 @@ module Steep
         receiver_type.types.flat_map { |t| precondition_target_type_names(t) }
       else
         []
+      end
+    end
+
+    # The types whose RBS declares the method this call resolved to — the owner
+    # of each `method_decl`, which for a method reached through an `include` is
+    # the module rather than the receiver's class. Mirrors
+    # `lookup_unconditional_postcondition_entry`, which walks the same decls for
+    # the same reason: "the same method may be declared in different ancestors".
+    def contract_declaring_type_names(call)
+      call.method_decls.filter_map do |decl|
+        name = decl.method_name
+        name.type_name if name.is_a?(InstanceMethodName)
       end
     end
 
