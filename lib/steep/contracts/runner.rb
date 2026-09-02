@@ -145,7 +145,12 @@ module Steep
       # above: they are how a lax caller withdraws a marker.
       def refining_type?(string)
         RBS::Parser.parse_type(string).is_a?(RBS::Types::Intersection)
-      rescue StandardError
+      rescue RBS::ParsingError => e
+        # Only a malformed type, and it says so. `rescue StandardError` here
+        # also caught programming errors — `parse_type(nil)` raises
+        # `NoMethodError` — and turned them into "not worth refining", which
+        # reads in the sidecar as the feature simply not firing.
+        Steep.logger.warn { "[contracts] failed to parse observed self type #{string.inspect}: #{e.message}" }
         false
       end
 
