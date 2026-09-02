@@ -47,6 +47,8 @@ module Steep
 
     attr_reader contract_call_sites: Array[{ key: String, satisfied: bool }]
 
+    attr_reader contract_receiver_types: Array[{ key: String, type: String }]
+
     attr_reader typing: Hash[Parser::AST::Node, AST::Types::t]
 
     attr_reader parent: Typing?
@@ -76,6 +78,8 @@ module Steep
     def add_error: (Diagnostic::Ruby::Base error) -> void
 
     def observe_contract_call_site: (key: String, satisfied: bool) -> void
+
+    def observe_contract_receiver_type: (key: String, type: String) -> void
 
     def record_branch_envs: (Parser::AST::Node node, entry: TypeInference::TypeEnv, truthy: TypeInference::TypeEnv, falsy: TypeInference::TypeEnv) -> void
 

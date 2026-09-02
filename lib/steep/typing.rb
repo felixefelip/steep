@@ -165,6 +165,13 @@ module Steep
     # Consumed by Contracts::Runner to close preconditions over the self-call
     # graph.
     attr_reader :precondition_obligations
+    # The RECEIVER TYPE observed at each contracted method's call sites, as an
+    # RBS type string: `{ key: "Class#method", type: "(::Card & ::Card::Validated)" }`.
+    # Contracts::Enforcement folds these into the one type every call site
+    # agrees on, which becomes the method's `self_type` predicate
+    # (felixefelip/steep#158). Recorded next to `contract_call_sites` and by the
+    # same walk, so a site can never be counted for enforcement and missed here.
+    attr_reader :contract_receiver_types
     # The type envs around each `if` node: `{ entry:, truthy:, falsy: }` keyed by
     # the `:if` node itself. The three are already computed while checking the
     # branches (`LogicTypeInterpreter#eval` runs on every condition); this keeps
@@ -196,6 +203,7 @@ module Steep
       @errors = []
       @contract_call_sites = []
       @precondition_obligations = []
+      @contract_receiver_types = []
       @record_branch_envs = record_branch_envs
       (@branch_envs = {}).compare_by_identity
       (@typing = {}).compare_by_identity
@@ -220,6 +228,10 @@ module Steep
 
     def observe_precondition_obligation(key:, expr:)
       precondition_obligations << { key: key, expr: expr }
+    end
+
+    def observe_contract_receiver_type(key:, type:)
+      contract_receiver_types << { key: key, type: type }
     end
 
     # `entry` is the env AFTER the condition is synthesized (so a pure call in the
@@ -364,6 +376,10 @@ module Steep
 
       precondition_obligations.each do |obligation|
         parent.observe_precondition_obligation(**obligation)
+      end
+
+      contract_receiver_types.each do |observation|
+        parent.observe_contract_receiver_type(**observation)
       end
 
       parent.cursor_context.set(cursor_context)

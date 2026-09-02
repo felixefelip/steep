@@ -408,6 +408,7 @@ module Steep
       ).build(type_env)
 
       type_env = apply_callbacks_for_method(method_name, type_env)
+      type_env = apply_contract_self_type(node, method_name, type_env)
       type_env = apply_method_entry_facts(method_name, type_env)
 
       method_params.errors.each do |error|
@@ -4985,6 +4986,51 @@ module Steep
       type_env
     end
 
+    # `self` on entry, when every statically visible call site was observed to
+    # pass the same receiver type (felixefelip/steep#158). Sits beside
+    # `apply_callbacks_for_method` and lands in the same slot
+    # (`with_refined_self`) — the difference is only where the fact comes from:
+    # rbs_rails DECLARES the callback one, and this one is READ off the call
+    # sites by `Contracts::Enforcement`.
+    #
+    # Replaces the declared self, exactly as `applies_self` does — never
+    # intersects with `self_type`, which at this point is still the CLASS BODY's
+    # self (`singleton(Card) & singleton(Card::Exportable)`) and would produce a
+    # self type that is both a singleton and an instance. Nothing is lost by
+    # replacing: the observed type is a receiver the method actually resolved
+    # on, so it already carries the module the `def` lives in.
+    def apply_contract_self_type(node, method_name, type_env)
+      return type_env if contracts.empty?
+      # Instance methods only. `def self.foo` and `def foo` share a name but not
+      # a contract, and `lookup_instance` would hand the singleton the instance
+      # one's `self`.
+      return type_env if node.type == :defs
+
+      class_name = module_context&.class_name
+      return type_env unless class_name
+
+      contract = contracts.lookup_instance(class_name.to_s.sub(/\A::/, ""), method_name)
+      # Same gate as `contract_narrowed_type`: an unenforced contract is a
+      # fiction — some call site skips it, or there are none at all — and
+      # narrowing on it would silence the body errors it was hiding.
+      return type_env unless contract&.enforced
+
+      req = contract.requires.find { |r| r.is_a?(Contracts::Predicate::SelfType) }
+      return type_env unless req
+
+      observed = parse_callback_self_type(req.type)
+      return type_env unless observed
+
+      type_env.with_refined_self(observed)
+    end
+
+    # Whether a call site passing `observed` as the receiver discharges a
+    # `self_type` requirement. Plain subtyping: the body was checked with the
+    # required type as `self`, so anything below it is safe to hand in.
+    def contract_self_type_holds?(required, observed)
+      no_subtyping?(sub_type: observed, super_type: required).nil?
+    end
+
     # Parses an `applies_self` RBS type string (e.g. "Dose & Dose::Validated")
     # into an AST type, or nil if it fails to parse.
     def parse_callback_self_type(string)
@@ -7376,6 +7422,22 @@ module Steep
 
       base_receiver = explicit_receiver ? receiver : nil
       env = context.type_env
+
+      # What this call site hands the method as `self`. An explicit receiver is
+      # its own type; a `self`/implicit call passes the enclosing `self`, which
+      # `#self_type` already reports as REFINED when an enforced contract (or a
+      # callback, or a postcondition) narrowed it — so a self-call inside a
+      # method that itself got refined observes the refined type, and the
+      # Runner's fixpoint propagates a marker down a self-call chain.
+      observed_self = explicit_receiver ? receiver_type : self_type
+      # EVERY receiver, not just the interesting ones. Whether the type is worth
+      # refining to is decided later, but whether the call sites AGREE can only
+      # be decided here — and a site left unrecorded is a site that cannot
+      # disagree. Filtering to intersections at this point let one validated
+      # caller define `self` for a method a bare receiver also called.
+      if observed_self
+        typing.observe_contract_receiver_type(key: contract.key, type: observed_self.to_s)
+      end
       # A `self` call to a contracted method that the enclosing method does
       # not satisfy propagates the requirement upward: the enclosing method
       # inherits `requires self.x`. (An explicit receiver carries no self
@@ -7384,6 +7446,32 @@ module Steep
       enclosing_key = explicit_receiver ? nil : enclosing_instance_method_key
       all_satisfied = true
       contract.requires.each do |req|
+        # A `self_type` requirement is discharged by the receiver alone: it says
+        # what `self` is inside the body, and this call site's receiver either is
+        # that type or is not. There is nothing to establish by flow, so no
+        # obligation is propagated to the enclosing method either — a caller
+        # cannot make its own receiver validated by checking something.
+        if req.is_a?(Contracts::Predicate::SelfType)
+          # Fails OPEN on an unparseable type. `apply_contract_self_type` cannot
+          # refine the body with a type it cannot parse either, so the body was
+          # checked unrefined — reporting its call sites as unsatisfied would
+          # unenforce the contract and take the NotNil narrowing down with it,
+          # for a requirement that never applied.
+          next unless (required = parse_callback_self_type(req.type))
+          next if observed_self && contract_self_type_holds?(required, observed_self)
+
+          all_satisfied = false
+          typing.add_error(
+            Diagnostic::Ruby::PreconditionUnsatisfied.new(
+              node: node,
+              method_name: method_name,
+              expression_source: "self: #{req.type}",
+              contract_source: contracts.source
+            )
+          )
+          next
+        end
+
         next unless req.is_a?(Contracts::Predicate::NotNil)
         next if precondition_holds?(req.expr, env, base_receiver: base_receiver, location: node.location)
         # A `self` call is also satisfied when the enclosing method's own

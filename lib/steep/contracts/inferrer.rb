@@ -20,7 +20,7 @@ module Steep
           next unless def_node.type == :def
 
           obligations = collect_obligations(def_node, class_name)
-          next if obligations.empty?
+          next if obligations.empty? && !self_rooted_argument_mismatch?(def_node)
 
           key = "#{class_name}##{def_node.children[0]}"
           merged = (results[key] || []) + obligations
@@ -118,6 +118,34 @@ module Steep
         end
 
         obligations
+      end
+
+      # Whether the body has an argument the enclosing `self` decides
+      # (felixefelip/steep#158): a self-rooted send passed to a method that
+      # wanted a narrower type. `export_user(creator)` inside `Card::Exportable`
+      # is one — the argument is `self.creator`, and whether it is `User?` or
+      # `(User & User::Validated)` depends entirely on which `self` the callers
+      # supply.
+      #
+      # No predicate can be written from this diagnostic. `NotNil` narrows by
+      # subtracting nil, which does not produce a marker, and the type the
+      # parameter wants is a fact about the ARGUMENT, not about `self`. All it
+      # yields is candidacy: the method gets an empty contract so
+      # `Enforcement` observes its call sites, and if they agree on a receiver
+      # type the Runner turns that into the `self_type` predicate that does the
+      # work. A candidate that acquires nothing is dropped before writing.
+      def self_rooted_argument_mismatch?(def_node)
+        body = def_node.children[2]
+        return false unless body
+
+        range = node_range(def_node)
+        @typing.errors.any? do |error|
+          next false unless error.is_a?(Steep::Diagnostic::Ruby::ArgumentTypeMismatch)
+          loc = error.node&.location&.expression
+          next false unless loc && range.cover?(loc.begin_pos)
+
+          !self_path_to_expr(error.node).nil?
+        end
       end
 
       # Map each send node to the send that calls a method on it, so the
