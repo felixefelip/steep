@@ -635,6 +635,122 @@ class ContractsEnforcementTest < Minitest::Test
     end
   RUBY
 
+  # felixefelip/steep#158. The reported shape: a concern method passes a
+  # self-send to a helper whose parameter wants a marker.
+  #
+  #   creator: export_user(creator)
+  #           ^ Cannot pass `(::User | nil)` as `(::User & ::User::Validated)`
+  #
+  # `Card#creator` is `User?`; `Card::Validated#creator` is
+  # `(User & User::Validated)`. The single call site hands `export` a
+  # `(Card & Card::Validated)`, so which of the two applies is settled — but
+  # nothing carried it inside. `NotNil` cannot: `not_nil self.creator` on a
+  # `User?` yields `User`, still not the marker the parameter wants.
+  MARKER_SELF_RBS = <<~RBS
+    class User
+      def id: () -> ::Integer?
+    end
+    class User::Validated
+      def id: () -> ::Integer
+    end
+    class Card
+      include Card::Exportable
+      def creator: () -> User?
+    end
+    class Card::Validated
+      def creator: () -> (User & User::Validated)
+    end
+    module Card::Exportable
+      def export: () -> ::Integer
+      def export_user: ((User & User::Validated) user) -> ::Integer
+    end
+    class Client
+      def run: (Card & Card::Validated) -> void
+    end
+  RBS
+
+  # The `@type instance` annotation is what rbs_infer injects for a concern —
+  # the module's methods run with the host's instance type. It is the DECLARED
+  # self; the contract's job is to narrow it with what the callers proved.
+  MARKER_SELF_APP = <<~RUBY
+    module Card::Exportable
+      # @type instance: ::Card & ::Card::Exportable
+
+      def export
+        export_user(creator)
+      end
+
+      def export_user(user)
+        user.id
+      end
+    end
+  RUBY
+
+  def test_marker_receiver_at_call_site_refines_self_in_the_body
+    in_tmpdir do
+      write("sig/marker.rbs", MARKER_SELF_RBS)
+      write("app/marker.rb", MARKER_SELF_APP + <<~RUBY)
+        class Client
+          def run(card)
+            card.export
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: STEEPFILE)
+
+      contracts = Contracts::Runner.run(project)
+
+      export = contracts.find { |c| c.key == "Card::Exportable#export" }
+      refute_nil export, "the self-rooted argument mismatch makes `export` a candidate"
+      assert_equal ["(::Card & ::Card::Validated)"],
+                   export.requires.grep(Contracts::Predicate::SelfType).map(&:type),
+                   "the only call site passes a validated card, so that is `self` inside `export`"
+      assert export.enforced
+
+      typing = type_check_file(project, "app/marker.rb", store_of(contracts))
+      assert_empty typing.errors.grep(Diagnostic::Ruby::ArgumentTypeMismatch),
+                   "with `self` refined, `creator` resolves on Card::Validated and is (User & User::Validated)"
+    end
+  end
+
+  # The other half of the discipline: one lax call site and the refinement is
+  # gone. `Card::Validated` proves nothing about a bare `Card`, and taking the
+  # meet of the two would let the validated caller define what the unvalidated
+  # one gets to assume.
+  def test_disagreeing_receivers_leave_self_unrefined
+    in_tmpdir do
+      write("sig/marker.rbs", MARKER_SELF_RBS + <<~RBS)
+        class Other
+          def run: (Card) -> void
+        end
+      RBS
+      write("app/marker.rb", MARKER_SELF_APP + <<~RUBY)
+        class Client
+          def run(card)
+            card.export
+          end
+        end
+
+        class Other
+          def run(card)
+            card.export
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: STEEPFILE)
+
+      contracts = Contracts::Runner.run(project)
+
+      export = contracts.find { |c| c.key == "Card::Exportable#export" }
+      assert_empty Array(export&.requires).grep(Contracts::Predicate::SelfType),
+                   "the bare-Card caller withdraws the marker"
+
+      typing = type_check_file(project, "app/marker.rb", store_of(contracts))
+      refute_empty typing.errors.grep(Diagnostic::Ruby::ArgumentTypeMismatch),
+                   "unrefined, `creator` is still `User?` and the mismatch stands"
+    end
+  end
+
   def test_closes_precondition_through_constructor_and_new_site
     in_tmpdir do
       write("sig/proxy.rbs", PROXY_RBS + <<~RBS)
@@ -657,8 +773,13 @@ class ContractsEnforcementTest < Minitest::Test
       refute_nil assignments,
                  "the `.new(self)` site should synthesize a contract on the enclosing getter"
       assert_equal [[:not_nil, [:send, [:self], :user, []]]],
-                   assignments.requires.map { |r| [:not_nil, expr_sig(r.expr)] },
+                   assignments.requires.grep(Contracts::Predicate::NotNil).map { |r| [:not_nil, expr_sig(r.expr)] },
                    "the translated obligation is `not_nil self.user` on Post#assignments"
+      # felixefelip/steep#158: the same call site that enforces the obligation
+      # also states what `self` is inside the getter.
+      assert_equal ["(::Post & ::Post::Validated)"],
+                   assignments.requires.grep(Contracts::Predicate::SelfType).map(&:type),
+                   "the `(Post & Post::Validated)` receiver is recorded as the getter's self"
       assert assignments.enforced,
              "the getter's caller passes a (Post & Post::Validated) receiver → enforced via #59"
 

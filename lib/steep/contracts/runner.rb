@@ -80,13 +80,78 @@ module Steep
           result = Enforcement.analyze(@project, store, contexts: method(:context_for))
 
           obligations_changed = apply_transitive_obligations(by_key, result.obligations)
+          self_types_changed = apply_self_types(by_key, result.self_types)
           enforced_changed = result.enforced != enforced
           enforced = result.enforced
 
-          break unless obligations_changed || enforced_changed
+          break unless obligations_changed || self_types_changed || enforced_changed
         end
 
-        by_key.values.map { |c| c.with_enforced(enforced.fetch(c.key, false)) }
+        # A candidate that never acquired a requirement states nothing; it exists
+        # only to make its call sites observable during the fixpoint.
+        by_key.values
+              .reject { |c| c.requires.empty? }
+              .map { |c| c.with_enforced(enforced.fetch(c.key, false)) }
+      end
+
+      # Records what every call site was observed to pass as `self`
+      # (felixefelip/steep#158). Returns whether any contract's `self_type`
+      # changed this pass.
+      #
+      # This is a fixpoint, not a single reading: refining one method's `self`
+      # changes what a self-call in its body observes about the method it calls,
+      # so a marker proven at the top of a call chain walks down it one pass at a
+      # time. `MAX_PASSES` bounds the walk.
+      def apply_self_types(by_key, self_types)
+        changed = false
+
+        by_key.keys.each do |key|
+          contract = by_key.fetch(key)
+          observed = self_types[key]
+          next if observed && !refining_type?(observed)
+
+          current = contract.requires.find { |r| r.is_a?(Predicate::SelfType) }
+          next if current&.type == observed
+
+          requires = contract.requires.reject { |r| r.is_a?(Predicate::SelfType) }
+          requires += [Predicate::SelfType.new(observed)] if observed
+
+          by_key[key] = MethodContract.new(
+            type_name: contract.type_name,
+            method_name: contract.method_name,
+            singleton: contract.singleton,
+            requires: requires
+          )
+          changed = true
+        end
+
+        changed
+      end
+
+      # Whether an agreed receiver type is worth stating as a `self_type`.
+      #
+      # It must READ BACK: a string RBS cannot parse is no use to anyone — the
+      # checker would decline to refine on it, and every call site would then be
+      # reported unsatisfied against a requirement that never applied.
+      #
+      # And it must be an INTERSECTION. A bare `Post` receiver says nothing the
+      # method's own declaration did not, so refining to it is a no-op that
+      # would still cost a subtyping check per call site and a line of sidecar
+      # per method. An intersection is exactly the shape of a caller knowing
+      # MORE than the declaration — `(Card & Card::Validated)` off a finder, a
+      # marker proven by a postcondition, the refined self of an enclosing
+      # method one pass earlier — which is the fact this predicate carries
+      # inward. Sites with a bare receiver still COUNT, at the unanimity step
+      # above: they are how a lax caller withdraws a marker.
+      def refining_type?(string)
+        RBS::Parser.parse_type(string).is_a?(RBS::Types::Intersection)
+      rescue RBS::ParsingError => e
+        # Only a malformed type, and it says so. `rescue StandardError` here
+        # also caught programming errors — `parse_type(nil)` raises
+        # `NoMethodError` — and turned them into "not worth refining", which
+        # reads in the sidecar as the feature simply not firing.
+        Steep.logger.warn { "[contracts] failed to parse observed self type #{string.inspect}: #{e.message}" }
+        false
       end
 
       def build_store(by_key, enforced)
@@ -152,6 +217,7 @@ module Steep
       def predicate_signature(predicate)
         case predicate
         when Predicate::NotNil then [:not_nil, expr_signature(predicate.expr)]
+        when Predicate::SelfType then [:self_type, predicate.type]
         end
       end
 

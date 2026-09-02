@@ -29,7 +29,7 @@ module Steep
       # Whole-program analysis result: the `enforced` flag per contract key,
       # plus the transitive precondition `obligations` (`{ key:, expr: }`)
       # harvested from self-calls that the enclosing method does not satisfy.
-      Result = Struct.new(:enforced, :obligations, keyword_init: true)
+      Result = Struct.new(:enforced, :obligations, :self_types, keyword_init: true)
 
       # Type-checks the whole program with `@store` loaded and returns a
       # `Result`. `enforced[key]` is true when the contract has at least one
@@ -38,9 +38,10 @@ module Steep
       def analyze
         observations = Hash.new { |h, k| h[k] = { seen: 0, unsatisfied: 0 } }
         obligations = []
+        receivers = Hash.new { |h, k| h[k] = Set[] }
 
         @project.targets.each do |target|
-          collect_for_target(target, observations, obligations)
+          collect_for_target(target, observations, obligations, receivers)
         end
 
         enforced = @store.methods.each_key.each_with_object({}) do |key, result|
@@ -48,12 +49,29 @@ module Steep
           result[key] = obs[:seen] > 0 && obs[:unsatisfied] == 0
         end
 
-        Result.new(enforced: enforced, obligations: obligations)
+        Result.new(enforced: enforced, obligations: obligations, self_types: agreed_self_types(receivers))
       end
 
       private
 
-      def collect_for_target(target, observations, obligations)
+      # The receiver type for a method whose call sites AGREE on one, or no entry
+      # at all. Unanimity, not a meet: two call sites passing `(Card &
+      # Card::Validated)` and a bare `Card` prove nothing more than `Card`, which
+      # is what the declaration already said — and computing the meet of
+      # disagreeing sites would let one lax caller silently define what the
+      # others get to assume. Declining on disagreement is the same discipline
+      # `enforced` applies to the boolean case.
+      #
+      # `untyped` is dropped rather than counted as disagreement: it is the
+      # absence of an answer, not an answer.
+      def agreed_self_types(receivers)
+        receivers.each_with_object({}) do |(key, types), result|
+          types = types.reject { |t| t == "untyped" }
+          result[key] = types.first if types.size == 1
+        end
+      end
+
+      def collect_for_target(target, observations, obligations, receivers)
         context = @contexts.call(target) or return
 
         context.sources.each do |_path, source|
@@ -68,6 +86,10 @@ module Steep
           end
 
           obligations.concat(typing.precondition_obligations)
+
+          typing.contract_receiver_types.each do |obs|
+            receivers[obs[:key]] << obs[:type]
+          end
         end
       end
     end

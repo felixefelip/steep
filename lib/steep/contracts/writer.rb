@@ -59,6 +59,8 @@ module Steep
         case predicate
         when Predicate::NotNil
           { "kind" => "not_nil", "expr" => serialize_expr(predicate.expr) }
+        when Predicate::SelfType
+          { "kind" => "self_type", "type" => predicate.type }
         else
           raise ArgumentError, "Unsupported predicate: #{predicate.class}"
         end

@@ -115,6 +115,14 @@ module Steep
         when "not_nil"
           expr = Expr.parse(raw["expr"], source: source)
           NotNil.new(expr) if expr
+        when "self_type"
+          type = raw["type"]
+          if type.is_a?(String) && !type.empty?
+            SelfType.new(type)
+          else
+            Steep.logger.warn { "[contracts] self_type predicate without a type in #{source}" }
+            nil
+          end
         else
           Steep.logger.warn { "[contracts] unknown predicate kind #{raw["kind"].inspect} in #{source}" }
           nil
@@ -126,6 +134,28 @@ module Steep
 
         def initialize(expr)
           @expr = expr
+        end
+      end
+
+      # `self` is of the given RBS type on entry — the receiver every statically
+      # visible call site was observed to pass (felixefelip/steep#158).
+      #
+      # Where `NotNil` states one fact about one path off `self`, this states the
+      # fact those are derived FROM. A method reached only as
+      # `card.export_json` with `card: (Card & Card::Validated)` runs with a
+      # validated `self`, and then `board`, `created_at`, `creator` are all
+      # non-nil (and `creator` is `(User & User::Validated)`) by ordinary lookup
+      # on the marker, with no per-attribute predicate to infer or enforce.
+      #
+      # `NotNil` cannot express the `creator` half of that: it narrows a send's
+      # result by SUBTRACTING nil (`partition_union`), so `not_nil self.creator`
+      # on a `User?` yields `User` and never `(User & User::Validated)`. Adding a
+      # marker is not nil-subtraction.
+      class SelfType
+        attr_reader :type
+
+        def initialize(type)
+          @type = type
         end
       end
     end
