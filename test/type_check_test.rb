@@ -9561,4 +9561,321 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_block_pass_optional_block
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Object
+            def stringify: (Integer value) -> String
+          end
+
+          class OptionalBlockTest
+            def sum: (?untyped init) ?{ (Integer e) -> untyped } -> untyped
+
+            def map: () ?{ (Integer element) -> String } -> Array[String]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          def stringify(value)
+            value.to_s
+          end
+
+          test = OptionalBlockTest.new
+
+          test.sum(&:to_r)
+          test.sum(0, &:to_r)
+          test.map(&:to_s)
+          test.map(&method(:stringify))
+
+          test.map
+          test.map {|element| element.to_s }
+          test.map(&(-> (element) { element.to_s }))
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_block_pass_optional_block_mismatch
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class OptionalBlockTest
+            def map: () ?{ (Integer element) -> Integer } -> Array[Integer]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          OptionalBlockTest.new.map(&:to_s)
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 26
+              end:
+                line: 1
+                character: 32
+            severity: ERROR
+            message: |-
+              Cannot pass a value of type `^(::Integer) -> ::String` as a block-pass-argument of type `(^(::Integer) -> ::Integer | nil)`
+                ^(::Integer) -> ::String <: (^(::Integer) -> ::Integer | nil)
+                  ^(::Integer) -> ::String <: ^(::Integer) -> ::Integer
+                    ::String <: ::Integer
+                      ::Object <: ::Integer
+                        ::BasicObject <: ::Integer
+            code: Ruby::BlockTypeMismatch
+      YAML
+    )
+  end
+
+  def test_lambda_block_param_type_alias
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          type callback = ^(Integer) -> void
+
+          type optional_callback = ^(Integer) -> void | nil
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          required = -> (&blk) {
+            # @type var blk: callback
+            blk.call(1)
+          }
+
+          optional = -> (&blk) {
+            # @type var blk: callback?
+            blk&.call(1)
+          }
+
+          expanded = -> (&blk) {
+            # @type var blk: optional_callback
+            blk&.call(1)
+          }
+
+          inline = -> (&blk) {
+            # @type var blk: ^(Integer) -> void
+            blk.call(1)
+          }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_lambda_block_param_type_alias_not_proc
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          type not_proc = Integer
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          lambda = -> (&blk) {
+            # @type var blk: not_proc
+            blk
+          }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 13
+              end:
+                line: 1
+                character: 17
+            severity: ERROR
+            message: Proc type is expected but `::not_proc` is specified
+            code: Ruby::ProcTypeExpected
+      YAML
+    )
+  end
+
+  def test_array_literal_with_pair_interface_hint
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          interface _KeyValue[K, V]
+            def to_ary: () -> [K, V]
+          end
+
+          class PairMaker
+            def make: [K, V] () { (String) -> _KeyValue[K, V] } -> Hash[K, V]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          maker = PairMaker.new
+          hash = maker.make {|string| [string, string.size] }
+          hash.each_key {|key| key.upcase }
+          hash.each_value {|value| value + 1 }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_array_literal_with_pair_interface_intersection_hint
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          interface _KeyValue[K, V]
+            def to_ary: () -> [K, V]
+          end
+
+          class PairMaker
+            def make_pair: () { (String) -> ([Symbol, Integer] & _KeyValue[Symbol, Integer]) } -> Hash[Symbol, Integer]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          maker = PairMaker.new
+          maker.make_pair {|string| [string.to_sym, string.size] }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_array_literal_with_pair_interface_hint_two_params_block
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          interface _KeyValue[K, V]
+            def to_ary: () -> [K, V]
+          end
+
+          class PairMaker
+            def make_from_pairs: [K, V] () { (Symbol, Integer) -> _KeyValue[K, V] } -> Hash[K, V]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          maker = PairMaker.new
+          hash = maker.make_from_pairs {|key, value| [key.to_s, value.to_f] }
+          hash.each_key {|key| key.upcase }
+          hash.each_value {|value| value.floor }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_array_literal_with_pair_interface_hint_mismatch
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          interface _KeyValue[K, V]
+            def to_ary: () -> [K, V]
+          end
+
+          class PairMaker
+            def make_exact: () { (String) -> _KeyValue[Symbol, Integer] } -> Hash[Symbol, Integer]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          maker = PairMaker.new
+          maker.make_exact {|string| [string, 1] }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 2
+                character: 17
+              end:
+                line: 2
+                character: 40
+            severity: ERROR
+            message: |-
+              Cannot allow block body have type `[::String, ::Integer]` because declared as type `::_KeyValue[::Symbol, ::Integer]`
+                [::String, ::Integer] <: ::_KeyValue[::Symbol, ::Integer]
+                  () -> [::String, ::Integer] <: () -> [::Symbol, ::Integer]
+                    [::String, ::Integer] <: [::Symbol, ::Integer]
+                      ::String <: ::Symbol
+                        ::Object <: ::Symbol
+                          ::BasicObject <: ::Symbol
+            code: Ruby::BlockBodyTypeMismatch
+      YAML
+    )
+  end
+
+  def test_defs_on_untyped_receiver
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class DefsOnUntypedReceiver
+            def foo: (untyped) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class DefsOnUntypedReceiver
+            def foo(object)
+              def object.bar = 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 15
+              end:
+                line: 3
+                character: 18
+            severity: ERROR
+            message: Method `bar` is defined in undeclared module
+            code: Ruby::MethodDefinitionInUndeclaredModule
+      YAML
+    )
+  end
+
 end

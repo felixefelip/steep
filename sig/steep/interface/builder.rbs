@@ -51,6 +51,16 @@ module Steep
 
       attr_reader singleton_shape_cache: Hash[TypeName, Shape?]
 
+      # Cache of the shapes of _closed_ types, whose shapes are independent of `Config`
+      #
+      # A closed type has no free variables -- no `self`, `instance`, `class`, or type variables --
+      # and its raw shape is a function of the type. The cache is limited to the types that resolve
+      # `self`/`instance`/`class` types by themselves (see `config_free_shape?`), so that the
+      # shape is used without `Config#subst`, and the entries resolved in the shape are reused
+      # across `#shape` calls.
+      #
+      attr_reader closed_shape_cache: Hash[AST::Types::t, Shape?]
+
       attr_reader implicitly_returns_nil: bool
 
       def initialize: (AST::Types::Factory, implicitly_returns_nil: bool) -> void
@@ -62,9 +72,41 @@ module Steep
       #
       def shape: (AST::Types::t, Config) -> Shape?
 
+      def shape0: (AST::Types::t, Config) -> Shape?
+
       private
 
-      def fetch_cache: [KEY] (Hash[KEY, Shape?], KEY) { () -> Shape? } -> Shape?
+      def fetch_cache: [KEY < ::Hash::_Key] (Hash[KEY, Shape?], KEY) { () -> Shape? } -> Shape?
+
+      # Returns `true` if the shape of the type is cached in `closed_shape_cache`
+      #
+      # The `config_free_shape?` test is skipped for the types already in the cache.
+      #
+      def closed_shape?: (AST::Types::t) -> bool
+
+      # Returns the cached shape of the type, building it if not cached yet
+      #
+      # `closed_shape?(type)` must hold.
+      #
+      def closed_shape: (AST::Types::t, Config) -> Shape?
+
+      # Returns `raw_shape` of the type, through `closed_shape_cache` if `closed_shape?`
+      #
+      # This is for the components of union, intersection, and alias types, whose shapes are built
+      # from the shapes of the components.
+      #
+      def cached_raw_shape: (AST::Types::t, Config) -> Shape?
+
+      # Returns `true` if the shape of the given closed type doesn't depend on `Config`
+      #
+      # The raw shapes of the class instance types, singleton types, and the types backed by them
+      # (literal, `nil`, `bool`, proc, tuple, and record types) resolve `self`, `instance`, and
+      # `class` types with the types themselves, and the `Config#subst` applied by `#shape` is a
+      # no-op. Union, intersection, and alias types are config free when their components are.
+      #
+      # Interface types resolve only `self` type, so their shapes depend on `Config`.
+      #
+      def config_free_shape?: (AST::Types::t) -> bool
 
       # Returns a shape of given type with respect to Config
       #
@@ -111,6 +153,69 @@ module Steep
 
       # Substitution for type application of class instance, type alias, or interface types
       def app_subst: (AST::Types::Name::Instance | AST::Types::Name::Alias | AST::Types::Name::Interface) -> Substitution
+
+      # Cache of shared method entries, keyed by the method name and the identity of the method
+      @method_entry_cache: Hash[Symbol, Hash[RBS::Definition::Method, Shape::Entry]]
+
+      # Index of shared method entries, keyed by the method name and the identity of the first overload
+      #
+      # The buckets hold an array only when different entries start with one overload.
+      #
+      @method_entry_index: Hash[Symbol, Hash[Integer, Shape::Entry | Array[Shape::Entry]]]
+
+      # Returns a shared `Shape::Entry` through the index, building one if it is new
+      def indexed_method_entry: (Symbol name, bool private_method, Array[Shape::MethodOverload]) -> Shape::Entry
+
+      # Returns `true` if the entry has the given visibility and exactly the given overloads
+      def same_overloads?: (Shape::Entry, bool private_method, Array[Shape::MethodOverload]) -> bool
+
+      # Returns a `Shape::Entry` of the method, shared with the shapes of other types
+      #
+      # RBS definitions are flat, and inherited/mixed-in methods appear in the definition of
+      # every type. The entry of a method is a pure function of the method name and the method,
+      # so one shared, immutable entry works for all of them.
+      #
+      # The only exception is `Kernel#class`, whose return type is replaced with the type being
+      # built -- the callers must build an entry with `build_method_overload` directly for
+      # methods named `class` of classes and modules.
+      #
+      def shared_method_entry: (Symbol name, RBS::Definition::Method) -> Shape::Entry
+
+      # Cache of shared method overloads, keyed by the method name and the identity of the type def
+      @method_overload_cache: Hash[Symbol, Hash[RBS::Definition::Method::TypeDef, Shape::MethodOverload]]
+
+      # Index of shared method overloads, keyed by the method name and the identity of the type
+      #
+      # The buckets hold an array only when different type defs share one type object.
+      #
+      @method_overload_index: Hash[Symbol, Hash[Integer, Shape::MethodOverload | Array[Shape::MethodOverload]]]
+
+      # Returns a shared `Shape::MethodOverload` through the index, building one if it is new
+      def indexed_method_overload: (Symbol name, RBS::Definition::Method::TypeDef) -> Shape::MethodOverload
+
+      # Returns `true` if the overload was built from a type def equal to the given one
+      #
+      # The type is not compared, because it is the key of the bucket the overload is in.
+      #
+      def same_type_def?: (Shape::MethodOverload, RBS::Definition::Method::TypeDef) -> bool
+
+      # Returns a `Shape::MethodOverload` of the `type_def`, shared with the shapes of other types
+      #
+      # RBS definitions are flat, and the type defs of inherited/mixed-in methods are converted
+      # to equivalent overloads in the shape of every type. The conversion is a pure function of
+      # the method name and the type def, so one shared, immutable overload works for all of them.
+      #
+      # The only exception is `Kernel#class`, whose return type is replaced with the type being
+      # built -- the callers must use `build_method_overload` directly for methods named `class`
+      # of classes and modules.
+      #
+      def shared_method_overload: (Symbol name, RBS::Definition::Method::TypeDef) -> Shape::MethodOverload
+
+      # Converts a type def to a fresh `Shape::MethodOverload`
+      #
+      # `kernel_class_type` replaces the return type of `Kernel#class` when given.
+      #
+      def build_method_overload: (Symbol name, RBS::Definition::Method::TypeDef, AST::Types::t? kernel_class_type) -> Shape::MethodOverload
 
       def method_name_for: (RBS::Definition::Method::TypeDef, Symbol name) -> method_name
 

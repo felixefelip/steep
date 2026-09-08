@@ -359,6 +359,7 @@ end
 
         assert_equal([parse_method_type("() -> ::Integer")], shape.methods[:first].method_types)
         assert_equal([parse_method_type("() -> top")], shape.methods[:last].method_types)
+        assert_equal([parse_method_type("() -> [::Integer, top]")], shape.methods[:to_ary].method_types)
       end
 
       builder.shape(parse_type("[::Integer, self]"), config).tap do |shape|
@@ -379,6 +380,7 @@ end
 
         assert_equal([parse_method_type("() -> ::Integer")], shape.methods[:first].method_types)
         assert_equal([parse_method_type("() -> self")], shape.methods[:last].method_types)
+        assert_equal([parse_method_type("() -> [::Integer, self]")], shape.methods[:to_ary].method_types)
       end
     end
   end
@@ -399,7 +401,7 @@ end
 
         assert_includes(shape.methods[:[]].method_types, parse_method_type("(:id) -> ::Integer"))
         assert_includes(shape.methods[:[]].method_types, parse_method_type("(:name) -> ::String"))
-        assert_includes(shape.methods[:[]].method_types, parse_method_type("(::Symbol) -> (::String | ::Integer | nil)"))
+        assert_includes(shape.methods[:[]].method_types, parse_method_type("(::Hash::_Key) -> (::String | ::Integer | nil)"))
 
         assert_includes(shape.methods[:[]=].method_types, parse_method_type("(:id, ::Integer) -> ::Integer"))
         assert_includes(shape.methods[:[]=].method_types, parse_method_type("(:name, ::String) -> ::String"))
@@ -417,7 +419,7 @@ end
 
         assert_includes(shape.methods[:[]].method_types, parse_method_type("(:id) -> ::Integer"))
         assert_includes(shape.methods[:[]].method_types, parse_method_type("(:name) -> self"))
-        assert_includes(shape.methods[:[]].method_types, parse_method_type("(::Symbol) -> (self | ::Integer | nil)"))
+        assert_includes(shape.methods[:[]].method_types, parse_method_type("(::Hash::_Key) -> (self | ::Integer | nil)"))
 
         assert_includes(shape.methods[:[]=].method_types, parse_method_type("(:id, ::Integer) -> ::Integer"))
         assert_includes(shape.methods[:[]=].method_types, parse_method_type("(:name, self) -> self"))
