@@ -422,7 +422,7 @@ module Steep
           when :send
             location = (_ = node.location) #: Parser::AST::_SelectorLocation
             if test_ast_location(location.selector, line: line, column: column)
-              if (parent = parents[0]) && parent.type == :block && parent.children[0] === node
+              if (parent = parents[0]) && (parent.type == :block || parent.type == :numblock || parent.type == :itblock) && parent.children[0] === node
                 node = parents[0]
               end
 
@@ -536,7 +536,9 @@ module Steep
       def constant_definition_in_ruby(name, locations:)
         type_check.source_files.each do |path, source|
           if typing = source.typing
-            target = project.target_for_source_path(path) or raise
+            # Inline sources are type checked too, but they don't have a Ruby definition to go to.
+            # Their declarations are found through the RBS lookup instead.
+            target = project.target_for_source_path(path) or next
             entry = typing.source_index.entry(constant: name)
             entry.definitions.each do |node|
               case node.type
@@ -563,7 +565,9 @@ module Steep
         if in_ruby
           type_check.source_files.each do |path, source|
             if typing = source.typing
-              target = project.target_for_source_path(path) or raise
+              # Inline sources are type checked too, but they don't have a Ruby definition to go to.
+              # Their declarations are found through the RBS lookup instead.
+              target = project.target_for_source_path(path) or next
               entry = typing.source_index.entry(method: name)
 
               if entry.definitions.empty?

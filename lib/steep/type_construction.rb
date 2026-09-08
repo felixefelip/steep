@@ -435,7 +435,8 @@ module Steep
                          method_name: InstanceMethodName.new(type_name: module_context.class_name, method_name: method_name)
                        )
                      else
-                       raise "Unexpected self_type: #{self_type}"
+                       # `def obj.foo` where the type of `obj` doesn't name a class or module, `untyped` included
+                       TypeInference::MethodCall::UnknownContext.new()
                      end
 
       self.class.new(
@@ -876,7 +877,6 @@ module Steep
         instance_definition: instance_definition
       )
 
-      singleton_definition = checker.factory.definition_builder.build_singleton(module_context.class_name)
       type_env =
         TypeInference::TypeEnvBuilder.new(
           TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(checker.factory),
@@ -960,7 +960,7 @@ module Steep
     end
 
     def synthesize(node, hint: nil, condition: false)
-      Steep.logger.tagged "synthesize:(#{node.location&.yield_self {|loc| loc.expression.to_s.split(/:/, 2).last } || "-"})" do
+      Steep.logger.tagged(-> { "synthesize:(#{node.location&.yield_self {|loc| loc.expression.to_s.split(/:/, 2).last } || "-"})" }) do
         Steep.logger.debug node.type
         case node.type
         when :begin, :kwbegin
@@ -1011,7 +1011,7 @@ module Steep
               end
 
               if rhs
-                rhs_type, rhs_constr, rhs_context = synthesize(rhs, hint: hint).to_ary
+                rhs_type, rhs_constr, _ = synthesize(rhs, hint: hint).to_ary
 
                 constr = rhs_constr.update_type_env do |type_env|
                   var_type = rhs_type
@@ -1996,6 +1996,11 @@ module Steep
             else
               if hint
                 tuples = select_flatten_types(hint) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
+                if tuples.empty?
+                  if converted = try_convert(hint, :to_ary)
+                    tuples = select_flatten_types(converted) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
+                  end
+                end
                 unless tuples.empty?
                   fallback_pair = nil #: Pair?
                   tuples.each do |tuple|
@@ -2148,7 +2153,7 @@ module Steep
           yield_self do
             cond, true_clause, false_clause = node.children
 
-            cond_type, constr = synthesize(cond, condition: true).to_ary
+            _, constr = synthesize(cond, condition: true).to_ary
             interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: constr.typing, config: builder_config, postconditions: postconditions, self_type: constr.self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
 
@@ -2291,7 +2296,7 @@ module Steep
                 branch_reachable = false
 
                 tests.each do |test|
-                  test_type, condition_constr = condition_constr.synthesize(test, condition: true)
+                  _, condition_constr = condition_constr.synthesize(test, condition: true)
                   truthy, falsy = interpreter.eval(env: condition_constr.context.type_env, node: test)
                   truthy_env = truthy.env
                   falsy_env = falsy.env
@@ -2541,7 +2546,7 @@ module Steep
         when :while, :until
           yield_self do
             cond, body = node.children
-            cond_type, constr = synthesize(cond, condition: true).to_ary
+            _, constr = synthesize(cond, condition: true).to_ary
 
             interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions, self_type: self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
@@ -2593,7 +2598,7 @@ module Steep
                   .for_branch(body, break_context: TypeInference::Context::BreakContext.new(break_type: hint || AST::Builtin.nil_type, next_type: nil))
 
               typing.cursor_context.set_node_context(body, for_loop.context)
-              _, body_constr, body_context = for_loop.synthesize(body)
+              _, _, body_context = for_loop.synthesize(body)
 
               constr = cond_constr.update_type_env {|env| env.join(env, body_context.type_env) }
 
@@ -2946,7 +2951,7 @@ module Steep
             constr.add_typing(node, type: type)
           end
 
-        when :block, :numblock, :send, :csend
+        when :block, :numblock, :itblock, :send, :csend
           synthesize_sendish(node, hint: hint, tapp: nil)
 
         when :forwarded_args, :forward_arg
@@ -3020,6 +3025,20 @@ module Steep
             arg_nodes = max_num.times.map {|i| Parser::AST::Node.new(:arg, [:"_#{i+1}"]) }
           end
 
+          params = Parser::AST::Node.new(:args, arg_nodes)
+
+          if send_node.type == :lambda
+            # @type var node: Parser::AST::Node & Parser::AST::_BlockNode
+            type_lambda(node, params_node: params, body_node: body, type_hint: hint)
+          else
+            type_send(node, send_node: send_node, block_params: params, block_body: body, unwrap: send_node.type == :csend, tapp: tapp, hint: hint)
+          end
+        end
+      when :itblock
+        yield_self do
+          send_node, _name, body = node.children
+
+          arg_nodes = [Parser::AST::Node.new(:procarg0, [:it])]
           params = Parser::AST::Node.new(:args, arg_nodes)
 
           if send_node.type == :lambda
@@ -3143,10 +3162,8 @@ module Steep
           if node.type == :splat
             asgn_node = node.children[0]
             next unless asgn_node
-            var_type = asgn_node.type
           else
             asgn_node = node
-            var_type = type
           end
 
           case asgn_node.type
@@ -3423,11 +3440,14 @@ module Steep
       block =
         if block_param = params.block_param
           if block_param_type = block_param.type
-            case block_param_type
+            # Expanding aliases because the cases below test the structure of the type
+            expanded_type = deep_expand_alias(block_param_type) || block_param_type
+
+            case expanded_type
             when AST::Types::Proc
-              Interface::Block.new(type: block_param_type.type, optional: false, self_type: block_param_type.self_type)
+              Interface::Block.new(type: expanded_type.type, optional: false, self_type: expanded_type.self_type)
             else
-              if proc_type = optional_proc?(block_param_type)
+              if proc_type = optional_proc?(expanded_type)
                 Interface::Block.new(type: proc_type.type, optional: true, self_type: proc_type.self_type)
               else
                 block_constr.typing.add_error(
@@ -3903,7 +3923,7 @@ module Steep
             end
           end
 
-          if node.type == :csend || ((node.type == :block || node.type == :numblock) && node.children[0].type == :csend)
+          if node.type == :csend || ((node.type == :block || node.type == :numblock || node.type == :itblock) && node.children[0].type == :csend)
             optional_type = AST::Types::Union.build(types: [call.return_type, AST::Builtin.nil_type])
             call = call.with_return_type(optional_type)
           end
@@ -4137,7 +4157,7 @@ module Steep
 
         when AST::Types::Any
           case node.type
-          when :block, :numblock
+          when :block, :numblock, :itblock
             # @type var node: Parser::AST::Node & Parser::AST::_BlockNode
             block_annotations = source.annotations(block: node, factory: checker.factory, context: nesting)
             block_params or raise
@@ -5931,7 +5951,9 @@ module Steep
             when arg.compatible?
               if arg.node
                 # Block pass (&block) is given
-                node_type, constr = constr.synthesize(arg.node, hint: arg.node_type)
+                # Passing `proc_type` instead of `node_type` because a block-pass argument is a proc, not `nil`.
+                # `nil` is still allowed by the `node_type` check below.
+                node_type, constr = constr.synthesize(arg.node, hint: arg.proc_type)
 
                 nil_given =
                   constr.check_relation(sub_type: node_type, super_type: AST::Builtin.nil_type).success? &&

@@ -20,6 +20,8 @@ module Steep
       # Whether to re-infer the sidecars at startup. Off starts from the stores on disk.
       attr_accessor inference: bool
 
+      attr_accessor command_socket: bool
+
       include Utils::DriverHelper
 
       def initialize: (stdout: untyped, stderr: untyped, stdin: untyped) -> void
@@ -36,6 +38,13 @@ module Steep
       def project: () -> Project
 
       def run: () -> Integer
+
+      # Starts accepting `steep query`/`steep check` connections on the UNIX socket
+      #
+      # Returns `nil` when the command socket is disabled, is not supported on the platform,
+      # or is already served by another process.
+      #
+      def start_command_socket: (Server::Master master) -> Server::CommandSocket?
     end
   end
 end

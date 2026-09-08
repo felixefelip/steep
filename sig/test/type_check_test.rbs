@@ -295,4 +295,22 @@ class TypeCheckTest < Minitest::Test
   def test_tuple_type_with_if_branch: () -> untyped
 
   def test_or_asgn_send_chain: () -> untyped
+
+  def test_block_pass_optional_block: () -> untyped
+
+  def test_block_pass_optional_block_mismatch: () -> untyped
+
+  def test_lambda_block_param_type_alias: () -> untyped
+
+  def test_lambda_block_param_type_alias_not_proc: () -> untyped
+
+  def test_array_literal_with_pair_interface_hint: () -> untyped
+
+  def test_array_literal_with_pair_interface_intersection_hint: () -> untyped
+
+  def test_array_literal_with_pair_interface_hint_two_params_block: () -> untyped
+
+  def test_array_literal_with_pair_interface_hint_mismatch: () -> untyped
+
+  def test_defs_on_untyped_receiver: () -> untyped
 end
