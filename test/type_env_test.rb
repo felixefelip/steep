@@ -218,6 +218,50 @@ class TypeEnvTest < Minitest::Test
     end
   end
 
+  # Refining a pure call invalidates the calls DERIVED from it, the same rule a
+  # refined local or ivar already applied. `source.window` cached under the wide
+  # `source` is stale the moment `source` narrows — and a cached pure call is
+  # read in preference to re-synthesizing, so the stale one would win.
+  def test_refining_a_pure_call_invalidates_the_calls_derived_from_it
+    with_factory do
+      source_node = parse_ruby("source").node
+      window_node = parse_ruby("source.window").node
+
+      source_call = MethodCall::Typed.new(
+        node: source_node,
+        context: MethodCall::TopLevelContext.new,
+        method_name: MethodName("::Object#source"),
+        receiver_type: parse_type("::Object"),
+        actual_method_type: parse_method_type("() -> ::String"),
+        method_decls: [],
+        return_type: parse_type("::String")
+      )
+      window_call = MethodCall::Typed.new(
+        node: window_node,
+        context: MethodCall::TopLevelContext.new,
+        method_name: MethodName("::Object#window"),
+        receiver_type: parse_type("::String"),
+        actual_method_type: parse_method_type("() -> ::Integer?"),
+        method_decls: [],
+        return_type: parse_type("::Integer?")
+      )
+
+      env = TypeEnv.new(constant_env)
+        .add_pure_call(source_node, source_call, nil)
+        .add_pure_call(window_node, window_call, nil)
+
+      assert_equal parse_type("::Integer?"), env[window_node]
+
+      refined = env.refine_types(pure_call_types: { source_node => parse_type("::Symbol") })
+
+      assert_equal parse_type("::Symbol"), refined[source_node]
+      # Back to the call's declared return: the flow fact computed under the old
+      # receiver is dropped, not kept.
+      assert_equal parse_type("::Integer?"), refined[window_node]
+      assert_nil refined.pure_method_calls.fetch(window_node)[1]
+    end
+  end
+
   def test_refinements_branches_0
     with_factory do
       # array = ["string", 123, nil].shuffle

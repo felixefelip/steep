@@ -177,11 +177,13 @@ module Steep
         if entry.conditional_block_truthy
           row["conditional_block_truthy"] = { "gate_ivar" => entry.conditional_block_truthy.to_s }
         end
-        unless entry.when_true_ivars.empty? && entry.when_true_consts.empty? && !entry.when_true_block_truthy
+        unless entry.when_true_ivars.empty? && entry.when_true_methods.empty? &&
+               entry.when_true_consts.empty? && !entry.when_true_block_truthy
           branch = serialize_branch(
             ivars: entry.when_true_ivars,
             self_type_string: entry.when_true_self_type_string,
-            consts: entry.when_true_consts
+            consts: entry.when_true_consts,
+            methods: entry.when_true_methods
           )
           # felixefelip/rbs_infer#144 stage 2. Not a refinement like its
           # neighbours — it names WHOSE answer a truthy return is, which is what
@@ -198,7 +200,13 @@ module Steep
       # const fact. `Branch` does not parse them back yet — 3c consumes them
       # in-process, from the same Runner pass that infers them — but they are
       # written because a fact nobody can see is a fact nobody can check.
-      def serialize_branch(ivars:, self_type_string:, consts: {})
+      # `methods` are the zero-arity self-method slots the branch proves
+      # narrower. Like `consts`, `Branch` does not parse them back: the
+      # refinement a consumer applies is the `self:` intersection, and the
+      # marker module named there is where these types actually live. They are
+      # written because the sidecar is how one reads what was inferred, and a
+      # `self:` pointing at a marker says nothing about WHY on its own.
+      def serialize_branch(ivars:, self_type_string:, consts: {}, methods: {})
         branch = {
           "ivars" => ivars.sort_by { |k, _| k.to_s }.each_with_object({}) do |(name, type), hash|
             hash[name.to_s] = type.to_s
@@ -207,6 +215,11 @@ module Steep
         branch.delete("ivars") if ivars.empty?
         unless consts.empty?
           branch["consts"] = consts.sort.each_with_object({}) { |(path, type), hash| hash[path] = type.to_s }
+        end
+        unless methods.empty?
+          branch["methods"] = methods.sort_by { |name, _| name.to_s }.each_with_object({}) do |(name, type), hash|
+            hash[name.to_s] = type.to_s
+          end
         end
         if self_type_string.is_a?(String) && !self_type_string.empty?
           branch["self"] = self_type_string

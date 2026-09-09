@@ -360,6 +360,157 @@ class PostconditionsInferrerTest < Minitest::Test
     assert_equal "::String", entry.when_true_ivars[:"@name"].to_s
   end
 
+  # --------------------------------------------------------------------
+  # `when_true` over a sibling METHOD instead of an ivar.
+  # `def windowed?; !window.nil?; end` should refine `window`, the same way the
+  # ivar spelling refines `@name` — including for a class that declares no ivar
+  # at all, and for a module (fizzy's `Card::Entropic`).
+  # --------------------------------------------------------------------
+
+  METHOD_PREDICATE_RBS_FIXTURE = <<~RBS
+    class PMWindow
+    end
+
+    class NilClass
+      def present?: () -> false
+    end
+
+    class Object
+      def present?: () -> bool
+    end
+
+    class PMSource
+      def window: () -> PMWindow?
+      def windowed?: () -> bool
+      def present_windowed?: () -> bool
+      def sized?: () -> bool
+      def size: () -> Integer
+      def at: (Integer) -> PMWindow?
+      def at_windowed?: () -> bool
+    end
+
+    module PMEntropic
+      def entropy: () -> PMWindow?
+      def entropic?: () -> bool
+    end
+
+    class PMCached
+      @cache: PMWindow?
+
+      def cache: () -> PMWindow?
+      def both?: () -> bool
+    end
+  RBS
+
+  def infer_method_predicate_for(ruby)
+    entries = nil
+    with_checker(METHOD_PREDICATE_RBS_FIXTURE) do |checker|
+      source = parse_ruby(ruby)
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        entries = Postconditions::Inferrer.infer(source, typing, checker)
+      end
+    end
+    entries
+  end
+
+  def test_infers_when_true_method_for_negated_nil_check
+    entries = infer_method_predicate_for(<<~RUBY)
+      class PMSource
+        def windowed?
+          !window.nil?
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :windowed? }
+    refute_nil entry
+    assert_empty entry.when_true_ivars, "the subject is a method, not an ivar"
+    assert_equal "::PMWindow", entry.when_true_methods[:window].to_s
+    assert_equal "::PMSource & ::PMSource::AfterWindowed", entry.when_true_self_type_string
+  end
+
+  def test_infers_when_true_method_for_present_check
+    entries = infer_method_predicate_for(<<~RUBY)
+      class PMSource
+        def present_windowed?
+          window.present?
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :present_windowed? }
+    refute_nil entry
+    assert_equal "::PMWindow", entry.when_true_methods[:window].to_s
+  end
+
+  # The class declaring no ivar is the whole point: `build_env_for_class` used to
+  # turn it away before the interpreter was asked.
+  def test_infers_when_true_method_on_a_module
+    entries = infer_method_predicate_for(<<~RUBY)
+      module PMEntropic
+        def entropic?
+          entropy.present?
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :entropic? }
+    refute_nil entry
+    assert_equal "::PMWindow", entry.when_true_methods[:entropy].to_s
+    assert_equal "::PMEntropic & ::PMEntropic::AfterEntropic", entry.when_true_self_type_string
+  end
+
+  # A predicate whose subject is not nilable narrows nothing, so there is no
+  # marker to mint.
+  def test_no_when_true_method_when_nothing_narrows
+    entries = infer_method_predicate_for(<<~RUBY)
+      class PMSource
+        def sized?
+          !size.nil?
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :sized? }
+    # The entry survives as a call-graph node (`self_call_deps`); what must be
+    # empty is the refinement.
+    assert_empty entry.when_true_methods
+    assert_nil entry.when_true_self_type_string
+  end
+
+  # A method taking arguments is not a slot: the narrowing would hold for the
+  # one argument seen and be claimed for every other.
+  def test_ignores_a_predicate_over_a_method_with_arguments
+    entries = infer_method_predicate_for(<<~RUBY)
+      class PMSource
+        def at_windowed?
+          !at(1).nil?
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :at_windowed? }
+    assert_empty entry.when_true_methods
+    assert_nil entry.when_true_self_type_string
+  end
+
+  # Both readings compose: `@cache` still comes back alongside `cache`.
+  def test_collects_ivar_and_method_slots_together
+    entries = infer_method_predicate_for(<<~RUBY)
+      class PMCached
+        def both?
+          !@cache.nil? && !cache.nil?
+        end
+      end
+    RUBY
+
+    entry = entries.find { |e| e.method_name == :both? }
+    refute_nil entry
+    assert_equal "::PMWindow", entry.when_true_ivars[:"@cache"].to_s
+    assert_equal "::PMWindow", entry.when_true_methods[:cache].to_s
+  end
+
   # --- return-value establishment (felixefelip/steep#56) --------------
 
   RETURNS_RBS_FIXTURE = <<~RBS

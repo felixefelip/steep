@@ -1041,7 +1041,17 @@ module Steep
       end
 
       def lookup_postcondition_entry(call:, receiver_type:)
-        method_sym = call.method_decls.map { |d| d.method_name.method_name }.compact.first
+        # The name the SOURCE called, not the name it resolved to. Those agree
+        # for an ordinary call, and part ways under delegation inlining
+        # (felixefelip/steep#32): `def windowed?; window.present?; end` is a
+        # forwarder, so `source.windowed?` is retyped as `source.window.present?`
+        # and `mirror_inlined_method_call` copies the inlined call's decls onto
+        # the original node — leaving `method_decls` naming `present?` while
+        # `method_name` still says `windowed?`. Reading the decls looked up
+        # `Example67Source#present?`, which is nobody's postcondition, and the
+        # entry for the method actually written was never found.
+        method_sym = call.method_name ||
+          call.method_decls.map { |d| d.method_name.method_name }.compact.first
         return nil unless method_sym
 
         receiver_type_names(receiver_type).each do |type_name|
