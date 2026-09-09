@@ -400,6 +400,36 @@ module Steep
           end
 
           [truthy_env, falsy_env]
+        when :csend
+          # `x&.m` answers nil whenever `x` does — that is the whole of `&.` — so
+          # a truthy type that cannot be nil proves the receiver was not nil.
+          # Recursion falls out: the receiver of a `&.` is often another `&.`, and
+          # each link hands the next one a non-nil type, so
+          # `latest&.label&.to_s == "opened"` reaches `latest`
+          # (felixefelip/rbs_infer#338).
+          #
+          # Only the truthy side. `x&.m` is nil both when `x` is nil and when `m`
+          # answered nil, so the falsy branch separates nothing and the env is
+          # returned untouched.
+          receiver = node.children[0]
+          if !receiver.is_a?(::Parser::AST::Node) || nilable_type?(truthy_type)
+            [env, env]
+          else
+            receiver_type = env[receiver] || (typing.type_of(node: receiver) rescue nil)
+            non_nil, _ = receiver_type ? factory.partition_union(receiver_type) : nil
+            if receiver_type && non_nil && nilable_type?(receiver_type)
+              truthy_env, _ = refine_node_type(
+                env: env,
+                node: receiver,
+                truthy_type: non_nil,
+                falsy_type: receiver_type
+              )
+              [truthy_env, env]
+            else
+              [env, env]
+            end
+          end
+
         when :self
           # Mirror the `:lvar`/`:ivar` branches for `self`. Without this,
           # postcondition narrowing (#10) on a receiver of `self` (implicit
@@ -810,6 +840,17 @@ module Steep
 
             method_type.type.return_type if method_type
           end
+        end
+      end
+
+      def nilable_type?(type)
+        case type
+        when AST::Types::Nil
+          true
+        when AST::Types::Union
+          type.types.any? { |t| t.is_a?(AST::Types::Nil) }
+        else
+          false
         end
       end
 
