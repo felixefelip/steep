@@ -202,6 +202,18 @@ module Steep
         end
 
         invalidated_nodes = Set.new(pure_call_types.each_key)
+        # A refined pure call invalidates the calls DERIVED from it, exactly as a
+        # refined local or ivar does below. Refining `source` while leaving
+        # `source.window` at the type it had under the wider receiver keeps a
+        # fact that the refinement just made obsolete — and the stale one wins,
+        # because a cached pure call is read in preference to re-synthesizing.
+        # Bites wherever a derived read was cached BEFORE the receiver narrowed,
+        # which delegation inlining (felixefelip/steep#32) does routinely: typing
+        # `source.windowed?` as `source.window.present?` registers `source.window`
+        # first, and the postcondition narrows `source` after.
+        pure_call_types.each_key do |node|
+          invalidated_nodes.merge(invalidated_pure_nodes(node))
+        end
         local_variable_types.each_key do |name|
           invalidated_nodes.merge(invalidated_pure_nodes(Parser::AST::Node.new(:lvar, [name])))
         end

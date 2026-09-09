@@ -171,6 +171,27 @@ class PostconditionsWriterTest < Minitest::Test
     refute row.key?("when_true"), "the gated fact is not a claim about every truthy exit"
   end
 
+  # The method-slot sibling of `when_true.ivars`. `Branch` does not parse it
+  # back — the refinement a consumer applies is the `self:` intersection, and
+  # the marker module named there is where these types live — but a `self:`
+  # pointing at a marker says nothing about WHY on its own.
+  def test_dump_serializes_when_true_method_slots
+    entry = InferredEntry.new(
+      class_name: "PMSource",
+      method_name: :windowed?,
+      singleton: false,
+      when_true_methods: { window: Steep::AST::Types::Name::Instance.new(name: RBS::TypeName.parse("::PMWindow"), args: []) },
+      when_true_self_type_string: "::PMSource & ::PMSource::AfterWindowed"
+    )
+
+    raw = YAML.safe_load(Writer.dump([entry]))
+    row = raw["postconditions"].find { |r| r["class"] == "PMSource" }
+
+    refute_nil row, "a method-only refinement is still a branch"
+    assert_equal({ "window" => "::PMWindow" }, row["when_true"]["methods"])
+    assert_equal "::PMSource & ::PMSource::AfterWindowed", row["when_true"]["self"]
+  end
+
   def test_dump_omits_block_truthiness_when_it_was_not_proven
     entry = InferredEntry.new(
       class_name: "BTToken",

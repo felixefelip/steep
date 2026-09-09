@@ -1051,6 +1051,10 @@ module Steep
               ivars: merged_ivars,
               self_type_string: existing.self_type_string || entry.self_type_string,
               when_true_ivars: existing.when_true_ivars,
+              # Merged rather than kept-first like its ivar sibling above: a
+              # predicate defined in two places contributes the slots of both,
+              # and a hash of disjoint method names has nothing to conflict over.
+              when_true_methods: existing.when_true_methods.merge(entry.when_true_methods),
               when_true_self_type_string: existing.when_true_self_type_string,
               returns_establishes: merged_establishes,
               may_write_ivars: existing.may_write_ivars | entry.may_write_ivars,

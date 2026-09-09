@@ -28,6 +28,79 @@ class LogicTypeInterpreterTest < Minitest::Test
     )
   end
 
+  # Delegation inlining (felixefelip/steep#32) retypes `source.windowed?` as
+  # `source.window.present?` and mirrors the INLINED call's decls onto the
+  # original node, so `method_decls` names `present?` while `method_name` still
+  # says `windowed?`. The postcondition lookup has to read the name the source
+  # called, or the entry for the method actually written is never found.
+  def test_postcondition_lookup_uses_the_called_name_not_the_inlined_decls
+    with_checker(<<~RBS) do |checker|
+      class LTISource
+        def window: () -> LTIWindow?
+        def windowed?: () -> bool
+        def present?: () -> bool
+      end
+
+      class LTIWindow
+      end
+
+      module LTISource::AfterWindowed
+      end
+    RBS
+      source = parse_ruby("source.windowed?")
+      send_node = source.node
+      receiver_node = send_node.children[0]
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      typing.add_typing(send_node, parse_type("bool"), nil)
+      typing.add_typing(receiver_node, parse_type("::LTISource"), nil)
+
+      receiver_call = TypeInference::MethodCall::Typed.new(
+        node: receiver_node,
+        context: TypeInference::MethodCall::TopLevelContext.new,
+        method_name: :source,
+        receiver_type: AST::Builtin::Object.instance_type,
+        actual_method_type: parse_method_type("() -> ::LTISource"),
+        method_decls: Set[],
+        return_type: parse_type("::LTISource")
+      )
+      # The mirrored call: the name the source wrote, the decls of the body it
+      # was inlined to.
+      present_def = checker.factory.definition_builder.build_instance(RBS::TypeName.parse("::LTISource")).methods[:present?]
+      typing.add_call(
+        send_node,
+        TypeInference::MethodCall::Typed.new(
+          node: send_node,
+          context: TypeInference::MethodCall::TopLevelContext.new,
+          method_name: :windowed?,
+          receiver_type: parse_type("::LTISource"),
+          actual_method_type: parse_method_type("() -> bool"),
+          method_decls: Set[TypeInference::MethodCall::MethodDecl.new(method_name: MethodName("::LTISource#present?"), method_def: present_def.defs.first)],
+          return_type: parse_type("bool")
+        )
+      )
+
+      store = Steep::Postconditions::Store.from_hash(
+        {
+          "postconditions" => [
+            {
+              "class" => "LTISource",
+              "method" => "windowed?",
+              "when_true" => { "self" => "::LTISource & ::LTISource::AfterWindowed" }
+            }
+          ]
+        },
+        source: "<test>"
+      )
+
+      env = type_env.add_pure_call(receiver_node, receiver_call, nil)
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config, postconditions: store)
+      truthy_result, _falsy_result = interpreter.eval(env: env, node: send_node)
+
+      assert_equal parse_type("(::LTISource & ::LTISource::AfterWindowed)"), truthy_result.env[receiver_node]
+    end
+  end
+
   def test_lvar_assignment
     with_checker do |checker|
       source = parse_ruby("a = @x")

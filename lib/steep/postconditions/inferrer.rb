@@ -47,7 +47,7 @@ module Steep
         results = []
         walk_classes(@source.node, nesting: []) do |def_node, class_name, singleton|
           ivars = collect_ivar_refinements(def_node, class_name, singleton: singleton)
-          when_true_ivars = collect_when_true_nonnil_refinements(def_node, class_name, singleton: singleton)
+          when_true_ivars, when_true_methods = collect_when_true_nonnil_refinements(def_node, class_name, singleton: singleton)
           returns_establishes = @return_establishment_inferrer.establishments(def_node)
           may_write = collect_ivar_writes(def_node, class_name, singleton: singleton)
           self_call_deps = collect_self_call_deps(def_node)
@@ -79,7 +79,7 @@ module Steep
           # dropping it before the fixpoint breaks the link it exists to carry.
           # Unlike `unconditional_call_deps` this costs little — the edge only
           # exists when a method's VALUE is a call it also handed its block to.
-          if ivars.empty? && when_true_ivars.empty? && returns_establishes.empty? &&
+          if ivars.empty? && when_true_ivars.empty? && when_true_methods.empty? && returns_establishes.empty? &&
              may_write.empty? && self_call_deps.empty? && returns_ivar.nil? &&
              conditional_returns.empty? && conditional_const_returns.empty? &&
              establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance &&
@@ -90,7 +90,9 @@ module Steep
 
           method_name = def_node.children[0]
           self_type_string = marker_self_type_for(class_name, method_name, singleton: singleton) unless ivars.empty?
-          when_true_self_type_string = marker_self_type_for(class_name, method_name, singleton: singleton) unless when_true_ivars.empty?
+          unless when_true_ivars.empty? && when_true_methods.empty?
+            when_true_self_type_string = marker_self_type_for(class_name, method_name, singleton: singleton)
+          end
 
           results << InferredEntry.new(
             class_name: class_name,
@@ -99,6 +101,7 @@ module Steep
             ivars: ivars,
             self_type_string: self_type_string,
             when_true_ivars: when_true_ivars,
+            when_true_methods: when_true_methods,
             when_true_self_type_string: when_true_self_type_string,
             returns_establishes: returns_establishes,
             may_write_ivars: may_write,
@@ -246,27 +249,40 @@ module Steep
       # strictly narrower (declared `T?` → refined `T`) become
       # postcondition refinements. Equal entries are dropped — a
       # no-op refinement would only add sidecar noise.
+      # Returns `[ivars, methods]` — the `@ivar` and the zero-arity self-method
+      # slots the predicate proves narrower on its truthy exit, each mapping to
+      # the refined type.
       def collect_when_true_nonnil_refinements(def_node, class_name, singleton:)
         body = def_node.children[2]
-        return {} unless body
-        last_expr = last_expression(body) or return {}
+        return [{}, {}] unless body
+        last_expr = last_expression(body) or return [{}, {}]
 
-        return {} unless predicate_body?(last_expr)
-
-        env = build_env_for_class(class_name, singleton: singleton) or return {}
+        seeds = pure_call_seeds(last_expr)
+        unless predicate_body?(last_expr) ||
+               boolean_slot_predicate?(last_expr, seeds, class_name, def_node.children[0], singleton: singleton)
+          return [{}, {}]
+        end
+        env = build_env_for_class(class_name, singleton: singleton, seeds: seeds) or return [{}, {}]
         interpreter = build_interpreter_for_class(class_name, singleton: singleton)
-        return {} unless interpreter
+        return [{}, {}] unless interpreter
 
         truthy_result = nil
         begin
           truthy_result = evaluate_truthy(interpreter: interpreter, env: env, node: last_expr)
         rescue StandardError => e
           Steep.logger.warn { "[postconditions] when_true inference failed for #{class_name}##{def_node.children[0]}: #{e.message}" }
-          return {}
+          return [{}, {}]
         end
-        return {} unless truthy_result
-        return {} if truthy_result.unreachable
+        return [{}, {}] unless truthy_result
+        return [{}, {}] if truthy_result.unreachable
 
+        [
+          narrowed_ivars(truthy_result, class_name, singleton: singleton),
+          narrowed_methods(truthy_result, seeds, class_name, singleton: singleton)
+        ]
+      end
+
+      def narrowed_ivars(truthy_result, class_name, singleton:)
         declared = declared_ivar_types(class_name, singleton: singleton)
         refined_ivars = truthy_result.env.instance_variable_types
         refined_ivars.each_with_object({}) do |(name, refined_type), result|
@@ -276,6 +292,142 @@ module Steep
           next unless strict_subtype?(refined_type, declared_type)
           result[name] = refined_type
         end
+      end
+
+      # The other half of the same reading: a predicate whose subject is a
+      # SIBLING METHOD rather than an ivar.
+      #
+      #   def entropy;  Card::Entropy.for(self); end   # () -> Card::Entropy?
+      #   def entropic?; entropy.present?;       end
+      #
+      # A human reads `card.entropic?` as proving `card.entropy` is there, and
+      # the ivar spelling of exactly this (`def confirmed?; !@name.nil?; end`)
+      # has been narrowing since felixefelip/steep#9. What made the method
+      # spelling silent was not the interpreter — it refines a pure-call slot as
+      # readily as an ivar — but that the slot was never in the env it was handed
+      # (`pure_call_seeds` now puts it there), and that only
+      # `instance_variable_types` was ever read back out.
+      #
+      # Compared against the method's DECLARED return type, not against the
+      # seeded type: they coincide for an unnarrowed self-send, and the declared
+      # one is what the marker has to restate to be worth emitting.
+      def narrowed_methods(truthy_result, seeds, class_name, singleton:)
+        return {} if seeds.empty?
+
+        truthy_result.env.pure_method_calls.each_with_object({}) do |(node, pair), result|
+          next unless seeds.key?(node)
+          refined_type = pair[1]
+          method_name = node.children[1]
+          declared_type = declared_method_return_type(class_name, method_name, singleton: singleton)
+          next unless declared_type
+          next if refined_type == declared_type
+          next unless strict_subtype?(refined_type, declared_type)
+          result[method_name] = refined_type
+        end
+      end
+
+      # The zero-arity self-sends of `node`, as `{ send_node => [call, type] }`
+      # ready to merge into a `TypeEnv`'s `pure_method_calls`.
+      #
+      # Method BODIES are not type-checked in conditional mode, so the env the
+      # predicate path builds is synthetic — and a synthetic env starts with no
+      # pure call registered at all, which is why the interpreter had nothing to
+      # refine. The types come from `typing`: the real check already synthesized
+      # this very node, so this restates its answer rather than computing one.
+      #
+      # Zero-arity only, and only a receiverless or explicit-`self` send. Both
+      # restrictions come from what the fact is FOR: a marker module can restate
+      # `def window: () -> Example67Window`, and there is nothing it could say
+      # about `at(i)` — the narrowing would hold for one argument and be claimed
+      # for all. `pure?` is asked because an `%a{impure}` method answers a fresh
+      # value each call, so a fact about one call is not a fact about the next.
+      def pure_call_seeds(node)
+        seeds = {} #: Hash[Parser::AST::Node, [untyped, untyped]]
+        each_node(node) do |descendant|
+          next unless descendant.type == :send
+          receiver, _method_name, *args = descendant.children
+          next unless args.empty?
+          next unless receiver.nil? || receiver.type == :self
+
+          call = @typing.call_of(node: descendant) rescue nil
+          next unless call.is_a?(TypeInference::MethodCall::Typed)
+          next unless call.pure?
+
+          type = type_of(descendant) or next
+          next if type.is_a?(AST::Types::Logic::Base) || type.is_a?(AST::Types::Logic::Env)
+
+          seeds[descendant] = [call, type]
+        end
+        seeds
+      end
+
+      # The other way in, for a predicate whose shape the AST does not carry.
+      #
+      #   def entropic?; entropy.present?; end
+      #
+      # `present?` is declared `() -> bool`, not a Logic type, so `predicate_body?`
+      # says no — yet the interpreter narrows it perfectly well, by partitioning
+      # the receiver's union on each component's declared return
+      # (`NilClass#present?: () -> false`). The Logic-type test is a cheap
+      # pre-filter, not the definition of a predicate, and this is the second
+      # filter for the case it misses: the method ANSWERS a boolean, and some
+      # nilable slot of ours is the receiver being asked about. Whether that
+      # actually narrows stays the interpreter's call — nothing is emitted if it
+      # does not.
+      def boolean_slot_predicate?(node, seeds, class_name, method_name, singleton:)
+        return false if seeds.empty?
+        return false unless boolean_type?(declared_method_return_type(class_name, method_name, singleton: singleton))
+
+        each_node(node) do |descendant|
+          next unless descendant.type == :send
+          receiver = descendant.children[0]
+          next unless receiver.is_a?(Parser::AST::Node)
+          pair = seeds[receiver] or next
+          return true if nilable_type?(pair[1])
+        end
+        false
+      end
+
+      def boolean_type?(type)
+        case type
+        when AST::Types::Boolean, AST::Types::Logic::Base, AST::Types::Logic::Env
+          true
+        when AST::Types::Literal
+          type.value == true || type.value == false
+        else
+          false
+        end
+      end
+
+      def each_node(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        yield node
+        node.children.each { |child| each_node(child, &block) }
+      end
+
+      # Declared return type of `class_name#method_name`, or nil when the class
+      # is not resolvable, the method is unknown, or it is overloaded — an
+      # overload has no single return to be narrower than.
+      def declared_method_return_type(class_name, method_name, singleton:)
+        return nil if class_name.empty?
+        type_name = RBS::TypeName.parse("::#{class_name}").absolute! rescue nil
+        return nil unless type_name
+        definition =
+          if singleton
+            @definition_builder.build_singleton(type_name) rescue nil
+          else
+            @definition_builder.build_instance(type_name) rescue nil
+          end
+        return nil unless definition
+        method = definition.methods[method_name] or return nil
+        # Private is dropped here rather than by the marker emitter: this is the
+        # one place that holds the real definition, and the emitter would have to
+        # re-derive it from the source it happens to be generating — which is not
+        # where a Rails column or association reader lives.
+        return nil if method.private?
+        return nil unless method.method_types.size == 1
+        method_type = method.method_types.first or return nil
+        @factory.type(method_type.type.return_type) rescue nil
       end
 
       # Returns the LogicTypeInterpreter `Result` for the truthy
@@ -322,9 +474,16 @@ module Steep
       # populated, scoped to a fresh `ConstantEnv`. The interpreter
       # mutates the env on refinement; we compare the result against
       # the same baseline to surface only the differences.
-      def build_env_for_class(class_name, singleton:)
+      # The env the predicate is evaluated in: the class's declared ivars, plus
+      # the pure-call slots `pure_call_seeds` found in the body.
+      #
+      # The bail-out is on having NOTHING to narrow, not on having no ivar. A
+      # class with only methods — `Card::Entropic` declares no ivar at all — used
+      # to be turned away here before the interpreter was ever asked, which is
+      # half of why the method spelling of a nil-check predicate was silent.
+      def build_env_for_class(class_name, singleton:, seeds: {})
         ivars = declared_ivar_types(class_name, singleton: singleton)
-        return nil if ivars.empty?
+        return nil if ivars.empty? && seeds.empty?
 
         const_env = TypeInference::ConstantEnv.new(
           factory: @factory,
@@ -332,7 +491,9 @@ module Steep
           resolver: RBS::Resolver::ConstantResolver.new(builder: @factory.definition_builder)
         )
         env = TypeInference::TypeEnv.new(const_env)
-        env.refine_types(instance_variable_types: ivars)
+        env = env.refine_types(instance_variable_types: ivars) unless ivars.empty?
+        env = env.merge(pure_method_calls: seeds) unless seeds.empty?
+        env
       end
 
       def build_interpreter_for_class(class_name, singleton:)
@@ -1842,6 +2003,12 @@ module Steep
       attr_reader :class_name, :method_name, :singleton
       attr_reader :ivars, :self_type_string
       attr_reader :when_true_ivars, :when_true_self_type_string
+      # `Hash[Symbol, AST::Types::t]` — the zero-arity self-methods this
+      # predicate proves narrower on its truthy exit, the method-slot sibling of
+      # `when_true_ivars`. Consumed by the marker emitter (rbs_infer's
+      # `PredicateMarkerSynthesizer`), which restates each as a `def` on the
+      # `After<Pred>` module the `when_true.self` string names.
+      attr_reader :when_true_methods
       # Array[Symbol] of attribute names the method establishes non-nil
       # on its returned value (felixefelip/steep#56).
       attr_reader :returns_establishes
@@ -1891,13 +2058,14 @@ module Steep
       # such a callee — the halt neither side could see alone.
       attr_reader :param_call_deps, :self_arg_calls, :halts_via_param
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_deps: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_methods: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_deps: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
         @ivars = ivars
         @self_type_string = self_type_string
         @when_true_ivars = when_true_ivars
+        @when_true_methods = when_true_methods
         @when_true_self_type_string = when_true_self_type_string
         @returns_establishes = returns_establishes
         @may_write_ivars = may_write_ivars
@@ -1927,7 +2095,8 @@ module Steep
         InferredEntry.new(
           class_name: class_name, method_name: method_name, singleton: singleton,
           ivars: self.ivars, self_type_string: self_type_string,
-          when_true_ivars: when_true_ivars, when_true_self_type_string: when_true_self_type_string,
+          when_true_ivars: when_true_ivars, when_true_methods: when_true_methods,
+          when_true_self_type_string: when_true_self_type_string,
           returns_establishes: returns_establishes,
           may_write_ivars: ivars, self_call_deps: self_call_deps,
           unconditional_call_deps: unconditional_call_deps,
@@ -1951,7 +2120,8 @@ module Steep
         InferredEntry.new(
           class_name: class_name, method_name: method_name, singleton: singleton,
           ivars: ivars, self_type_string: self_type_string,
-          when_true_ivars: when_true_ivars, when_true_self_type_string: when_true_self_type_string,
+          when_true_ivars: when_true_ivars, when_true_methods: when_true_methods,
+          when_true_self_type_string: when_true_self_type_string,
           returns_establishes: returns_establishes,
           may_write_ivars: may_write_ivars, self_call_deps: self_call_deps,
           unconditional_call_deps: unconditional_call_deps,
@@ -1975,7 +2145,7 @@ module Steep
       # gate an instance setter's establishments, not a serialized fact — so it
       # does NOT keep an entry alive, but a surviving `establishes_consts` does.
       def empty?
-        ivars.empty? && when_true_ivars.empty? && when_true_consts.empty? &&
+        ivars.empty? && when_true_ivars.empty? && when_true_methods.empty? && when_true_consts.empty? &&
           returns_establishes.empty? &&
           may_write_ivars.empty? && returns_ivar.nil? && conditional_returns.empty? &&
           conditional_const_returns.empty? && establishes_consts.empty? &&
@@ -2007,6 +2177,7 @@ module Steep
           other.ivars == ivars &&
           other.self_type_string == self_type_string &&
           other.when_true_ivars == when_true_ivars &&
+          other.when_true_methods == when_true_methods &&
           other.when_true_self_type_string == when_true_self_type_string &&
           other.returns_establishes == returns_establishes &&
           other.may_write_ivars == may_write_ivars
@@ -2016,7 +2187,7 @@ module Steep
 
       def hash
         class_name.hash ^ method_name.hash ^ singleton.hash ^ ivars.hash ^ self_type_string.hash ^
-          when_true_ivars.hash ^ when_true_self_type_string.hash ^ returns_establishes.hash ^
+          when_true_ivars.hash ^ when_true_methods.hash ^ when_true_self_type_string.hash ^ returns_establishes.hash ^
           may_write_ivars.hash
       end
     end
