@@ -257,7 +257,7 @@ module Steep
         return [{}, {}] unless body
         last_expr = last_expression(body) or return [{}, {}]
 
-        seeds = pure_call_seeds(last_expr)
+        seeds = pure_call_seeds(last_expr, class_name, singleton: singleton)
         unless predicate_body?(last_expr) ||
                boolean_slot_predicate?(last_expr, seeds, class_name, def_node.children[0], singleton: singleton)
           return [{}, {}]
@@ -341,11 +341,11 @@ module Steep
       # about `at(i)` — the narrowing would hold for one argument and be claimed
       # for all. `pure?` is asked because an `%a{impure}` method answers a fresh
       # value each call, so a fact about one call is not a fact about the next.
-      def pure_call_seeds(node)
+      def pure_call_seeds(node, class_name, singleton:)
         seeds = {} #: Hash[Parser::AST::Node, [untyped, untyped]]
         each_node(node) do |descendant|
           next unless descendant.type == :send
-          receiver, _method_name, *args = descendant.children
+          receiver, method_name, *args = descendant.children
           next unless args.empty?
           next unless receiver.nil? || receiver.type == :self
 
@@ -353,7 +353,16 @@ module Steep
           next unless call.is_a?(TypeInference::MethodCall::Typed)
           next unless call.pure?
 
-          type = type_of(descendant) or next
+          # The DECLARED return, not the type recorded for this node. `typing`
+          # holds one type per node, and node identity is structural — so a slot
+          # read twice in the body (`latest&.label && latest.stamp`) resolves to
+          # whatever the LAST read was, which is the narrowed one once the checker
+          # can narrow it. The env being built stands for method ENTRY, where
+          # nothing is narrowed yet; seeding it mid-body made the inferrer report
+          # that a guard proves nothing, because by then it had already proven it.
+          type = declared_method_return_type(class_name, method_name, singleton: singleton) ||
+            type_of(descendant)
+          next unless type
           next if type.is_a?(AST::Types::Logic::Base) || type.is_a?(AST::Types::Logic::Env)
 
           seeds[descendant] = [call, type]

@@ -4299,6 +4299,37 @@ EOF
     end
   end
 
+  # The `:csend` env join exists because the CALL may not have happened. The
+  # RECEIVER always ran, so its pure-call registration holds on both paths —
+  # dropping it is what left `holder.latest&.label && holder.latest.stamp` unable
+  # to narrow while the same guard through a local narrowed fine
+  # (felixefelip/rbs_infer#338).
+  def test_csend_keeps_the_receivers_pure_call_across_the_join
+    with_checker(<<~RBS) do |checker|
+      class CJEntry
+        attr_reader label: String?
+        attr_reader stamp: Integer
+      end
+
+      class CJHolder
+        attr_reader latest: CJEntry?
+      end
+    RBS
+      source = parse_ruby(<<~RUBY)
+        # @type var holder: CJHolder
+        holder = _ = nil
+
+        holder.latest&.label && holder.latest.stamp
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_while
     with_checker do |checker|
       source = parse_ruby(<<EOF)

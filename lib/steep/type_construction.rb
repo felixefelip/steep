@@ -3002,7 +3002,7 @@ module Steep
             type_send(node, send_node: node, block_params: nil, block_body: nil, unwrap: true, tapp: tapp, hint: hint).to_ary
 
           constr
-            .update_type_env { context.type_env.join(constr.context.type_env, context.type_env) }
+            .update_type_env { csend_env_join(pre: context.type_env, post: constr.context.type_env, receiver: node.children[0]) }
             .add_typing(node, type: union_type(send_type, AST::Builtin.nil_type))
         end
       when :block
@@ -3051,6 +3051,32 @@ module Steep
       else
         raise "Unexpected node is given to `#synthesize_sendish` (#{node.type}, #{node.location.first_line})"
       end
+    end
+
+    # The env after `x&.m`. The join is the whole point — the CALL may not have
+    # happened, so nothing it established can be assumed — but the RECEIVER always
+    # ran: `&.` evaluates `x` and only then decides. `TypeEnv#join` keeps a pure
+    # call only when both sides hold it, and the receiver's own registration was
+    # made while synthesizing it, so it exists on one side only and was dropped.
+    #
+    # That is why `latest&.label && latest.stamp` could not narrow `latest` while
+    # `entry&.label && entry.stamp` could: a local survives the join, a pure call
+    # did not. Carrying the receiver subtree's registrations back restores the
+    # symmetry, and composes down a chain — each `&.` carries its own receiver, so
+    # by the time the outermost one joins, the root is present on both sides.
+    def csend_env_join(pre:, post:, receiver:)
+      joined = pre.join(post, pre)
+      return joined unless receiver.is_a?(Parser::AST::Node)
+
+      nodes = Set[receiver]
+      each_descendant_node(receiver) { |child| nodes << child }
+
+      carried = post.pure_method_calls.select do |node, _|
+        nodes.include?(node) && !joined.pure_method_calls.key?(node)
+      end
+      return joined if carried.empty?
+
+      joined.merge(pure_method_calls: carried)
     end
 
     def masgn_lhs?(lhs)

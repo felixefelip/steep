@@ -191,6 +191,63 @@ class LogicTypeInterpreterTest < Minitest::Test
     end
   end
 
+  # `x&.m` answers nil whenever `x` does, so narrowing the chain's VALUE to
+  # something non-nil proves the receiver was not nil — and each link hands the
+  # next one a non-nil type, so a chain reaches its root. The comparison here is
+  # `== "opened"`, which Steep already types `Logic::ReceiverIsArg` and already
+  # partitions to the literal alone; what was missing was `refine_node_type`
+  # having anything to say about a `:csend` node.
+  def test_csend_chain_narrows_its_receiver_when_the_value_is_proven_non_nil
+    with_checker(<<~RBS) do |checker|
+      class CSEntry
+        attr_reader label: String?
+      end
+
+      class CSHolder
+        attr_reader latest: CSEntry?
+      end
+    RBS
+      source = parse_ruby(%q{holder = nil; holder.latest&.label&.to_s == "opened"})
+      node = source.node.children[1]
+
+      chain = dig(node, 0)          # holder.latest&.label&.to_s
+      label = dig(node, 0, 0)       # holder.latest&.label
+      latest = dig(node, 0, 0, 0)   # holder.latest
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      # What `String#==` really carries: Steep types it `Logic::ReceiverIsArg`, and
+      # the literal partition below is what already excludes nil from the CHAIN.
+      typing.add_typing(dig(node), AST::Types::Logic::ReceiverIsArg.instance, nil)
+      typing.add_typing(chain, parse_type("::String?"), nil)
+      typing.add_typing(label, parse_type("::String?"), nil)
+      typing.add_typing(latest, parse_type("::CSEntry?"), nil)
+      typing.add_typing(dig(node, 0, 0, 0, 0), parse_type("::CSHolder"), nil)
+      typing.add_typing(dig(node, 2), parse_type("::String"), nil)
+
+      latest_call = TypeInference::MethodCall::Typed.new(
+        node: latest,
+        context: TypeInference::MethodCall::TopLevelContext.new,
+        method_name: :latest,
+        receiver_type: parse_type("::CSHolder"),
+        actual_method_type: parse_method_type("() -> ::CSEntry?"),
+        method_decls: [],
+        return_type: parse_type("::CSEntry?")
+      )
+
+      env = type_env
+        .assign_local_variable(:holder, parse_type("::CSHolder"), nil)
+        .add_pure_call(latest, latest_call, nil)
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: node)
+
+      assert_equal parse_type("::CSEntry"), truthy_result.env[latest]
+      # The falsy branch separates nothing: the chain is nil both when `latest`
+      # is nil and when `label` is.
+      assert_equal parse_type("::CSEntry?"), falsy_result.env[latest]
+    end
+  end
+
   def test_pure_call
     with_checker(<<-RBS) do |checker|
 class Article
