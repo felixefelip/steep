@@ -211,9 +211,15 @@ module Steep
 
           case type
           when AST::Types::Logic::Base
-            receiver, _, *arguments = node.children
+            receiver, method_name, *arguments = node.children
             if (truthy_result, falsy_result = evaluate_method_call(env: env, type: type, receiver: receiver, arguments: arguments))
               return [truthy_result, falsy_result]
+            end
+            if (equality_env = equality_narrowed_env(env: env, node: node))
+              return [
+                Result.new(type: BOOL, env: equality_env, unreachable: false),
+                Result.new(type: BOOL, env: env, unreachable: false)
+              ]
             end
           else
             receiver, *_ = node.children
@@ -269,6 +275,16 @@ module Steep
               if ivar_falsy
                 falsy_result = Result.new(type: falsy_result.type, env: falsy_result.env.refine_types(instance_variable_types: { ivar => ivar_falsy }), unreachable: falsy_result.unreachable)
               end
+            end
+
+            # An `==` whose own type is `untyped` never reaches the branch above:
+            # `guess_type_from_method` knows `is_a?`, `nil?`, `!` and `===`, not
+            # `==`, so there is no logic type to dispatch on. That is not an edge
+            # case in Rails — one unresolved link anywhere in the chain makes the
+            # whole comparison `untyped` — and it is exactly fizzy's
+            # `last_event&.action&.to_s == "card_#{action}"`.
+            if (equality_env = equality_narrowed_env(env: truthy_result.env, node: node))
+              truthy_result = Result.new(type: truthy_result.type, env: equality_env, unreachable: truthy_result.unreachable)
             end
 
             truthy_result, falsy_result = apply_postconditions(
@@ -448,6 +464,91 @@ module Steep
         else
           [env, env]
         end
+      end
+
+      # `==` and `eql?`. Not `equal?` (identity, and never typed `ReceiverIsArg`
+      # anyway), and emphatically not the other methods that share this logic
+      # type: `nil.is_a?(NilClass)` is TRUE, so `x.is_a?(y)` says nothing about
+      # `x` being non-nil. The name has to gate this, not the logic type.
+      EQUALITY_METHODS = Set[:==, :eql?] #: Set[Symbol]
+
+      # What a truthy `a == b` says about `a` when `b` is not a literal.
+      #
+      #   last_event&.action&.to_s == "card_#{action}"
+      #
+      # `evaluate_method_call`'s `ReceiverIsArg` branch handles two shapes: an
+      # argument that is a class (`is_a?`) and one that is a literal, where
+      # `literal_var_type_case_select` partitions the receiver's union against the
+      # literal's value and drops `nil` on the way. That reading switches on the
+      # argument NODE's type and knows `:nil`, `:true`, `:false`, `:int`, `:str`
+      # and `:sym` — a `:dstr` is none of them, so an interpolated string answered
+      # nothing and the comparison narrowed nothing at all.
+      #
+      # But nil-ness needs no literal. `a == b` dispatches on `a`, the nil member
+      # of `a`'s union resolves `==` to identity (`NilClass` inherits it from
+      # `BasicObject`), and `b`'s type says it is never nil — so a truthy answer
+      # means `a` was not nil, whatever `b` computes. Only the left side gets
+      # this: `b == a` dispatches on `b`, and a `==` someone wrote could answer
+      # true for nil.
+      #
+      # `b` must have something to say. `untyped` admits nil among everything
+      # else, and a nilable `b` is exactly the case where a truthy answer can mean
+      # BOTH were nil.
+      #
+      # What the comparison establishes is about `a`'s VALUE, not about its type,
+      # and that distinction is why this walks the chain itself instead of handing
+      # a type to `refine_node_type`. An `&.` link whose own type is `untyped`
+      # still answers nil exactly when its receiver is nil — `&.` says so — and
+      # `untyped == "x"` is false for a nil receiver just as `String? == "x"` is.
+      # So a link that says nothing is walked THROUGH rather than stopped at, and
+      # only the links whose type is actually nilable are refined. Rails puts such
+      # a link in the middle routinely: fizzy's `Event#action` is
+      # `def action; super.inquiry; end`, inferred `untyped`, and it sits between
+      # `last_event` and the comparison.
+      def equality_narrowed_env(env:, node:)
+        receiver, method_name, *arguments = node.children
+        return nil unless EQUALITY_METHODS.include?(method_name)
+        return nil unless receiver.is_a?(::Parser::AST::Node)
+        return nil unless arguments.size == 1
+
+        argument_type = typing.type_of(node: arguments[0]) rescue nil
+        return nil unless argument_type
+        return nil if argument_type.is_a?(AST::Types::Any)
+        return nil if nilable_type?(argument_type)
+
+        # Only the truthy side has anything: `a != b` is as true of a nil `a` as of
+        # any other value it could hold, so the callers leave the falsy env alone.
+        truthy_env = refine_chain_to_non_nil(env, receiver)
+        truthy_env unless truthy_env.equal?(env)
+      end
+
+      # `node` is known non-nil. Refine it if its type is nilable, then follow one
+      # `&.` at a time: a `csend` answers nil whenever its receiver does, so the
+      # receiver is non-nil too. Stops at the first node that is not a `&.`, whose
+      # non-nilness says nothing about ITS receiver.
+      def refine_chain_to_non_nil(env, node)
+        env = refine_node_to_non_nil(env, node)
+        return env unless node.type == :csend
+
+        inner = node.children[0]
+        return env unless inner.is_a?(::Parser::AST::Node)
+
+        refine_chain_to_non_nil(env, inner)
+      end
+
+      # Subtract nil from one node's type, or leave the env alone when there is
+      # nothing to subtract — an `untyped` link, a type that was never nilable, or
+      # a shape `refine_node_type` does not narrow.
+      def refine_node_to_non_nil(env, node)
+        current = env[node] || (typing.type_of(node: node) rescue nil)
+        return env unless current
+        return env unless nilable_type?(current)
+
+        truthy_type, _falsy_type = factory.partition_union(current)
+        return env unless truthy_type
+
+        truthy_env, _ = refine_node_type(env: env, node: node, truthy_type: truthy_type, falsy_type: current)
+        truthy_env
       end
 
       def evaluate_method_call(env:, type:, receiver:, arguments:)

@@ -248,6 +248,63 @@ class LogicTypeInterpreterTest < Minitest::Test
     end
   end
 
+  # The same chain, but compared against something that is not a literal and with
+  # an `untyped` link in the middle — which is what Rails hands you in practice,
+  # and what the literal path cannot read: `literal_var_type_case_select` switches
+  # on the argument NODE's type and knows `:nil`, `:true`, `:false`, `:int`,
+  # `:str`, `:sym`, so a `:dstr` answers nothing. Nil-ness needs no literal: `a ==
+  # b` dispatches on `a`, and a nil `a` resolves `==` to identity.
+  def test_equality_against_a_non_literal_narrows_through_an_untyped_link
+    with_checker(<<~RBS) do |checker|
+      class EQEntry
+        def marker: () -> untyped
+      end
+
+      class EQHolder
+        attr_reader latest: EQEntry?
+      end
+    RBS
+      source = parse_ruby(%q{holder = nil; suffix = ""; holder.latest&.marker&.to_s == "opened_#{suffix}"})
+      node = source.node.children[2]
+
+      chain = dig(node, 0)
+      marker = dig(node, 0, 0)
+      latest = dig(node, 0, 0, 0)
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      # `untyped` all the way out, exactly as one unresolved link makes it.
+      typing.add_typing(dig(node), parse_type("untyped"), nil)
+      typing.add_typing(chain, parse_type("untyped"), nil)
+      typing.add_typing(marker, parse_type("untyped"), nil)
+      typing.add_typing(latest, parse_type("::EQEntry?"), nil)
+      typing.add_typing(dig(node, 0, 0, 0, 0), parse_type("::EQHolder"), nil)
+      typing.add_typing(dig(node, 2), parse_type("::String"), nil)
+
+      latest_call = TypeInference::MethodCall::Typed.new(
+        node: latest,
+        context: TypeInference::MethodCall::TopLevelContext.new,
+        method_name: :latest,
+        receiver_type: parse_type("::EQHolder"),
+        actual_method_type: parse_method_type("() -> ::EQEntry?"),
+        method_decls: [],
+        return_type: parse_type("::EQEntry?")
+      )
+
+      env = type_env
+        .assign_local_variable(:holder, parse_type("::EQHolder"), nil)
+        .assign_local_variable(:suffix, parse_type("::String"), nil)
+        .add_pure_call(latest, latest_call, nil)
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: node)
+
+      # The untyped links are walked THROUGH — there is nothing to subtract from
+      # `untyped` — and the root, which does have a nilable type, is refined.
+      assert_equal parse_type("::EQEntry"), truthy_result.env[latest]
+      assert_equal parse_type("::EQEntry?"), falsy_result.env[latest]
+    end
+  end
+
   def test_pure_call
     with_checker(<<-RBS) do |checker|
 class Article
