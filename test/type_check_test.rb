@@ -2800,8 +2800,8 @@ class TypeCheckTest < Minitest::Test
                 character: 31
             severity: ERROR
             message: |-
-              Cannot assign a value of type `{ :id => ::Integer, ?:name => ::Integer }` to a variable of type `{ :id => ::Integer, ?:name => ::String }`
-                { :id => ::Integer, ?:name => ::Integer } <: { :id => ::Integer, ?:name => ::String }
+              Cannot assign a value of type `{ :id => 123, ?:name => ::Integer }` to a variable of type `{ :id => ::Integer, ?:name => ::String }`
+                { :id => 123, ?:name => ::Integer } <: { :id => ::Integer, ?:name => ::String }
                   ::Integer <: ::String
                     ::Numeric <: ::String
                       ::Object <: ::String
@@ -3174,6 +3174,18 @@ class TypeCheckTest < Minitest::Test
         ---
         - file: a.rb
           diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 6
+              end:
+                line: 1
+                character: 75
+            severity: ERROR
+            message: 'Assertion cannot hold: no relationship between inferred type (`{ ?:email
+              => ::String, :name => \"soutaro\" }`) and asserted type (`{ :name => ::String
+              }`)'
+            code: Ruby::FalseAssertion
           - range:
               start:
                 line: 1
@@ -9830,10 +9842,10 @@ class TypeCheckTest < Minitest::Test
                 character: 40
             severity: ERROR
             message: |-
-              Cannot allow block body have type `[::String, ::Integer]` because declared as type `::_KeyValue[::Symbol, ::Integer]`
-                [::String, ::Integer] <: ::_KeyValue[::Symbol, ::Integer]
-                  () -> [::String, ::Integer] <: () -> [::Symbol, ::Integer]
-                    [::String, ::Integer] <: [::Symbol, ::Integer]
+              Cannot allow block body have type `[::String, 1]` because declared as type `::_KeyValue[::Symbol, ::Integer]`
+                [::String, 1] <: ::_KeyValue[::Symbol, ::Integer]
+                  () -> [::String, 1] <: () -> [::Symbol, ::Integer]
+                    [::String, 1] <: [::Symbol, ::Integer]
                       ::String <: ::Symbol
                         ::Object <: ::Symbol
                           ::BasicObject <: ::Symbol
