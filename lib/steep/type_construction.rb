@@ -1719,7 +1719,8 @@ module Steep
             synthesize(child)
           end
 
-          add_typing(node, type: AST::Builtin::String.instance_type)
+          literal = node.type == :dstr ? folded_string_literal(node) : nil
+          add_typing(node, type: literal || AST::Builtin::String.instance_type)
 
         when :dsym
           each_child_node(node) do |child|
@@ -6721,6 +6722,28 @@ module Steep
       else
         typ
       end
+    end
+
+    def folded_string_literal(node)
+      text = +""
+
+      node.children.each do |child|
+        piece =
+          if child.type == :str
+            child.children[0]
+          else
+            type = typing.type_of(node: child)
+            return nil unless type.is_a?(AST::Types::Literal)
+
+            type.value.to_s
+          end
+
+        return nil unless piece.is_a?(String)
+
+        text << piece
+      end
+
+      AST::Types::Literal.new(value: text)
     end
 
     def test_literal_type(literal, hint)

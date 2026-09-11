@@ -504,6 +504,8 @@ module Steep
     def expand_alias: (AST::Types::t `type`) -> AST::Types::t
                     | [A] (AST::Types::t) { (AST::Types::t) -> A } -> A
 
+    def folded_string_literal: (Parser::AST::Node node) -> AST::Types::Literal?
+
     def test_literal_type: (untyped literal, untyped hint) -> (untyped | nil)
 
     def to_instance_type: (untyped `type`, ?args: untyped?) -> untyped

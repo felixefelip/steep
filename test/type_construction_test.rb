@@ -3948,6 +3948,40 @@ end
     end
   end
 
+  def test_dstr_folds_when_every_part_is_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: "admin"
+kind = (_ = nil)
+x = "role_#{kind}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"role_admin"'), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_dstr_stays_a_string_when_a_part_is_not_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var name: String
+name = (_ = nil)
+x = "def #{name}; end"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::String"), pair.context.type_env[:x]
+      end
+    end
+  end
+
   def test_type_case_array1
     with_checker do |checker|
       source = parse_ruby(<<EOF)
