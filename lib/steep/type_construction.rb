@@ -6756,7 +6756,7 @@ module Steep
         else
           literal_type = AST::Types::Literal.new(value: literal)
           if check_relation(sub_type: literal_type, super_type: hint).success?
-            unwrap(hint)
+            literal_type
           end
         end
       end

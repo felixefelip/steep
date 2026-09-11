@@ -4020,6 +4020,28 @@ EOF
     end
   end
 
+  def test_str_argument_keeps_its_literal
+    with_checker(<<~RBS) do |checker|
+      class Slots
+        def slot: (String name, Symbol kind, Integer size) -> void
+      end
+    RBS
+
+      source = parse_ruby(<<~EOF)
+        Slots.new.slot("content", :fast, 80)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        args = source.node.children.drop(2)
+        assert_equal [parse_type('"content"'), parse_type(":fast"), parse_type("80")],
+                     args.map {|node| typing.type_of(node: node) }
+      end
+    end
+  end
+
   def test_type_case_array1
     with_checker do |checker|
       source = parse_ruby(<<EOF)
@@ -4524,7 +4546,7 @@ y = case x
       source = parse_ruby(<<EOF)
 # @type var x: String | Integer
 
-y = case (x = "")
+y = case (x = (_ = nil))
 when String
   3
 else
@@ -5459,7 +5481,11 @@ EOF
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("::String"), pair.context.type_env[:a]
+        # In `a` the literal is hinted by `x`'s non-nil type and keeps it; the
+        # union holding both denotes exactly `::String`, and carrying the extra
+        # member costs nothing. In `b` the literal leads and has no hint, so it
+        # is `::String` as it always was.
+        assert_equal parse_type('(::String | "foo")'), pair.context.type_env[:a]
         assert_equal parse_type("::String"), pair.context.type_env[:b]
         assert_equal parse_type("untyped"), pair.context.type_env[:c]
       end
@@ -5584,7 +5610,7 @@ EOF
         type, _ = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("^(::String, ::Integer) -> ::Symbol"), type
+        assert_equal parse_type("^(::String, ::Integer) -> :foo"), type
       end
     end
   end
@@ -5605,7 +5631,7 @@ EOF
         type, _ = construction.synthesize(source.node)
 
         assert_typing_error typing, size: 1
-        assert_equal parse_type("^(untyped, ::Integer) -> ::Symbol"), type
+        assert_equal parse_type("^(untyped, ::Integer) -> :foo"), type
       end
     end
   end
@@ -6972,7 +6998,7 @@ end
         # rbs_infer-style consumers do) must not raise UnknownNodeError.
         def_node = source.node.children[2]
         or_asgn = def_node.children[2]
-        assert_equal parse_type("::String"), typing.type_of(node: or_asgn)
+        assert_equal parse_type('"foo"'), typing.type_of(node: or_asgn)
       end
     end
   end
@@ -6995,8 +7021,10 @@ a[1] &&= 4
         # typing table for the original node, not only the rewritten or/and node.
         or_asgn = source.node.children[1]
         and_asgn = source.node.children[2]
+        # `a[0] ||= 3` is `::Integer | 3`, which the union absorbs back to
+        # `::Integer`; `a[1] &&= 4` evaluates to the `4` it assigns.
         assert_equal parse_type("::Integer"), typing.type_of(node: or_asgn)
-        assert_equal parse_type("::Integer"), typing.type_of(node: and_asgn)
+        assert_equal parse_type("4"), typing.type_of(node: and_asgn)
       end
     end
   end
