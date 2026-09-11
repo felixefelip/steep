@@ -1719,7 +1719,8 @@ module Steep
             synthesize(child)
           end
 
-          add_typing(node, type: AST::Builtin::String.instance_type)
+          literal = node.type == :dstr ? folded_string_literal(node) : nil
+          add_typing(node, type: literal || AST::Builtin::String.instance_type)
 
         when :dsym
           each_child_node(node) do |child|
@@ -6721,6 +6722,36 @@ module Steep
       else
         typ
       end
+    end
+
+    # The text an interpolated string spells out, when every part of it is
+    # known: a `:str` part is its own bytes, and an interpolated part is known
+    # only when it already carries a literal type.
+    #
+    # Nothing is manufactured here. `test_literal_type` right below answers only
+    # when a hint asks for a literal, so a literal type exists in a program
+    # because a SIGNATURE said so — and this carries that through an
+    # interpolation instead of dropping it at the first `#{}`.
+    def folded_string_literal(node)
+      text = +""
+
+      node.children.each do |child|
+        piece =
+          if child.type == :str
+            child.children[0]
+          else
+            type = typing.type_of(node: child)
+            return nil unless type.is_a?(AST::Types::Literal)
+
+            type.value.to_s
+          end
+
+        return nil unless piece.is_a?(String)
+
+        text << piece
+      end
+
+      AST::Types::Literal.new(value: text)
     end
 
     def test_literal_type(literal, hint)

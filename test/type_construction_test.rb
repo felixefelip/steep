@@ -3948,6 +3948,46 @@ end
     end
   end
 
+  # An interpolation carries a literal type through, when the value it
+  # interpolates already has one. Nothing manufactures a literal here: the
+  # annotation is what declares it, exactly as `test_literal_type` requires.
+  def test_dstr_folds_when_every_part_is_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: "admin"
+kind = (_ = nil)
+x = "role_#{kind}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"role_admin"'), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  # And the case that decides whether this reaches a macro's `class_eval`: a
+  # plain `String` interpolated is still a `::String`, because Steep never
+  # derives a literal type on its own. A signature has to say so first.
+  def test_dstr_stays_a_string_when_a_part_is_not_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var name: String
+name = (_ = nil)
+x = "def #{name}; end"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::String"), pair.context.type_env[:x]
+      end
+    end
+  end
+
   def test_type_case_array1
     with_checker do |checker|
       source = parse_ruby(<<EOF)
