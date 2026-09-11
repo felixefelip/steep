@@ -3982,6 +3982,44 @@ EOF
     end
   end
 
+  def test_literal_bool_argument_keeps_its_literal
+    with_checker(<<~RBS) do |checker|
+      class Slots
+        def slot: (?flag: bool) -> void
+      end
+    RBS
+
+      source = parse_ruby(<<~EOF)
+        Slots.new.slot(flag: true)
+        Slots.new.slot(flag: false)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        args = source.node.children.map { |send| send.children.last.children.last.children.last }
+        assert_equal [parse_type("true"), parse_type("false")], args.map { |n| typing.type_of(node: n) }
+      end
+    end
+  end
+
+  def test_bool_without_a_hint_stays_bool
+    with_checker do |checker|
+      source = parse_ruby(<<~EOF)
+        x = true
+        x = false
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("bool"), pair.context.type_env[:x]
+      end
+    end
+  end
+
   def test_type_case_array1
     with_checker do |checker|
       source = parse_ruby(<<EOF)
