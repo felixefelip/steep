@@ -6724,14 +6724,6 @@ module Steep
       end
     end
 
-    # The text an interpolated string spells out, when every part of it is
-    # known: a `:str` part is its own bytes, and an interpolated part is known
-    # only when it already carries a literal type.
-    #
-    # Nothing is manufactured here. `test_literal_type` right below answers only
-    # when a hint asks for a literal, so a literal type exists in a program
-    # because a SIGNATURE said so — and this carries that through an
-    # interpolation instead of dropping it at the first `#{}`.
     def folded_string_literal(node)
       text = +""
 
