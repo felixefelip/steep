@@ -1689,10 +1689,24 @@ module Steep
         when :true, :false
           ty = node.type == :true ? AST::Types::Literal.new(value: true) : AST::Types::Literal.new(value: false)
 
-          case
-          when hint && check_relation(sub_type: ty, super_type: hint).success? && !hint.is_a?(AST::Types::Any) && !hint.is_a?(AST::Types::Top)
-            add_typing(node, type: unwrap(hint))
-          when condition
+          # The LITERAL, not the hint it fits into. A hint is an upper bound —
+          # what the position will ACCEPT — and answering with it throws away the
+          # narrower thing actually written there: `f(false)` against
+          # `(?flag: bool)` used to type its argument `bool`, so nothing
+          # downstream could tell it from `f(true)`.
+          #
+          # Sound by the relation being tested: the literal is a subtype of the
+          # hint, and every check made afterwards is `node type <: expected`, so
+          # a narrower node passes wherever the wider one did. Condition position
+          # already answered this way, for the same reason.
+          #
+          # With NEITHER a hint nor a condition there is nothing to narrow under,
+          # and `x = true` has to stay `bool` so a later `x = false` is not an
+          # error — which is why this is not simply always the literal.
+          fits_hint = hint && !hint.is_a?(AST::Types::Any) && !hint.is_a?(AST::Types::Top) &&
+            check_relation(sub_type: ty, super_type: hint).success?
+
+          if condition || fits_hint
             add_typing(node, type: ty)
           else
             add_typing(node, type: AST::Types::Boolean.instance)
