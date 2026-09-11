@@ -3982,9 +3982,6 @@ EOF
     end
   end
 
-  # The argument keeps the literal it was written as. It used to be typed
-  # `bool` — the parameter's declared type — which is what makes two call sites
-  # that pass opposite values indistinguishable to anything reading them.
   def test_literal_bool_argument_keeps_its_literal
     with_checker(<<~RBS) do |checker|
       class Slots
@@ -4007,9 +4004,6 @@ EOF
     end
   end
 
-  # And the guard that keeps it from being simply "always the literal": with no
-  # hint to narrow under, `true` stays `bool`, so a later `x = false` is not an
-  # error about a variable declared `true`.
   def test_bool_without_a_hint_stays_bool
     with_checker do |checker|
       source = parse_ruby(<<~EOF)
