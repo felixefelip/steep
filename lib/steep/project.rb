@@ -49,6 +49,17 @@ module Steep
       @callbacks ||= Callbacks.load(base_dir)
     end
 
+    # Per-argument-tuple return types (felixefelip/rbs_infer#345, stage S4).
+    # Loaded lazily from `sig/generated/.steep_specializations.yml`, which
+    # `Specializations::Runner` writes before the check.
+    def specializations
+      @specializations ||= Specializations.load(base_dir)
+    end
+
+    def reload_specializations!
+      @specializations = nil
+    end
+
     # Project-wide registry of forward-delegate methods, used by
     # `TypeConstruction` to inline delegation calls during narrowing
     # (felixefelip/steep#32). Built eagerly on first access via

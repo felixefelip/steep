@@ -668,7 +668,7 @@ module TypeConstructionHelper
   TypeInference = Steep::TypeInference #: singleton(TypeInference)
 
   # @rbs (Subtyping::Check, Source, ?cursor: untyped, ?contracts: Steep::Contracts::Store, ?postconditions: Steep::Postconditions::Store, ?callbacks: Steep::Callbacks::Store) { (TypeConstruction, Typing) -> void } -> void
-  def with_standard_construction(checker, source, cursor: nil, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, delegation_registry: Steep::Project::DelegationRegistry.new, constructor_bindings: Steep::Project::ConstructorBindingRegistry.new, return_forwarding: Steep::Project::ReturnForwardingRegistry.new, return_alias: Steep::Project::ReturnAliasRegistry.new, record_branch_envs: false)
+  def with_standard_construction(checker, source, cursor: nil, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, specializations: Steep::Specializations::Store.empty, delegation_registry: Steep::Project::DelegationRegistry.new, constructor_bindings: Steep::Project::ConstructorBindingRegistry.new, return_forwarding: Steep::Project::ReturnForwardingRegistry.new, return_alias: Steep::Project::ReturnAliasRegistry.new, record_branch_envs: false)
     annotations = source.annotations(block: source.node, factory: checker.factory, context: nil)
     resolver = RBS::Resolver::ConstantResolver.new(builder: checker.factory.definition_builder)
     const_env = ConstantEnv.new(factory: checker.factory, context: nil, resolver: resolver)
@@ -750,6 +750,7 @@ module TypeConstructionHelper
                                         contracts: contracts,
                                         postconditions: postconditions,
                                         callbacks: callbacks,
+                                        specializations: specializations,
                                         delegation_registry: delegation_registry,
                                         constructor_bindings: constructor_bindings,
                                         return_forwarding: return_forwarding,

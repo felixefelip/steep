@@ -52,6 +52,7 @@ module Steep
     attr_reader :contracts
     attr_reader :postconditions
     attr_reader :callbacks
+    attr_reader :specializations
     attr_reader :delegation_registry
     attr_reader :constructor_bindings
     attr_reader :return_forwarding
@@ -98,7 +99,7 @@ module Steep
       context.variable_context
     end
 
-    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty, postconditions: Postconditions::Store.empty, callbacks: Callbacks::Store.empty, delegation_registry:, constructor_bindings:, return_forwarding:, return_alias:)
+    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty, postconditions: Postconditions::Store.empty, callbacks: Callbacks::Store.empty, specializations:, delegation_registry:, constructor_bindings:, return_forwarding:, return_alias:)
       @checker = checker
       @source = source
       @annotations = annotations
@@ -107,6 +108,7 @@ module Steep
       @contracts = contracts
       @postconditions = postconditions
       @callbacks = callbacks
+      @specializations = specializations
       @delegation_registry = delegation_registry
       @constructor_bindings = constructor_bindings
       @return_forwarding = return_forwarding
@@ -123,6 +125,7 @@ module Steep
         contracts: contracts,
         postconditions: postconditions,
         callbacks: callbacks,
+        specializations: specializations,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -149,6 +152,7 @@ module Steep
           contracts: contracts,
           postconditions: postconditions,
           callbacks: callbacks,
+          specializations: specializations,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -295,6 +299,10 @@ module Steep
       annotation_method_type = annotations.method_type(method_name)
 
       method_type = annotation_method_type || definition_method_type
+
+      if method_type && (arguments = specialization_arguments(method_name, self_type))
+        method_type = arguments.substitute(method_type)
+      end
 
       unless method_type
         if definition
@@ -457,11 +465,27 @@ module Steep
         contracts: contracts,
         postconditions: postconditions,
         callbacks: callbacks,
+        specializations: specializations,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
         return_alias: return_alias
       )
+    end
+
+    # The argument types a specialization pass is checking this body under
+    # (felixefelip/rbs_infer#345, stage S4). nil during an ordinary type check.
+    def specialization_arguments(method_name, self_type)
+      return nil if specializations.empty?
+
+      key =
+        case self_type
+        when AST::Types::Name::Instance then "#{self_type.name}##{method_name}"
+        when AST::Types::Name::Singleton then "#{self_type.name}.#{method_name}"
+        end
+      return nil unless key
+
+      specializations.active_arguments(key.delete_prefix("::"))
     end
 
     def with_method_constr(method_name, node, args:, self_type:, definition:)
@@ -688,6 +712,7 @@ module Steep
         contracts: contracts,
         postconditions: postconditions,
         callbacks: callbacks,
+        specializations: specializations,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -786,6 +811,7 @@ module Steep
         contracts: contracts,
         postconditions: postconditions,
         callbacks: callbacks,
+        specializations: specializations,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -905,6 +931,7 @@ module Steep
         contracts: contracts,
         postconditions: postconditions,
         callbacks: callbacks,
+        specializations: specializations,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -2268,7 +2295,18 @@ module Steep
               end
             end
 
-            node_type = union_type_unify(true_pair&.type || AST::Builtin.nil_type, false_pair&.type || AST::Builtin.nil_type)
+            true_type = true_pair&.type || AST::Builtin.nil_type
+            false_type = false_pair&.type || AST::Builtin.nil_type
+
+            node_type =
+              if truthy.unreachable && !falsy.unreachable
+                false_type
+              elsif falsy.unreachable && !truthy.unreachable
+                true_type
+              else
+                union_type_unify(true_type, false_type)
+              end
+
             add_typing(node, type: node_type, constr: constr)
           end
 
@@ -3753,6 +3791,8 @@ module Steep
           end
 
           if call.is_a?(TypeInference::MethodCall::Typed)
+            call = specialized_call(node, call, block_params: block_params, block_body: block_body)
+
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
 
             # Phase 1: type subtraction on attribute write for intersection
@@ -5194,6 +5234,21 @@ module Steep
       nil
     end
 
+    # `call` with the return type recorded for the argument tuple this call site
+    # supplies (felixefelip/rbs_infer#345, stage S4), or `call` unchanged.
+    #
+    # A call that takes a block is left alone: the recorded return was computed
+    # for the arguments only, and a block can decide the return type on its own.
+    def specialized_call(node, call, block_params:, block_body:)
+      return call if specializations.empty? || block_params || block_body
+
+      key = Specializations.method_key(call.method_decls) or return call
+      arguments = Specializations::Arguments.from_send(node, typing) or return call
+      type = specializations.return_type(key, arguments.key, factory: checker.factory) or return call
+
+      call.with_return_type(type)
+    end
+
     def type_method_call(node, method_name:, receiver_type:, method:, arguments:, block_params:, block_body:, tapp:, hint:)
       # @type var fails: Array[[TypeInference::MethodCall::t, TypeConstruction]]
       fails = []
@@ -6395,6 +6450,7 @@ module Steep
         contracts: contracts,
         postconditions: postconditions,
         callbacks: callbacks,
+        specializations: specializations,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,

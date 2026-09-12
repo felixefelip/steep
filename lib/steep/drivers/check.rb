@@ -63,6 +63,23 @@ module Steep
         stderr.puts "Warning: precondition inference failed: #{e.class}: #{e.message}"
       end
 
+      def infer_specializations(project)
+        runner = Specializations::Runner.new(project)
+        methods = runner.run
+        runner.write(methods)
+
+        if methods.any?
+          stdout.puts Rainbow("# Inferred specializations (return types per argument tuple):").bold
+          methods.each do |key, entries|
+            entries.each_key { |arguments| stdout.puts "  #{key}#{arguments}" }
+          end
+          stdout.puts "  → #{project.relative_path(runner.output_path)}"
+          stdout.puts
+        end
+      rescue => e
+        stderr.puts "Warning: specialization inference failed: #{e.class}: #{e.message}"
+      end
+
       def infer_postconditions(project)
         runner = Postconditions::Runner.new(project)
         entries = runner.run
@@ -115,6 +132,8 @@ module Steep
         infer_postconditions(project)
         project.reload_postconditions!
         infer_contracts(project)
+        infer_specializations(project)
+        project.reload_specializations!
 
         params = build_typecheck_params(project)
 
@@ -182,6 +201,7 @@ module Steep
             contracts: project.contracts,
             postconditions: project.postconditions,
             callbacks: project.callbacks,
+            specializations: project.specializations,
             delegation_registry: project.delegation_registry,
             constructor_bindings: project.constructor_binding_registry,
             return_forwarding: project.return_forwarding_registry,
