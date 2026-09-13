@@ -1,4 +1,5 @@
 require_relative "test_helper"
+require "timeout"
 
 class SpecializationsTest < Minitest::Test
   include TestHelper
@@ -136,6 +137,153 @@ class SpecializationsTest < Minitest::Test
       methods = Specializations::Runner.run(setup_project)
 
       assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#label"))
+    end
+  end
+
+  # felixefelip/rbs_infer#345 stage S5. `relay` has no literal in its own body —
+  # it hands its parameter on — so its return is only specializable once `label`
+  # already is, which is a second generation.
+  def test_runner_carries_a_literal_across_two_calls
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: () -> String
+          def relay: (bool) -> String
+          def label: (bool) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def greet
+            relay(true)
+          end
+
+          def relay(loud)
+            label(loud)
+          end
+
+          def label(loud)
+            if loud
+              "LOUD"
+            else
+              "quiet"
+            end
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#label"))
+      assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#relay"))
+    end
+  end
+
+  # A tuple whose argument is a literal only because the call inside it
+  # specialized: `shout` passes `label(true)`, typed `String` until `label` has
+  # its entry and `"LOUD"` after.
+  def test_runner_grows_a_tuple_from_a_specialized_argument
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: () -> String
+          def shout: () -> String
+          def wrap: (String) -> String
+          def label: (bool) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def shout
+            wrap(label(true))
+          end
+
+          def wrap(text)
+            text
+          end
+
+          def label(loud)
+            if loud
+              "LOUD"
+            else
+              "quiet"
+            end
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ '("LOUD")' => '"LOUD"' }, methods.fetch("Bar#wrap"))
+    end
+  end
+
+  # The fixpoint's termination, which is the whole reason widening exists: every
+  # generation folds a longer literal and supplies a tuple never seen before.
+  def test_runner_terminates_on_a_body_that_folds_a_longer_literal
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def start: () -> String
+          def g: (String) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def start
+            g("a")
+          end
+
+          def g(s)
+            g("\#{s}x")
+          end
+        end
+      RUBY
+
+      methods = Timeout.timeout(60) { Specializations::Runner.run(setup_project) }
+
+      recorded = methods.fetch("Bar#g", {})
+      assert_operator recorded.size, :<=, Specializations::Runner::WIDEN_AFTER
+      recorded.each_key { |key| assert_operator key.length, :<=, Specializations::Runner::LITERAL_WIDTH }
+    end
+  end
+
+  # The other divergence, and the one a generation count was hiding: no new tuple
+  # is ever supplied — `f(flag)` calls itself with the same `(true)` — yet the
+  # return folds one more `x` every generation. The widening of a return that
+  # disagrees with the generation before is what stops it, and `String` is the
+  # honest answer: the program does not fix this value.
+  def test_runner_widens_a_return_that_keeps_growing
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def start: () -> String
+          def f: (bool) -> "a"
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def start
+            f(true)
+          end
+
+          def f(flag)
+            if flag
+              "\#{f(flag)}x"
+            else
+              "base"
+            end
+          end
+        end
+      RUBY
+
+      methods = Timeout.timeout(120) { Specializations::Runner.run(setup_project) }
+
+      # Nothing recorded is the honest answer: widening took the return back to
+      # what the declaration already gives, so there is no specialization to
+      # state. Without it the entry was `"axxxxxx"` — one `x` per generation, the
+      # value decided by where the loop was cut off.
+      assert_empty methods.fetch("Bar#f", {})
     end
   end
 

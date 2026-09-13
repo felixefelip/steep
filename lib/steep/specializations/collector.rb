@@ -35,6 +35,30 @@ module Steep
         result
       end
 
+      # Every project method the call sites in `typing` resolve to, literal
+      # argument or not. `call_sites` answers a subset — the calls that fix a
+      # value today — and a call that fixes none now may fix one once an inner
+      # call specializes, so what file to re-read is decided from this.
+      def self.callees(typing)
+        result = Set[] #: Set[String]
+
+        typing.each_typing do |node, _type|
+          next unless node.type == :send
+
+          call = begin
+                   typing.call_of(node: node)
+                 rescue Typing::UnknownNodeError
+                   next
+                 end
+          next unless call.is_a?(TypeInference::MethodCall::Typed)
+
+          key = Specializations.method_key(call.method_decls) or next
+          result << key
+        end
+
+        result
+      end
+
       def self.walk_defs(node, nesting, &block)
         return unless node.is_a?(Parser::AST::Node)
 
