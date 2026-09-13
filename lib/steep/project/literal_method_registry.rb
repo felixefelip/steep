@@ -9,6 +9,7 @@ module Steep
       LOOKUP_MUTATORS = Set[:include, :prepend, :extend]
       EVAL_METHODS = Set[:class_eval, :class_exec, :module_eval, :module_exec]
       METHOD_MUTATORS = Set[:define_method, :alias_method, :remove_method, :undef_method]
+      SEND_METHODS = Set[:send, :public_send, :__send__]
 
       def self.build(project)
         new.tap { |registry| registry.build(project) }
@@ -140,7 +141,7 @@ module Steep
           end
         when :send
           owner = forced_owner || nesting.join("::")
-          receiver, method_name, *arguments = node.children
+          receiver, method_name, arguments = call_parts(node)
 
           target = receiver ? core_receiver(receiver, nesting) : (owner if CORE_CLASSES.include?(owner))
 
@@ -185,7 +186,7 @@ module Steep
       def eval_owner(node, nesting)
         return nil unless node&.type == :send
 
-        receiver, method_name, = node.children
+        receiver, method_name, = call_parts(node)
         return nil unless EVAL_METHODS.include?(method_name)
 
         receiver ? core_receiver(receiver, nesting) : nil
@@ -194,10 +195,23 @@ module Steep
       def refinement_owner(node, nesting)
         return nil unless node&.type == :send
 
-        _receiver, method_name, target = node.children
+        _receiver, method_name, arguments = call_parts(node)
         return nil unless method_name == :refine
 
-        core_receiver(target, nesting)
+        core_receiver(arguments.first, nesting)
+      end
+
+      # `send`/`public_send`/`__send__` with a literal first argument names a
+      # statically knowable call. Normalize that shape before looking for
+      # method-table mutations so it cannot bypass the override registry.
+      def call_parts(node)
+        receiver, method_name, *arguments = node.children
+        return [receiver, method_name, arguments] unless SEND_METHODS.include?(method_name)
+
+        dispatched = literal_method_name(arguments.first)
+        return [receiver, method_name, arguments] unless dispatched
+
+        [receiver, dispatched.to_sym, arguments.drop(1)]
       end
 
       def core_receiver(node, nesting)

@@ -34,7 +34,18 @@ module Steep
         return nil if type.to_s.bytesize > MAX_LITERAL_WIDTH
 
         type
-      rescue StandardError
+      rescue ArgumentError, EncodingError, RangeError, ZeroDivisionError => exn
+        Steep.logger.debug do
+          "[literal_intrinsics] declined #{key || "(unresolved)"}: #{exn.class}: #{exn.message}"
+        end
+        nil
+      rescue StandardError => exn
+        # Folding is optional, so an evaluator bug must not take down type
+        # checking. Unlike expected runtime failures above, it must be visible.
+        Steep.logger.warn do
+          "[literal_intrinsics] unexpected failure for #{key || "(unresolved)"}: #{exn.class}: #{exn.message}"
+        end
+        Steep.logger.debug { exn.full_message(highlight: false) }
         nil
       end
 

@@ -64,6 +64,20 @@ class LiteralMethodRegistryTest < Minitest::Test
     assert registry.blocked?("::Symbol#to_s")
   end
 
+  def test_records_mutations_dispatched_through_literal_send
+    registry = registry_for(<<~RUBY)
+      String.send(:define_method, :upcase) { "override" }
+      Integer.__send__("alias_method", :succ, :abs)
+      Symbol.public_send(:class_eval) do
+        def to_s = "override"
+      end
+    RUBY
+
+    assert registry.blocked?("::String#upcase")
+    assert registry.blocked?("::Integer#succ")
+    assert registry.blocked?("::Symbol#to_s")
+  end
+
   def test_fails_closed_when_a_source_cannot_be_parsed
     registry = registry_for("class String\n  def")
 
