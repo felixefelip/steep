@@ -78,7 +78,7 @@ class LiteralMethodRegistryTest < Minitest::Test
       project = Steep::Project.new(steepfile_path: root + "Steepfile")
       Steep::Project::DSL.parse(project, <<~STEEPFILE)
         target :app do
-          check "app"
+          check "app/views/**/*.erb"
         end
       STEEPFILE
 

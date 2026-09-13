@@ -10,7 +10,7 @@ module Steep
       # latter matters to editor checks: an unsaved `class String` reopen must
       # disable folding before the file is written to disk.
       def literal_method_registry
-        @literal_method_registry ||= project.literal_method_registry.tap do |registry|
+        @literal_method_registry ||= project.literal_method_registry.dup.tap do |registry|
           source_files.each_value do |file|
             next if file.path.extname == ".erb"
 

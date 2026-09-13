@@ -111,6 +111,8 @@ RBS
     )
 
     assert service.literal_method_registry.blocked?("::String#upcase")
+    refute_same project.literal_method_registry, service.literal_method_registry
+    refute project.literal_method_registry.blocked?("::String#upcase")
 
     service.update(changes: { path => [ContentChange.string("class Other; end\n")] })
 
