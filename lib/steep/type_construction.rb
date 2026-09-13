@@ -304,7 +304,7 @@ module Steep
 
       method_type = annotation_method_type || definition_method_type
 
-      if method_type && (arguments = specialization_arguments(method_name, self_type))
+      if method_type && (arguments = specialization_arguments(node))
         method_type = arguments.substitute(method_type)
       end
 
@@ -480,17 +480,13 @@ module Steep
 
     # The argument types a specialization pass is checking this body under
     # (felixefelip/rbs_infer#345, stage S4). nil during an ordinary type check.
-    def specialization_arguments(method_name, self_type)
+    def specialization_arguments(node)
       return nil if specializations.empty?
 
-      key =
-        case self_type
-        when AST::Types::Name::Instance then "#{self_type.name}##{method_name}"
-        when AST::Types::Name::Singleton then "#{self_type.name}.#{method_name}"
-        end
-      return nil unless key
+      path = source.path or return nil
+      offset = node.loc.expression&.begin_pos or return nil
 
-      specializations.active_arguments(key.delete_prefix("::"))
+      specializations.active_arguments([path.to_s, offset])
     end
 
     def with_method_constr(method_name, node, args:, self_type:, definition:)

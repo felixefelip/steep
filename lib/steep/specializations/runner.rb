@@ -60,10 +60,16 @@ module Steep
 
       def initialize(project)
         @project = project
+        @evals = {} #: Hash[String, Array[String?]]
       end
+
+      # What each call site of a code-writing method defines there, by
+      # `path:line:column`. Filled by `run` alongside the return types.
+      attr_reader :evals
 
       def run
         methods = {} #: Hash[String, Hash[String, String]]
+        @evals = {}
         @project.targets.each { |target| specialize_target(target, methods) }
         methods
       end
@@ -72,11 +78,21 @@ module Steep
         @project.absolute_path(DEFAULT_OUTPUT_PATH)
       end
 
+      def evals_output_path
+        @project.absolute_path(Evals::DEFAULT_OUTPUT_PATH)
+      end
+
       def write(methods)
         if methods.empty?
           output_path.delete if output_path.file?
         else
           Writer.write(output_path, methods)
+        end
+
+        if @evals.empty?
+          evals_output_path.delete if evals_output_path.file?
+        else
+          Evals::Writer.write(evals_output_path, @evals)
         end
       end
 
@@ -85,8 +101,15 @@ module Steep
       def specialize_target(target, methods)
         context = load_target(target) or return
 
-        baselines, tuples, definitions, callees = collect(context, Store.empty)
-        return if tuples.empty?
+        writers = code_writers(context)
+        locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
+        baselines, tuples, definitions, callees = collect(context, Store.empty, locations, writers)
+        if tuples.empty?
+          # No return specializes, but a body that writes code can still be
+          # decided — by its defaults, or by having no arguments at all.
+          harvest_evals(context, Store.empty, locations, definitions)
+          return
+        end
 
         found = {} #: Hash[String, Hash[String, AST::Types::t]]
         widened = Set[] #: Set[[String, String]]
@@ -109,13 +132,15 @@ module Steep
 
           paths = affected_paths(callees, changed_keys(found, discovered))
           found = discovered
-          tuples = grow(grown, call_sites(context, store(found), definitions, paths), generation)
+          tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers), generation)
           generation += 1
         end
 
         found.each do |key, entries|
           (methods[key] ||= {}).merge!(entries.transform_values(&:to_s))
         end
+
+        harvest_evals(context, store(found), locations, definitions)
       end
 
       # `discovered` with every entry that disagrees with the generation before
@@ -176,6 +201,46 @@ module Steep
         [found, revealed]
       end
 
+      # What each call site of a code-writing method writes there, read off one
+      # last check of the body under that call's arguments. Separate from the
+      # loop above, and after it: a generation is a guess at the returns, and a
+      # body rendered from a guess would be rendered again, differently, by the
+      # next one.
+      #
+      # Rounds, like `specialize`: two macros in one file are read by one check,
+      # and only two tuples of the SAME macro cost two.
+      def harvest_evals(context, store, locations, definitions)
+        writing = locations.select { |key, _| definitions.key?(key) }
+        return if writing.empty?
+
+        defaults = writing.keys.to_h { |key| [key, Collector.defaults(definitions.fetch(key)[1])] }
+
+        rounds(writing.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
+          typings = check_definitions(context, store, with_defaults(active, defaults), definitions)
+
+          active.each do |key, arguments|
+            path, def_node = definitions.fetch(key)
+            typing = typings[path] or next
+
+            sources = Evals.sources(typing, def_node)
+            next if sources.empty?
+
+            writing.fetch(key).fetch(arguments).each { |site| @evals[site] = sources }
+          end
+        end
+      end
+
+      # A call omitting an optional parameter does not leave it open: the body
+      # runs with the definition's default, and which chunk the macro writes can
+      # turn on exactly that.
+      def with_defaults(active, defaults)
+        active.to_h do |key, arguments|
+          positionals, keywords = defaults.fetch(key)
+
+          [key, arguments.with_defaults(positionals: positionals, keywords: keywords)]
+        end
+      end
+
       # The tuples for the next generation: the ones already known, plus the ones
       # the returns just discovered revealed — a call whose argument is now a
       # literal because the call inside it specialized. Each new tuple is kept
@@ -209,19 +274,44 @@ module Steep
       # The argument tuples the call sites in `paths` supply when read under
       # `store`. Separate from `collect`, which also needs each body's type and so
       # keeps its own single sweep.
-      def call_sites(context, store, definitions, paths)
+      # The methods that define methods by evaluating a string, which is the
+      # only thing the eval harvest reads. A pure walk of trees already parsed,
+      # so a project without the idiom pays this and nothing else.
+      def code_writers(context)
+        writers = Set[] #: Set[String]
+
+        context.sources.each_value do |source|
+          Collector.definitions(source.node).each do |key, def_node|
+            writers << key if Evals.writes_code?(def_node)
+          end
+        end
+
+        writers
+      end
+
+      def call_sites(context, store, definitions, paths, locations, writers)
         tuples = {} #: Hash[String, Set[Arguments]]
 
         paths.each do |path|
           source = context.sources[path] or next
           typing = type_check(context, store, source, {})
 
-          Collector.call_sites(typing).each do |key, arguments|
-            (tuples[key] ||= Set.new).merge(arguments) if definitions.key?(key)
+          Collector.each_call_site(typing) do |key, arguments, node|
+            next unless definitions.key?(key)
+
+            (tuples[key] ||= Set.new) << arguments if arguments.literal?
+            record_location(locations, key, arguments, path, node) if writers.include?(key)
           end
         end
 
         tuples
+      end
+
+      def record_location(locations, key, arguments, path, node)
+        expression = node.loc.expression or return
+        site = "#{@project.relative_path(path)}:#{expression.line}:#{expression.column}"
+
+        ((locations[key] ||= {})[arguments] ||= Set.new) << site
       end
 
       # The methods whose entries this generation changed.
@@ -265,7 +355,7 @@ module Steep
         TargetContext.new(subtyping: status.subtyping, constant_resolver: status.constant_resolver, sources: sources)
       end
 
-      def collect(context, store)
+      def collect(context, store, locations, writers)
         baselines = {} #: Hash[String, String]
         tuples = {} #: Hash[String, Set[Arguments]]
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
@@ -280,14 +370,16 @@ module Steep
             baselines[key] = type.to_s if type
           end
 
-          Collector.call_sites(typing).each do |key, arguments|
-            (tuples[key] ||= Set.new).merge(arguments)
+          Collector.each_call_site(typing) do |key, arguments, node|
+            (tuples[key] ||= Set.new) << arguments if arguments.literal?
+            record_location(locations, key, arguments, path, node) if writers.include?(key)
           end
 
           callees[path] = Collector.callees(typing) if typing
         end
 
         tuples.select! { |key, _| definitions.key?(key) }
+        locations.select! { |key, _| definitions.key?(key) }
         [baselines, tuples, definitions, callees]
       end
 
@@ -305,10 +397,20 @@ module Steep
 
       def check_definitions(context, store, active, definitions)
         paths = active.keys.filter_map { |key| definitions[key]&.first }.uniq
+        by_node = active.to_h do |key, arguments|
+          path, def_node = definitions.fetch(key)
+          [node_key(path, def_node), arguments]
+        end
 
         paths.to_h do |path|
-          [path, type_check(context, store, context.sources.fetch(path), active)]
+          [path, type_check(context, store, context.sources.fetch(path), by_node)]
         end
+      end
+
+      # What the checker matches a body by, since the name it would derive from
+      # the self type is not always the name this pass keys the body under.
+      def node_key(path, def_node)
+        [path.to_s, def_node.loc.expression.begin_pos]
       end
 
       # `store` is always one this run computed, never the sidecar on disk:

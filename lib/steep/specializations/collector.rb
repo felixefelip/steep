@@ -16,6 +16,21 @@ module Steep
       def self.call_sites(typing)
         result = {} #: Hash[String, Set[Arguments]]
 
+        each_call_site(typing) do |key, arguments, _node|
+          # A tuple fixing no value specializes nothing: the body would be
+          # re-checked under the declaration it already has.
+          (result[key] ||= Set.new) << arguments if arguments.literal?
+        end
+
+        result
+      end
+
+      # The same call sites, with the node each one is, and without the literal
+      # filter `call_sites` applies. `call_sites` answers what to specialize; a
+      # consumer that has to point back at the source needs to know which call it
+      # was, and one that reads a body's control flow needs the calls that fix
+      # nothing too.
+      def self.each_call_site(typing)
         typing.each_typing do |node, _type|
           next unless node.type == :send
 
@@ -29,10 +44,45 @@ module Steep
           key = Specializations.method_key(call.method_decls) or next
           arguments = Arguments.from_send(node, typing) or next
 
-          (result[key] ||= Set.new) << arguments
+          yield key, arguments, node
+        end
+      end
+
+      # The values a definition gives the parameters a call may leave out, by
+      # position and by name, for the ones written as a literal. Anything else —
+      # a call, a constant, an expression — is left to the declaration, since a
+      # default this cannot read is not one it may guess at.
+      def self.defaults(def_node)
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        positionals = {} #: Hash[Integer, AST::Types::t]
+        keywords = {} #: Hash[Symbol, AST::Types::t]
+        return [positionals, keywords] unless args
+
+        index = 0
+        args.children.each do |arg|
+          case arg.type
+          when :arg, :procarg0
+            index += 1
+          when :optarg
+            type = default_type(arg.children[1])
+            positionals[index] = type if type
+            index += 1
+          when :kwoptarg
+            type = default_type(arg.children[1])
+            keywords[arg.children[0]] = type if type
+          end
         end
 
-        result
+        [positionals, keywords]
+      end
+
+      def self.default_type(node)
+        case node&.type
+        when :true then AST::Types::Literal.new(value: true)
+        when :false then AST::Types::Literal.new(value: false)
+        when :nil then AST::Builtin.nil_type
+        when :sym, :str, :int then AST::Types::Literal.new(value: node.children[0])
+        end
       end
 
       # Every project method the call sites in `typing` resolve to, literal
@@ -100,7 +150,7 @@ module Steep
         "#{prefix}::#{node.children[1]}"
       end
 
-      private_class_method :walk_defs, :walk_sclass_defs, :const_name
+      private_class_method :walk_defs, :walk_sclass_defs, :const_name, :default_type
     end
   end
 end

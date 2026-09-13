@@ -76,6 +76,13 @@ module Steep
           stdout.puts "  → #{project.relative_path(runner.output_path)}"
           stdout.puts
         end
+
+        if runner.evals.any?
+          stdout.puts Rainbow("# Inferred string evals (code a call site writes):").bold
+          runner.evals.each_key { |site| stdout.puts "  #{site}" }
+          stdout.puts "  → #{project.relative_path(runner.evals_output_path)}"
+          stdout.puts
+        end
       rescue => e
         stderr.puts "Warning: specialization inference failed: #{e.class}: #{e.message}"
       end

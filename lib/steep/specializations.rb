@@ -55,9 +55,13 @@ module Steep
       attr_reader :positionals, :keywords
 
       # The argument types of `node`, or nil when the call has a shape no tuple
-      # describes: a splat, a block pass, a non-symbol keyword. A call with no
-      # literal among its arguments answers nil too — specializing it would
-      # record the declaration back.
+      # describes: a splat, a block pass, a non-symbol keyword.
+      #
+      # A call fixing no literal is still described. Specializing its RETURN
+      # would only record the declaration back, so `Collector.call_sites` drops
+      # it — but a body that writes code is decided by its defaults and its
+      # control flow as much as by its arguments, and `slot()` with a literal
+      # default is as determined as `slot(:ro)`.
       def self.from_send(node, typing)
         _receiver, _name, *args = node.children
 
@@ -84,13 +88,31 @@ module Steep
           positionals << typing.type_of(node: arg)
         end
 
-        arguments = new(positionals: positionals, keywords: keywords)
-        arguments.literal? ? arguments : nil
+        new(positionals: positionals, keywords: keywords)
       end
 
-      def initialize(positionals:, keywords:)
+      def initialize(positionals:, keywords:, positional_defaults: {}, keyword_defaults: {})
         @positionals = positionals
         @keywords = keywords
+        @positional_defaults = positional_defaults
+        @keyword_defaults = keyword_defaults
+      end
+
+      # The same call, with the parameters it leaves out fixed to the values the
+      # definition gives them. A call that omits an optional does not leave that
+      # parameter open — it runs the body with the default, which is exactly the
+      # kind of fact a per-call-site check exists to use.
+      #
+      # `defaults` stays out of `key`, `==` and `hash`: they are a property of
+      # the DEFINITION, so two calls that spell the same tuple cannot disagree
+      # about them, and the send side computes its key from the call alone.
+      def with_defaults(positionals: {}, keywords: {})
+        Arguments.new(
+          positionals: @positionals,
+          keywords: @keywords,
+          positional_defaults: positionals,
+          keyword_defaults: keywords
+        )
       end
 
       def key
@@ -150,7 +172,7 @@ module Steep
           case param
           when Interface::Function::Params::PositionalParams::Required,
                Interface::Function::Params::PositionalParams::Optional
-            type = positionals[index]
+            type = positionals[index] || @positional_defaults[index]
             index += 1
             type ? param.map_type { type } : param
           else
@@ -161,7 +183,7 @@ module Steep
       end
 
       def substitute_keywords(params)
-        return params if keywords.empty?
+        return params if keywords.empty? && @keyword_defaults.empty?
 
         params.update(
           requireds: substitute_keyword_hash(params.requireds),
@@ -171,7 +193,7 @@ module Steep
 
       def substitute_keyword_hash(hash)
         hash.each_key.with_object({}) do |name, result|
-          result[name] = keywords.fetch(name, hash[name])
+          result[name] = keywords.fetch(name) { @keyword_defaults.fetch(name, hash[name]) }
         end
       end
     end
@@ -221,11 +243,18 @@ module Steep
         nil
       end
 
-      # The argument types a specialization pass is currently checking
-      # `method_key`'s body under — nil during an ordinary type check, where every
-      # body is checked once under its declaration.
-      def active_arguments(method_key)
-        @active[method_key]
+      # The argument types a specialization pass is currently checking one BODY
+      # under — nil during an ordinary type check, where every body is checked
+      # once under its declaration.
+      #
+      # Keyed by the `def` node (its file and its offset), not by the method's
+      # name. A name has to be derived from the self type at the point the body
+      # is checked, and the two part company exactly where this matters: a
+      # concern's `ClassMethods` is written as an instance method and reached as
+      # a singleton one, so a `@type instance:` annotation names the host and not
+      # the module the body is written in. The node is what the pass asked about.
+      def active_arguments(node_key)
+        @active[node_key]
       end
 
       def with_active(active)
