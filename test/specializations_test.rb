@@ -1,4 +1,5 @@
 require_relative "test_helper"
+require "timeout"
 
 class SpecializationsTest < Minitest::Test
   include TestHelper
@@ -136,6 +137,114 @@ class SpecializationsTest < Minitest::Test
       methods = Specializations::Runner.run(setup_project)
 
       assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#label"))
+    end
+  end
+
+  # felixefelip/rbs_infer#345 stage S5. `relay` has no literal in its own body —
+  # it hands its parameter on — so its return is only specializable once `label`
+  # already is, which is a second generation.
+  def test_runner_carries_a_literal_across_two_calls
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: () -> String
+          def relay: (bool) -> String
+          def label: (bool) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def greet
+            relay(true)
+          end
+
+          def relay(loud)
+            label(loud)
+          end
+
+          def label(loud)
+            if loud
+              "LOUD"
+            else
+              "quiet"
+            end
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#label"))
+      assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#relay"))
+    end
+  end
+
+  # A tuple whose argument is a literal only because the call inside it
+  # specialized: `shout` passes `label(true)`, typed `String` until `label` has
+  # its entry and `"LOUD"` after.
+  def test_runner_grows_a_tuple_from_a_specialized_argument
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: () -> String
+          def shout: () -> String
+          def wrap: (String) -> String
+          def label: (bool) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def shout
+            wrap(label(true))
+          end
+
+          def wrap(text)
+            text
+          end
+
+          def label(loud)
+            if loud
+              "LOUD"
+            else
+              "quiet"
+            end
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ '("LOUD")' => '"LOUD"' }, methods.fetch("Bar#wrap"))
+    end
+  end
+
+  # The fixpoint's termination, which is the whole reason widening exists: every
+  # generation folds a longer literal and supplies a tuple never seen before.
+  def test_runner_terminates_on_a_body_that_folds_a_longer_literal
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def start: () -> String
+          def g: (String) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def start
+            g("a")
+          end
+
+          def g(s)
+            g("\#{s}x")
+          end
+        end
+      RUBY
+
+      methods = Timeout.timeout(60) { Specializations::Runner.run(setup_project) }
+
+      recorded = methods.fetch("Bar#g", {})
+      assert_operator recorded.size, :<=, Specializations::Runner::WIDEN_AFTER
+      recorded.each_key { |key| assert_operator key.length, :<=, Specializations::Runner::LITERAL_WIDTH }
     end
   end
 
