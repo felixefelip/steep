@@ -240,11 +240,18 @@ module Steep
         nil
       end
 
-      # The argument types a specialization pass is currently checking
-      # `method_key`'s body under — nil during an ordinary type check, where every
-      # body is checked once under its declaration.
-      def active_arguments(method_key)
-        @active[method_key]
+      # The argument types a specialization pass is currently checking one BODY
+      # under — nil during an ordinary type check, where every body is checked
+      # once under its declaration.
+      #
+      # Keyed by the `def` node (its file and its offset), not by the method's
+      # name. A name has to be derived from the self type at the point the body
+      # is checked, and the two part company exactly where this matters: a
+      # concern's `ClassMethods` is written as an instance method and reached as
+      # a singleton one, so a `@type instance:` annotation names the host and not
+      # the module the body is written in. The node is what the pass asked about.
+      def active_arguments(node_key)
+        @active[node_key]
       end
 
       def with_active(active)

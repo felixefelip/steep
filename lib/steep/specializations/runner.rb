@@ -137,30 +137,6 @@ module Steep
         harvest_evals(context, store(found), locations, definitions)
       end
 
-      # What each call site of a code-writing method writes there, read off one
-      # last check of the body under that call's arguments. Separate from the
-      # loop above, and after it: a generation is a guess at the returns, and a
-      # body rendered from a guess would be rendered again, differently, by the
-      # next one.
-      def harvest_evals(context, store, locations, definitions)
-        locations.each do |key, by_arguments|
-          path, def_node = definitions.fetch(key)
-          next unless Evals.writes_code?(def_node)
-
-          positionals, keywords = Collector.defaults(def_node)
-
-          by_arguments.each do |arguments, sites|
-            active = { key => arguments.with_defaults(positionals: positionals, keywords: keywords) }
-            typing = check_definitions(context, store, active, definitions)[path] or next
-
-            sources = Evals.sources(typing, def_node)
-            next if sources.empty?
-
-            sites.each { |site| @evals[site] = sources }
-          end
-        end
-      end
-
       # `discovered` with every entry that disagrees with the generation before
       # widened, and every entry widening took back to what the declaration
       # already answers dropped. An entry written for the first time is left as
@@ -217,6 +193,46 @@ module Steep
         end
 
         [found, revealed]
+      end
+
+      # What each call site of a code-writing method writes there, read off one
+      # last check of the body under that call's arguments. Separate from the
+      # loop above, and after it: a generation is a guess at the returns, and a
+      # body rendered from a guess would be rendered again, differently, by the
+      # next one.
+      #
+      # Rounds, like `specialize`: two macros in one file are read by one check,
+      # and only two tuples of the SAME macro cost two.
+      def harvest_evals(context, store, locations, definitions)
+        writing = locations.select { |key, _| Evals.writes_code?(definitions.fetch(key)[1]) }
+        return if writing.empty?
+
+        defaults = writing.keys.to_h { |key| [key, Collector.defaults(definitions.fetch(key)[1])] }
+
+        rounds(writing.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
+          typings = check_definitions(context, store, with_defaults(active, defaults), definitions)
+
+          active.each do |key, arguments|
+            path, def_node = definitions.fetch(key)
+            typing = typings[path] or next
+
+            sources = Evals.sources(typing, def_node)
+            next if sources.empty?
+
+            writing.fetch(key).fetch(arguments).each { |site| @evals[site] = sources }
+          end
+        end
+      end
+
+      # A call omitting an optional parameter does not leave it open: the body
+      # runs with the definition's default, and which chunk the macro writes can
+      # turn on exactly that.
+      def with_defaults(active, defaults)
+        active.to_h do |key, arguments|
+          positionals, keywords = defaults.fetch(key)
+
+          [key, arguments.with_defaults(positionals: positionals, keywords: keywords)]
+        end
       end
 
       # The tuples for the next generation: the ones already known, plus the ones
@@ -360,10 +376,20 @@ module Steep
 
       def check_definitions(context, store, active, definitions)
         paths = active.keys.filter_map { |key| definitions[key]&.first }.uniq
+        by_node = active.to_h do |key, arguments|
+          path, def_node = definitions.fetch(key)
+          [node_key(path, def_node), arguments]
+        end
 
         paths.to_h do |path|
-          [path, type_check(context, store, context.sources.fetch(path), active)]
+          [path, type_check(context, store, context.sources.fetch(path), by_node)]
         end
+      end
+
+      # What the checker matches a body by, since the name it would derive from
+      # the self type is not always the name this pass keys the body under.
+      def node_key(path, def_node)
+        [path.to_s, def_node.loc.expression.begin_pos]
       end
 
       # `store` is always one this run computed, never the sidecar on disk:
