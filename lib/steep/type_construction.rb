@@ -53,6 +53,7 @@ module Steep
     attr_reader :postconditions
     attr_reader :callbacks
     attr_reader :specializations
+    attr_reader :literal_method_registry
     attr_reader :delegation_registry
     attr_reader :constructor_bindings
     attr_reader :return_forwarding
@@ -99,7 +100,7 @@ module Steep
       context.variable_context
     end
 
-    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty, postconditions: Postconditions::Store.empty, callbacks: Callbacks::Store.empty, specializations:, delegation_registry:, constructor_bindings:, return_forwarding:, return_alias:)
+    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty, postconditions: Postconditions::Store.empty, callbacks: Callbacks::Store.empty, specializations:, literal_method_registry:, delegation_registry:, constructor_bindings:, return_forwarding:, return_alias:)
       @checker = checker
       @source = source
       @annotations = annotations
@@ -109,6 +110,7 @@ module Steep
       @postconditions = postconditions
       @callbacks = callbacks
       @specializations = specializations
+      @literal_method_registry = literal_method_registry
       @delegation_registry = delegation_registry
       @constructor_bindings = constructor_bindings
       @return_forwarding = return_forwarding
@@ -126,6 +128,7 @@ module Steep
         postconditions: postconditions,
         callbacks: callbacks,
         specializations: specializations,
+        literal_method_registry: literal_method_registry,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -153,10 +156,11 @@ module Steep
           postconditions: postconditions,
           callbacks: callbacks,
           specializations: specializations,
-        delegation_registry: delegation_registry,
-        constructor_bindings: constructor_bindings,
-        return_forwarding: return_forwarding,
-        return_alias: return_alias
+          literal_method_registry: literal_method_registry,
+          delegation_registry: delegation_registry,
+          constructor_bindings: constructor_bindings,
+          return_forwarding: return_forwarding,
+          return_alias: return_alias
         )
       else
         self
@@ -466,6 +470,7 @@ module Steep
         postconditions: postconditions,
         callbacks: callbacks,
         specializations: specializations,
+        literal_method_registry: literal_method_registry,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -713,6 +718,7 @@ module Steep
         postconditions: postconditions,
         callbacks: callbacks,
         specializations: specializations,
+        literal_method_registry: literal_method_registry,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -812,6 +818,7 @@ module Steep
         postconditions: postconditions,
         callbacks: callbacks,
         specializations: specializations,
+        literal_method_registry: literal_method_registry,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -932,6 +939,7 @@ module Steep
         postconditions: postconditions,
         callbacks: callbacks,
         specializations: specializations,
+        literal_method_registry: literal_method_registry,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,
@@ -3791,7 +3799,16 @@ module Steep
           end
 
           if call.is_a?(TypeInference::MethodCall::Typed)
+            declared_return_type = call.return_type
             call = specialized_call(node, call, block_params: block_params, block_body: block_body)
+            unless block_params || block_body
+              call = constr.literal_intrinsic_call(
+                call,
+                receiver_type: receiver_type,
+                arguments: arguments,
+                declared_return_type: declared_return_type
+              )
+            end
 
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
 
@@ -5249,6 +5266,65 @@ module Steep
       call.with_return_type(type)
     end
 
+    # Replaces a successfully-dispatched core call's nominal return with its
+    # exact literal value when every operand is literal and the closed intrinsic
+    # table can evaluate it safely. The selected declaration remains the upper
+    # bound: even a buggy intrinsic cannot manufacture a return the RBS method
+    # does not permit.
+    def literal_intrinsic_call(call, receiver_type:, arguments:, declared_return_type:)
+      receiver_node = call.node.children[0]
+      receiver_type = literal_operand_type(receiver_node, receiver_type)
+
+      argument_types = arguments.map do |argument|
+        return call unless typing.has_type?(argument)
+
+        literal_operand_type(argument, typing.type_of(node: argument))
+      end
+
+      type = LiteralIntrinsics.fold(
+        call: call,
+        receiver_type: receiver_type,
+        argument_types: argument_types,
+        override_registry: literal_method_registry
+      ) or return call
+
+      return call unless check_relation(sub_type: type, super_type: declared_return_type).success?
+
+      call.with_return_type(type)
+    end
+
+    # Literal syntax remains exact information even when contextual typing has
+    # widened the node to its nominal class (for example, a method body checked
+    # against `String`). Specialized calls already arrive here as literal types;
+    # this only recovers values that are visibly literal in the source.
+    def literal_operand_type(node, inferred_type)
+      return inferred_type if inferred_type.is_a?(AST::Types::Literal)
+      return inferred_type unless node.is_a?(::Parser::AST::Node)
+
+      value =
+        case node.type
+        when :int, :str, :sym
+          node.children[0]
+        when :true
+          true
+        when :false
+          false
+        when :begin
+          if node.children.one?
+            nested = literal_operand_type(node.children[0], inferred_type)
+            nested.value if nested.is_a?(AST::Types::Literal)
+          end
+        when :send
+          receiver, method_name, *arguments = node.children
+          if arguments.empty? && receiver&.type == :int && [:+@, :-@].include?(method_name)
+            integer = receiver.children[0]
+            method_name == :-@ ? -integer : integer
+          end
+        end
+
+      value.nil? ? inferred_type : AST::Types::Literal.new(value: value)
+    end
+
     def type_method_call(node, method_name:, receiver_type:, method:, arguments:, block_params:, block_body:, tapp:, hint:)
       # @type var fails: Array[[TypeInference::MethodCall::t, TypeConstruction]]
       fails = []
@@ -6451,6 +6527,7 @@ module Steep
         postconditions: postconditions,
         callbacks: callbacks,
         specializations: specializations,
+        literal_method_registry: literal_method_registry,
         delegation_registry: delegation_registry,
         constructor_bindings: constructor_bindings,
         return_forwarding: return_forwarding,

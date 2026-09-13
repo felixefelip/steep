@@ -55,6 +55,7 @@ require "steep/ast/node/type_application"
 require "steep/ast/builtin"
 require "steep/ast/types/factory"
 require "steep/ast/ignore"
+require "steep/literal_intrinsics"
 
 require "steep/range_extension"
 
@@ -109,6 +110,7 @@ require "steep/project/return_forwarding_registry"
 require "steep/contracts/alias_resolver"
 require "steep/type_inference/return_alias_analyzer"
 require "steep/project/return_alias_registry"
+require "steep/project/literal_method_registry"
 
 require "steep/locator.rb"
 

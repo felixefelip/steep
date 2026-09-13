@@ -6,6 +6,19 @@ module Steep
       attr_reader :source_files
       attr_reader :signature_services
 
+      # The on-disk project index plus every in-memory source buffer. The
+      # latter matters to editor checks: an unsaved `class String` reopen must
+      # disable folding before the file is written to disk.
+      def literal_method_registry
+        @literal_method_registry ||= project.literal_method_registry.dup.tap do |registry|
+          source_files.each_value do |file|
+            next if file.path.extname == ".erb"
+
+            registry.ingest_source(file.content, path_name: file.path.to_s)
+          end
+        end
+      end
+
       class SourceFile
         attr_reader :path
         attr_reader :target
@@ -341,6 +354,8 @@ module Steep
         project.invalidate_constructor_binding_registry! if any_change
         project.invalidate_return_forwarding_registry! if any_change
         project.invalidate_return_alias_registry! if any_change
+        project.invalidate_literal_method_registry! if any_change
+        @literal_method_registry = nil if any_change
       end
 
       def type_check_file(target:, subtyping:, path:, text:)
@@ -356,6 +371,7 @@ module Steep
             postconditions: project.postconditions,
             callbacks: project.callbacks,
             specializations: project.specializations,
+            literal_method_registry: literal_method_registry,
             delegation_registry: project.delegation_registry,
             constructor_bindings: project.constructor_binding_registry,
             return_forwarding: project.return_forwarding_registry,
@@ -393,6 +409,7 @@ module Steep
         postconditions:,
         callbacks:,
         specializations:,
+        literal_method_registry:,
         delegation_registry:,
         constructor_bindings:,
         return_forwarding:,
@@ -517,6 +534,7 @@ module Steep
           postconditions: postconditions,
           callbacks: callbacks,
           specializations: specializations,
+          literal_method_registry: literal_method_registry,
           delegation_registry: delegation_registry,
           constructor_bindings: constructor_bindings,
           return_forwarding: return_forwarding,

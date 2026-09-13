@@ -113,6 +113,17 @@ module Steep
       @return_alias_registry = nil
     end
 
+    # Ruby-source implementations that shadow a closed-table literal
+    # intrinsic. RBS names the selected owner, but cannot distinguish the core
+    # body from a project reopen of that same owner.
+    def literal_method_registry
+      @literal_method_registry ||= LiteralMethodRegistry.build(self)
+    end
+
+    def invalidate_literal_method_registry!
+      @literal_method_registry = nil
+    end
+
     def relative_path(path)
       path.relative_path_from(base_dir)
     rescue ArgumentError
