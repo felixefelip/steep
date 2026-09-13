@@ -281,7 +281,7 @@ module Steep
         writers = Set[] #: Set[String]
 
         context.sources.each_value do |source|
-          Collector.definitions(source.node).each do |key, def_node|
+          Collector.definitions(source).each do |key, def_node|
             writers << key if Evals.writes_code?(def_node)
           end
         end
@@ -364,7 +364,7 @@ module Steep
         context.sources.each do |path, source|
           typing = type_check(context, store, source, {})
 
-          Collector.definitions(source.node).each do |key, def_node|
+          Collector.definitions(source).each do |key, def_node|
             definitions[key] = [path, def_node]
             type = body_type(typing, def_node)
             baselines[key] = type.to_s if type

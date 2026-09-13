@@ -466,6 +466,47 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # `class_methods do … end` puts the def lexically in the concern and the
+  # methods on its `ClassMethods`. `@implements`, injected from the module
+  # self-type sidecar, is what says so — without reading it the def is keyed
+  # under a name no call site ever resolves to, and the body is never
+  # specialized.
+  def test_a_def_inside_an_implementing_block_is_keyed_by_that_module
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Attribute
+          def self.class_methods: () { () -> void } -> void
+
+          module ClassMethods
+            def has_rich_text: (Symbol name) -> untyped
+          end
+        end
+
+        class Article
+          extend Attribute::ClassMethods
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Attribute
+          def self.class_methods(&block)
+          end
+
+          class_methods do # @implements ::Attribute::ClassMethods
+            def has_rich_text(name) # @type self: singleton(::Article) & ::Attribute::ClassMethods
+              class_eval "def \#{name}; end"
+            end
+          end
+        end
+
+        class Article
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content; end"], evals_of(setup_project).fetch("app/base.rb:13:2")
+    end
+  end
+
   def test_write_drops_a_stale_sidecar
     in_tmpdir do
       write("sig/base.rbs", MACRO_RBS)

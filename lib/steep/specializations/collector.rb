@@ -4,10 +4,11 @@ module Steep
     # defines, and the argument tuples its call sites supply to methods the
     # project defines elsewhere.
     class Collector
-      # `{ "Foo#bar" => def node }` for every method defined in `node`.
-      def self.definitions(node)
+      # `{ "Foo#bar" => def node }` for every method defined in `source`.
+      def self.definitions(source)
         result = {} #: Hash[String, Parser::AST::Node]
-        walk_defs(node, []) { |key, def_node| result[key] = def_node } if node
+        node = source.node
+        walk_defs(node, [], source) { |key, def_node| result[key] = def_node } if node
         result
       end
 
@@ -109,7 +110,7 @@ module Steep
         result
       end
 
-      def self.walk_defs(node, nesting, &block)
+      def self.walk_defs(node, nesting, source, &block)
         return unless node.is_a?(Parser::AST::Node)
 
         case node.type
@@ -117,25 +118,59 @@ module Steep
           name = const_name(node.children[0])
           inner = name ? nesting + [name] : nesting
           body = node.type == :class ? node.children[2] : node.children[1]
-          walk_defs(body, inner, &block)
+          walk_defs(body, inner, source, &block)
+        when :block
+          walk_block_defs(node, nesting, source, &block)
         when :def
           yield "#{nesting.join("::")}##{node.children[0]}", node unless nesting.empty?
         when :defs
           yield "#{nesting.join("::")}.#{node.children[1]}", node unless nesting.empty?
         when :sclass
-          walk_sclass_defs(node, nesting, &block)
+          walk_sclass_defs(node, nesting, source, &block)
         else
-          node.children.each { |child| walk_defs(child, nesting, &block) }
+          node.children.each { |child| walk_defs(child, nesting, source, &block) }
+        end
+      end
+
+      # A DSL block whose body has a definee of its own — `class_methods do … end`
+      # is the one that matters here, and `class_eval` on a stored block is the
+      # other. Where the methods land is not where the call is WRITTEN, and
+      # `@implements` is what says so; the annotation is injected from the module
+      # self-type sidecar, the same fact that gives the body its `self`.
+      #
+      # Without this a `def` inside `class_methods do` is keyed by the concern
+      # that wrote the block, while every call site resolves to the
+      # `ClassMethods` the method actually lives on — two names that never meet,
+      # so the body is never specialized.
+      def self.walk_block_defs(node, nesting, source, &block)
+        modules = implemented_modules(source, node)
+        if modules.empty?
+          node.children.each { |child| walk_defs(child, nesting, source, &block) }
+          return
+        end
+
+        modules.each do |mod|
+          name = mod.name.to_s.delete_prefix("::")
+
+          walk_defs(node.children[2], [name], source) do |key, def_node|
+            yield mod.singleton? ? key.sub("#", ".") : key, def_node
+          end
+        end
+      end
+
+      def self.implemented_modules(source, node)
+        (source.mapping[node] || []).flat_map do |annotation|
+          annotation.is_a?(AST::Annotation::Implements) ? annotation.names : []
         end
       end
 
       # `class << self` holds singleton methods of the enclosing class, written
       # as plain `def`s. `class << obj` holds singleton methods of that object,
       # which no class name keys.
-      def self.walk_sclass_defs(node, nesting, &block)
+      def self.walk_sclass_defs(node, nesting, source, &block)
         return unless node.children[0].type == :self
 
-        walk_defs(node.children[1], nesting) do |key, def_node|
+        walk_defs(node.children[1], nesting, source) do |key, def_node|
           yield key.sub("#", "."), def_node
         end
       end
@@ -150,7 +185,8 @@ module Steep
         "#{prefix}::#{node.children[1]}"
       end
 
-      private_class_method :walk_defs, :walk_sclass_defs, :const_name, :default_type
+      private_class_method :walk_defs, :walk_block_defs, :implemented_modules, :walk_sclass_defs,
+                           :const_name, :default_type
     end
   end
 end
