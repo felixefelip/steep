@@ -31,6 +31,15 @@ module Steep
         Store.empty
       end
 
+      # `type` with every literal replaced by the class it instantiates. The
+      # widening operator of the fixpoint: a value that keeps changing is a value
+      # the program does not fix, and its class is what it does fix.
+      def widen_literals(type)
+        return type.back_type if type.is_a?(AST::Types::Literal)
+
+        type.map_type { |child| widen_literals(child) }
+      end
+
       # `"Foo#bar"` / `"Foo.bar"` for a resolved call, matching how a `def` in the
       # source keys itself. nil when the call resolves to more than one
       # declaration — the argument tuple then names no single body to specialize.

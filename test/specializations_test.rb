@@ -248,6 +248,45 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # The other divergence, and the one a generation count was hiding: no new tuple
+  # is ever supplied — `f(flag)` calls itself with the same `(true)` — yet the
+  # return folds one more `x` every generation. The widening of a return that
+  # disagrees with the generation before is what stops it, and `String` is the
+  # honest answer: the program does not fix this value.
+  def test_runner_widens_a_return_that_keeps_growing
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def start: () -> String
+          def f: (bool) -> "a"
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def start
+            f(true)
+          end
+
+          def f(flag)
+            if flag
+              "\#{f(flag)}x"
+            else
+              "base"
+            end
+          end
+        end
+      RUBY
+
+      methods = Timeout.timeout(120) { Specializations::Runner.run(setup_project) }
+
+      # Nothing recorded is the honest answer: widening took the return back to
+      # what the declaration already gives, so there is no specialization to
+      # state. Without it the entry was `"axxxxxx"` — one `x` per generation, the
+      # value decided by where the loop was cut off.
+      assert_empty methods.fetch("Bar#f", {})
+    end
+  end
+
   def test_runner_writes_and_deletes_the_sidecar
     in_tmpdir do
       write("sig/foo.rbs", FIXTURE_RBS)

@@ -15,20 +15,25 @@ module Steep
     # parameters it substitutes and at the sends inside the body, until the
     # returns stop changing (felixefelip/rbs_infer#345, stage S5).
     #
-    # Iterating over literals does not terminate by itself — `def g(s) =
-    # g("#{s}x")` folds a longer literal every generation, each one a tuple never
-    # seen before. So a tuple a later generation discovers is WIDENED: its
-    # literals rise to the classes they are instances of, past `WIDEN_AFTER`
-    # generations or past `LITERAL_WIDTH` characters. A tuple that fixes no value
-    # specializes nothing, which is what ends the chain.
+    # Iterating over literals does not terminate by itself, and it diverges on
+    # both sides of a specialization:
+    #
+    #   def g(s) = g("#{s}x")          # a longer ARGUMENT every generation
+    #   def f(flag) = "#{f(flag)}x"    # a longer RETURN, on one fixed tuple
+    #
+    # Widening answers both: a literal rises to the class it instantiates, which
+    # is what a program that does not fix a value does fix. A tuple a later
+    # generation discovers widens past `WIDEN_AFTER` generations or past
+    # `LITERAL_WIDTH` characters, and a tuple fixing no value specializes
+    # nothing. A return widens as soon as it DISAGREES with the generation
+    # before, because one that keeps moving is not converging on a value.
+    #
+    # Widening is remembered per entry, so each side of one is bounded — a tuple
+    # set that stops growing, a return that widens once and stays widened — and
+    # the loop runs until nothing changes rather than until a generation count is
+    # spent.
     class Runner
       DEFAULT_OUTPUT_PATH = Pathname("sig/generated/.steep_specializations.yml").freeze
-
-      # A chain longer than this stops being specialized, whatever it would have
-      # proved. Five is well past the depth a chain of literal-passing calls
-      # reaches in practice (Example69's is three) and keeps a pathological
-      # project bounded.
-      MAX_GENERATIONS = 6
 
       # Generations whose newly discovered tuples are still taken literally. Past
       # it every new tuple widens, so a body that folds a longer literal each
@@ -83,22 +88,60 @@ module Steep
         baselines, tuples, definitions, callees = collect(context, Store.empty)
         return if tuples.empty?
 
-        found = {} #: Hash[String, Hash[String, String]]
+        found = {} #: Hash[String, Hash[String, AST::Types::t]]
+        widened = Set[] #: Set[[String, String]]
+        seen = Set[] #: Set[Hash[String, Hash[String, AST::Types::t]]]
+        generation = 0
 
-        MAX_GENERATIONS.times do |generation|
+        loop do
           discovered, revealed = specialize(context, store(found), baselines, tuples, definitions)
+          discovered = settle(found, discovered, baselines, widened)
           grown = grow(tuples, revealed, generation)
           # Both have to settle, not just the returns: a generation that finds no
           # new return can still fix a tuple inside a body it re-checked, and that
           # tuple is what the next generation specializes.
           break if discovered == found && grown == tuples
+          # A state seen before cannot lead anywhere a later generation has not
+          # already been. Widening bounds an entry's literals; this bounds the one
+          # shape it says nothing about — a return alternating between two
+          # CLASSES, which no amount of widening settles.
+          break unless seen.add?(discovered)
 
           paths = affected_paths(callees, changed_keys(found, discovered))
           found = discovered
           tuples = grow(grown, call_sites(context, store(found), definitions, paths), generation)
+          generation += 1
         end
 
-        found.each { |key, entries| (methods[key] ||= {}).merge!(entries) }
+        found.each do |key, entries|
+          (methods[key] ||= {}).merge!(entries.transform_values(&:to_s))
+        end
+      end
+
+      # `discovered` with every entry that disagrees with the generation before
+      # widened, and every entry widening took back to what the declaration
+      # already answers dropped. An entry written for the first time is left as
+      # found: a body just reached is converging, not oscillating.
+      #
+      # `widened` remembers which entries have widened, and that memory is what
+      # makes the loop terminate rather than cycle. Widening only by comparison
+      # with the generation before forgets: a widened entry that the next
+      # generation drops comes back literal, and the result then depends on which
+      # generation the loop happens to stop at.
+      def settle(found, discovered, baselines, widened)
+        discovered.each_with_object({}) do |(key, entries), result|
+          settled = entries.filter_map do |tuple, type|
+            previous = found.dig(key, tuple)
+            if widened.include?([key, tuple]) || (previous && previous != type)
+              widened << [key, tuple]
+              type = Specializations.widen_literals(type)
+            end
+
+            [tuple, type] unless type.to_s == baselines[key]
+          end.to_h
+
+          result[key] = settled unless settled.empty?
+        end
       end
 
       # The returns every known tuple produces, read under `store` — the
@@ -107,7 +150,7 @@ module Steep
       # `relay(loud)` forwarding to `label(loud)` fixes `label(true)` only here,
       # where `loud` is `true`; a sweep that substitutes nothing cannot see it.
       def specialize(context, store, baselines, tuples, definitions)
-        found = {} #: Hash[String, Hash[String, String]]
+        found = {} #: Hash[String, Hash[String, AST::Types::t]]
         revealed = {} #: Hash[String, Set[Arguments]]
 
         rounds(tuples).each do |active|
@@ -118,7 +161,7 @@ module Steep
             type = body_type(typings[path], def_node) or next
             next if type.to_s == baselines[key]
 
-            (found[key] ||= {})[arguments.key] = type.to_s
+            (found[key] ||= {})[arguments.key] = type
           end
 
           typings.each_value do |typing|
@@ -160,7 +203,7 @@ module Steep
       end
 
       def store(methods)
-        Store.new(methods: methods, source: nil)
+        Store.new(methods: methods.transform_values { |entries| entries.transform_values(&:to_s) }, source: nil)
       end
 
       # The argument tuples the call sites in `paths` supply when read under
