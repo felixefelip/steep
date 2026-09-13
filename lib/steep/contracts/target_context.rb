@@ -80,7 +80,7 @@ module Steep
           contracts: contracts,
           postconditions: project.postconditions,
           callbacks: project.callbacks,
-            specializations: project.specializations,
+          specializations: project.specializations,
           delegation_registry: project.delegation_registry,
           constructor_bindings: project.constructor_binding_registry,
           return_forwarding: project.return_forwarding_registry,
