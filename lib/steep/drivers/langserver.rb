@@ -61,6 +61,8 @@ module Steep
           infer_postconditions(@project)
           @project.reload_postconditions!
           infer_contracts(@project)
+          infer_specializations(@project)
+          @project.reload_specializations!
         else
           Steep.logger.info { "Skipping sidecar inference; using the stores already on disk" }
         end
@@ -132,6 +134,17 @@ module Steep
         end
       rescue => e
         Steep.logger.warn "Precondition inference failed: #{e.class}: #{e.message}"
+      end
+
+      def infer_specializations(project)
+        runner = Specializations::Runner.new(project)
+        methods = runner.run
+        runner.write(methods)
+        Steep.logger.info do
+          "Inferred #{methods.values.sum(&:size)} specialization(s); sidecar #{methods.any? ? "at #{project.relative_path(runner.output_path)}" : (runner.output_path.file? ? "kept" : "absent")}"
+        end
+      rescue => e
+        Steep.logger.warn "Specialization inference failed: #{e.class}: #{e.message}"
       end
 
       def infer_postconditions(project)
