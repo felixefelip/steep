@@ -279,7 +279,7 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
-  def test_a_call_that_fixes_no_literal_records_nothing
+  def test_a_call_whose_argument_is_not_fixed_records_a_hole
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
         class Base
@@ -306,7 +306,163 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
-      assert_empty evals_of(setup_project)
+      assert_equal [nil], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  # The failure the whole idea has to avoid: with the condition still open both
+  # branches fold, and a consumer handed both writes a class two methods where
+  # runtime has one. Neither is claimed.
+  def test_a_condition_the_call_site_does_not_decide_records_holes
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, ?writable: bool) -> untyped
+          def self.dynamic: () -> bool
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, writable: true)
+            if writable
+              class_eval "def \#{name}_rw; end"
+            else
+              class_eval "def \#{name}_ro; end"
+            end
+          end
+
+          def self.dynamic
+            true
+          end
+        end
+
+        class Article < Base
+          slot :size, writable: dynamic
+        end
+      RUBY
+
+      assert_equal [nil, nil], evals_of(setup_project).fetch("app/base.rb:16:2")
+    end
+  end
+
+  # A `case` branch runs only when every other one is dead. Two live branches
+  # decide nothing, however many of the rest the checker ruled out.
+  def test_a_case_with_two_live_branches_records_holes
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, Symbol mode) -> untyped
+          def self.mode: () -> Symbol
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, mode)
+            case mode
+            when :ro then class_eval "def \#{name}_ro; end"
+            when :rw then class_eval "def \#{name}_rw; end"
+            end
+          end
+
+          def self.mode
+            :ro
+          end
+        end
+
+        class Article < Base
+          slot :size, mode
+        end
+      RUBY
+
+      assert_equal [nil, nil], evals_of(setup_project).fetch("app/base.rb:15:2")
+    end
+  end
+
+  # A lambda the macro returns writes nothing until something calls it, and
+  # nothing here knows whether anything does.
+  def test_a_body_the_call_does_not_run_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}_now; end"
+            -> { class_eval "def \#{name}_never; end" }
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content_now; end"], evals_of(setup_project).fetch("app/base.rb:9:2")
+    end
+  end
+
+  # A macro taking no arguments fixes everything it has, so there is nothing for
+  # the literal gate on RETURN specialization to say about it.
+  def test_a_call_with_no_arguments_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.install: () -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.install
+            class_eval "def installed; end"
+          end
+        end
+
+        class Article < Base
+          install
+        end
+      RUBY
+
+      assert_equal ["def installed; end"], evals_of(setup_project).fetch("app/base.rb:8:2")
+    end
+  end
+
+  # And a call that passes nothing still takes its defaults, which is enough to
+  # decide a branch on its own.
+  def test_a_default_alone_decides_a_branch
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (?writable: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(writable: false)
+            if writable
+              class_eval "def size_rw; end"
+            else
+              class_eval "def size_ro; end"
+            end
+          end
+        end
+
+        class Article < Base
+          slot
+        end
+      RUBY
+
+      assert_equal ["def size_ro; end"], evals_of(setup_project).fetch("app/base.rb:12:2")
     end
   end
 

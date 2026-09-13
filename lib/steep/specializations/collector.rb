@@ -17,15 +17,19 @@ module Steep
         result = {} #: Hash[String, Set[Arguments]]
 
         each_call_site(typing) do |key, arguments, _node|
-          (result[key] ||= Set.new) << arguments
+          # A tuple fixing no value specializes nothing: the body would be
+          # re-checked under the declaration it already has.
+          (result[key] ||= Set.new) << arguments if arguments.literal?
         end
 
         result
       end
 
-      # The same call sites, with the node each one is. `call_sites` answers what
-      # to specialize; a consumer that has to point back at the source needs to
-      # know which call it was.
+      # The same call sites, with the node each one is, and without the literal
+      # filter `call_sites` applies. `call_sites` answers what to specialize; a
+      # consumer that has to point back at the source needs to know which call it
+      # was, and one that reads a body's control flow needs the calls that fix
+      # nothing too.
       def self.each_call_site(typing)
         typing.each_typing do |node, _type|
           next unless node.type == :send

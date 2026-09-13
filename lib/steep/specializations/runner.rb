@@ -101,9 +101,15 @@ module Steep
       def specialize_target(target, methods)
         context = load_target(target) or return
 
+        writers = code_writers(context)
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, definitions, callees = collect(context, Store.empty, locations)
-        return if tuples.empty?
+        baselines, tuples, definitions, callees = collect(context, Store.empty, locations, writers)
+        if tuples.empty?
+          # No return specializes, but a body that writes code can still be
+          # decided — by its defaults, or by having no arguments at all.
+          harvest_evals(context, Store.empty, locations, definitions)
+          return
+        end
 
         found = {} #: Hash[String, Hash[String, AST::Types::t]]
         widened = Set[] #: Set[[String, String]]
@@ -126,7 +132,7 @@ module Steep
 
           paths = affected_paths(callees, changed_keys(found, discovered))
           found = discovered
-          tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations), generation)
+          tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers), generation)
           generation += 1
         end
 
@@ -204,7 +210,7 @@ module Steep
       # Rounds, like `specialize`: two macros in one file are read by one check,
       # and only two tuples of the SAME macro cost two.
       def harvest_evals(context, store, locations, definitions)
-        writing = locations.select { |key, _| Evals.writes_code?(definitions.fetch(key)[1]) }
+        writing = locations.select { |key, _| definitions.key?(key) }
         return if writing.empty?
 
         defaults = writing.keys.to_h { |key| [key, Collector.defaults(definitions.fetch(key)[1])] }
@@ -268,7 +274,22 @@ module Steep
       # The argument tuples the call sites in `paths` supply when read under
       # `store`. Separate from `collect`, which also needs each body's type and so
       # keeps its own single sweep.
-      def call_sites(context, store, definitions, paths, locations)
+      # The methods that define methods by evaluating a string, which is the
+      # only thing the eval harvest reads. A pure walk of trees already parsed,
+      # so a project without the idiom pays this and nothing else.
+      def code_writers(context)
+        writers = Set[] #: Set[String]
+
+        context.sources.each_value do |source|
+          Collector.definitions(source.node).each do |key, def_node|
+            writers << key if Evals.writes_code?(def_node)
+          end
+        end
+
+        writers
+      end
+
+      def call_sites(context, store, definitions, paths, locations, writers)
         tuples = {} #: Hash[String, Set[Arguments]]
 
         paths.each do |path|
@@ -278,8 +299,8 @@ module Steep
           Collector.each_call_site(typing) do |key, arguments, node|
             next unless definitions.key?(key)
 
-            (tuples[key] ||= Set.new) << arguments
-            record_location(locations, key, arguments, path, node)
+            (tuples[key] ||= Set.new) << arguments if arguments.literal?
+            record_location(locations, key, arguments, path, node) if writers.include?(key)
           end
         end
 
@@ -334,7 +355,7 @@ module Steep
         TargetContext.new(subtyping: status.subtyping, constant_resolver: status.constant_resolver, sources: sources)
       end
 
-      def collect(context, store, locations)
+      def collect(context, store, locations, writers)
         baselines = {} #: Hash[String, String]
         tuples = {} #: Hash[String, Set[Arguments]]
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
@@ -350,8 +371,8 @@ module Steep
           end
 
           Collector.each_call_site(typing) do |key, arguments, node|
-            (tuples[key] ||= Set.new) << arguments
-            record_location(locations, key, arguments, path, node)
+            (tuples[key] ||= Set.new) << arguments if arguments.literal?
+            record_location(locations, key, arguments, path, node) if writers.include?(key)
           end
 
           callees[path] = Collector.callees(typing) if typing

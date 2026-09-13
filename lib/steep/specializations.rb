@@ -55,9 +55,13 @@ module Steep
       attr_reader :positionals, :keywords
 
       # The argument types of `node`, or nil when the call has a shape no tuple
-      # describes: a splat, a block pass, a non-symbol keyword. A call with no
-      # literal among its arguments answers nil too — specializing it would
-      # record the declaration back.
+      # describes: a splat, a block pass, a non-symbol keyword.
+      #
+      # A call fixing no literal is still described. Specializing its RETURN
+      # would only record the declaration back, so `Collector.call_sites` drops
+      # it — but a body that writes code is decided by its defaults and its
+      # control flow as much as by its arguments, and `slot()` with a literal
+      # default is as determined as `slot(:ro)`.
       def self.from_send(node, typing)
         _receiver, _name, *args = node.children
 
@@ -84,8 +88,7 @@ module Steep
           positionals << typing.type_of(node: arg)
         end
 
-        arguments = new(positionals: positionals, keywords: keywords)
-        arguments.literal? ? arguments : nil
+        new(positionals: positionals, keywords: keywords)
       end
 
       def initialize(positionals:, keywords:, positional_defaults: {}, keyword_defaults: {})
