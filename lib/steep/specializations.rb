@@ -88,9 +88,28 @@ module Steep
         arguments.literal? ? arguments : nil
       end
 
-      def initialize(positionals:, keywords:)
+      def initialize(positionals:, keywords:, positional_defaults: {}, keyword_defaults: {})
         @positionals = positionals
         @keywords = keywords
+        @positional_defaults = positional_defaults
+        @keyword_defaults = keyword_defaults
+      end
+
+      # The same call, with the parameters it leaves out fixed to the values the
+      # definition gives them. A call that omits an optional does not leave that
+      # parameter open — it runs the body with the default, which is exactly the
+      # kind of fact a per-call-site check exists to use.
+      #
+      # `defaults` stays out of `key`, `==` and `hash`: they are a property of
+      # the DEFINITION, so two calls that spell the same tuple cannot disagree
+      # about them, and the send side computes its key from the call alone.
+      def with_defaults(positionals: {}, keywords: {})
+        Arguments.new(
+          positionals: @positionals,
+          keywords: @keywords,
+          positional_defaults: positionals,
+          keyword_defaults: keywords
+        )
       end
 
       def key
@@ -150,7 +169,7 @@ module Steep
           case param
           when Interface::Function::Params::PositionalParams::Required,
                Interface::Function::Params::PositionalParams::Optional
-            type = positionals[index]
+            type = positionals[index] || @positional_defaults[index]
             index += 1
             type ? param.map_type { type } : param
           else
@@ -161,7 +180,7 @@ module Steep
       end
 
       def substitute_keywords(params)
-        return params if keywords.empty?
+        return params if keywords.empty? && @keyword_defaults.empty?
 
         params.update(
           requireds: substitute_keyword_hash(params.requireds),
@@ -171,7 +190,7 @@ module Steep
 
       def substitute_keyword_hash(hash)
         hash.each_key.with_object({}) do |name, result|
-          result[name] = keywords.fetch(name, hash[name])
+          result[name] = keywords.fetch(name) { @keyword_defaults.fetch(name, hash[name]) }
         end
       end
     end
