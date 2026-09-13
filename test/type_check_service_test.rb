@@ -95,6 +95,28 @@ RBS
     end
   end
 
+  def test_literal_method_registry_tracks_unsaved_source_changes
+    service = Services::TypeCheckService.new(project: project)
+    service.update(changes: reset_changes)
+
+    path = Pathname("lib/main.rb")
+    service.update(
+      changes: {
+        path => [ContentChange.string(<<~RUBY)]
+          class String
+            def upcase = "override"
+          end
+        RUBY
+      }
+    )
+
+    assert service.literal_method_registry.blocked?("::String#upcase")
+
+    service.update(changes: { path => [ContentChange.string("class Other; end\n")] })
+
+    refute service.literal_method_registry.blocked?("::String#upcase")
+  end
+
   def test_typecheck__ruby_syntax_error
     service = Services::TypeCheckService.new(project: project)
     service.update(changes: reset_changes)

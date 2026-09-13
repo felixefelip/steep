@@ -33,10 +33,11 @@ module Steep
       attr_reader :postconditions
       attr_reader :callbacks
       attr_reader :specializations
+      attr_reader :literal_method_registry
       attr_reader :delegation_registry
       attr_reader :return_alias
 
-      def initialize(source:, subtyping:, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, specializations: Steep::Specializations::Store.empty, delegation_registry:, return_alias: Steep::Project::ReturnAliasRegistry.new)
+      def initialize(source:, subtyping:, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, specializations: Steep::Specializations::Store.empty, literal_method_registry: Steep::Project::LiteralMethodRegistry.new, delegation_registry:, return_alias: Steep::Project::ReturnAliasRegistry.new)
         @source = source
         @subtyping = subtyping
         @buffer = source.buffer
@@ -44,6 +45,7 @@ module Steep
         @postconditions = postconditions
         @callbacks = callbacks
         @specializations = specializations
+        @literal_method_registry = literal_method_registry
         @delegation_registry = delegation_registry
         @return_alias = return_alias
       end
@@ -100,6 +102,7 @@ module Steep
           postconditions: postconditions,
           callbacks: callbacks,
           specializations: specializations,
+          literal_method_registry: literal_method_registry,
           delegation_registry: delegation_registry,
           constructor_bindings: Project::ConstructorBindingRegistry.new,
           return_forwarding: Project::ReturnForwardingRegistry.new,

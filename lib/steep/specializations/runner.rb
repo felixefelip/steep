@@ -324,6 +324,7 @@ module Steep
           postconditions: @project.postconditions,
           callbacks: @project.callbacks,
           specializations: store.with_active(active),
+          literal_method_registry: @project.literal_method_registry,
           delegation_registry: @project.delegation_registry,
           constructor_bindings: @project.constructor_binding_registry,
           return_forwarding: @project.return_forwarding_registry,

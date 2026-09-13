@@ -1642,11 +1642,11 @@ class PostconditionsRunnerTest < Minitest::Test
       by_pattern = partitions.to_h { |p| [p[:pattern], p] }
 
       refute_nil by_pattern[":name"], "the :name partition must survive the hop"
-      assert_equal "::String", by_pattern[":name"][:ivars][:@name].to_s
+      assert_equal '"John Doe"', by_pattern[":name"][:ivars][:@name].to_s
       refute by_pattern[":name"][:ivars].key?(:@value), "the :name partition keeps only its own caller's fact"
 
       refute_nil by_pattern[":age"], "the :age partition must survive the hop"
-      assert_equal "::Integer", by_pattern[":age"][:ivars][:@value].to_s
+      assert_equal "42", by_pattern[":age"][:ivars][:@value].to_s
     end
   end
 
@@ -1791,12 +1791,12 @@ class PostconditionsRunnerTest < Minitest::Test
 
       name_partition = by_pattern[":name"]
       refute_nil name_partition
-      assert_equal "::String", name_partition[:ivars][:@name].to_s
+      assert_equal '"John Doe"', name_partition[:ivars][:@name].to_s
       refute name_partition[:ivars].key?(:@value), "the :name partition must not carry the :age caller's ivar"
 
       age_partition = by_pattern[":age"]
       refute_nil age_partition
-      assert_equal "::Integer", age_partition[:ivars][:@value].to_s
+      assert_equal "42", age_partition[:ivars][:@value].to_s
       refute age_partition[:ivars].key?(:@name), "the :age partition must not carry the :name caller's ivar"
     end
   end

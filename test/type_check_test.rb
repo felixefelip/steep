@@ -28,6 +28,10 @@ class TypeCheckTest < Minitest::Test
     typings = {}
 
     delegation_registry = build_test_delegation_registry(code.merge(inline_code))
+    literal_method_registry = Steep::Project::LiteralMethodRegistry.new
+    code.merge(inline_code).each do |path, content|
+      literal_method_registry.ingest_source(content, path_name: path)
+    end
 
     with_factory(signatures, inline_code, nostdlib: false) do |factory|
       builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
@@ -35,7 +39,7 @@ class TypeCheckTest < Minitest::Test
 
       code.merge(inline_code).each do |path, content|
         source = Source.parse(content, path: Pathname(path), factory: factory)
-        with_standard_construction(subtyping, source, postconditions: postconditions, callbacks: callbacks, delegation_registry: delegation_registry) do |construction, typing|
+        with_standard_construction(subtyping, source, postconditions: postconditions, callbacks: callbacks, literal_method_registry: literal_method_registry, delegation_registry: delegation_registry) do |construction, typing|
           if source.node
             construction.synthesize(source.node)
           end
@@ -63,6 +67,165 @@ class TypeCheckTest < Minitest::Test
       exps.to_yaml
 
       assert_equal expectations, exps.to_yaml
+    end
+  end
+
+  def test_literal_intrinsics_fold_closed_core_operations
+    run_type_check_test(
+      signatures: {
+        "literal_intrinsics.rbs" => <<~RBS
+          class LiteralIntrinsicsExample
+            def string_upcase: () -> String
+            def string_downcase: () -> String
+            def string_capitalize: () -> String
+            def string_reverse: () -> String
+            def string_strip: () -> String
+            def string_concat: () -> String
+            def string_repeat: () -> String
+            def string_length: () -> Integer
+            def string_to_sym: () -> Symbol
+            def integer_add: () -> Integer
+            def integer_subtract: () -> Integer
+            def integer_multiply: () -> Integer
+            def integer_divide: () -> Integer
+            def integer_modulo: () -> Integer
+            def integer_power: () -> Integer
+            def integer_abs: () -> Integer
+            def integer_succ: () -> Integer
+            def integer_to_s: () -> String
+            def symbol_to_s: () -> String
+          end
+        RBS
+      },
+      code: {
+        "literal_intrinsics.rb" => <<~RUBY
+          class LiteralIntrinsicsExample
+            def string_upcase = "yellow".upcase
+            def string_downcase = "ABC".downcase
+            def string_capitalize = "yellow".capitalize
+            def string_reverse = "abc".reverse
+            def string_strip = " x ".strip
+            def string_concat = "a" + "b"
+            def string_repeat = "x" * 3
+            def string_length = "abc".length
+            def string_to_sym = "tag".to_sym
+            def integer_add = 31 + 10
+            def integer_subtract = 10 - 3
+            def integer_multiply = 6 * 7
+            def integer_divide = 7 / 2
+            def integer_modulo = 7 % 4
+            def integer_power = 2 ** 5
+            def integer_abs = (-3).abs
+            def integer_succ = 3.succ
+            def integer_to_s = 31.to_s
+            def symbol_to_s = :tag.to_s
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("literal_intrinsics.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal(
+        {
+          "string_upcase" => '"YELLOW"',
+          "string_downcase" => '"abc"',
+          "string_capitalize" => '"Yellow"',
+          "string_reverse" => '"cba"',
+          "string_strip" => '"x"',
+          "string_concat" => '"ab"',
+          "string_repeat" => '"xxx"',
+          "string_length" => "3",
+          "string_to_sym" => ":tag",
+          "integer_add" => "41",
+          "integer_subtract" => "7",
+          "integer_multiply" => "42",
+          "integer_divide" => "3",
+          "integer_modulo" => "3",
+          "integer_power" => "32",
+          "integer_abs" => "3",
+          "integer_succ" => "4",
+          "integer_to_s" => '"31"',
+          "symbol_to_s" => '"tag"'
+        },
+        actual
+      )
+    end
+  end
+
+  def test_literal_intrinsics_decline_unsafe_or_unbounded_calls
+    run_type_check_test(
+      signatures: {
+        "literal_intrinsics.rbs" => <<~RBS
+          class LiteralIntrinsicFallbacks
+            def dynamic: (Integer) -> Integer
+            def mutating: () -> String
+            def divide_by_zero: () -> Integer
+            def huge_string: () -> String
+            def huge_integer: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "literal_intrinsics.rb" => <<~RUBY
+          class LiteralIntrinsicFallbacks
+            def dynamic(value) = 31 + value
+            def mutating = "yellow".upcase!
+            def divide_by_zero = 1 / 0
+            def huge_string = "x" * 1_000_000
+            def huge_integer = 10 ** 1_000_000
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("literal_intrinsics.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::Integer", actual.fetch("dynamic")
+      assert_equal "(::String | nil)", actual.fetch("mutating")
+      assert_equal "::Integer", actual.fetch("divide_by_zero")
+      assert_equal "::String", actual.fetch("huge_string")
+      assert_equal "::Numeric", actual.fetch("huge_integer")
+    end
+  end
+
+  def test_literal_intrinsics_decline_project_core_overrides
+    run_type_check_test(
+      signatures: {
+        "literal_intrinsics.rbs" => <<~RBS
+          class LiteralIntrinsicOverride
+            def call: () -> String
+          end
+        RBS
+      },
+      code: {
+        "override.rb" => <<~RUBY,
+          class String
+            def upcase = "project implementation"
+          end
+        RUBY
+        "call.rb" => <<~RUBY
+          class LiteralIntrinsicOverride
+            def call = "yellow".upcase
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("call.rb")
+      call_def = typing.each_typing.find { |node, _type| node.type == :def && node.children[0] == :call }&.first
+
+      assert call_def
+      assert_equal "::String", typing.type_of(node: call_def.children[2]).to_s
     end
   end
 

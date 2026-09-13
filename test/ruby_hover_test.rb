@@ -404,7 +404,7 @@ RBS
         assert_instance_of HoverProvider::ConstantContent, content
         assert_equal [2,2]...[2,7], [content.location.line,content.location.column]...[content.location.last_line, content.location.last_column]
         assert_equal RBS::TypeName.parse("::Hello::World"), content.full_name
-        assert_equal "::String", content.type.to_s
+        assert_equal '"Hello World!"', content.type.to_s
         assert_equal service.signature_services[:lib].latest_env.constant_decls[RBS::TypeName.parse("::Hello::World")], content.decl
       end
     end

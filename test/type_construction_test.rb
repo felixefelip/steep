@@ -1162,6 +1162,7 @@ end
                                           context: context,
                                           typing: typing,
                                           specializations: Steep::Specializations::Store.empty,
+                                          literal_method_registry: Steep::Project::LiteralMethodRegistry.new,
                                           delegation_registry: Steep::Project::DelegationRegistry.new,
                                           constructor_bindings: Steep::Project::ConstructorBindingRegistry.new,
                                           return_forwarding: Steep::Project::ReturnForwardingRegistry.new,
@@ -1258,6 +1259,7 @@ class Steep end
                                           context: context,
                                           typing: typing,
                                           specializations: Steep::Specializations::Store.empty,
+                                          literal_method_registry: Steep::Project::LiteralMethodRegistry.new,
                                           delegation_registry: Steep::Project::DelegationRegistry.new,
                                           constructor_bindings: Steep::Project::ConstructorBindingRegistry.new,
                                           return_forwarding: Steep::Project::ReturnForwardingRegistry.new,
@@ -3850,7 +3852,7 @@ EOF
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("::Integer | ::String | ::Symbol"), pair.type
+        assert_equal parse_type("3 | ::Integer | ::String | ::Symbol"), pair.type
         assert_equal parse_type("::String | ::Integer | ::Symbol | nil"), pair.context.type_env[:x]
       end
     end
