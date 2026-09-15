@@ -275,8 +275,27 @@ module Steep
           return false unless EVAL_METHODS.include?(node.children[1])
           return false unless accepted_receiver?(node, receivers, typing, parameters)
 
-          argument = node.children[2]
-          argument&.type == :str || argument&.type == :dstr
+          accepted_argument?(node.children[2], typing)
+        end
+
+        # What the eval is handed. Written as a string or an interpolation, it is
+        # readable on the syntax alone — and that is the cheap gate, which has no
+        # typing to consult.
+        #
+        # With a typing, what matters is the TYPE: a call site that folds to a
+        # string literal has written its source as surely as a heredoc does, and
+        # `ActiveSupport::Delegation` hands `module_eval` a `join` rather than a
+        # literal. Reading the node alone declined it before the value was ever
+        # looked at, while `literal_string` — which decides the same question one
+        # step later — has always read the type.
+        def accepted_argument?(argument, typing)
+          return false if argument.nil?
+          return true if argument.type == :str || argument.type == :dstr
+          return true if typing.nil?
+          return false unless typing.has_type?(argument)
+
+          type = typing.type_of(node: argument)
+          type.is_a?(AST::Types::Literal) && type.value.is_a?(String)
         end
 
         # `typing` is nil for the cheap gate that only asks WHETHER a method
