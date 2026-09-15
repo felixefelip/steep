@@ -23,6 +23,17 @@ class LiteralMethodRegistryTest < Minitest::Test
     refute registry.blocked?("::String#downcase")
   end
 
+  def test_records_a_reopened_array
+    registry = registry_for(<<~RUBY)
+      class Array
+        def join(separator = nil) = "override"
+      end
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+    refute registry.blocked?("::Array#first")
+  end
+
   def test_dup_has_an_independent_blocked_set
     original = Registry.new
     copy = original.dup
@@ -123,6 +134,22 @@ class LiteralMethodRegistryTest < Minitest::Test
     Steep::LiteralIntrinsics.method_keys_for("String").each do |method_name|
       assert registry.blocked?(method_name), method_name
     end
+  end
+
+  def test_an_included_module_does_not_shadow_an_entry
+    registry = registry_for(<<~RUBY)
+      module Conversions
+        def join(*) = "hijacked"
+      end
+
+      Array.include Conversions
+      Integer.extend Conversions
+    RUBY
+
+    # Neither reaches an instance method the class defines itself — `include`
+    # lands below it, `extend` lands on the singleton.
+    refute registry.blocked?("::Array#join")
+    refute registry.blocked?("::Integer#succ")
   end
 
   def test_does_not_confuse_a_nested_constant_with_the_core_class

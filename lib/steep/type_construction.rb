@@ -5297,6 +5297,22 @@ module Steep
       return inferred_type if inferred_type.is_a?(AST::Types::Literal)
       return inferred_type unless node.is_a?(::Parser::AST::Node)
 
+      # An array written out in the source is exact information the same way a
+      # string is, and the element types are NOT where it survives: `["a#{b}",
+      # "c"]` infers `Array['ab' | String]`, the plain element having widened
+      # into the union. So the tuple is read off the nodes, one element at a
+      # time, through this same recovery.
+      if node.type == :array
+        elements = node.children.map do |child|
+          next unless typing.has_type?(child)
+
+          element = literal_operand_type(child, typing.type_of(node: child))
+          element if element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple)
+        end
+
+        return elements.all? ? AST::Types::Tuple.new(types: elements) : inferred_type
+      end
+
       value =
         case node.type
         when :int, :str, :sym

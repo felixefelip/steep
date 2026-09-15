@@ -5,8 +5,19 @@ module Steep
     # the owner and name, but a Ruby reopen has the same owner and name; this
     # source index supplies the missing implementation provenance.
     class LiteralMethodRegistry
-      CORE_CLASSES = Set["String", "Integer", "Symbol"]
-      LOOKUP_MUTATORS = Set[:include, :prepend, :extend]
+      CORE_CLASSES = Set["String", "Integer", "Symbol", "Array"]
+      # Only `prepend` can shadow an entry. A module inserted by `include` sits
+      # BELOW the class in the lookup chain, and every method in the table is
+      # one the core class defines itself, so the class's own always wins:
+      #
+      #   module M; def join(*) = "hijacked"; end
+      #   Array.include M  #=> [1, 2].join(",") == "1,2"
+      #   Array.prepend M  #=> [1, 2].join(",") == "hijacked"
+      #
+      # `extend` reaches the singleton, and the table holds no singleton method.
+      # Tainting on either is not caution, it is a wrong answer: it blocks folds
+      # in any project whose core extensions are written the ordinary way.
+      LOOKUP_MUTATORS = Set[:prepend]
       EVAL_METHODS = Set[:class_eval, :class_exec, :module_eval, :module_exec]
       METHOD_MUTATORS = Set[:define_method, :alias_method, :remove_method, :undef_method]
       SEND_METHODS = Set[:send, :public_send, :__send__]

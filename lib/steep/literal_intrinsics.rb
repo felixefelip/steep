@@ -4,26 +4,40 @@ module Steep
   # already succeeded against RBS, every operand must be a literal, the method
   # must resolve to one closed-table core identity, and any project override
   # disables the entry.
+  #
+  # An operand is either a literal or a TUPLE of them, so a call whose receiver
+  # or argument is an array written out in the source folds as well. Nothing
+  # else about arrays is modelled: an array assembled by `<<`, or one whose
+  # elements are not all literal, has no tuple to read and declines here.
   module LiteralIntrinsics
     MAX_LITERAL_WIDTH = 64
     MAX_INTEGER_BITS = 256
+
+    # How many elements an operand may hold. A bound on the work, not on the
+    # text: the widths below are what keep the result small.
+    MAX_COLLECTION_SIZE = 64
+
+    # A whole collection operand may be wider than a single literal, because its
+    # bytes are already written in the file. Still bounded, so a pathological
+    # source cannot make the checker assemble an unbounded string.
+    MAX_OPERAND_WIDTH = 4096
 
     Entry = _ = Struct.new(:method, :arity, :preflight, keyword_init: true)
 
     class << self
       def fold(call:, receiver_type:, argument_types:, override_registry:)
-        return nil unless receiver_type.is_a?(AST::Types::Literal)
-        return nil unless argument_types.all? { |type| type.is_a?(AST::Types::Literal) }
+        return nil unless operand?(receiver_type)
+        return nil unless argument_types.all? { |type| operand?(type) }
 
         key = resolved_method_key(call) or return nil
         entry = ENTRIES[key] or return nil
         return nil if override_registry.blocked?(key)
         source_location = entry.method.source_location
         return nil if source_location && !source_location.first.start_with?("<internal:")
-        return nil unless entry.arity == argument_types.size
+        return nil unless entry.arity === argument_types.size
 
-        receiver = receiver_type.value
-        arguments = argument_types.map(&:value)
+        receiver = operand_value(receiver_type)
+        arguments = argument_types.map { |type| operand_value(type) }
         return nil unless within_input_budget?(receiver, arguments)
         return nil unless entry.preflight.call(receiver, arguments)
 
@@ -31,7 +45,7 @@ module Steep
         return nil unless literal_value?(value)
 
         type = AST::Types::Literal.new(value: value)
-        return nil if type.to_s.bytesize > MAX_LITERAL_WIDTH
+        return nil if type.to_s.bytesize > result_budget(receiver, arguments)
 
         type
       rescue ArgumentError, EncodingError, RangeError, ZeroDivisionError => exn
@@ -63,10 +77,48 @@ module Steep
         names.first.start_with?("::") ? names.first : "::#{names.first}"
       end
 
+      # A literal, or a tuple of things that are themselves operands. Nested
+      # because a tuple of tuples is what a method's parameter list looks like,
+      # and there is nothing to gain by refusing one depth.
+      def operand?(type)
+        case type
+        when AST::Types::Literal then true
+        when AST::Types::Tuple then type.types.all? { |element| operand?(element) }
+        else false
+        end
+      end
+
+      def operand_value(type)
+        type.is_a?(AST::Types::Tuple) ? type.types.map { |element| operand_value(element) } : type.value
+      end
+
       def within_input_budget?(receiver, arguments)
         [receiver, *arguments].all? do |value|
-          AST::Types::Literal.new(value: value).to_s.bytesize <= MAX_LITERAL_WIDTH
+          next false if collection_size(value) > MAX_COLLECTION_SIZE
+
+          operand_width(value) <= (value.is_a?(::Array) ? MAX_OPERAND_WIDTH : MAX_LITERAL_WIDTH)
         end
+      end
+
+      # How wide the result may be. A fold that only reassembles its operands —
+      # `join`, `first`, `+` — cannot outgrow them, so bytes already written in
+      # the file are always affordable; `'x' * 1000` and `2 ** 4096` COMPUTE
+      # theirs out of tiny operands and stay bounded by MAX_LITERAL_WIDTH. The
+      # rule falls out of the operands and needs no per-entry taxonomy.
+      def result_budget(receiver, arguments)
+        [MAX_LITERAL_WIDTH, operand_width(receiver) + arguments.sum { |value| operand_width(value) }].max
+      end
+
+      def operand_width(value)
+        return AST::Types::Literal.new(value: value).to_s.bytesize unless value.is_a?(::Array)
+
+        value.sum { |element| operand_width(element) + 2 }
+      end
+
+      def collection_size(value)
+        return 0 unless value.is_a?(::Array)
+
+        value.sum { |element| 1 + collection_size(element) }
       end
 
       def literal_value?(value)
@@ -89,6 +141,12 @@ module Steep
       divisor = arguments.first
       divisor.is_a?(Integer) && !divisor.zero?
     end
+    # `join` is total over the values this table admits (String, Integer, Symbol,
+    # bool all answer `to_s`), so only the separator has to be checked.
+    ARRAY_JOIN = lambda do |_receiver, arguments|
+      arguments.empty? || arguments.first.is_a?(String)
+    end
+    ARRAY_INTERSECT = ->(_receiver, arguments) { arguments.first.is_a?(::Array) }
     INTEGER_POWER = lambda do |receiver, arguments|
       exponent = arguments.first
       next false unless exponent.is_a?(Integer) && exponent >= 0
@@ -119,7 +177,17 @@ module Steep
       "::Integer#abs" => Entry.new(method: Integer.instance_method(:abs), arity: 0, preflight: ALWAYS),
       "::Integer#succ" => Entry.new(method: Integer.instance_method(:succ), arity: 0, preflight: ALWAYS),
       "::Integer#to_s" => Entry.new(method: Integer.instance_method(:to_s), arity: 0, preflight: ALWAYS),
-      "::Symbol#to_s" => Entry.new(method: Symbol.instance_method(:to_s), arity: 0, preflight: ALWAYS)
+      "::Symbol#to_s" => Entry.new(method: Symbol.instance_method(:to_s), arity: 0, preflight: ALWAYS),
+      # `::Array#first` is deliberately NOT here, though it folds as safely as
+      # these do. `[1].first` is how a good deal of code — the checker's own
+      # tests included — asks for an `Integer?`, and sharpening it to `1` turns
+      # the `return unless a` that follows into an unreachable branch. The fold
+      # is right and the change is real, so it belongs in the stage that has a
+      # use for it (`parameters.map(&:first)`, S2/S3 of #171) and can carry the
+      # test edits it forces, not in the one that needs `join`.
+      "::Array#join" => Entry.new(method: Array.instance_method(:join), arity: 0..1, preflight: ARRAY_JOIN),
+      "::Array#include?" => Entry.new(method: Array.instance_method(:include?), arity: 1, preflight: ALWAYS),
+      "::Array#intersect?" => Entry.new(method: Array.instance_method(:intersect?), arity: 1, preflight: ARRAY_INTERSECT)
     }.freeze
   end
 end
