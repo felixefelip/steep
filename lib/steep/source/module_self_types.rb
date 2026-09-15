@@ -146,6 +146,29 @@ module Steep
         # after it, a two-line shift — the same cost the nested case has always
         # paid. A concern file is one module ending at end-of-file, so there is
         # normally no line after it to move.
+        # The module-wide annotations of `entry`, as `[anchor, [text, …]]`.
+        #
+        # These used to be spliced into the source as new lines, which moved
+        # every position below them: the checker then reported — and recorded —
+        # line numbers the file does not have, one further down per annotation.
+        # It reached the diagnostics the CLI and the LSP print, and the sidecars
+        # keyed by `path:line:column` (felixefelip/steep#176).
+        #
+        # Nothing is written into the source now. The sidecar IS a map of module
+        # to annotations, and what the checker consumes is a map of NODE to
+        # annotations, so `Source.parse` attaches them to the node the anchor
+        # names and the round trip through comment text is gone. Which also
+        # makes the attachment exact: a comment lands on whatever node's line
+        # range contains it, while this picks the node.
+        # Writes the annotations INTO the source, for a consumer that parses a
+        # source of its own making — rbs_infer's `SelfTypeAnnotators` is the one
+        # there is (felixefelip/rbs_infer#52).
+        #
+        # Steep's own check does not use this and must not: the inserted lines
+        # move every position below them, so the checker would report and record
+        # line numbers the file does not have (felixefelip/steep#176). It reads
+        # the file as it is and attaches these to their node instead — see
+        # `scope_annotations` and `Source.attach_scope_annotations`.
         def inject(source_code, annotations:, anchor:)
           missing = annotations.reject { |line| source_code.include?(line) }
           return source_code if missing.empty?
@@ -158,6 +181,16 @@ module Steep
           end
         rescue StandardError
           append_at_end(source_code, missing)
+        end
+
+        def scope_annotations(entry)
+          self_types_of(entry).filter_map do |mod|
+            anchor = mod["anchor"] or next
+            lines = Array(mod["annotations"]).select { |line| line.is_a?(String) }
+            next if lines.empty?
+
+            [anchor.to_s, lines]
+          end
         end
 
         # Annotates each block call named `call`, for every `blocks` spec
@@ -420,6 +453,21 @@ module Steep
         # self.x` is excluded: its `self` is the module object, which the
         # module-wide annotation already covers and which no invoker narrows.
         # Nested scopes have their own context and their own sidecar entry.
+        def insert_in_body(source_code, node, annotation_lines)
+          return append_at_end(source_code, annotation_lines) unless node.respond_to?(:end_keyword_loc) && node.end_keyword_loc
+
+          indent = " " * (node.location.start_column + 2)
+          block = annotation_lines.map { |line| "#{indent}#{line}\n" }.join
+          bytes = source_code.b
+          line_start = (bytes.rindex("\n".b, node.end_keyword_loc.start_offset) || -1) + 1
+
+          (bytes[0...line_start] + block.b + bytes[line_start..]).force_encoding(source_code.encoding)
+        end
+
+        def append_at_end(source_code, annotation_lines)
+          source_code.rstrip + "\n\n" + annotation_lines.join("\n") + "\n"
+        end
+
         def each_scope_def(node)
           body = node.body
           return [] unless body.is_a?(Prism::StatementsNode)
@@ -501,20 +549,6 @@ module Steep
         # point down — past the module's own `end` and into its parent's body,
         # where the annotation binds to the wrong scope and silently does
         # nothing. `inject_blocks` splices by byte for the same reason.
-        def insert_in_body(source_code, node, annotation_lines)
-          return append_at_end(source_code, annotation_lines) unless node.respond_to?(:end_keyword_loc) && node.end_keyword_loc
-
-          indent = " " * (node.location.start_column + 2)
-          block = annotation_lines.map { |line| "#{indent}#{line}\n" }.join
-          bytes = source_code.b
-          line_start = (bytes.rindex("\n".b, node.end_keyword_loc.start_offset) || -1) + 1
-
-          (bytes[0...line_start] + block.b + bytes[line_start..]).force_encoding(source_code.encoding)
-        end
-
-        def append_at_end(source_code, annotation_lines)
-          source_code.rstrip + "\n\n" + annotation_lines.join("\n") + "\n"
-        end
       end
     end
   end
