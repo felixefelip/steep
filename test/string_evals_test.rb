@@ -44,6 +44,19 @@ class StringEvalsTest < Minitest::Test
     end
   RBS
 
+  DELEGATION_RBS = <<~RBS
+    module Writer
+      def self.generate: (untyped owner, Symbol name) -> void
+    end
+
+    class Base
+      def self.has_rich_text: (Symbol name) -> untyped
+    end
+
+    class Article < Base
+    end
+  RBS
+
   def evals_of(project)
     runner = Specializations::Runner.new(project)
     runner.run
@@ -301,22 +314,13 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
-  # The S5b boundary of felixefelip/steep#171: `owner` is the caller's self, but
-  # saying so needs the frame that passed it, and nothing here reads that yet.
-  def test_a_receiver_that_is_not_self_is_not_read
+  # The frame in between is what the answer belongs to: `generate` evals on an
+  # object it was handed, so its own call site is the wrong place to attribute
+  # anything to, while `has_rich_text`'s call sites are written in the classes
+  # that actually get the methods.
+  def test_a_receiver_handed_this_method_s_own_self_is_read
     in_tmpdir do
-      write("sig/base.rbs", <<~RBS)
-        module Writer
-          def self.generate: (untyped owner, Symbol name) -> void
-        end
-
-        class Base
-          def self.has_rich_text: (Symbol name) -> untyped
-        end
-
-        class Article < Base
-        end
-      RBS
+      write("sig/base.rbs", DELEGATION_RBS)
       write("app/base.rb", <<~RUBY)
         module Writer
           def self.generate(owner, name)
@@ -335,7 +339,285 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
+      assert_equal(
+        { "app/base.rb:14:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_a_frame_that_does_not_pass_its_own_self_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", DELEGATION_RBS)
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Writer.generate(Article, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
       assert_empty evals_of(setup_project)
+    end
+  end
+
+  # One frame, deliberately: two would need the argument threaded through a
+  # chain, and nothing asks for it yet.
+  def test_a_second_frame_is_not_followed
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        module Middle
+          def self.relay: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        module Middle
+          def self.relay(owner, name)
+            Writer.generate(owner, name)
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Middle.relay(self, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_empty evals_of(setup_project)
+    end
+  end
+
+  def test_a_delegation_in_a_branch_the_call_site_kills_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name, ?enabled: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name, enabled: true)
+            Writer.generate(self, name) if enabled
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content, enabled: false
+        end
+      RUBY
+
+      assert_empty evals_of(setup_project)
+    end
+  end
+
+  def test_a_delegation_the_call_site_does_not_decide_records_a_hole
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name, ?enabled: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name, enabled: true)
+            Writer.generate(self, name) if enabled
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content, enabled: Article.respond_to?(:x)
+        end
+      RUBY
+
+      assert_equal({ "app/base.rb:14:2" => [nil] }, evals_of(setup_project))
+    end
+  end
+
+  def test_an_eval_and_a_delegation_are_kept_in_source_order
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}_writer; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}_reader; end"
+            Writer.generate(self, name)
+            class_eval "def \#{name}_last; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        {
+          "app/base.rb:16:2" => [
+            "def content_reader; end",
+            "def content_writer; end",
+            "def content_last; end"
+          ]
+        },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_the_inner_body_is_read_with_only_the_parameter_it_was_handed
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, untyped other, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, other, name)
+            owner.module_eval "def \#{name}; end"
+            other.module_eval "def \#{name}_elsewhere; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Writer.generate(self, String, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      # `other` is `String`, not this class: what it writes belongs to no call
+      # site here, and reading it would attribute it to `Article`.
+      assert_equal(
+        { "app/base.rb:15:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_the_inner_frame_gets_its_own_defaults
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name, ?bool enabled) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name, enabled = true)
+            if enabled
+              owner.module_eval "def \#{name}; end"
+            end
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Writer.generate(self, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:16:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
     end
   end
 
