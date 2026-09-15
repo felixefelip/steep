@@ -163,7 +163,16 @@ module Steep
       end
 
       # A positional index names one parameter only up to the first rest
-      # parameter; past it, `positionals` is exhausted so the tail is left alone.
+      # parameter. What lands in the REST is everything left, and a call site
+      # fixes those as surely as it fixes a required one:
+      #
+      #   def delegate(*methods, to:)   # methods: Array[Symbol]
+      #   delegate :email, to: :user    # methods: Array[:email]
+      #
+      # The element type is the union of what is left, which is what the array
+      # holds — sound for any number of them, and a literal for the one-argument
+      # case that a macro's interpolation can then fold. A rest param left at its
+      # declaration says `Symbol`, and `"def #{name}"` over that is `::String`.
       def substitute_positionals(params)
         return params unless params
 
@@ -175,11 +184,19 @@ module Steep
             type = positionals[index] || @positional_defaults[index]
             index += 1
             type ? param.map_type { type } : param
+          when Interface::Function::Params::PositionalParams::Rest
+            rest = positionals[index..] || []
+            index = positionals.size
+            rest.empty? ? param : param.map_type { union_of(rest) }
           else
             index = positionals.size
             param
           end
         end
+      end
+
+      def union_of(types)
+        types.size == 1 ? types.fetch(0) : AST::Types::Union.build(types: types)
       end
 
       def substitute_keywords(params)
