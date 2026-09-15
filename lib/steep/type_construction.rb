@@ -478,6 +478,44 @@ module Steep
       )
     end
 
+    # The type of one pushed element, read from the NODE.
+    #
+    # A literal written as a statement's argument widens to its class by the
+    # time anything asks the typing — and a push from an earlier statement may
+    # not be in this typing at all, since each check builds its own. The syntax
+    # is the same either way, and it is exact.
+    #
+    # Only a literal counts: an array holding anything else has no contents to
+    # state, which is the right answer for `parts << some_value`.
+    def accumulated_element_type(node)
+      inferred = typing.has_type?(node) ? typing.type_of(node: node) : AST::Builtin.any_type
+      type = literal_operand_type(node, inferred)
+
+      type if type.is_a?(AST::Types::Literal)
+    end
+
+    # The tuple an array built by `<<` holds where this call reads it, or nil for
+    # every other call — which is nearly all of them.
+    #
+    # Handed to the fold rather than written into the type environment, because
+    # refining the local makes `Array[Elem]#<<` demand the first element's type
+    # and the next push stops type-checking. The contents are the same; this is
+    # the half of it that changes nothing else.
+    #
+    # Memoised per source: the analysis reads the AST and nothing else, so it
+    # answers the same however many times a body is re-checked.
+    def accumulated_type(node)
+      return nil unless node.type == :send
+
+      @accumulated_contents ||= Accumulators.contents_at_reads(source.node)
+      elements = @accumulated_contents[node] or return nil
+
+      types = elements.map { |element| accumulated_element_type(element) }
+      return nil unless types.all?
+
+      AST::Types::Tuple.new(types: types)
+    end
+
     # The argument types a specialization pass is checking this body under
     # (felixefelip/rbs_infer#345, stage S4). nil during an ordinary type check.
     def specialization_arguments(node)
@@ -5269,7 +5307,11 @@ module Steep
     # does not permit.
     def literal_intrinsic_call(call, receiver_type:, arguments:, declared_return_type:)
       receiver_node = call.node.children[0]
-      receiver_type = literal_operand_type(receiver_node, receiver_type)
+      # A tuple the accumulator analysis computed is read as it is. Every other
+      # tuple arriving as a type is refused by `literal_operand_type`, because an
+      # annotation outlives the mutation that invalidates it — and this one
+      # cannot, since the analysis strikes the local on any call but a read.
+      receiver_type = accumulated_type(call.node) || literal_operand_type(receiver_node, receiver_type)
 
       argument_types = arguments.map do |argument|
         return call unless typing.has_type?(argument)

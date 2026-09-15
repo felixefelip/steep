@@ -202,6 +202,153 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # An array built by `<<` carries what was pushed into it — the contents come
+  # from reading the pushes, since an array's TYPE says what its elements are
+  # and never how many.
+  def test_an_array_built_by_push_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "accumulators.rbs" => <<~RBS
+          class AccumulatorExample
+            def straight: () -> String
+            def from_a_literal: () -> String
+            def read_midway: () -> String
+          end
+        RBS
+      },
+      code: {
+        "accumulators.rb" => <<~RUBY
+          class AccumulatorExample
+            def straight
+              parts = []
+              parts << "a"
+              parts << "b"
+              parts.join(";")
+            end
+
+            def from_a_literal
+              parts = ["a"]
+              parts << "b"
+              parts.join(";")
+            end
+
+            def read_midway
+              parts = []
+              parts << "a"
+              midway = parts.join(";")
+              parts << "b"
+              midway
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("accumulators.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"a;b"', actual.fetch("straight")
+      assert_equal '"a;b"', actual.fetch("from_a_literal")
+      # The contents where it is READ, not at the end of the body.
+      assert_equal '"a"', actual.fetch("read_midway")
+    end
+  end
+
+  # The answers that must not come out. Each of these hands the array to
+  # something that can push into it, or pushes where the count is unknown — and
+  # an implementation that answered anyway would be confidently wrong rather
+  # than vague, which is the worse failure of the two.
+  def test_an_array_that_can_be_reached_another_way_is_not_read
+    run_type_check_test(
+      signatures: {
+        "accumulators.rbs" => <<~RBS
+          class AccumulatorFallbacks
+            def aliased: () -> String
+            def through_a_call: () -> String
+            def fill: (Array[String]) -> void
+            def looped: () -> String
+            def conditional: (bool) -> String
+            def mutated: () -> String
+            def returned: () -> Array[String]
+          end
+        RBS
+      },
+      code: {
+        "accumulators.rb" => <<~RUBY
+          class AccumulatorFallbacks
+            def fill(parts)
+              parts << "a"
+            end
+
+            # Two names for one array: the push happens through the other.
+            def aliased
+              parts = []
+              other = parts
+              other << "a"
+              parts.join(";")
+            end
+
+            # The push happens inside a call, where nothing about `parts` is
+            # written.
+            def through_a_call
+              parts = []
+              fill(parts)
+              parts.join(";")
+            end
+
+            # Read once, runs any number of times.
+            def looped
+              parts = []
+              ["x", "y"].each { |piece| parts << piece }
+              parts.join(";")
+            end
+
+            # One content or two, and nothing here decides which.
+            def conditional(flag)
+              parts = []
+              parts << "a"
+              parts << "b" if flag
+              parts.join(";")
+            end
+
+            # A call that is not a read can do anything, `reverse!` included.
+            def mutated
+              parts = []
+              parts << "a"
+              parts.reverse!
+              parts.join(";")
+            end
+
+            # Handed to the caller, who may push into it.
+            def returned
+              parts = []
+              parts << "a"
+              parts
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("accumulators.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::String", actual.fetch("aliased")
+      assert_equal "::String", actual.fetch("through_a_call")
+      assert_equal "::String", actual.fetch("looped")
+      assert_equal "::String", actual.fetch("conditional")
+      assert_equal "::String", actual.fetch("mutated")
+    end
+  end
+
   def test_literal_intrinsics_decline_collections_that_fix_nothing
     run_type_check_test(
       signatures: {
@@ -260,7 +407,9 @@ class TypeCheckTest < Minitest::Test
       end
 
       assert_equal "::String", actual.fetch("with_unknown")
-      assert_equal "::String", actual.fetch("accumulated")
+      # Folds since `Accumulators`: a local born from an array literal and pushed
+      # to in the body's straight line carries what was pushed into it.
+      assert_equal '"def x;end;more"', actual.fetch("accumulated")
       assert_equal "::String", actual.fetch("splatted")
       assert_equal "(::String | nil)", actual.fetch("taken_first")
       assert_equal "::String", actual.fetch("joined_bare")
