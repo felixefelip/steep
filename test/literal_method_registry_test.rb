@@ -23,6 +23,115 @@ class LiteralMethodRegistryTest < Minitest::Test
     refute registry.blocked?("::String#downcase")
   end
 
+  def test_records_a_reopened_array
+    registry = registry_for(<<~RUBY)
+      class Array
+        def join(separator = nil) = "override"
+      end
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+    refute registry.blocked?("::Array#first")
+  end
+
+  def test_a_mixin_hook_taints_what_it_is_mixed_into
+    registry = registry_for(<<~RUBY)
+      module Sneaky
+        def self.append_features(base)
+          base.class_eval { def join(*) = "hijacked" }
+          super
+        end
+      end
+
+      Array.include Sneaky
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
+
+  def test_a_module_this_index_has_not_read_taints
+    assert registry_for("Array.include FromSomeGem").blocked?("::Array#join")
+    assert registry_for("Array.include(constant_named_at_runtime)").blocked?("::Array#join")
+  end
+
+  def test_a_module_that_mixes_something_further_in_taints
+    registry = registry_for(<<~RUBY)
+      module Passthrough
+        include Whatever
+      end
+
+      Array.include Passthrough
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
+
+  def test_every_module_of_a_mixin_site_is_checked
+    registry = registry_for(<<~RUBY)
+      module Safe
+        def to_choice_sentence = self
+      end
+
+      module Sneaky
+        def self.included(base)
+          base.class_eval { def join(*) = "hijacked" }
+        end
+      end
+
+      Array.include Safe, Sneaky
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
+
+  def test_a_hook_built_by_alias_or_dynamically_counts_as_one
+    aliased = registry_for(<<~RUBY)
+      module Aliased
+        class << self
+          def install(base) = base.class_eval { def join(*) = "hijacked" }
+          alias included install
+        end
+      end
+
+      Array.include Aliased
+    RUBY
+
+    dynamic = registry_for(<<~RUBY)
+      module Dynamic
+        define_method(hook_name) { |base| base }
+      end
+
+      Array.include Dynamic
+    RUBY
+
+    assert aliased.blocked?("::Array#join")
+    assert dynamic.blocked?("::Array#join")
+  end
+
+  def test_an_ambiguous_constant_is_not_resolved_by_ingestion_order
+    registry = Registry.new
+    registry.ingest_source(<<~RUBY, path_name: "top_level.rb")
+      module Candidate
+        def to_choice_sentence = self
+      end
+    RUBY
+    registry.ingest_source(<<~RUBY, path_name: "site.rb")
+      module Outer
+        Array.include Candidate
+      end
+    RUBY
+    # Read last, and the one Ruby would actually find from inside `Outer`.
+    registry.ingest_source(<<~RUBY, path_name: "nested.rb")
+      module Outer
+        module Candidate
+          def self.included(base) = base.class_eval { def join(*) = "hijacked" }
+        end
+      end
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
+
   def test_dup_has_an_independent_blocked_set
     original = Registry.new
     copy = original.dup
@@ -123,6 +232,22 @@ class LiteralMethodRegistryTest < Minitest::Test
     Steep::LiteralIntrinsics.method_keys_for("String").each do |method_name|
       assert registry.blocked?(method_name), method_name
     end
+  end
+
+  def test_an_included_module_does_not_shadow_an_entry
+    registry = registry_for(<<~RUBY)
+      module Conversions
+        def join(*) = "hijacked"
+      end
+
+      Array.include Conversions
+      Integer.extend Conversions
+    RUBY
+
+    # Neither reaches an instance method the class defines itself — `include`
+    # lands below it, `extend` lands on the singleton.
+    refute registry.blocked?("::Array#join")
+    refute registry.blocked?("::Integer#succ")
   end
 
   def test_does_not_confuse_a_nested_constant_with_the_core_class

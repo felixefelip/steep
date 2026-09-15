@@ -5,8 +5,37 @@ module Steep
     # the owner and name, but a Ruby reopen has the same owner and name; this
     # source index supplies the missing implementation provenance.
     class LiteralMethodRegistry
-      CORE_CLASSES = Set["String", "Integer", "Symbol"]
-      LOOKUP_MUTATORS = Set[:include, :prepend, :extend]
+      CORE_CLASSES = Set["String", "Integer", "Symbol", "Array"]
+      # Only `prepend` shadows an entry by LOOKUP. A module inserted by `include`
+      # sits below the class in the chain, and every method in the table is one
+      # the core class defines itself, so the class's own always wins:
+      #
+      #   module M; def join(*) = "hijacked"; end
+      #   Array.include M  #=> [1, 2].join(",") == "1,2"
+      #   Array.prepend M  #=> [1, 2].join(",") == "hijacked"
+      #
+      # `extend` reaches the singleton, and the table holds no singleton method.
+      LOOKUP_MUTATORS = Set[:prepend]
+
+      # `include` and `extend` still RUN code — `append_features`, `included`,
+      # `extend_object`, `extended` — and a hook is free to redefine anything:
+      #
+      #   module Sneaky
+      #     def self.append_features(base)
+      #       base.class_eval { def join(*) = "hijacked" }
+      #       super
+      #     end
+      #   end
+      #   Array.include Sneaky  #=> [1, 2].join(",") == "hijacked"
+      #
+      # So they are held until the module is known: one this index has read and
+      # which defines no hook (and mixes in nothing further, which would take
+      # the question somewhere this cannot follow) is inert and taints nothing.
+      # Anything else — a module from a gem, a dynamic argument, a hook — taints
+      # as before. That keeps the ordinary `Array.include Conversions` folding
+      # without taking the checker's word for a module it has never read.
+      HOOK_MUTATORS = Set[:include, :extend]
+      MIXIN_HOOKS = Set[:append_features, :included, :extend_object, :extended, :prepend_features, :prepended]
       EVAL_METHODS = Set[:class_eval, :class_exec, :module_eval, :module_exec]
       METHOD_MUTATORS = Set[:define_method, :alias_method, :remove_method, :undef_method]
       SEND_METHODS = Set[:send, :public_send, :__send__]
@@ -26,11 +55,17 @@ module Steep
 
       def initialize
         @blocked = Set[] #: Set[String]
+        @mixins = [] #: Array[[String, String?]]
+        @modules = Set[] #: Set[String]
+        @opaque_modules = Set[] #: Set[String]
       end
 
       def initialize_copy(original)
         super
         @blocked = original.to_set
+        @mixins = []
+        @modules = Set[]
+        @opaque_modules = Set[]
       end
 
       def build(project)
@@ -48,14 +83,17 @@ module Steep
       end
 
       def blocked?(method_name)
+        resolve_mixins
         @blocked.include?(normalize(method_name))
       end
 
       def empty?
+        resolve_mixins
         @blocked.empty?
       end
 
       def to_set
+        resolve_mixins
         @blocked.dup
       end
 
@@ -106,6 +144,69 @@ module Steep
         @blocked << key if LiteralIntrinsics::ENTRIES.key?(key)
       end
 
+      def note_hook(owner, method_name)
+        @opaque_modules << owner if method_name && MIXIN_HOOKS.include?(method_name.to_sym)
+      end
+
+      # What makes a module unreadable, and so unsafe to mix into a core class:
+      # it mixes something further in (the question moves somewhere this cannot
+      # follow), it builds a method whose NAME this cannot read, or it builds
+      # one of the hooks by hand. `class << self; alias included install; end`
+      # and `define_method(name_from_a_variable)` both land here.
+      def note_opaque_module(owner, method_name, arguments, target)
+        mixes_in = LOOKUP_MUTATORS.include?(method_name) || HOOK_MUTATORS.include?(method_name)
+        return @opaque_modules << owner if mixes_in && !target
+
+        builds = METHOD_MUTATORS.include?(method_name) || EVAL_METHODS.include?(method_name)
+        return unless builds
+
+        name = literal_method_name(arguments.first)
+        @opaque_modules << owner if name.nil? || MIXIN_HOOKS.include?(name.to_sym)
+      end
+
+      # `alias` writes bare method names, which the parser gives as `:sym` nodes
+      # without the quoting `literal_method_name` expects everywhere else.
+      def literal_alias_name(node)
+        return nil unless node.is_a?(::Parser::AST::Node)
+
+        node.children[0] if node.type == :sym
+      end
+
+      # `include`/`extend` taints unless EVERY module it names is one this index
+      # read and found inert. Deferred to the first query, and the names are
+      # resolved here rather than at the scan: a module may be defined in a file
+      # ingested after the mixin site, and deciding earlier makes the answer
+      # depend on ingestion order.
+      def resolve_mixins
+        return if @mixins.empty?
+
+        pending = @mixins
+        @mixins = []
+        pending.each do |target, references, nesting|
+          inert = references.any? && references.all? { |reference| inert_mixin?(reference, nesting) }
+          taint(target) unless inert
+        end
+      end
+
+      # Whether one named module is known to be harmless. A relative constant is
+      # matched against the lexical scopes Ruby would search; more than one
+      # match is a question this cannot settle, so it counts as unknown — as
+      # does a name never read, and anything that is not a plain constant.
+      def inert_mixin?(reference, nesting)
+        name, absolute = reference
+        return false unless name
+
+        candidates =
+          if absolute
+            [name]
+          else
+            nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+          end
+
+        found = candidates.uniq.select { |candidate| @modules.include?(candidate) }
+        found.size == 1 && !@opaque_modules.include?(found.first)
+      end
+
       def taint(owner)
         return unless CORE_CLASSES.include?(owner)
 
@@ -124,11 +225,18 @@ module Steep
           name, absolute = const_name(node.children[0])
           owner = absolute ? name : [*nesting, name].compact.join("::")
           body = node.type == :class ? node.children[2] : node.children[1]
+          @modules << owner
           scan(body, owner.split("::"), nil)
         when :def
           owner = forced_owner || nesting.join("::")
           block_method(owner, node.children[0])
+          note_hook(owner, node.children[0])
           scan(node.children[2], nesting, forced_owner)
+        when :defs
+          # `def self.included(base)` — the common spelling of a hook, and one
+          # the instance-method branch above never sees.
+          note_hook(forced_owner || nesting.join("::"), node.children[1])
+          scan(node.children[3], nesting, forced_owner)
         when :block
           send_node, _args, body = node.children
           if (owner = eval_owner(send_node, nesting))
@@ -147,12 +255,18 @@ module Steep
 
           if LOOKUP_MUTATORS.include?(method_name) && target
             taint(target)
+          elsif HOOK_MUTATORS.include?(method_name) && target
+            # `include A, B` mixes in BOTH, so one inert module does not speak
+            # for the call. The names are kept unresolved: which constant each
+            # denotes depends on modules this may not have read yet.
+            @mixins << [target, arguments.map { |argument| const_name(argument) }, nesting.dup]
           elsif EVAL_METHODS.include?(method_name) && target && !arguments.empty?
             # String/evaluated forms are opaque to the AST. Any method in the
             # target's lookup table could be replaced.
             taint(target)
           elsif METHOD_MUTATORS.include?(method_name) && target
             if method_name == :define_method || method_name == :alias_method
+              note_hook(owner, literal_method_name(arguments.first))
               if (name = literal_method_name(arguments.first))
                 block_method(target, name)
               else
@@ -171,10 +285,17 @@ module Steep
             end
           end
 
+          note_opaque_module(forced_owner || nesting.join("::"), method_name, arguments, target)
+
           node.children.each { |child| scan(child, nesting, forced_owner) }
         when :alias
           owner = forced_owner || nesting.join("::")
-          block_method(owner, literal_method_name(node.children[0])) if node.children[0]
+          if (aliased = literal_alias_name(node.children[0]))
+            block_method(owner, aliased)
+            # `alias included install` gives the module a hook under a name the
+            # `def` above never wrote.
+            note_hook(owner, aliased)
+          end
         when :undef
           owner = forced_owner || nesting.join("::")
           node.children.each { |name| block_method(owner, literal_method_name(name)) }

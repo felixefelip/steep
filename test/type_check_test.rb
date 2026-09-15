@@ -158,6 +158,119 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  def test_literal_intrinsics_fold_collection_operands
+    run_type_check_test(
+      signatures: {
+        "literal_collections.rbs" => <<~RBS
+          class LiteralCollectionExample
+            def joined: () -> String
+            def wide: () -> String
+            def interpolated: (:content) -> String
+          end
+        RBS
+      },
+      code: {
+        "literal_collections.rb" => <<~'RUBY'
+          class LiteralCollectionExample
+            def joined = ["def x", "end"].join(";")
+                            def included = ["class", "def", "end"].include?("while")
+            def intersected = [:req, :opt].intersect?([:opt, :rest])
+            def wide = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccc"].join("-")
+            def interpolated(name) = ["def #{name}", "end"].join(";")
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("literal_collections.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"def x;end"', actual.fetch("joined")
+      # Past MAX_LITERAL_WIDTH, and affordable because every byte of it is
+      # already written in the operands.
+      assert_equal(
+        '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-cccccccccccccccccccccccccccccc"',
+        actual.fetch("wide")
+      )
+      # The element that widened into the array's element type is recovered from
+      # the node, so the interpolation still reaches the join.
+      assert_equal '"def content;end"', actual.fetch("interpolated")
+    end
+  end
+
+  def test_literal_intrinsics_decline_collections_that_fix_nothing
+    run_type_check_test(
+      signatures: {
+        "literal_collections.rbs" => <<~RBS
+          class LiteralCollectionFallbacks
+            def with_unknown: (String) -> String
+            def accumulated: () -> String
+            def splatted: (Array[String]) -> String
+            def taken_first: () -> String?
+            def joined_bare: () -> String
+            def joined_symbols: () -> String
+            def stale_tuple: () -> String
+          end
+        RBS
+      },
+      code: {
+        "literal_collections.rb" => <<~RUBY
+          class LiteralCollectionFallbacks
+            def with_unknown(part) = ["def x", part].join(";")
+
+            def accumulated
+              parts = ["def x", "end"]
+              parts << "more"
+              parts.join(";")
+            end
+
+            def splatted(rest) = ["def x", *rest].join(";")
+
+            # Folds as safely as the others and is held out of the table on
+            # purpose — see the comment beside ENTRIES.
+            def taken_first = ["def x", "end"].first
+
+            # Reads `$,`, which this cannot see.
+            def joined_bare = ["a", "b"].join
+
+            # Renders its elements through `Symbol#to_s`, which the program is
+            # free to replace.
+            def joined_symbols = [:a, :b].join(",")
+
+            def stale_tuple
+              # @type var parts: ["a", "b"]
+              parts = ["a", "b"]
+              parts.reverse!
+              parts.join(";")
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("literal_collections.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::String", actual.fetch("with_unknown")
+      assert_equal "::String", actual.fetch("accumulated")
+      assert_equal "::String", actual.fetch("splatted")
+      assert_equal "(::String | nil)", actual.fetch("taken_first")
+      assert_equal "::String", actual.fetch("joined_bare")
+      assert_equal "::String", actual.fetch("joined_symbols")
+      # The tuple describes an array this call did not build, and `reverse!` has
+      # run since: folding it would answer "a;b" where the program says "b;a".
+      assert_equal "::String", actual.fetch("stale_tuple")
+    end
+  end
+
   def test_literal_intrinsics_decline_unsafe_or_unbounded_calls
     run_type_check_test(
       signatures: {
