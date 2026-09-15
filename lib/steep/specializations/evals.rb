@@ -101,12 +101,27 @@ module Steep
           end
         end
 
-        # A receiverless `class_eval` with a string argument. One with a block is
-        # `ClassEvalExpander`'s shape and is plain Ruby a reader already sees;
-        # one with a receiver evals somewhere this method's parameters do not
-        # name.
+        # A `class_eval` on this method's own self, with a string argument.
+        #
+        # Receiverless or written `self.class_eval`, it is the SAME call: the
+        # implicit receiver of the first IS self, and a macro that spells it out
+        # writes code in exactly the place a macro that does not. What the
+        # consumer does with the answer is why the distinction matters at all —
+        # it places the source in the class whose body holds the macro call, so
+        # an eval that runs anywhere else would be placed somewhere it does not
+        # belong.
+        #
+        # Every other receiver still declines. A constant names a class this
+        # call site did not choose, and a variable — `owner.module_eval`, the
+        # shape `ActiveSupport::Delegation` uses — names an object only the
+        # frame that passed it can identify, which is felixefelip/steep#171 S5b.
+        #
+        # A block is `ClassEvalExpander`'s shape and is plain Ruby a reader
+        # already sees.
         def eval_send?(node)
-          return false unless node.type == :send && node.children[0].nil?
+          return false unless node.type == :send
+          receiver = node.children[0]
+          return false unless receiver.nil? || receiver.type == :self
           return false unless EVAL_METHODS.include?(node.children[1])
 
           argument = node.children[2]

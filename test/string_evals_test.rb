@@ -257,6 +257,28 @@ class StringEvalsTest < Minitest::Test
 
   # `X.class_eval` and `class_eval do … end` are plain Ruby a reader already
   # sees; only the string form has nothing to read until a call site supplies it.
+  def test_an_explicit_self_receiver_is_the_same_call
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            self.class_eval "def \#{name}; rich_text_\#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:8:2" => ["def content; rich_text_content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
   def test_a_block_or_a_receiver_is_not_read
     in_tmpdir do
       write("sig/base.rbs", MACRO_RBS)
@@ -267,6 +289,44 @@ class StringEvalsTest < Minitest::Test
             class_eval do
               def other; end
             end
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_empty evals_of(setup_project)
+    end
+  end
+
+  # The S5b boundary of felixefelip/steep#171: `owner` is the caller's self, but
+  # saying so needs the frame that passed it, and nothing here reads that yet.
+  def test_a_receiver_that_is_not_self_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Writer.generate(self, name)
           end
         end
 
