@@ -66,6 +66,72 @@ class LiteralMethodRegistryTest < Minitest::Test
     assert registry.blocked?("::Array#join")
   end
 
+  def test_every_module_of_a_mixin_site_is_checked
+    registry = registry_for(<<~RUBY)
+      module Safe
+        def to_choice_sentence = self
+      end
+
+      module Sneaky
+        def self.included(base)
+          base.class_eval { def join(*) = "hijacked" }
+        end
+      end
+
+      Array.include Safe, Sneaky
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
+
+  def test_a_hook_built_by_alias_or_dynamically_counts_as_one
+    aliased = registry_for(<<~RUBY)
+      module Aliased
+        class << self
+          def install(base) = base.class_eval { def join(*) = "hijacked" }
+          alias included install
+        end
+      end
+
+      Array.include Aliased
+    RUBY
+
+    dynamic = registry_for(<<~RUBY)
+      module Dynamic
+        define_method(hook_name) { |base| base }
+      end
+
+      Array.include Dynamic
+    RUBY
+
+    assert aliased.blocked?("::Array#join")
+    assert dynamic.blocked?("::Array#join")
+  end
+
+  def test_an_ambiguous_constant_is_not_resolved_by_ingestion_order
+    registry = Registry.new
+    registry.ingest_source(<<~RUBY, path_name: "top_level.rb")
+      module Candidate
+        def to_choice_sentence = self
+      end
+    RUBY
+    registry.ingest_source(<<~RUBY, path_name: "site.rb")
+      module Outer
+        Array.include Candidate
+      end
+    RUBY
+    # Read last, and the one Ruby would actually find from inside `Outer`.
+    registry.ingest_source(<<~RUBY, path_name: "nested.rb")
+      module Outer
+        module Candidate
+          def self.included(base) = base.class_eval { def join(*) = "hijacked" }
+        end
+      end
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
+
   def test_dup_has_an_independent_blocked_set
     original = Registry.new
     copy = original.dup
