@@ -5295,7 +5295,7 @@ module Steep
     # this only recovers values that are visibly literal in the source.
     def literal_operand_type(node, inferred_type)
       return inferred_type if inferred_type.is_a?(AST::Types::Literal)
-      return inferred_type unless node.is_a?(::Parser::AST::Node)
+      return built_here_only(inferred_type) unless node.is_a?(::Parser::AST::Node)
 
       # An array written out in the source is exact information the same way a
       # string is, and the element types are NOT where it survives: `["a#{b}",
@@ -5310,7 +5310,7 @@ module Steep
           element if element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple)
         end
 
-        return elements.all? ? AST::Types::Tuple.new(types: elements) : inferred_type
+        return elements.all? ? AST::Types::Tuple.new(types: elements) : built_here_only(inferred_type)
       end
 
       value =
@@ -5334,7 +5334,22 @@ module Steep
           end
         end
 
-      value.nil? ? inferred_type : AST::Types::Literal.new(value: value)
+      value.nil? ? built_here_only(inferred_type) : AST::Types::Literal.new(value: value)
+    end
+
+    # A tuple that ARRIVES as a type describes an array this call did not build
+    # — a local, a parameter — and a type outlives mutations a value does not:
+    #
+    #   # @type var parts: ["a", "b"]
+    #   parts = ["a", "b"]
+    #   parts.reverse!
+    #   parts.join(";")      # folds to "a;b", runs as "b;a"
+    #
+    # So a tuple is BUILT above, out of the array written at this call site, and
+    # never passed through from the type. `any` is what an operand this cannot
+    # read exactly looks like, and the fold declines it.
+    def built_here_only(type)
+      type.is_a?(AST::Types::Tuple) ? AST::Types::Any.new : type
     end
 
     def type_method_call(node, method_name:, receiver_type:, method:, arguments:, block_params:, block_body:, tapp:, hint:)

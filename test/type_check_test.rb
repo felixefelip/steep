@@ -164,9 +164,6 @@ class TypeCheckTest < Minitest::Test
         "literal_collections.rbs" => <<~RBS
           class LiteralCollectionExample
             def joined: () -> String
-            def joined_bare: () -> String
-            def included: () -> bool
-            def intersected: () -> bool
             def wide: () -> String
             def interpolated: (:content) -> String
           end
@@ -176,8 +173,7 @@ class TypeCheckTest < Minitest::Test
         "literal_collections.rb" => <<~'RUBY'
           class LiteralCollectionExample
             def joined = ["def x", "end"].join(";")
-            def joined_bare = ["a", "b"].join
-                    def included = ["class", "def", "end"].include?("while")
+                            def included = ["class", "def", "end"].include?("while")
             def intersected = [:req, :opt].intersect?([:opt, :rest])
             def wide = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccc"].join("-")
             def interpolated(name) = ["def #{name}", "end"].join(";")
@@ -194,9 +190,6 @@ class TypeCheckTest < Minitest::Test
       end
 
       assert_equal '"def x;end"', actual.fetch("joined")
-      assert_equal '"ab"', actual.fetch("joined_bare")
-      assert_equal "false", actual.fetch("included")
-      assert_equal "true", actual.fetch("intersected")
       # Past MAX_LITERAL_WIDTH, and affordable because every byte of it is
       # already written in the operands.
       assert_equal(
@@ -218,6 +211,9 @@ class TypeCheckTest < Minitest::Test
             def accumulated: () -> String
             def splatted: (Array[String]) -> String
             def taken_first: () -> String?
+            def joined_bare: () -> String
+            def joined_symbols: () -> String
+            def stale_tuple: () -> String
           end
         RBS
       },
@@ -237,6 +233,20 @@ class TypeCheckTest < Minitest::Test
             # Folds as safely as the others and is held out of the table on
             # purpose — see the comment beside ENTRIES.
             def taken_first = ["def x", "end"].first
+
+            # Reads `$,`, which this cannot see.
+            def joined_bare = ["a", "b"].join
+
+            # Renders its elements through `Symbol#to_s`, which the program is
+            # free to replace.
+            def joined_symbols = [:a, :b].join(",")
+
+            def stale_tuple
+              # @type var parts: ["a", "b"]
+              parts = ["a", "b"]
+              parts.reverse!
+              parts.join(";")
+            end
           end
         RUBY
       }
@@ -253,6 +263,11 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::String", actual.fetch("accumulated")
       assert_equal "::String", actual.fetch("splatted")
       assert_equal "(::String | nil)", actual.fetch("taken_first")
+      assert_equal "::String", actual.fetch("joined_bare")
+      assert_equal "::String", actual.fetch("joined_symbols")
+      # The tuple describes an array this call did not build, and `reverse!` has
+      # run since: folding it would answer "a;b" where the program says "b;a".
+      assert_equal "::String", actual.fetch("stale_tuple")
     end
   end
 

@@ -141,12 +141,17 @@ module Steep
       divisor = arguments.first
       divisor.is_a?(Integer) && !divisor.zero?
     end
-    # `join` is total over the values this table admits (String, Integer, Symbol,
-    # bool all answer `to_s`), so only the separator has to be checked.
-    ARRAY_JOIN = lambda do |_receiver, arguments|
-      arguments.empty? || arguments.first.is_a?(String)
+    # `join` is a closed operation only over STRING elements with an explicit
+    # separator, and both halves are load-bearing. A non-String element is
+    # rendered by its own `to_s`, and a program that redefines one diverges from
+    # the value folded in the checker's process: with `Integer#to_s` replaced,
+    # `[1, 2].join(",")` runs as `"hijacked,hijacked"`. Omitting the separator
+    # reads `$,`, a global this cannot see. With neither, `join` walks its
+    # elements and concatenates them — no dispatch, nothing global.
+    ARRAY_JOIN = lambda do |receiver, arguments|
+      arguments.size == 1 && arguments.first.is_a?(String) &&
+        receiver.all? { |element| element.is_a?(String) }
     end
-    ARRAY_INTERSECT = ->(_receiver, arguments) { arguments.first.is_a?(::Array) }
     INTEGER_POWER = lambda do |receiver, arguments|
       exponent = arguments.first
       next false unless exponent.is_a?(Integer) && exponent >= 0
@@ -185,9 +190,14 @@ module Steep
       # is right and the change is real, so it belongs in the stage that has a
       # use for it (`parameters.map(&:first)`, S2/S3 of #171) and can carry the
       # test edits it forces, not in the one that needs `join`.
-      "::Array#join" => Entry.new(method: Array.instance_method(:join), arity: 0..1, preflight: ARRAY_JOIN),
-      "::Array#include?" => Entry.new(method: Array.instance_method(:include?), arity: 1, preflight: ALWAYS),
-      "::Array#intersect?" => Entry.new(method: Array.instance_method(:intersect?), arity: 1, preflight: ARRAY_INTERSECT)
+      # `include?` and `intersect?` are NOT here, and not for want of safety in
+      # the fold: both answer by DISPATCHING — `==` for one, `eql?`/`hash` for
+      # the other — so a program that redefines `String#==` makes the runtime
+      # disagree with the value computed here, and the registry watches the
+      # table's own methods rather than the ones an entry leans on. Neither has
+      # a consumer in S1; they return with the stage that needs them (S2/S3 of
+      # #171), along with the dependency tracking that makes them safe.
+      "::Array#join" => Entry.new(method: Array.instance_method(:join), arity: 1, preflight: ARRAY_JOIN)
     }.freeze
   end
 end

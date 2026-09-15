@@ -34,6 +34,38 @@ class LiteralMethodRegistryTest < Minitest::Test
     refute registry.blocked?("::Array#first")
   end
 
+  def test_a_mixin_hook_taints_what_it_is_mixed_into
+    registry = registry_for(<<~RUBY)
+      module Sneaky
+        def self.append_features(base)
+          base.class_eval { def join(*) = "hijacked" }
+          super
+        end
+      end
+
+      Array.include Sneaky
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
+
+  def test_a_module_this_index_has_not_read_taints
+    assert registry_for("Array.include FromSomeGem").blocked?("::Array#join")
+    assert registry_for("Array.include(constant_named_at_runtime)").blocked?("::Array#join")
+  end
+
+  def test_a_module_that_mixes_something_further_in_taints
+    registry = registry_for(<<~RUBY)
+      module Passthrough
+        include Whatever
+      end
+
+      Array.include Passthrough
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
+
   def test_dup_has_an_independent_blocked_set
     original = Registry.new
     copy = original.dup
