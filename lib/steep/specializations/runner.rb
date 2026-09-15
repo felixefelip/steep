@@ -101,15 +101,14 @@ module Steep
       def specialize_target(target, methods)
         context = load_target(target) or return
 
-        writers = code_writers(context)
-        delegations = delegating_writers(context)
+        parameter_writers = eval_parameters(context)
+        writers = code_writers(context, parameter_writers)
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, definitions, callees =
-          collect(context, Store.empty, locations, writers | delegations.keys.to_set)
+        baselines, tuples, definitions, callees = collect(context, Store.empty, locations, writers)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          harvest_evals(context, Store.empty, locations, definitions, delegations)
+          harvest_evals(context, Store.empty, locations, definitions, parameter_writers)
           return
         end
 
@@ -134,11 +133,7 @@ module Steep
 
           paths = affected_paths(callees, changed_keys(found, discovered))
           found = discovered
-          tuples = grow(
-            grown,
-            call_sites(context, store(found), definitions, paths, locations, writers | delegations.keys.to_set),
-            generation
-          )
+          tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers), generation)
           generation += 1
         end
 
@@ -146,7 +141,7 @@ module Steep
           (methods[key] ||= {}).merge!(entries.transform_values(&:to_s))
         end
 
-        harvest_evals(context, store(found), locations, definitions, delegations)
+        harvest_evals(context, store(found), locations, definitions, parameter_writers)
       end
 
       # `discovered` with every entry that disagrees with the generation before
@@ -215,7 +210,7 @@ module Steep
       #
       # Rounds, like `specialize`: two macros in one file are read by one check,
       # and only two tuples of the SAME macro cost two.
-      def harvest_evals(context, store, locations, definitions, delegations)
+      def harvest_evals(context, store, locations, definitions, parameter_writers)
         writing = locations.select { |key, _| definitions.key?(key) }
         return if writing.empty?
 
@@ -228,13 +223,28 @@ module Steep
             path, def_node = definitions.fetch(key)
             typing = typings[path] or next
 
-            sources = Evals.sources(typing, def_node)
-            if sources.empty? && (callee = delegations[key])
-              sources = delegated_sources(context, store, typing, def_node, callee, definitions)
-            end
+            sources = eval_sources(context, store, typing, def_node, definitions, parameter_writers)
             next if sources.empty?
 
             writing.fetch(key).fetch(arguments).each { |site| @evals[site] = sources }
+          end
+        end
+      end
+
+      # What this body writes, in the order it writes it: its own evals, and what
+      # the methods it hands its own `self` to write there. A macro that evals
+      # once and then hands off produces both, and the class gets them in source
+      # order — the order the consumer places them in.
+      def eval_sources(context, store, typing, def_node, definitions, parameter_writers)
+        Evals.effects(typing, def_node, parameter_writers).flat_map do |effect|
+          if effect.kind == :eval
+            [effect.certain ? Evals.source_of(typing, effect.node) : nil]
+          elsif effect.certain
+            delegated_sources(context, store, typing, effect, definitions)
+          else
+            # Code is written here and this call site does not decide what: a
+            # hole, the same answer an eval it cannot fold gets.
+            [nil]
           end
         end
       end
@@ -251,45 +261,43 @@ module Steep
       # is the wrong place to attribute anything to, while `has_rich_text`'s call
       # sites are written in the classes that actually get the methods.
       #
+      # The inner body is read with ONE receiver allowed: the parameter this call
+      # was seen to hand its self to. A helper evaling on two parameters writes
+      # for two different objects, and only one of them is the class being
+      # attributed to.
+      #
       # One frame, deliberately. Two would need the argument threaded through a
       # chain, and nothing yet asks for it.
-      def delegated_sources(context, store, typing, _def_node, callee, definitions)
-        callee_key, node = callee
-        return [] unless definitions.key?(callee_key)
+      def delegated_sources(context, store, typing, effect, definitions)
+        entry = definitions[effect.callee] or return [nil]
+        path, callee_node = entry
+        arguments = Specializations::Arguments.from_send(effect.node, typing) or return [nil]
+        receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]
 
-        arguments = Specializations::Arguments.from_send(node, typing) or return []
+        positionals, keywords = Collector.defaults(callee_node)
+        arguments = arguments.with_defaults(positionals: positionals, keywords: keywords)
 
-        inner = check_definitions(context, store, { callee_key => arguments }, definitions)
-        path, callee_node = definitions.fetch(callee_key)
-        inner_typing = inner[path] or return []
+        inner = check_definitions(context, store, { effect.callee => arguments }, definitions)
+        inner_typing = inner[path] or return [nil]
 
-        Evals.sources(inner_typing, callee_node)
+        Evals.sources(inner_typing, callee_node, [receiver])
       end
 
-      # The methods that write code by handing their own `self` to one that
-      # writes on a parameter. Read off the AST alone: the delegating call names
-      # its target by constant (`ActiveSupport::Delegation.generate`), which is
-      # the shape that matters and the one a syntactic reader can resolve without
-      # a type-check pass of its own.
-      def delegating_writers(context)
-        parameter_writers = {} #: Hash[String, Set[Integer]]
+      # The methods that eval on a PARAMETER, by the position it sits in. Not
+      # writers themselves — they write on an object they were handed, so their
+      # own call site is the wrong place to attribute anything to — but what a
+      # frame handing its own `self` is recognised against.
+      def eval_parameters(context)
+        writers = {} #: Hash[String, Set[Integer]]
+
         context.sources.each_value do |source|
           Collector.definitions(source).each do |key, def_node|
             indices = Evals.eval_parameters(def_node)
-            parameter_writers[key] = indices unless indices.empty?
-          end
-        end
-        return {} if parameter_writers.empty?
-
-        delegations = {} #: Hash[String, String]
-        context.sources.each_value do |source|
-          Collector.definitions(source).each do |key, def_node|
-            delegation = Evals.delegated_writer(Evals.body_of(def_node), parameter_writers) or next
-            delegations[key] = delegation
+            writers[key] = indices unless indices.empty?
           end
         end
 
-        delegations
+        writers
       end
 
       # A call omitting an optional parameter does not leave it open: the body
@@ -339,12 +347,12 @@ module Steep
       # The methods that define methods by evaluating a string, which is the
       # only thing the eval harvest reads. A pure walk of trees already parsed,
       # so a project without the idiom pays this and nothing else.
-      def code_writers(context)
+      def code_writers(context, parameter_writers)
         writers = Set[] #: Set[String]
 
         context.sources.each_value do |source|
           Collector.definitions(source).each do |key, def_node|
-            writers << key if Evals.writes_code?(def_node)
+            writers << key if Evals.writes_code?(def_node, parameter_writers)
           end
         end
 

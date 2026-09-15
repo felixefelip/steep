@@ -45,12 +45,21 @@ module Steep
       ].freeze
 
       class << self
-        # Whether the method writes code ON ITS OWN SELF, which is the gate that
-        # keeps a project without the idiom from paying for a single extra
-        # check. Sources for one of these are read from this body, at this
-        # method's own call sites.
-        def writes_code?(def_node)
-          walk(body_of(def_node), nil, true, EVAL_ON_SELF) { return true }
+        # One thing a body does that writes code, in source order.
+        #
+        # `:eval` is a string eval written on this method's own self. `:delegated`
+        # is a call handing that self to a method which evals on the parameter it
+        # lands in — `index` is the position that got it, and the source is read
+        # from THAT body under the arguments this call passes.
+        #
+        # `certain` is whether the call site's arguments decide it runs at all.
+        Effect = Struct.new(:kind, :node, :callee, :index, :certain, keyword_init: true)
+
+        # Whether the method writes code, directly or by handing its own self
+        # to one that does. The gate that keeps a project without the idiom from
+        # paying for a single extra check, so it reads the AST and nothing else.
+        def writes_code?(def_node, parameter_writers = {})
+          each_effect(body_of(def_node), nil, true, EVAL_ON_SELF, parameter_writers) { return true }
           false
         end
 
@@ -66,8 +75,8 @@ module Steep
           names = parameter_names(def_node)
           found = Set[] #: Set[Integer]
 
-          walk(body_of(def_node), nil, true, names) do |node, _certain|
-            receiver = node.children[0]
+          each_effect(body_of(def_node), nil, true, names, {}) do |effect|
+            receiver = effect.node.children[0]
             next unless receiver&.type == :lvar
 
             index = names.index(receiver.children[0]) and found << index
@@ -92,24 +101,52 @@ module Steep
         # decide. A nil is reported rather than dropped: a consumer rendering
         # the list needs to know its macro was read in part, since a class given
         # a reader whose writer was skipped is worse than one given neither.
-        def sources(typing, def_node)
+        # `receivers` is what this body is allowed to eval ON, and the caller
+        # chooses it rather than the body offering everything it has. A direct
+        # writer gets `EVAL_ON_SELF`; a body reached through a frame gets the ONE
+        # parameter that frame proved it handed its own self to. A helper evaling
+        # on two parameters writes for two different objects, and only one of
+        # them is the class the harvest is attributing to.
+        def sources(typing, def_node, receivers = EVAL_ON_SELF)
           flow = Flow.new(typing)
           result = [] #: Array[String?]
-          receivers = EVAL_ON_SELF + parameter_names(def_node)
 
-          walk(body_of(def_node), flow, true, receivers) do |node, certain|
-            result << (certain ? literal_string(typing, node) : nil)
+          each_effect(body_of(def_node), flow, true, receivers, {}) do |effect|
+            result << (effect.certain ? literal_string(typing, effect.node) : nil)
           end
 
           result
+        end
+
+        # Every effect of this body, direct and delegated, in source order and
+        # each carrying the flow's verdict. A macro that evals once and then
+        # hands off writes both, and the class gets them in the order it is
+        # written.
+        def effects(typing, def_node, parameter_writers)
+          flow = Flow.new(typing)
+          result = [] #: Array[Effect]
+
+          each_effect(body_of(def_node), flow, true, EVAL_ON_SELF, parameter_writers) do |effect|
+            result << effect
+          end
+
+          result
+        end
+
+        # The text one eval writes, for a consumer holding an effect rather than
+        # walking the body itself.
+        def source_of(typing, node)
+          literal_string(typing, node)
         end
 
         def body_of(def_node)
           def_node.type == :defs ? def_node.children[3] : def_node.children[2]
         end
 
-        # The send in `body` that hands this method's own `self` to a method
-        # which evals on the parameter it lands in, with that method's key:
+        private
+
+        # `[key, index]` when this send hands the caller's own `self` to a method
+        # which evals on the parameter it lands in:
         #
         #   Writer.generate(self, name)   # `Writer.generate` evals on parameter 0
         #
@@ -119,26 +156,15 @@ module Steep
         #
         # `self` written at the call site is the whole proof that the two frames
         # share an object — a syntactic check, not an alias analysis.
-        def delegated_writer(body, parameter_writers)
-          each_send(body) do |node|
-            key = constant_send_key(node) or next
-            indices = parameter_writers[key] or next
-            next unless indices.any? { |index| node.children[2 + index]&.type == :self }
+        def delegated_write(node, parameter_writers)
+          return nil if parameter_writers.empty?
+          return nil unless node.type == :send
 
-            return [key, node]
-          end
+          key = constant_send_key(node) or return nil
+          indices = parameter_writers[key] or return nil
+          index = indices.find { |position| node.children[2 + position]&.type == :self } or return nil
 
-          nil
-        end
-
-        private
-
-        def each_send(node, &block)
-          return unless node.is_a?(Parser::AST::Node)
-          return if DEFERRED.include?(node.type)
-
-          yield node if node.type == :send
-          node.children.each { |child| each_send(child, &block) }
+          [key, index]
         end
 
         # `"Writer.generate"` for `Writer.generate(…)`, matching how a singleton
@@ -166,12 +192,24 @@ module Steep
         #
         # `flow` is nil when the caller only asks WHETHER code is written, which
         # needs no decisions and no typing.
-        def walk(node, flow, certain, receivers, &block)
+        # Both kinds of effect come out of ONE walk, so a delegated call is
+        # classified by the same control flow an eval is: a branch the call site
+        # kills is not reached, and one it does not decide takes `certain` away
+        # from whatever is inside it. `Writer.generate(self, name) if enabled`
+        # writes nothing when the call site fixes `enabled` to false, and that is
+        # not a fact the AST alone can produce.
+        def each_effect(node, flow, certain, receivers, parameter_writers, &block)
           return unless node.is_a?(Parser::AST::Node)
           return if DEFERRED.include?(node.type)
 
           if eval_send?(node, receivers)
-            yield node, certain
+            yield Effect.new(kind: :eval, node: node, certain: certain)
+            return
+          end
+
+          if (delegation = delegated_write(node, parameter_writers))
+            callee, index = delegation
+            yield Effect.new(kind: :delegated, node: node, callee: callee, index: index, certain: certain)
             return
           end
 
@@ -180,10 +218,10 @@ module Steep
             children.each do |child, state|
               next if state == :dead
 
-              walk(child, flow, certain && state == :certain, receivers, &block)
+              each_effect(child, flow, certain && state == :certain, receivers, parameter_writers, &block)
             end
           else
-            node.children.each { |child| walk(child, flow, certain, receivers, &block) }
+            node.children.each { |child| each_effect(child, flow, certain, receivers, parameter_writers, &block) }
           end
         end
 
