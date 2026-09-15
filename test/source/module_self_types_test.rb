@@ -2,10 +2,111 @@ require_relative "../test_helper"
 require "tmpdir"
 
 class Steep::Source::ModuleSelfTypesTest < Minitest::Test
+  include TestHelper
+  include FactoryHelper
+
   M = Steep::Source::ModuleSelfTypes
+
+  def with_module_convention
+    previous = ENV["STEEP_MODULE_CONVENTION"]
+    ENV["STEEP_MODULE_CONVENTION"] = "1"
+    yield
+  ensure
+    ENV["STEEP_MODULE_CONVENTION"] = previous
+    M.reset!
+  end
+
+  def parse_source(code, path:)
+    result = nil
+    with_factory({}) { |factory| result = Steep::Source.parse(code, path: path, factory: factory) }
+    result
+  end
 
   CONCERN = ["# @type self: singleton(Post) & singleton(Post::Notifiable)",
              "# @type instance: Post & Post::Notifiable"].freeze
+
+  # --- attachment: what Steep's own check uses ---
+
+  # The bug this closes lived behind a test that looked like it covered it:
+  # `test_inject_preserves_the_line_numbers_of_the_body` asserts the lines
+  # BEFORE the insertion are untouched, which they always were. Everything after
+  # shifted, and every position Steep reported for it — diagnostics included —
+  # was one line off per annotation (felixefelip/steep#176).
+  def test_scope_annotations_reach_the_node_without_moving_a_line
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        sidecar = Pathname(dir) + M::DEFAULT_SIDECAR_PATH
+        sidecar.parent.mkpath
+        sidecar.write(<<~YAML)
+          a.rb:
+            modules:
+            - anchor: Notifiable
+              annotations:
+              - "# @type self: singleton(Post) & singleton(Post::Notifiable)"
+              - "# @type instance: Post & Post::Notifiable"
+        YAML
+        M.reset!
+
+        code = <<~RUBY
+          module Post::Notifiable
+            def notify
+            end
+          end
+
+          class After
+            def where_am_i
+            end
+          end
+        RUBY
+
+        source = with_module_convention { parse_source(code, path: Pathname("a.rb")) }
+
+        module_node = source.node.children.first
+        attached = source.mapping[module_node] || []
+        assert_equal 2, attached.size, "both annotations belong to the module the anchor names"
+        assert attached.any? { |a| a.is_a?(Steep::AST::Annotation::SelfType) }
+        assert attached.any? { |a| a.is_a?(Steep::AST::Annotation::InstanceType) }
+
+        # The point of the whole change: the file Steep parsed is the file on
+        # disk, so a node after the annotated module keeps its own line.
+        after = source.node.children.last
+        assert_equal 6, after.loc.line
+        assert_equal code, source.buffer.content
+      end
+    end
+  end
+
+  def test_an_annotation_written_by_hand_wins_over_the_sidecar
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        sidecar = Pathname(dir) + M::DEFAULT_SIDECAR_PATH
+        sidecar.parent.mkpath
+        sidecar.write(<<~YAML)
+          a.rb:
+            modules:
+            - anchor: Notifiable
+              annotations:
+              - "# @type instance: Post & Post::Notifiable"
+        YAML
+        M.reset!
+
+        code = <<~RUBY
+          module Post::Notifiable
+            # @type instance: String
+            def notify
+            end
+          end
+        RUBY
+
+        source = with_module_convention { parse_source(code, path: Pathname("a.rb")) }
+
+        module_node = source.node
+        instances = (source.mapping[module_node] || []).select { |a| a.is_a?(Steep::AST::Annotation::InstanceType) }
+        assert_equal 1, instances.size, "the sidecar is derived; a hand-written annotation is not argued with"
+        assert_equal "String", instances.first.type.to_s
+      end
+    end
+  end
 
   # --- inject: placement (the genuinely-Steep behavior) ---
 

@@ -56,18 +56,12 @@ module Steep
         ModuleSelfTypes.self_types_of(entry).each do |mod|
           next unless mod["anchor"]
 
-          # Per-def BEFORE the module-wide lines: this one rides existing lines
-          # and shifts nothing, while `inject` may insert into the body.
-          # Each re-parses, so the order is not load-bearing — it just keeps
-          # the cheaper walk on the smaller source.
+          # Rides existing lines and shifts nothing. The module-wide annotations
+          # are not written into the source at all — they are attached to their
+          # node after the parse, below.
           source_code = ModuleSelfTypes.inject_defs(
             source_code,
             defs: mod["defs"],
-            anchor: mod["anchor"].to_s
-          )
-          source_code = ModuleSelfTypes.inject(
-            source_code,
-            annotations: Array(mod["annotations"]),
             anchor: mod["anchor"].to_s
           )
         end
@@ -132,6 +126,16 @@ module Steep
         map.fetch(node) << annot
       end
 
+      if node && ENV["STEEP_MODULE_CONVENTION"] && path.to_s.end_with?(".rb") && (entry = ModuleSelfTypes.entry_for(path))
+        attach_scope_annotations(
+          entry: entry,
+          node: node,
+          mapping: map,
+          annotation_parser: annotation_parser,
+          buffer: buffer
+        )
+      end
+
       ignores = comments.filter_map do |comment|
         AST::Ignore.parse(comment, buffer)
       end
@@ -141,6 +145,58 @@ module Steep
 
     def self.extract_ruby_from_erb(source_code)
       ::Herb.extract_ruby(source_code, semicolons: true, comments: true)
+    end
+
+    # Puts the sidecar's module-wide annotations on the node their anchor names.
+    #
+    # They used to be spliced into the source as new lines, which moved every
+    # position below them — the checker reported and recorded line numbers the
+    # file does not have (felixefelip/steep#176). Attaching them here means the
+    # source Steep parses IS the file on disk, so nothing downstream has to know
+    # an annotation was supplied from outside it.
+    #
+    # An annotation the file already carries wins: the sidecar is derived, and a
+    # hand-written one is the author saying something the derivation should not
+    # argue with.
+    #
+    # `location` is the anchor's own — the annotation exists in no file, and the
+    # module it describes is where anything said about it should point.
+    def self.attach_scope_annotations(entry:, node:, mapping:, annotation_parser:, buffer:)
+      ModuleSelfTypes.scope_annotations(entry).each do |anchor, lines|
+        target = find_scope_node(node, anchor) or next
+        location = RBS::Location.new(
+          buffer: buffer,
+          start_pos: target.loc.expression.begin_pos,
+          end_pos: target.loc.expression.begin_pos
+        )
+
+        existing = mapping[target] || []
+        lines.each do |line|
+          annotation = annotation_parser.parse(line.delete_prefix("#").strip, location: location) or next
+          next if existing.any? { |other| other.class == annotation.class }
+
+          mapping[target] ||= []
+          mapping.fetch(target) << annotation
+        end
+      end
+    end
+
+    # The DEEPEST `class`/`module` whose name is `anchor`, matching how the
+    # sidecar's own reader resolves one: a name written in two scopes is meant as
+    # the inner one, since that is the one a nested declaration adds.
+    def self.find_scope_node(node, anchor, depth = 0, found = nil)
+      return found unless node.is_a?(Parser::AST::Node)
+
+      if node.type == :class || node.type == :module
+        name = node.children[0]
+        if name.is_a?(Parser::AST::Node) && name.type == :const && name.children[1].to_s == anchor
+          found = [depth, node] if found.nil? || depth > found[0]
+        end
+      end
+
+      each_child_node(node) { |child| found = find_scope_node(child, anchor, depth + 1, found) }
+
+      depth.zero? ? found&.last : found
     end
 
     def self.construct_mapping(node:, annotations:, mapping:, line_range: nil)
