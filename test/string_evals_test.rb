@@ -57,7 +57,14 @@ class StringEvalsTest < Minitest::Test
     end
   RBS
 
+  # The SOURCES each call site writes. Most of this file is about what the
+  # checker can read, not about where it lands, so the target stays out of the
+  # way unless a test asks for it with `chunks_of`.
   def evals_of(project)
+    chunks_of(project).transform_values { |chunks| chunks.map { |chunk| chunk&.source } }
+  end
+
+  def chunks_of(project)
     runner = Specializations::Runner.new(project)
     runner.run
     runner.evals
@@ -292,16 +299,90 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
-  def test_a_block_or_a_receiver_is_not_read
+  def test_a_block_is_not_read
     in_tmpdir do
       write("sig/base.rbs", MACRO_RBS)
       write("app/base.rb", <<~RUBY)
         class Base
           def self.has_rich_text(name)
-            Article.class_eval "def \#{name}; end"
             class_eval do
               def other; end
             end
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_empty evals_of(setup_project)
+    end
+  end
+
+  # A receiver that NAMES a class says where its methods go, which is something
+  # the consumer cannot work out on its own: it places what it is handed in the
+  # class whose body holds the macro call, and this eval lands somewhere else
+  # entirely (felixefelip/steep#175).
+  def test_a_receiver_that_names_a_class_carries_it
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            Photo.class_eval "def \#{name}_elsewhere; end"
+            class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      chunks = chunks_of(setup_project).fetch("app/base.rb:9:2")
+
+      assert_equal ["def content_elsewhere; end", "def content; end"], chunks.map(&:source)
+      # The second has none: an eval on the caller's own self lands on the class
+      # holding the call, and only the call site knows which that is.
+      assert_equal ["::Photo", nil], chunks.map(&:target)
+    end
+  end
+
+  # A local holding the constant is the same question with an assignment in
+  # front of it — what decides is the receiver's TYPE, not the shape of the
+  # expression that produced it.
+  def test_a_local_that_holds_a_class_carries_it_too
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            target = Photo
+            target.class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["::Photo"], chunks_of(setup_project).fetch("app/base.rb:9:2").map(&:target)
+    end
+  end
+
+  # `singleton_class` is the shape that names NOTHING: the checker knows the
+  # object and RBS has no spelling for "the singleton class of Photo" as a
+  # value, so it infers `::Class`. An eval this cannot place is one it must not
+  # read (S2 of felixefelip/steep#171).
+  def test_a_receiver_whose_type_names_no_class_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            Photo.singleton_class.class_eval "def \#{name}; end"
           end
         end
 
@@ -883,7 +964,7 @@ class StringEvalsTest < Minitest::Test
       runner.write(runner.run)
 
       assert_equal(
-        { "version" => 1, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] } },
+        { "version" => 2, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] } },
         YAML.safe_load(runner.evals_output_path.read)
       )
     end
