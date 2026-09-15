@@ -102,12 +102,14 @@ module Steep
         context = load_target(target) or return
 
         writers = code_writers(context)
+        delegations = delegating_writers(context)
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, definitions, callees = collect(context, Store.empty, locations, writers)
+        baselines, tuples, definitions, callees =
+          collect(context, Store.empty, locations, writers | delegations.keys.to_set)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          harvest_evals(context, Store.empty, locations, definitions)
+          harvest_evals(context, Store.empty, locations, definitions, delegations)
           return
         end
 
@@ -132,7 +134,11 @@ module Steep
 
           paths = affected_paths(callees, changed_keys(found, discovered))
           found = discovered
-          tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers), generation)
+          tuples = grow(
+            grown,
+            call_sites(context, store(found), definitions, paths, locations, writers | delegations.keys.to_set),
+            generation
+          )
           generation += 1
         end
 
@@ -140,7 +146,7 @@ module Steep
           (methods[key] ||= {}).merge!(entries.transform_values(&:to_s))
         end
 
-        harvest_evals(context, store(found), locations, definitions)
+        harvest_evals(context, store(found), locations, definitions, delegations)
       end
 
       # `discovered` with every entry that disagrees with the generation before
@@ -209,7 +215,7 @@ module Steep
       #
       # Rounds, like `specialize`: two macros in one file are read by one check,
       # and only two tuples of the SAME macro cost two.
-      def harvest_evals(context, store, locations, definitions)
+      def harvest_evals(context, store, locations, definitions, delegations)
         writing = locations.select { |key, _| definitions.key?(key) }
         return if writing.empty?
 
@@ -223,11 +229,67 @@ module Steep
             typing = typings[path] or next
 
             sources = Evals.sources(typing, def_node)
+            if sources.empty? && (callee = delegations[key])
+              sources = delegated_sources(context, store, typing, def_node, callee, definitions)
+            end
             next if sources.empty?
 
             writing.fetch(key).fetch(arguments).each { |site| @evals[site] = sources }
           end
         end
+      end
+
+      # What the method this one hands its own `self` to writes there, read under
+      # the arguments THIS call passes it.
+      #
+      #   def has_rich_text(name)
+      #     Writer.generate(self, name)      # ← the call read here
+      #   end
+      #
+      # The frame in between is what the answer belongs to: `generate` evals on
+      # an object it was handed, so its own call site — one line inside a gem —
+      # is the wrong place to attribute anything to, while `has_rich_text`'s call
+      # sites are written in the classes that actually get the methods.
+      #
+      # One frame, deliberately. Two would need the argument threaded through a
+      # chain, and nothing yet asks for it.
+      def delegated_sources(context, store, typing, _def_node, callee, definitions)
+        callee_key, node = callee
+        return [] unless definitions.key?(callee_key)
+
+        arguments = Specializations::Arguments.from_send(node, typing) or return []
+
+        inner = check_definitions(context, store, { callee_key => arguments }, definitions)
+        path, callee_node = definitions.fetch(callee_key)
+        inner_typing = inner[path] or return []
+
+        Evals.sources(inner_typing, callee_node)
+      end
+
+      # The methods that write code by handing their own `self` to one that
+      # writes on a parameter. Read off the AST alone: the delegating call names
+      # its target by constant (`ActiveSupport::Delegation.generate`), which is
+      # the shape that matters and the one a syntactic reader can resolve without
+      # a type-check pass of its own.
+      def delegating_writers(context)
+        parameter_writers = {} #: Hash[String, Set[Integer]]
+        context.sources.each_value do |source|
+          Collector.definitions(source).each do |key, def_node|
+            indices = Evals.eval_parameters(def_node)
+            parameter_writers[key] = indices unless indices.empty?
+          end
+        end
+        return {} if parameter_writers.empty?
+
+        delegations = {} #: Hash[String, String]
+        context.sources.each_value do |source|
+          Collector.definitions(source).each do |key, def_node|
+            delegation = Evals.delegated_writer(Evals.body_of(def_node), parameter_writers) or next
+            delegations[key] = delegation
+          end
+        end
+
+        delegations
       end
 
       # A call omitting an optional parameter does not leave it open: the body

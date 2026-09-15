@@ -45,11 +45,46 @@ module Steep
       ].freeze
 
       class << self
-        # Whether the method writes code at all, which is the gate that keeps a
-        # project without the idiom from paying for a single extra check.
+        # Whether the method writes code ON ITS OWN SELF, which is the gate that
+        # keeps a project without the idiom from paying for a single extra
+        # check. Sources for one of these are read from this body, at this
+        # method's own call sites.
         def writes_code?(def_node)
-          walk(body_of(def_node), nil, true) { return true }
+          walk(body_of(def_node), nil, true, EVAL_ON_SELF) { return true }
           false
+        end
+
+        # The positions of the parameters a body writes code on instead —
+        # `owner.module_eval "…"` in `generate(owner, name)` answers `[0]`.
+        #
+        # A method like that is NOT a writer in its own right: it writes on an
+        # object it was handed, so its own call site is the wrong place to
+        # attribute anything to. It becomes one only through a frame that passes
+        # its own `self` there, which is what `Runner#delegating_writers` looks
+        # for.
+        def eval_parameters(def_node)
+          names = parameter_names(def_node)
+          found = Set[] #: Set[Integer]
+
+          walk(body_of(def_node), nil, true, names) do |node, _certain|
+            receiver = node.children[0]
+            next unless receiver&.type == :lvar
+
+            index = names.index(receiver.children[0]) and found << index
+          end
+
+          found
+        end
+
+        # The positional parameters of a def, in order, so an eval written on one
+        # can be matched against the argument a caller passes there.
+        def parameter_names(def_node)
+          args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+          return [] unless args
+
+          args.children.filter_map do |arg|
+            arg.children[0] if arg.type == :arg || arg.type == :optarg
+          end
         end
 
         # The strings this body evals, in source order, with nil for one whose
@@ -60,18 +95,69 @@ module Steep
         def sources(typing, def_node)
           flow = Flow.new(typing)
           result = [] #: Array[String?]
+          receivers = EVAL_ON_SELF + parameter_names(def_node)
 
-          walk(body_of(def_node), flow, true) do |node, certain|
+          walk(body_of(def_node), flow, true, receivers) do |node, certain|
             result << (certain ? literal_string(typing, node) : nil)
           end
 
           result
         end
 
-        private
-
         def body_of(def_node)
           def_node.type == :defs ? def_node.children[3] : def_node.children[2]
+        end
+
+        # The send in `body` that hands this method's own `self` to a method
+        # which evals on the parameter it lands in, with that method's key:
+        #
+        #   Writer.generate(self, name)   # `Writer.generate` evals on parameter 0
+        #
+        # Read off the AST, so the target has to be named by a constant. That is
+        # the shape a framework writes (`::ActiveSupport::Delegation.generate`),
+        # and a receiver this cannot name is one whose method this cannot find.
+        #
+        # `self` written at the call site is the whole proof that the two frames
+        # share an object — a syntactic check, not an alias analysis.
+        def delegated_writer(body, parameter_writers)
+          each_send(body) do |node|
+            key = constant_send_key(node) or next
+            indices = parameter_writers[key] or next
+            next unless indices.any? { |index| node.children[2 + index]&.type == :self }
+
+            return [key, node]
+          end
+
+          nil
+        end
+
+        private
+
+        def each_send(node, &block)
+          return unless node.is_a?(Parser::AST::Node)
+          return if DEFERRED.include?(node.type)
+
+          yield node if node.type == :send
+          node.children.each { |child| each_send(child, &block) }
+        end
+
+        # `"Writer.generate"` for `Writer.generate(…)`, matching how a singleton
+        # method keys itself, or nil for any receiver that is not a constant.
+        def constant_send_key(node)
+          receiver = node.children[0]
+          return nil unless receiver&.type == :const
+
+          name = constant_path(receiver) or return nil
+          "#{name}.#{node.children[1]}"
+        end
+
+        def constant_path(node)
+          parent, name = node.children
+          return name.to_s if parent.nil? || parent.type == :cbase
+          return nil unless parent.type == :const
+
+          prefix = constant_path(parent) or return nil
+          "#{prefix}::#{name}"
         end
 
         # `certain` is whether the call site's arguments decide that this point
@@ -80,11 +166,11 @@ module Steep
         #
         # `flow` is nil when the caller only asks WHETHER code is written, which
         # needs no decisions and no typing.
-        def walk(node, flow, certain, &block)
+        def walk(node, flow, certain, receivers, &block)
           return unless node.is_a?(Parser::AST::Node)
           return if DEFERRED.include?(node.type)
 
-          if eval_send?(node)
+          if eval_send?(node, receivers)
             yield node, certain
             return
           end
@@ -94,12 +180,17 @@ module Steep
             children.each do |child, state|
               next if state == :dead
 
-              walk(child, flow, certain && state == :certain, &block)
+              walk(child, flow, certain && state == :certain, receivers, &block)
             end
           else
-            node.children.each { |child| walk(child, flow, certain, &block) }
+            node.children.each { |child| walk(child, flow, certain, receivers, &block) }
           end
         end
+
+        # What `walk` is asked to read a receiver as. `nil` stands for self —
+        # receiverless or written `self.` — and a Symbol for a parameter of the
+        # def, which only the delegating shape passes.
+        EVAL_ON_SELF = [nil].freeze
 
         # A `class_eval` on this method's own self, with a string argument.
         #
@@ -118,14 +209,20 @@ module Steep
         #
         # A block is `ClassEvalExpander`'s shape and is plain Ruby a reader
         # already sees.
-        def eval_send?(node)
+        def eval_send?(node, receivers)
           return false unless node.type == :send
-          receiver = node.children[0]
-          return false unless receiver.nil? || receiver.type == :self
+          return false unless accepted_receiver?(node.children[0], receivers)
           return false unless EVAL_METHODS.include?(node.children[1])
 
           argument = node.children[2]
           argument&.type == :str || argument&.type == :dstr
+        end
+
+        def accepted_receiver?(receiver, receivers)
+          return receivers.include?(nil) if receiver.nil? || receiver.type == :self
+          return false unless receiver.type == :lvar
+
+          receivers.include?(receiver.children[0])
         end
 
         def literal_string(typing, node)
