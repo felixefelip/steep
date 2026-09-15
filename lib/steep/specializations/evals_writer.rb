@@ -37,8 +37,19 @@ module Steep
         def payload
           {
             "version" => SCHEMA_VERSION,
-            "call_sites" => @call_sites.keys.sort.to_h { |key| [key, @call_sites[key]] }
+            "call_sites" => @call_sites.keys.sort.to_h { |key| [key, @call_sites[key].map { |chunk| entry(chunk) }] }
           }
+        end
+
+        # A chunk with no target stays a bare string — the version 1 spelling,
+        # and still what an eval on the caller's own self writes, since only the
+        # call site knows which class that is. One that NAMES its class says so,
+        # which is the whole of version 2.
+        def entry(chunk)
+          return nil if chunk.nil?
+          return chunk.source if chunk.target.nil?
+
+          { "source" => chunk.source, "target" => chunk.target }
         end
       end
     end

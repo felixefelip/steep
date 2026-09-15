@@ -238,7 +238,7 @@ module Steep
       def eval_sources(context, store, typing, def_node, definitions, parameter_writers)
         Evals.effects(typing, def_node, parameter_writers).flat_map do |effect|
           if effect.kind == :eval
-            [effect.certain ? Evals.source_of(typing, effect.node) : nil]
+            [Evals.chunk_of(typing, effect)]
           elsif effect.certain
             delegated_sources(context, store, typing, effect, definitions)
           else
