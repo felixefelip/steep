@@ -258,6 +258,67 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # The value a body ENDS on leaves it, and nothing in the body runs afterwards
+  # to be told a lie about it — so a local handed back carries what was pushed
+  # into it, where one handed to something MID-BODY still does not.
+  def test_an_array_handed_back_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "returned.rbs" => <<~RBS
+          class ReturnedAccumulator
+            def built: () -> untyped
+            def from_a_literal: () -> untyped
+            def escapes_first: () -> untyped
+            def fill: (untyped) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "returned.rb" => <<~RUBY
+          class ReturnedAccumulator
+            def built
+              parts = []
+              parts << "a"
+              parts << "b"
+              parts
+            end
+
+            def from_a_literal
+              parts = ["a"]
+              parts << "b"
+              parts
+            end
+
+            # Handed out BEFORE the end: what follows could read an array the
+            # callee changed, so this one is still struck.
+            def escapes_first
+              parts = []
+              parts << "a"
+              fill(parts)
+              parts
+            end
+
+            def fill(parts)
+              parts << "z"
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("returned.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '["a", "b"]', actual.fetch("built")
+      assert_equal '["a", "b"]', actual.fetch("from_a_literal")
+      assert_equal "::Array[untyped]", actual.fetch("escapes_first")
+    end
+  end
+
   # Where the walk has to STOP. Each of these is a way to name one array and
   # read another, and each is wrong in its own way: one reads an array that does
   # not exist yet, one reads at a time other than the one it runs at, and one
@@ -390,7 +451,9 @@ class TypeCheckTest < Minitest::Test
               parts.join(";")
             end
 
-            # Handed to the caller, who may push into it.
+            # Handed back, which `test_an_array_handed_back_carries_its_contents`
+            # is about — here only to pin that a tuple still satisfies the
+            # `Array[String]` the declaration asks for.
             def returned
               parts = []
               parts << "a"
