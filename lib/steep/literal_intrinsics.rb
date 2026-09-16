@@ -22,7 +22,22 @@ module Steep
     # source cannot make the checker assemble an unbounded string.
     MAX_OPERAND_WIDTH = 4096
 
-    Entry = _ = Struct.new(:method, :arity, :preflight, keyword_init: true)
+    # `depends_on` names the methods a fold LEANS on without owning: `join`
+    # owns nothing beyond itself, but `include?` answers by calling `==` on the
+    # elements and `intersect?` by calling `eql?`/`hash`. A project that
+    # redefines one of those makes the value computed in this process disagree
+    # with the value the program computes, and the entry's own key says nothing
+    # about it — so the entry declares them and they are checked alongside it.
+    Entry = _ = Struct.new(:method, :arity, :preflight, :depends_on, keyword_init: true)
+
+    # The element classes a dispatching fold is allowed to see. Not a
+    # convenience: `depends_on` has to be a FINITE list, and it can only be
+    # finite if the elements are confined to classes the registry already reads
+    # reopens of (`LiteralMethodRegistry::CORE_CLASSES`). `true`/`false` are out
+    # for the same reason — `TrueClass` is not one of those.
+    COMPARABLE_ELEMENTS = [::String, ::Symbol, ::Integer].freeze
+    EQUALITY_METHODS = %w[::String#== ::Symbol#== ::Integer#==].freeze
+    HASH_METHODS = %w[::String#eql? ::Symbol#eql? ::Integer#eql? ::String#hash ::Symbol#hash ::Integer#hash].freeze
 
     class << self
       def fold(call:, receiver_type:, argument_types:, override_registry:)
@@ -32,6 +47,7 @@ module Steep
         key = resolved_method_key(call) or return nil
         entry = ENTRIES[key] or return nil
         return nil if override_registry.blocked?(key)
+        return nil if entry.depends_on&.any? { |dependency| override_registry.blocked?(dependency) }
         source_location = entry.method.source_location
         return nil if source_location && !source_location.first.start_with?("<internal:")
         return nil unless entry.arity === argument_types.size
@@ -63,9 +79,19 @@ module Steep
         nil
       end
 
+      # Every method key whose redefinition matters: the table's own, plus the
+      # ones entries LEAN on. A reopen is recorded only for a key in here, so a
+      # dependency nothing watches is a dependency that cannot be checked — and
+      # `depends_on` would be a comment rather than a guard.
+      def watched_keys
+        @watched_keys ||= Set.new(
+          ENTRIES.keys + ENTRIES.each_value.flat_map { |entry| entry.depends_on || [] }
+        )
+      end
+
       def method_keys_for(class_name)
         prefix = "::#{class_name}#"
-        ENTRIES.each_key.select { |key| key.start_with?(prefix) }
+        watched_keys.select { |key| key.start_with?(prefix) }
       end
 
       private
@@ -152,6 +178,18 @@ module Steep
       arguments.size == 1 && arguments.first.is_a?(String) &&
         receiver.all? { |element| element.is_a?(String) }
     end
+    # `include?` and `intersect?` compare their operands, and comparison is a
+    # CALL. Confining both sides to the classes above is what makes the list of
+    # methods that call reaches finite, and therefore watchable.
+    COMPARABLE = ->(value) { COMPARABLE_ELEMENTS.any? { |klass| value.is_a?(klass) } }
+    ARRAY_INCLUDE = lambda do |receiver, arguments|
+      arguments.size == 1 && COMPARABLE[arguments.first] && receiver.all?(&COMPARABLE)
+    end
+    ARRAY_INTERSECT = lambda do |receiver, arguments|
+      other = arguments.first
+      arguments.size == 1 && other.is_a?(::Array) &&
+        receiver.all?(&COMPARABLE) && other.all?(&COMPARABLE)
+    end
     INTEGER_POWER = lambda do |receiver, arguments|
       exponent = arguments.first
       next false unless exponent.is_a?(Integer) && exponent >= 0
@@ -190,14 +228,15 @@ module Steep
       # is right and the change is real, so it belongs in the stage that has a
       # use for it (`parameters.map(&:first)`, S2/S3 of #171) and can carry the
       # test edits it forces, not in the one that needs `join`.
-      # `include?` and `intersect?` are NOT here, and not for want of safety in
-      # the fold: both answer by DISPATCHING — `==` for one, `eql?`/`hash` for
-      # the other — so a program that redefines `String#==` makes the runtime
-      # disagree with the value computed here, and the registry watches the
-      # table's own methods rather than the ones an entry leans on. Neither has
-      # a consumer in S1; they return with the stage that needs them (S2/S3 of
-      # #171), along with the dependency tracking that makes them safe.
-      "::Array#join" => Entry.new(method: Array.instance_method(:join), arity: 1, preflight: ARRAY_JOIN)
+      "::Array#join" => Entry.new(method: Array.instance_method(:join), arity: 1, preflight: ARRAY_JOIN),
+      "::Array#include?" => Entry.new(
+        method: Array.instance_method(:include?), arity: 1, preflight: ARRAY_INCLUDE,
+        depends_on: EQUALITY_METHODS
+      ),
+      "::Array#intersect?" => Entry.new(
+        method: Array.instance_method(:intersect?), arity: 1, preflight: ARRAY_INTERSECT,
+        depends_on: EQUALITY_METHODS + HASH_METHODS
+      )
     }.freeze
   end
 end
