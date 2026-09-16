@@ -258,6 +258,73 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # Where the walk has to STOP. Each of these is a way to name one array and
+  # read another, and each is wrong in its own way: one reads an array that does
+  # not exist yet, one reads at a time other than the one it runs at, and one
+  # reads a different variable that shares a name.
+  def test_the_walk_stops_at_time_and_at_scope
+    run_type_check_test(
+      signatures: {
+        "boundaries.rbs" => <<~RBS
+          class AccumulatorBoundaries
+            def read_before_init: (Array[String]) -> String
+            def read_in_a_closure: () -> String
+            def outer: () -> Symbol
+            def inner: (Array[String]) -> String
+          end
+        RBS
+      },
+      code: {
+        "boundaries.rb" => <<~RUBY
+          class AccumulatorBoundaries
+            # The `parts` read on the first line is the ARGUMENT. The local of
+            # the same name is born on the second, and what goes into it says
+            # nothing about what was read above it.
+            def read_before_init(parts)
+              result = parts.join(";")
+              parts = []
+              parts << "later"
+              result
+            end
+
+            # The lambda runs after the second push, so the contents where it is
+            # WRITTEN are not the contents where it runs.
+            def read_in_a_closure
+              parts = []
+              parts << "a"
+              reader = -> { parts.join(";") }
+              parts << "b"
+              reader.call
+            end
+
+            # `inner` has a body of its own: its `parts` is its own parameter,
+            # and the array out here is not it.
+            def outer
+              parts = []
+              parts << "outer"
+
+              def inner(parts)
+                parts.join(";")
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("boundaries.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::String", actual.fetch("read_before_init")
+      assert_equal "::String", actual.fetch("read_in_a_closure")
+      assert_equal "::String", actual.fetch("inner")
+    end
+  end
+
   # The answers that must not come out. Each of these hands the array to
   # something that can push into it, or pushes where the count is unknown — and
   # an implementation that answered anyway would be confidently wrong rather

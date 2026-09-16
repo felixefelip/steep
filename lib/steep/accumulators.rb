@@ -22,14 +22,38 @@ module Steep
   #
   # so every way the array can be reached under another name disqualifies the
   # local: assigned to a second name, passed as an argument, returned, stored,
-  # or pushed inside a block (where nothing here knows how many times the push
-  # runs). What is left is a local that is born from an array literal, pushed to
-  # in a straight line, and read.
+  # or mentioned inside a block (where nothing here knows WHEN, or how many
+  # times, that body runs). What is left is a local that is born from an array
+  # literal, pushed to in a straight line, and read.
+  #
+  # Three boundaries this must not cross, each of which is a way to name one
+  # array and read another:
+  #
+  #     result = parts.join(";")   # BEFORE the array exists — a read of
+  #     parts = []                 # something else entirely
+  #
+  #     reader = -> { parts.join(";") }   # runs later; the contents here are
+  #     parts << "b"                      # not the contents there
+  #
+  #     def inner(parts)           # a body of its own: this `parts` is a
+  #       parts.join(";")          # different variable that shares a name
+  #     end
   module Accumulators
     # Methods that read an array without letting it escape. Anything else on the
     # receiver — including one that merely looks harmless — is not on this list
     # because the list is the claim.
     READERS = %i[join first last size length empty? count fetch [] include?].freeze
+
+    # Nodes that open a body of their own. A local named inside one is a
+    # DIFFERENT variable that happens to share a name, so nothing outside says
+    # anything about it and nothing inside says anything about the outside.
+    SCOPES = %i[def defs class module sclass].freeze
+
+    # Nodes whose body closes over the locals around it but runs on its own
+    # schedule — an argument-position block, a lambda, a `numblock`. What the
+    # array holds when one is WRITTEN is not what it holds when the body runs,
+    # so a mention inside one takes the local away.
+    CLOSURES = %i[block numblock].freeze
 
     class << self
       # `{ name => [element node, …] }` for every local in `def_node` whose
@@ -83,8 +107,19 @@ module Steep
           readable = in_body(def_node)
           next if readable.empty?
 
-          contents = readable.keys.to_h { |name| [name, seed_of(body, name)] }
+          # A local enters `contents` where its assignment is REACHED, never
+          # before: seeding the whole body up front would make the array
+          # available retroactively, so `parts.join(";")` written ABOVE
+          # `parts = []` would be answered with the contents of an array that
+          # does not exist yet — while the `parts` it actually reads is whatever
+          # else that name holds there, a method argument included.
+          contents = {} #: Hash[Symbol, Array[untyped]]
           statements(body).each do |statement|
+            if (seed = seed_from(statement)) && readable.key?(seed[0])
+              contents[seed[0]] = seed[1]
+              next
+            end
+
             if (push = push_onto(statement, contents))
               name, value = push
               contents[name] = contents.fetch(name) + [value]
@@ -111,8 +146,12 @@ module Steep
         def_node.type == :defs ? def_node.children[3] : def_node.children[2]
       end
 
+      # Every node of one statement, stopping at a body of its own — `parts`
+      # inside a nested `def` is that def's variable, and answering its read
+      # with the contents out here is an answer about a different array.
       def each_node(node, &block)
         return unless node.is_a?(Parser::AST::Node)
+        return if SCOPES.include?(node.type)
 
         yield node
         node.children.each { |child| each_node(child, &block) }
@@ -125,14 +164,13 @@ module Steep
         node.children.each { |child| each_def(child, &block) }
       end
 
-      # The elements the local was born with, which the pushes extend.
-      def seed_of(body, name)
-        statements(body).each do |statement|
-          next unless statement.type == :lvasgn && statement.children[0] == name
-          return array_literal?(statement.children[1]) ? statement.children[1].children.dup : []
-        end
+      # `[name, elements]` where this statement is a local born from an array
+      # literal, the only birth this vouches for.
+      def seed_from(statement)
+        return nil unless statement.is_a?(Parser::AST::Node)
+        return nil unless statement.type == :lvasgn && array_literal?(statement.children[1])
 
-        []
+        [statement.children[0], statement.children[1].children.dup]
       end
 
       def statements(body)
@@ -146,11 +184,11 @@ module Steep
       def read(statement, found)
         return unless statement.is_a?(Parser::AST::Node)
 
-        if statement.type == :lvasgn && array_literal?(statement.children[1])
-          name = statement.children[0]
+        if (seed = seed_from(statement))
+          name, elements = seed
           # A second assignment is a different array, and nothing here orders
           # the two.
-          found[name] = found.key?(name) ? nil : statement.children[1].children.dup
+          found[name] = found.key?(name) ? nil : elements
           return
         end
 
@@ -181,12 +219,21 @@ module Steep
       end
 
       # Every local this statement so much as names stops being readable, except
-      # where it is the receiver of a call that only READS the array.
-      def strike(node, found)
+      # where it is the receiver of a call that only READS the array — and not
+      # even then inside a closure, whose body runs at a time this walk does not
+      # know.
+      def strike(node, found, closure: false)
         return unless node.is_a?(Parser::AST::Node)
+        # Another body's locals, not these.
+        return if SCOPES.include?(node.type)
 
-        if node.type == :send && READERS.include?(node.children[1]) && node.children[0]&.type == :lvar
-          node.children.drop(2).each { |argument| strike(argument, found) }
+        if CLOSURES.include?(node.type)
+          node.children.each { |child| strike(child, found, closure: true) }
+          return
+        end
+
+        if !closure && node.type == :send && READERS.include?(node.children[1]) && node.children[0]&.type == :lvar
+          node.children.drop(2).each { |argument| strike(argument, found, closure: closure) }
           return
         end
 
@@ -196,7 +243,7 @@ module Steep
           return
         end
 
-        node.children.each { |child| strike(child, found) }
+        node.children.each { |child| strike(child, found, closure: closure) }
       end
     end
 
