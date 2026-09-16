@@ -33,6 +33,23 @@ class SourceTest < Minitest::Test
     assert_same source.accumulators, source.accumulators
   end
 
+  def test_constants_are_analyzed_once_per_source
+    source = Steep::Source.parse(<<~RUBY, path: Pathname("b.rb"), factory: RBS::Factory.new)
+      class Reads
+        KEPT = ["a"]
+        GONE = ["b"]
+        GONE = ["c"]
+
+        def a = KEPT.include?("a")
+        def b = KEPT.include?("b")
+        def c = GONE.include?("c")
+      end
+    RUBY
+
+    assert_equal 2, source.constants.size
+    assert_same source.constants, source.constants
+  end
+
   def test_foo
     with_factory({ "a.rbs" => <<-RBS }) do |factory|
 module Foo

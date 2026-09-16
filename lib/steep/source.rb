@@ -408,6 +408,13 @@ module Steep
       @accumulators ||= Accumulators.analyze(node)
     end
 
+    # The constants this file writes once and only reads, computed once for the
+    # same reason as above: a construction is built per method body, and this
+    # answer is about the whole file.
+    def constants
+      @constants ||= Constants.analyze(node)
+    end
+
     def annotations(block:, factory:, context:)
       annotations =
         if block

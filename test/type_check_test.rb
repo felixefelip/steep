@@ -910,6 +910,107 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # A constant is the one name Ruby means to be written once, so the value at a
+  # read is the value at the assignment — provided this file is where the name
+  # is decided and nothing here changes the object behind it.
+  def test_a_constant_written_once_carries_its_value
+    run_type_check_test(
+      signatures: {
+        "constants.rbs" => <<~RBS
+          class WrittenConstants
+            RESERVED: Array[String]
+            FROZEN: Array[String]
+            TWICE: Array[String]
+            MUTATED: Array[String]
+            PASSED: Array[String]
+            EMPTY: Array[String]
+            MISDECLARED: Array[Integer]
+
+            def plain: () -> bool
+            def frozen: () -> String
+            def twice: () -> bool
+            def mutated: () -> bool
+            def passed: () -> bool
+            def empty: () -> bool
+            def misdeclared: () -> bool
+            def guarded: (:user) -> String
+            def mutate: () -> void
+            def hand_over: () -> void
+            def sink: (Array[String]) -> void
+          end
+        RBS
+      },
+      code: {
+        "constants.rb" => <<~'RUBY'
+          class WrittenConstants
+            RESERVED = ["class", "def", "end"]
+            FROZEN = %w(class self).freeze
+            TWICE = ["a"]
+            TWICE = ["b"]
+            MUTATED = ["a"]
+            PASSED = ["a"]
+            EMPTY = []
+            MISDECLARED = ["a"]
+
+            def plain = RESERVED.include?("content")
+            def frozen = FROZEN.join(";")
+
+            # Written twice: which value a read means is a question about
+            # constant lookup, not about this walk.
+            def twice = TWICE.include?("a")
+
+            # Changed behind the read.
+            def mutated = MUTATED.include?("a")
+            def mutate
+              MUTATED << "b"
+            end
+
+            # Handed to something that can change it.
+            def passed = PASSED.include?("a")
+            def hand_over
+              sink(PASSED)
+            end
+
+            def empty = EMPTY.include?("a")
+
+            # The recovered value is held against the type the read RESOLVED to,
+            # so a name that turns out to be some other constant is refused.
+            def misdeclared = MISDECLARED.include?("a")
+
+            # What the whole thing is for: the guard decides, so the local keeps
+            # the value it had and the interpolation after it still folds.
+            def guarded(to)
+              receiver = to.to_s
+              receiver = "self.#{receiver}" if FROZEN.include?(receiver)
+              "  (#{receiver}).x(...)"
+            end
+
+            def sink(list)
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("constants.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "false", actual.fetch("plain")
+      assert_equal '"class;self"', actual.fetch("frozen")
+      assert_equal '"  (user).x(...)"', actual.fetch("guarded")
+
+      assert_equal "bool", actual.fetch("twice")
+      assert_equal "bool", actual.fetch("mutated")
+      assert_equal "bool", actual.fetch("passed")
+      assert_equal "bool", actual.fetch("empty")
+      assert_equal "bool", actual.fetch("misdeclared")
+    end
+  end
+
   # A fold that dispatches is only as trustworthy as the methods it dispatches
   # TO. `==` is nobody's table entry, so nothing about `include?`'s own key says
   # the answer has stopped being the program's — the entry has to name it.
