@@ -164,6 +164,8 @@ class TypeCheckTest < Minitest::Test
         "literal_collections.rbs" => <<~RBS
           class LiteralCollectionExample
             def joined: () -> String
+            def included: () -> bool
+            def intersected: () -> bool
             def wide: () -> String
             def interpolated: (:content) -> String
           end
@@ -173,7 +175,7 @@ class TypeCheckTest < Minitest::Test
         "literal_collections.rb" => <<~'RUBY'
           class LiteralCollectionExample
             def joined = ["def x", "end"].join(";")
-                            def included = ["class", "def", "end"].include?("while")
+            def included = ["class", "def", "end"].include?("while")
             def intersected = [:req, :opt].intersect?([:opt, :rest])
             def wide = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccc"].join("-")
             def interpolated(name) = ["def #{name}", "end"].join(";")
@@ -190,6 +192,10 @@ class TypeCheckTest < Minitest::Test
       end
 
       assert_equal '"def x;end"', actual.fetch("joined")
+      # These two answer by CALLING — `==` for one, `eql?`/`hash` for the other
+      # — so they fold only while nothing the project writes has replaced those.
+      assert_equal "false", actual.fetch("included")
+      assert_equal "true", actual.fetch("intersected")
       # Past MAX_LITERAL_WIDTH, and affordable because every byte of it is
       # already written in the operands.
       assert_equal(
@@ -901,6 +907,55 @@ class TypeCheckTest < Minitest::Test
 
       assert call_def
       assert_equal "::String", typing.type_of(node: call_def.children[2]).to_s
+    end
+  end
+
+  # A fold that dispatches is only as trustworthy as the methods it dispatches
+  # TO. `==` is nobody's table entry, so nothing about `include?`'s own key says
+  # the answer has stopped being the program's — the entry has to name it.
+  def test_literal_intrinsics_decline_an_override_of_a_method_they_depend_on
+    run_type_check_test(
+      signatures: {
+        "depends.rbs" => <<~RBS
+          class LiteralIntrinsicDependency
+            def included: () -> bool
+            def intersected: () -> bool
+            def joined: () -> String
+          end
+
+          class ::String
+            def ==: (untyped) -> bool
+          end
+        RBS
+      },
+      code: {
+        "override.rb" => <<~RUBY,
+          class String
+            def ==(other) = true
+          end
+        RUBY
+        "call.rb" => <<~RUBY
+          class LiteralIntrinsicDependency
+            def included = ["class", "def"].include?("while")
+            def intersected = ["a"].intersect?(["b"])
+            # Unaffected: `join` over String elements with a separator does no
+            # dispatch at all, which is what its preflight is for.
+            def joined = ["def x", "end"].join(";")
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("call.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "bool", actual.fetch("included")
+      assert_equal "bool", actual.fetch("intersected")
+      assert_equal '"def x;end"', actual.fetch("joined")
     end
   end
 

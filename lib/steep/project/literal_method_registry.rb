@@ -141,7 +141,7 @@ module Steep
         return unless CORE_CLASSES.include?(owner)
 
         key = "::#{owner}##{method_name}"
-        @blocked << key if LiteralIntrinsics::ENTRIES.key?(key)
+        @blocked << key if LiteralIntrinsics.watched_keys.include?(key)
       end
 
       def note_hook(owner, method_name)

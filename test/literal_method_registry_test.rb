@@ -23,6 +23,21 @@ class LiteralMethodRegistryTest < Minitest::Test
     refute registry.blocked?("::String#downcase")
   end
 
+  # The table watches what its entries LEAN on, not only what they are. `==` is
+  # nobody's entry, and redefining it is how `Array#include?` starts answering
+  # something other than what the fold computes.
+  def test_records_a_method_an_entry_depends_on
+    registry = registry_for(<<~RUBY)
+      class String
+        def ==(other) = true
+      end
+    RUBY
+
+    assert registry.blocked?("::String#==")
+    refute registry.blocked?("::String#hash")
+    refute registry.blocked?("::Array#join")
+  end
+
   def test_records_a_reopened_array
     registry = registry_for(<<~RUBY)
       class Array
