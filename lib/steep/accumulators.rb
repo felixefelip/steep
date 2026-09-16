@@ -59,10 +59,9 @@ module Steep
   # callee does more than append to — is a body this does not have, and the
   # local goes away as before.
   module Accumulators
-    # Methods that read an array without letting it escape. Anything else on the
-    # receiver — including one that merely looks harmless — is not on this list
-    # because the list is the claim.
-    READERS = %i[join first last size length empty? count fetch [] include?].freeze
+    # Shared with `Constants`, which vouches for a value on the same terms. See
+    # `CollectionReaders` for why a call is on the list or is not.
+    READERS = CollectionReaders::METHODS
 
     # Nodes that open a body of their own. A local named inside one is a
     # DIFFERENT variable that happens to share a name, so nothing outside says

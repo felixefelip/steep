@@ -426,5 +426,6 @@ end
 #   end
 #   # steep:ignore:end
 # end
+require "steep/collection_readers"
 require "steep/accumulators"
 require "steep/constants"

@@ -23,12 +23,13 @@ module Steep
   # then holds the recovered value against the type the read actually resolved
   # to, so a name that turns out to be some OTHER constant is refused there.
   module Constants
-    # Calls that answer about the collection without letting it out. `each` and
-    # `map` are deliberately absent: they hand every element to a body this does
-    # not follow, which is the same reason `Accumulators` stops at a block.
-    READERS = %i[join first last size length empty? count fetch [] include? intersect?].freeze
+    # Shared with `Accumulators`, which vouches for a value on the same terms.
+    # See `CollectionReaders` for why a call is on the list or is not.
+    READERS = CollectionReaders::METHODS
 
     class << self
+      include NodeHelper
+
       # `{ constant read node => the node its value is written as }`.
       def analyze(node)
         found = assignments(node)
@@ -93,6 +94,13 @@ module Steep
       # Every mention that is not a plain read takes the name away — passed as an
       # argument, assigned to something, or the receiver of a call that is not on
       # the list above.
+      #
+      # `Accumulators#strike` is the same sentence about a local and is
+      # deliberately a separate walk: it stops at a body of its own and turns a
+      # reader inside a block into a strike, neither of which means anything for
+      # a constant, and the node that WRITES one is a `casgn` whose value is not
+      # a mention rather than an `lvasgn` whose value is. What the two agree on
+      # is the list of reads, and that they share.
       def strike(node, found)
         return unless node.is_a?(Parser::AST::Node)
 
@@ -115,14 +123,15 @@ module Steep
         node.children.each { |child| strike(child, found) }
       end
 
-      # Every node of the file. A constant is not scoped the way a local is: one
-      # written at the top is the same constant a method body reads, so nothing
-      # here stops at a body of its own.
+      # Every node of the file, the root included. A constant is not scoped the
+      # way a local is — one written at the top is the same constant a method
+      # body reads — so unlike `Accumulators`' walk this stops at nothing, and
+      # `NodeHelper`'s plain descent is the whole of it.
       def each_node(node, &block)
         return unless node.is_a?(Parser::AST::Node)
 
         yield node
-        node.children.each { |child| each_node(child, &block) }
+        each_descendant_node(node, &block)
       end
     end
   end
