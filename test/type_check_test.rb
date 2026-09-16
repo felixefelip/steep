@@ -260,7 +260,8 @@ class TypeCheckTest < Minitest::Test
 
   # The value a body ENDS on leaves it, and nothing in the body runs afterwards
   # to be told a lie about it — so a local handed back carries what was pushed
-  # into it, where one handed to something MID-BODY still does not.
+  # into it, where one handed MID-BODY to something this cannot read still does
+  # not.
   def test_an_array_handed_back_carries_its_contents
     run_type_check_test(
       signatures: {
@@ -269,7 +270,7 @@ class TypeCheckTest < Minitest::Test
             def built: () -> untyped
             def from_a_literal: () -> untyped
             def escapes_first: () -> untyped
-            def fill: (untyped) -> untyped
+            def leaks: (untyped) -> untyped
           end
         RBS
       },
@@ -289,17 +290,19 @@ class TypeCheckTest < Minitest::Test
               parts
             end
 
-            # Handed out BEFORE the end: what follows could read an array the
-            # callee changed, so this one is still struck.
+            # Handed out BEFORE the end to a body that hands it on again: what
+            # follows could read an array changed in a way nothing here can
+            # count, so this one is still struck.
             def escapes_first
               parts = []
               parts << "a"
-              fill(parts)
+              leaks(parts)
               parts
             end
 
-            def fill(parts)
-              parts << "z"
+            def leaks(parts)
+              other = parts
+              other << "z"
             end
           end
         RUBY
@@ -316,6 +319,127 @@ class TypeCheckTest < Minitest::Test
       assert_equal '["a", "b"]', actual.fetch("built")
       assert_equal '["a", "b"]', actual.fetch("from_a_literal")
       assert_equal "::Array[untyped]", actual.fetch("escapes_first")
+    end
+  end
+
+  # A call is a body this walk may or may not have. Where it has one — a method
+  # of the same class, written in this file, that only appends to the parameter
+  # it is handed — what the call does to the array is as readable as a `<<`
+  # written here.
+  def test_a_call_whose_body_is_here_appends_to_the_array
+    run_type_check_test(
+      signatures: {
+        "builders.rbs" => <<~RBS
+          class ArrayBuilders
+            def handed_back: () -> untyped
+            def read_after: () -> String
+            def twice: () -> untyped
+            def kept_value: () -> untyped
+            def by_a_singleton: () -> String
+            def defined_twice: () -> String
+            def fill: (untyped) -> untyped
+            def stamp: (untyped) -> untyped
+          end
+
+          class ArrayBuilders::Neighbour
+            def borrowed: () -> String
+            def fill: (untyped) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "builders.rb" => <<~RUBY
+          class ArrayBuilders
+            def handed_back
+              parts = []
+              fill(parts)
+              parts
+            end
+
+            def read_after
+              parts = []
+              fill(parts)
+              parts.join(";")
+            end
+
+            # Twice, and a push of its own before them: the appends land in the
+            # order the statements run.
+            def twice
+              parts = []
+              parts << "z"
+              fill(parts)
+              fill(parts)
+              parts
+            end
+
+            # The VALUE is kept, so the array now has a second name and the
+            # pushes counted here are not all of them.
+            def kept_value
+              parts = []
+              other = fill(parts)
+              parts
+            end
+
+            # `fill` named with no receiver inside `def self.` is a singleton
+            # method, and the one written here is not.
+            def self.by_a_singleton
+              parts = []
+              fill(parts)
+              parts.join(";")
+            end
+
+            # A class of its own. `fill` is declared on it, and the only body
+            # of that name in this file is in the class AROUND it — which is
+            # not a body this class calls.
+            class Neighbour
+              def borrowed
+                parts = []
+                fill(parts)
+                parts.join(";")
+              end
+            end
+
+            def defined_twice
+              parts = []
+              stamp(parts)
+              parts.join(";")
+            end
+
+            def fill(parts)
+              parts << "a"
+              parts
+            end
+
+            def stamp(parts)
+              parts << "s"
+            end
+
+            # Written over: which of the two a call runs is not this walk's to
+            # say, so neither answers.
+            def stamp(parts)
+              parts << "t"
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("builders.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def || node.type == :defs
+
+        name = node.type == :defs ? node.children[1] : node.children[0]
+        body = node.type == :defs ? node.children[3] : node.children[2]
+        actual[name.to_s] = typing.type_of(node: body).to_s
+      end
+
+      assert_equal '["a"]', actual.fetch("handed_back")
+      assert_equal '"a"', actual.fetch("read_after")
+      assert_equal '["z", "a", "a"]', actual.fetch("twice")
+      assert_equal "::Array[untyped]", actual.fetch("kept_value")
+      assert_equal "::String", actual.fetch("by_a_singleton")
+      assert_equal "::String", actual.fetch("borrowed")
+      assert_equal "::String", actual.fetch("defined_twice")
     end
   end
 
@@ -503,8 +627,10 @@ class TypeCheckTest < Minitest::Test
         "accumulators.rbs" => <<~RBS
           class AccumulatorFallbacks
             def aliased: () -> String
-            def through_a_call: () -> String
+            def through_a_foreign_call: (AccumulatorFallbacks) -> String
+            def through_a_call_that_does_more: () -> String
             def fill: (Array[String]) -> void
+            def leaks: (Array[String]) -> void
             def looped: () -> String
             def conditional: (bool) -> String
             def reassigned: () -> String
@@ -522,6 +648,13 @@ class TypeCheckTest < Minitest::Test
               parts << "a"
             end
 
+            # Appends too, but through a second name — so what this call does to
+            # the array is not readable, however plain the effect is.
+            def leaks(parts)
+              other = parts
+              other << "a"
+            end
+
             # Two names for one array: the push happens through the other.
             def aliased
               parts = []
@@ -530,11 +663,19 @@ class TypeCheckTest < Minitest::Test
               parts.join(";")
             end
 
-            # The push happens inside a call, where nothing about `parts` is
-            # written.
-            def through_a_call
+            # A receiver of its own: which `fill` runs is a question about a
+            # TYPE, and this walk reads the source.
+            def through_a_foreign_call(other)
               parts = []
-              fill(parts)
+              other.fill(parts)
+              parts.join(";")
+            end
+
+            # The body is here, and still says nothing: it hands the array to a
+            # second name before pushing.
+            def through_a_call_that_does_more
+              parts = []
+              leaks(parts)
               parts.join(";")
             end
 
@@ -610,7 +751,8 @@ class TypeCheckTest < Minitest::Test
       end
 
       assert_equal "::String", actual.fetch("aliased")
-      assert_equal "::String", actual.fetch("through_a_call")
+      assert_equal "::String", actual.fetch("through_a_foreign_call")
+      assert_equal "::String", actual.fetch("through_a_call_that_does_more")
       assert_equal "::String", actual.fetch("looped")
       assert_equal "::String", actual.fetch("conditional")
       assert_equal "::String", actual.fetch("reassigned")

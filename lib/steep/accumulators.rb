@@ -43,6 +43,21 @@ module Steep
   # same question reached from the other side. There is no name to reach it
   # under, so there is nothing to disqualify and the contents are simply what
   # the source says; `Analysis#returned` is that half.
+  #
+  # A CALL is the boundary this is least willing to cross, and the one worth
+  # crossing:
+  #
+  #     parts = []
+  #     fill(parts)          # `fill` pushes; nothing about `parts` is written
+  #     parts.join(";")      # "a" at runtime, "" to anything following the name
+  #
+  # so `fill(parts)` takes the local away, and rightly — unless the body of
+  # `fill` is one this walk HAS. A method of the same class written in this file
+  # is such a body, and if all it does with the parameter is append to it, what
+  # the call does to the array is as readable as a `<<` written here. Anything
+  # else — a receiver, another file, a name defined twice, a parameter the
+  # callee does more than append to — is a body this does not have, and the
+  # local goes away as before.
   module Accumulators
     # Methods that read an array without letting it escape. Anything else on the
     # receiver — including one that merely looks harmless — is not on this list
@@ -76,7 +91,7 @@ module Steep
       # `fill(parts)` both hand the array to someone who can push into it, and a
       # tracker that answered anyway would be confidently wrong rather than
       # vague.
-      def in_body(def_node)
+      def in_body(def_node, builders)
         body = body_of(def_node) or return {}
 
         found = {} #: Hash[Symbol, Array[untyped]?]
@@ -91,7 +106,7 @@ module Steep
         lines.each_with_index do |statement, index|
           next if index == lines.size - 1 && returned
 
-          read(statement, found)
+          read(statement, found, builders)
         end
 
         found.reject { |_, pushes| pushes.nil? }
@@ -112,12 +127,13 @@ module Steep
       #     parts << "a"      # parts becomes ["a"]
       #     parts << "b"      # error: `::String` is not `"a"`
       #
-      # `final` — `{ last push node => [element node, …] }`, the contents of
-      # every readable local at the push that completes them. This half the type
-      # environment does hear about, and the LAST push is the one place where it
-      # is safe to say so: after it there is no `<<` left to demand anything, and
-      # what the local is worth from there on is exactly the tuple `return parts`
-      # hands back.
+      # `final` — `{ last push node => { name => [element node, …] } }`, the
+      # contents of every readable local at the statement that completes them.
+      # This half the type environment does hear about, and the LAST push is the
+      # one place where it is safe to say so: after it there is no `<<` left to
+      # demand anything, and what the local is worth from there on is exactly
+      # the tuple `return parts` hands back. Keyed by name as well as by node
+      # because one `fill(parts, others)` can complete more than one.
       #
       # `returned` — the array LITERALS a body hands back. Nothing has to be
       # replayed for these: what is in one is written in it, and the only
@@ -134,17 +150,19 @@ module Steep
         # are the ones the checker types, so identity is both available and the
         # only thing that distinguishes them.
         at_reads = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
-        final = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
+        final = {}.compare_by_identity #: Hash[untyped, Hash[Symbol, Array[untyped]]]
         returned = {}.compare_by_identity #: Hash[untyped, bool]
 
-        each_def(node) do |def_node|
+        builders = builders_in(node)
+
+        each_def_with_owner(node) do |def_node, owner|
           each_returned(def_node) { |array| returned[array] = true }
 
           last = {} #: Hash[Symbol, [untyped, Array[untyped]]]
 
-          replay(def_node) do |statement, pushed, contents|
-            if pushed
-              last[pushed] = [statement, contents.fetch(pushed)]
+          replay(def_node, builders_for(builders, owner, def_node)) do |statement, pushed, contents|
+            unless pushed.empty?
+              pushed.each { |name| last[name] = [statement, contents.fetch(name)] }
               next
             end
 
@@ -158,18 +176,12 @@ module Steep
             end
           end
 
-          last.each_value { |statement, elements| final[statement] = elements }
+          last.each do |name, (statement, elements)|
+            (final[statement] ||= {})[name] = elements
+          end
         end
 
         Analysis.new(at_reads: at_reads, final: final, returned: returned)
-      end
-
-      def contents_at_reads(node)
-        analyze(node).at_reads
-      end
-
-      def final_contents(node)
-        analyze(node).final
       end
 
       private
@@ -185,24 +197,34 @@ module Steep
       # answered with the contents of an array that does not exist yet — while
       # the `parts` it actually reads is whatever else that name holds there, a
       # method argument included.
-      def replay(def_node)
+      def replay(def_node, builders)
         body = body_of(def_node) or return
 
-        readable = in_body(def_node)
+        readable = in_body(def_node, builders)
         return if readable.empty?
 
         contents = {} #: Hash[Symbol, Array[untyped]]
         statements(body).each do |statement|
           if (seed = seed_from(statement)) && readable.key?(seed[0])
             contents[seed[0]] = seed[1]
-            yield statement, nil, contents
+            yield statement, [], contents
             next
           end
 
-          name, value = push_onto(statement, contents)
-          contents[name] = contents.fetch(name) + [value] if name
+          pushed = [] #: Array[Symbol]
 
-          yield statement, name, contents
+          if (built = builds_onto(statement, contents, builders))
+            built.each do |name, elements|
+              contents[name] = contents.fetch(name) + elements
+              pushed << name
+            end
+          elsif (push = push_onto(statement, contents))
+            name, value = push
+            contents[name] = contents.fetch(name) + [value]
+            pushed << name
+          end
+
+          yield statement, pushed, contents
         end
       end
 
@@ -282,11 +304,142 @@ module Steep
         node.children.each { |child| each_node(child, &block) }
       end
 
-      def each_def(node, &block)
+      # Every `def` with the `class`/`module`/`sclass` node it is written in, or
+      # nil where it is written at the top level. The owner is the node itself
+      # and not a name: two classes of one name in one file are one class, but
+      # this only has to tell one BODY from another.
+      def each_def_with_owner(node, owner = nil, &block)
         return unless node.is_a?(Parser::AST::Node)
 
-        yield node if node.type == :def || node.type == :defs
-        node.children.each { |child| each_def(child, &block) }
+        if node.type == :def || node.type == :defs
+          yield node, owner
+          # A `def` inside a `def` is still a method of the class around it.
+          each_def_with_owner(body_of(node), owner, &block)
+          return
+        end
+
+        inner = SCOPES.include?(node.type) ? node : owner
+        node.children.each { |child| each_def_with_owner(child, inner, &block) }
+      end
+
+      # `{ owner node => { [singleton?, name] => summary } }` for this whole
+      # source: what each method of each class body does to the arrays it is
+      # handed. `nil` for a summary means the name is defined more than once
+      # here, which is a name this cannot resolve to a body at all.
+      def builders_in(node, owner = nil, table = {}.compare_by_identity)
+        return table unless node.is_a?(Parser::AST::Node)
+
+        if node.type == :def || node.type == :defs
+          # Deliberately NOT descending: a `def` written inside another one does
+          # not exist until the outer body runs, so a call to that name is not
+          # this body.
+          register_builder(table, owner, node)
+          return table
+        end
+
+        inner = SCOPES.include?(node.type) ? node : owner
+        node.children.each { |child| builders_in(child, inner, table) }
+        table
+      end
+
+      def register_builder(table, owner, def_node)
+        singleton = def_node.type == :defs
+        key = [singleton, singleton ? def_node.children[1] : def_node.children[0]]
+        methods = (table[owner] ||= {})
+
+        # Two definitions of one name in one body: which of them runs where is
+        # not this walk's to say, so neither answers.
+        methods[key] = methods.key?(key) ? nil : appends_in(def_node)
+      end
+
+      # The summaries a body may call by name alone: the methods of the class it
+      # is written in, of the same kind — an implicit-self send inside
+      # `def self.x` names a singleton method, and inside `def x` an instance
+      # one.
+      def builders_for(builders, owner, def_node)
+        methods = builders[owner] or return {}
+        singleton = def_node.type == :defs
+
+        methods.each_with_object({}) do |((kind, name), summary), found|
+          found[name] = summary if kind == singleton && summary
+        end
+      end
+
+      # What one body appends to each of its parameters, as a list the length of
+      # the parameter list — `[nil, [element node, …]]` for a body that appends
+      # to its second parameter and leaves the first alone — or nil for a body
+      # that appends to none of them.
+      #
+      # The same straight line, and the same disqualifications, as a local born
+      # here: the only difference is that a parameter arrives holding something
+      # this cannot see, so what is read off the pushes is what the call ADDS
+      # rather than everything the array holds.
+      #
+      # Summarised without any summaries in scope, so `fill` calling `fill2` is
+      # a body this declines rather than one it chases.
+      def appends_in(def_node)
+        body = body_of(def_node) or return nil
+        names = positionals_of(def_node) or return nil
+        return nil if names.empty?
+
+        found = names.to_h { |name| [name, []] } #: Hash[Symbol, Array[untyped]?]
+
+        lines = statements(body)
+        # `return parts` hands the array back, which is what a builder is for.
+        # It is only the CALLER's problem, and only where the caller keeps the
+        # value — where it does, the call is not a bare statement and no summary
+        # is applied to it.
+        returned = returned_local(lines.last)
+
+        lines.each_with_index do |statement, index|
+          next if index == lines.size - 1 && returned
+
+          read(statement, found, {})
+        end
+
+        summary = names.map { |name| found[name]&.any? ? found[name] : nil }
+        summary.any? ? summary : nil
+      end
+
+      # The required positional parameters, or nil for a signature a call site
+      # cannot be lined up with by counting — an optional, a rest, a keyword or
+      # a block all make the parameter an argument lands in a question of its
+      # own.
+      def positionals_of(def_node)
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        return nil unless args.is_a?(Parser::AST::Node)
+        return nil unless args.children.all? { |argument| argument.type == :arg }
+
+        args.children.map { |argument| argument.children[0] }
+      end
+
+      # `{ name => [element node, …] }` where this statement is a call to a body
+      # this walk has, handing it locals it only appends to.
+      def builds_onto(statement, found, builders)
+        return nil unless statement.is_a?(Parser::AST::Node)
+        return nil unless statement.type == :send && statement.children[0].nil?
+
+        summary = builders[statement.children[1]] or return nil
+
+        arguments = statement.children.drop(2)
+        return nil unless arguments.size == summary.size
+        return nil if arguments.any? { |argument| argument.type == :splat || argument.type == :block_pass }
+
+        built = {} #: Hash[Symbol, Array[untyped]]
+        arguments.each_with_index do |argument, index|
+          elements = summary[index] or next
+          next unless argument.type == :lvar
+
+          name = argument.children[0]
+          next unless found[name]
+          # One array in two parameters is two orders of appends, and nothing
+          # here picks between them.
+          return nil if built.key?(name)
+
+          built[name] = elements
+        end
+
+        built.empty? ? nil : built
       end
 
       # `[name, elements]` where this statement is a local born from an array
@@ -314,7 +467,7 @@ module Steep
 
       # One statement of the straight line. It either seeds a local, pushes onto
       # one, or is everything else — and everything else only takes locals away.
-      def read(statement, found)
+      def read(statement, found, builders)
         return unless statement.is_a?(Parser::AST::Node)
 
         if (seed = seed_from(statement))
@@ -328,6 +481,18 @@ module Steep
         if (push = push_onto(statement, found))
           name, value = push
           found[name] = found[name] + [value]
+          return
+        end
+
+        if (built = builds_onto(statement, found, builders))
+          built.each { |name, elements| found[name] = found[name] + elements }
+          # What the call does to the arrays it appends to is read; everything
+          # ELSE it names is a mention like any other.
+          statement.children.drop(2).each do |argument|
+            next if argument.type == :lvar && built.key?(argument.children[0])
+
+            strike(argument, found)
+          end
           return
         end
 

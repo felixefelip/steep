@@ -515,17 +515,24 @@ module Steep
       AST::Types::Tuple.new(types: types)
     end
 
-    # The tuple a local is worth after the last push into it, or nil anywhere
-    # else — the half of the analysis the type environment hears about.
-    def accumulated_final_type(node)
-      return nil unless node.type == :send && node.children[1] == :<<
+    # `{ local name => tuple }` for the locals this call completes, or nil
+    # anywhere else — the half of the analysis the type environment hears about.
+    # More than one name because a single `fill(parts, others)` can be the last
+    # thing that happens to each of them.
+    def accumulated_final_types(node)
+      return nil unless node.type == :send
 
-      elements = source.accumulators.final[node] or return nil
+      entries = source.accumulators.final[node] or return nil
 
-      types = elements.map { |element| accumulated_element_type(element) }
-      return nil unless types.all?
+      types = {} #: Hash[Symbol, AST::Types::t]
+      entries.each do |name, elements|
+        element_types = elements.map { |element| accumulated_element_type(element) }
+        next unless element_types.all?
 
-      AST::Types::Tuple.new(types: types)
+        types[name] = AST::Types::Tuple.new(types: element_types)
+      end
+
+      types.empty? ? nil : types
     end
 
     # The argument types a specialization pass is checking this body under
@@ -3810,9 +3817,9 @@ module Steep
             # what went into it, and not `Array[untyped]`. Only the LAST: a
             # tuple makes `Array[Elem]#<<` demand the first element's type, and
             # a push after that would stop type-checking.
-            if (final = constr.accumulated_final_type(node)) && (name = receiver&.children&.first).is_a?(Symbol)
+            if (finals = constr.accumulated_final_types(node))
               constr = constr.update_type_env do |env|
-                env.refine_types(local_variable_types: { name => final })
+                env.refine_types(local_variable_types: finals)
               end
             end
 
