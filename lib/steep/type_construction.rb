@@ -2064,60 +2064,7 @@ module Steep
           end
 
         when :array
-          yield_self do
-            if node.children.empty?
-              if hint
-                array = AST::Builtin::Array.instance_type(AST::Builtin.any_type)
-                if check_relation(sub_type: array, super_type: hint).success?
-                  add_typing node, type: unwrap(hint)
-                else
-                  add_typing node, type: array
-                end
-              else
-                typing.add_error Diagnostic::Ruby::UnannotatedEmptyCollection.new(node: node)
-                add_typing node, type: AST::Builtin::Array.instance_type(AST::Builtin.any_type)
-              end
-            else
-              if hint
-                tuples = select_flatten_types(hint) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
-                if tuples.empty?
-                  if converted = try_convert(hint, :to_ary)
-                    tuples = select_flatten_types(converted) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
-                  end
-                end
-                unless tuples.empty?
-                  fallback_pair = nil #: Pair?
-                  tuples.each do |tuple|
-                    typing.new_child() do |child_typing|
-                      if pair = with_new_typing(child_typing).try_tuple_type(node, tuple)
-                        if pair.constr.check_relation(sub_type: pair.type, super_type: tuple).success?
-                          return pair.with(constr: pair.constr.save_typing)
-                        end
-                        fallback_pair ||= pair.with(constr: pair.constr.save_typing)
-                      end
-                    end
-                  end
-                  return fallback_pair if fallback_pair
-                end
-              end
-
-              if hint
-                arrays = select_flatten_types(hint) {|type| AST::Builtin::Array.instance_type?(type) } #: Array[AST::Types::Name::Instance]
-                unless arrays.empty?
-                  arrays.each do |array|
-                    typing.new_child() do |child_typing|
-                      pair = with_new_typing(child_typing).try_array_type(node, array)
-                      if pair.constr.check_relation(sub_type: pair.type, super_type: hint).success?
-                        return pair.with(constr: pair.constr.save_typing)
-                      end
-                    end
-                  end
-                end
-              end
-
-              try_array_type(node, nil)
-            end
-          end
+          array_literal(node, hint)
 
         when :and
           yield_self do
@@ -7131,6 +7078,90 @@ module Steep
         subst = constraints.solution(checker, variables: variables, context: context)
 
         type.subst(subst)
+      end
+    end
+
+    # An array a body HANDS BACK is worth its tuple. Everywhere else the literal
+    # widens to `Array[Elem]`, and that is not timidity: a name makes the array
+    # reachable, and a tuple takes only what it already holds —
+    #
+    #     parts = ["a", "b"]   # were this `["a", "b"]`,
+    #     parts << "c"         # this would stop type-checking
+    #
+    # — so the widening buys the mutation. In the positions a body's value
+    # leaves from, no name here holds the array and no `<<` here can make its
+    # length or its order a lie, so there is nothing to buy.
+    #
+    # The tuple is read off the source nodes, not off the element types the
+    # ordinary path has already widened, and it is taken only while it still
+    # satisfies whatever was asked of the literal — a declaration is never
+    # contradicted, only met more exactly.
+    def array_literal(node, hint)
+      pair = synthesize_array_literal(node, hint)
+      return pair if pair.type.is_a?(AST::Types::Tuple)
+      return pair unless source.accumulators.returned[node]
+
+      tuple = pair.constr.literal_operand_type(node, pair.type)
+      return pair unless tuple.is_a?(AST::Types::Tuple)
+      return pair if hint && !pair.constr.check_relation(sub_type: tuple, super_type: hint).success?
+
+      pair.constr.add_typing(node, type: tuple)
+    end
+
+    # The array literal as it types without that: a tuple where something asked
+    # for one, otherwise `Array[Elem]` over the union of the elements.
+    def synthesize_array_literal(node, hint)
+      if node.children.empty?
+        if hint
+          array = AST::Builtin::Array.instance_type(AST::Builtin.any_type)
+          if check_relation(sub_type: array, super_type: hint).success?
+            add_typing node, type: unwrap(hint)
+          else
+            add_typing node, type: array
+          end
+        else
+          typing.add_error Diagnostic::Ruby::UnannotatedEmptyCollection.new(node: node)
+          add_typing node, type: AST::Builtin::Array.instance_type(AST::Builtin.any_type)
+        end
+      else
+        if hint
+          tuples = select_flatten_types(hint) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
+          if tuples.empty?
+            if converted = try_convert(hint, :to_ary)
+              tuples = select_flatten_types(converted) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
+            end
+          end
+          unless tuples.empty?
+            fallback_pair = nil #: Pair?
+            tuples.each do |tuple|
+              typing.new_child() do |child_typing|
+                if pair = with_new_typing(child_typing).try_tuple_type(node, tuple)
+                  if pair.constr.check_relation(sub_type: pair.type, super_type: tuple).success?
+                    return pair.with(constr: pair.constr.save_typing)
+                  end
+                  fallback_pair ||= pair.with(constr: pair.constr.save_typing)
+                end
+              end
+            end
+            return fallback_pair if fallback_pair
+          end
+        end
+
+        if hint
+          arrays = select_flatten_types(hint) {|type| AST::Builtin::Array.instance_type?(type) } #: Array[AST::Types::Name::Instance]
+          unless arrays.empty?
+            arrays.each do |array|
+              typing.new_child() do |child_typing|
+                pair = with_new_typing(child_typing).try_array_type(node, array)
+                if pair.constr.check_relation(sub_type: pair.type, super_type: hint).success?
+                  return pair.with(constr: pair.constr.save_typing)
+                end
+              end
+            end
+          end
+        end
+
+        try_array_type(node, nil)
       end
     end
 

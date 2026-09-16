@@ -38,6 +38,11 @@ module Steep
   #     def inner(parts)           # a body of its own: this `parts` is a
   #       parts.join(";")          # different variable that shares a name
   #     end
+  #
+  # An array that NO local holds — one written out where the body ends — is the
+  # same question reached from the other side. There is no name to reach it
+  # under, so there is nothing to disqualify and the contents are simply what
+  # the source says; `Analysis#returned` is that half.
   module Accumulators
     # Methods that read an array without letting it escape. Anything else on the
     # receiver — including one that merely looks harmless — is not on this list
@@ -113,7 +118,11 @@ module Steep
       # is safe to say so: after it there is no `<<` left to demand anything, and
       # what the local is worth from there on is exactly the tuple `return parts`
       # hands back.
-      Analysis = Struct.new(:at_reads, :final, keyword_init: true)
+      #
+      # `returned` — the array LITERALS a body hands back. Nothing has to be
+      # replayed for these: what is in one is written in it, and the only
+      # question was whether anything here could change it before it leaves.
+      Analysis = Struct.new(:at_reads, :final, :returned, keyword_init: true)
 
       # Both maps, from one pass. Ask a `Source` for this rather than calling it
       # per method — `Source#accumulators` holds the answer for the whole file,
@@ -126,8 +135,11 @@ module Steep
         # only thing that distinguishes them.
         at_reads = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
         final = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
+        returned = {}.compare_by_identity #: Hash[untyped, bool]
 
         each_def(node) do |def_node|
+          each_returned(def_node) { |array| returned[array] = true }
+
           last = {} #: Hash[Symbol, [untyped, Array[untyped]]]
 
           replay(def_node) do |statement, pushed, contents|
@@ -149,7 +161,7 @@ module Steep
           last.each_value { |statement, elements| final[statement] = elements }
         end
 
-        Analysis.new(at_reads: at_reads, final: final)
+        Analysis.new(at_reads: at_reads, final: final, returned: returned)
       end
 
       def contents_at_reads(node)
@@ -196,6 +208,67 @@ module Steep
 
       def body_of(def_node)
         def_node.type == :defs ? def_node.children[3] : def_node.children[2]
+      end
+
+      # Every array literal in a position `def_node`'s value leaves from.
+      #
+      # Written out rather than spelled `hint`: the return type reaches exactly
+      # these positions while it is being CHECKED against, but it reaches
+      # argument positions and typed assignments the same way, and those are
+      # places where a name does hold the array.
+      def each_returned(def_node)
+        body = body_of(def_node) or return
+
+        literal = ->(node) do
+          # An empty literal is the one the checker already asks to be
+          # annotated, and a tuple of nothing is not an answer to that.
+          yield node if array_literal?(node) && !node.children.empty?
+        end
+
+        each_tail(body, &literal)
+        each_returns(body, &literal)
+      end
+
+      # The ends of one body: the statement it finishes on, and — because a body
+      # that finishes on an `if` finishes on whichever arm ran — the ends inside
+      # that. `return` is the same thing written earlier, so it is followed from
+      # wherever it appears, through a block (which returns from the method
+      # around it) but not into a body of its own.
+      def each_tail(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        return if SCOPES.include?(node.type)
+
+        case node.type
+        when :begin, :kwbegin
+          each_tail(node.children.last, &block)
+        when :if
+          each_tail(node.children[1], &block)
+          each_tail(node.children[2], &block)
+        when :case, :case_match
+          node.children.drop(1).each do |branch|
+            next unless branch.is_a?(Parser::AST::Node)
+
+            arm = branch.type == :when || branch.type == :in_pattern ? branch.children.last : branch
+            each_tail(arm, &block)
+          end
+        when :return
+          each_tail(node.children[0], &block)
+        else
+          yield node
+        end
+      end
+
+      # `return` written anywhere but the end — inside an `if` that guards, in a
+      # block, wherever. The value leaves from there just the same.
+      def each_returns(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        return if SCOPES.include?(node.type)
+
+        node.children.each do |child|
+          next unless child.is_a?(Parser::AST::Node)
+
+          child.type == :return ? each_tail(child, &block) : each_returns(child, &block)
+        end
       end
 
       # Every node of one statement, stopping at a body of its own — `parts`
