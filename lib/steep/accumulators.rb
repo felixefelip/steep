@@ -92,31 +92,49 @@ module Steep
         found.reject { |_, pushes| pushes.nil? }
       end
 
-      # `{ read node => [element node, …] }` — what the array holds where it is
-      # READ, for every local this vouches for.
+      # What one walk of a whole source says, for the checker to ask node by
+      # node. Both halves come out of the SAME replay — the reads and the last
+      # pushes are two things to notice about one pass over a body, and walking
+      # twice would cost the file's AST twice for no second answer.
       #
-      # Keyed by the read because that is the question the checker asks: it is
-      # standing on `parts.join(";")` and wants the contents there. The contents
-      # are handed to the fold rather than written into the type environment —
+      # `at_reads` — `{ read node => [element node, …] }`, what the array holds
+      # where it is READ. Keyed by the read because that is the question the
+      # checker asks: it is standing on `parts.join(";")` and wants the contents
+      # there. Those go to the fold and nowhere near the type environment, since
       # refining the local makes `Array[Elem]#<<` demand the first element's
-      # type, so the NEXT push stops type-checking:
+      # type and the NEXT push stops type-checking:
       #
       #     parts << "a"      # parts becomes ["a"]
       #     parts << "b"      # error: `::String` is not `"a"`
       #
-      # The contents are the same either way; this is the half that has no blast
-      # radius.
-      def contents_at_reads(node)
-        # BY IDENTITY. Parser nodes compare structurally, so `parts.join(";")`
-        # written in two methods is one key — and the second would be answered
-        # with the first one's contents. The nodes walked here are the ones the
-        # checker types, so identity is both available and the only thing that
-        # distinguishes them.
-        result = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
+      # `final` — `{ last push node => [element node, …] }`, the contents of
+      # every readable local at the push that completes them. This half the type
+      # environment does hear about, and the LAST push is the one place where it
+      # is safe to say so: after it there is no `<<` left to demand anything, and
+      # what the local is worth from there on is exactly the tuple `return parts`
+      # hands back.
+      Analysis = Struct.new(:at_reads, :final, keyword_init: true)
+
+      # Both maps, from one pass. Ask a `Source` for this rather than calling it
+      # per method — `Source#accumulators` holds the answer for the whole file,
+      # and a `TypeConstruction` is built anew for every method body.
+      def analyze(node)
+        # BY IDENTITY, both of them. Parser nodes compare structurally, so
+        # `parts.join(";")` written in two methods is one key — and the second
+        # would be answered with the first one's contents. The nodes walked here
+        # are the ones the checker types, so identity is both available and the
+        # only thing that distinguishes them.
+        at_reads = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
+        final = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
 
         each_def(node) do |def_node|
+          last = {} #: Hash[Symbol, [untyped, Array[untyped]]]
+
           replay(def_node) do |statement, pushed, contents|
-            next if pushed
+            if pushed
+              last[pushed] = [statement, contents.fetch(pushed)]
+              next
+            end
 
             each_node(statement) do |child|
               next unless child.type == :send && READERS.include?(child.children[1])
@@ -124,36 +142,22 @@ module Steep
               receiver = child.children[0]
               next unless receiver&.type == :lvar && contents.key?(receiver.children[0])
 
-              result[child] = contents.fetch(receiver.children[0])
+              at_reads[child] = contents.fetch(receiver.children[0])
             end
           end
+
+          last.each_value { |statement, elements| final[statement] = elements }
         end
 
-        result
+        Analysis.new(at_reads: at_reads, final: final)
       end
 
-      # `{ last push node => [element node, …] }` — the final contents of every
-      # readable local, at the push that completes them.
-      #
-      # This is the half the type environment does hear about, and refining the
-      # local at the LAST push and nowhere earlier is what makes that safe: a
-      # tuple makes `Array[Elem]#<<` demand the first element's type, so a push
-      # after the refinement would stop type-checking — and after the last one
-      # there is none. What the local is worth from there on is exactly the
-      # tuple, which is what `return parts` hands back.
+      def contents_at_reads(node)
+        analyze(node).at_reads
+      end
+
       def final_contents(node)
-        result = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
-
-        each_def(node) do |def_node|
-          last = {} #: Hash[Symbol, [untyped, Array[untyped]]]
-          replay(def_node) do |statement, pushed, contents|
-            last[pushed] = [statement, contents.fetch(pushed)] if pushed
-          end
-
-          last.each_value { |statement, elements| result[statement] = elements }
-        end
-
-        result
+        analyze(node).final
       end
 
       private
@@ -285,6 +289,27 @@ module Steep
 
         if CLOSURES.include?(node.type)
           node.children.each { |child| strike(child, found, closure: true) }
+          return
+        end
+
+        # WRITTEN, so the pushes recorded so far were into an array the name no
+        # longer holds:
+        #
+        #     parts = []
+        #     parts << "a"
+        #     parts = Array.new   # ← a different array from here on
+        #     parts << "b"        #   `["b"]`, and `["a", "b"]` to anything
+        #     parts               #   still counting from the first one
+        #
+        # Reached for every shape of write, because `op_asgn`, `or_asgn`,
+        # `and_asgn` and each target of an `masgn` all hold an `lvasgn` of their
+        # own. The one write that does NOT come through here is the birth
+        # `parts = []`, which `read` takes before striking — and a SECOND one of
+        # those it strikes itself, for this same reason.
+        if node.type == :lvasgn
+          name = node.children[0]
+          found[name] = nil if found.key?(name)
+          strike(node.children[1], found, closure: closure)
           return
         end
 

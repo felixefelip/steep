@@ -387,9 +387,10 @@ class TypeCheckTest < Minitest::Test
   end
 
   # The answers that must not come out. Each of these hands the array to
-  # something that can push into it, or pushes where the count is unknown — and
-  # an implementation that answered anyway would be confidently wrong rather
-  # than vague, which is the worse failure of the two.
+  # something that can push into it, pushes where the count is unknown, or
+  # writes the name over so the pushes counted so far were into a different
+  # array — and an implementation that answered anyway would be confidently
+  # wrong rather than vague, which is the worse failure of the two.
   def test_an_array_that_can_be_reached_another_way_is_not_read
     run_type_check_test(
       signatures: {
@@ -400,6 +401,9 @@ class TypeCheckTest < Minitest::Test
             def fill: (Array[String]) -> void
             def looped: () -> String
             def conditional: (bool) -> String
+            def reassigned: () -> String
+            def reassigned_by_masgn: () -> String
+            def reassigned_by_or_asgn: () -> String
             def mutated: () -> String
             def returned: () -> Array[String]
           end
@@ -443,6 +447,34 @@ class TypeCheckTest < Minitest::Test
               parts.join(";")
             end
 
+            # WRITTEN over: the pushes above went into an array the name no
+            # longer holds, so this is `"b"` at runtime.
+            def reassigned
+              parts = []
+              parts << "a"
+              parts = Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
+            # The same write, reached through an `masgn` target.
+            def reassigned_by_masgn
+              parts = []
+              parts << "a"
+              _other, parts = 1, Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
+            # And through an `or_asgn`, which may or may not write at all.
+            def reassigned_by_or_asgn
+              parts = []
+              parts << "a"
+              parts ||= Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
             # A call that is not a read can do anything, `reverse!` included.
             def mutated
               parts = []
@@ -475,6 +507,9 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::String", actual.fetch("through_a_call")
       assert_equal "::String", actual.fetch("looped")
       assert_equal "::String", actual.fetch("conditional")
+      assert_equal "::String", actual.fetch("reassigned")
+      assert_equal "::String", actual.fetch("reassigned_by_masgn")
+      assert_equal "::String", actual.fetch("reassigned_by_or_asgn")
       assert_equal "::String", actual.fetch("mutated")
     end
   end

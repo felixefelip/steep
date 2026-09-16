@@ -502,15 +502,12 @@ module Steep
     # and the next push stops type-checking. The contents are the same; this is
     # the half of it that changes nothing else.
     #
-    # Memoised per source: the analysis reads the AST and nothing else, so it
-    # answers the same however many times a body is re-checked.
-    # The tuple a local is worth after the last push into it, or nil anywhere
-    # else.
-    def accumulated_final_type(node)
-      return nil unless node.type == :send && node.children[1] == :<<
+    # Read off the source, which holds one analysis for the whole file — this
+    # construction is one of many over it.
+    def accumulated_type(node)
+      return nil unless node.type == :send
 
-      @accumulated_final ||= Accumulators.final_contents(source.node)
-      elements = @accumulated_final[node] or return nil
+      elements = source.accumulators.at_reads[node] or return nil
 
       types = elements.map { |element| accumulated_element_type(element) }
       return nil unless types.all?
@@ -518,11 +515,12 @@ module Steep
       AST::Types::Tuple.new(types: types)
     end
 
-    def accumulated_type(node)
-      return nil unless node.type == :send
+    # The tuple a local is worth after the last push into it, or nil anywhere
+    # else — the half of the analysis the type environment hears about.
+    def accumulated_final_type(node)
+      return nil unless node.type == :send && node.children[1] == :<<
 
-      @accumulated_contents ||= Accumulators.contents_at_reads(source.node)
-      elements = @accumulated_contents[node] or return nil
+      elements = source.accumulators.final[node] or return nil
 
       types = elements.map { |element| accumulated_element_type(element) }
       return nil unless types.all?

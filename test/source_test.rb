@@ -9,6 +9,30 @@ class SourceTest < Minitest::Test
   include SubtypingHelper
   include FactoryHelper
 
+  # One analysis for the file, not one per method. A `TypeConstruction` is
+  # built anew for every method body, so memoising it there charged the whole
+  # file's AST once per method.
+  def test_accumulators_are_analyzed_once_per_source
+    source = Steep::Source.parse(<<~RUBY, path: Pathname("a.rb"), factory: RBS::Factory.new)
+      class Scans
+        def a
+          parts = []
+          parts << "a"
+          parts.join(";")
+        end
+
+        def b
+          parts = []
+          parts << "b"
+          parts.join(";")
+        end
+      end
+    RUBY
+
+    assert_equal 2, source.accumulators.at_reads.size
+    assert_same source.accumulators, source.accumulators
+  end
+
   def test_foo
     with_factory({ "a.rbs" => <<-RBS }) do |factory|
 module Foo
