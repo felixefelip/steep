@@ -910,6 +910,58 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # `x = y if cond` with no `else`: the branch the condition rules out must not
+  # be joined back in. The truthy side has always been guarded this way; the
+  # falsy side was not, so a decided condition still produced a union of both.
+  def test_a_decided_condition_does_not_join_the_branch_that_cannot_run
+    run_type_check_test(
+      signatures: {
+        "decided.rbs" => <<~RBS
+          class DecidedCondition
+            def taken: (true, "a") -> String
+            def skipped: (false, "a") -> String
+            def undecided: (bool, "a") -> String
+          end
+        RBS
+      },
+      code: {
+        "decided.rb" => <<~'RUBY'
+          class DecidedCondition
+            # `piece` arrives literal, the way a macro's keyword does: a local
+            # written `piece = "a"` here would widen before the `if` is reached.
+            def taken(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+
+            def skipped(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+
+            # Nothing decides this one, and both values reach the end.
+            def undecided(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("decided.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"self.a"', actual.fetch("taken")
+      assert_equal '"a"', actual.fetch("skipped")
+      assert_equal '("self.a" | "a")', actual.fetch("undecided")
+    end
+  end
+
   # A constant is the one name Ruby means to be written once, so the value at a
   # read is the value at the assignment — provided this file is where the name
   # is decided and nothing here changes the object behind it.

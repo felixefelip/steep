@@ -2244,10 +2244,23 @@ module Steep
                   end
                 end
               else
-                envs << falsy.env
+                # `unless falsy.unreachable` here too, which the truthy side
+                # above has had all along. Without it an `x = y if cond` whose
+                # condition is DECIDED still joins the env of the branch that
+                # cannot run, and the value the condition just settled comes out
+                # a union of both:
+                #
+                #     receiver = "class"
+                #     receiver = "self.#{receiver}" if RESERVED.include?(receiver)
+                #     receiver   # ("self.class" | "class"), for a condition
+                #                #   the checker answered `true`
+                envs << falsy.env unless falsy.unreachable
               end
 
-              env.join(*envs)
+              # Both branches gone: nothing after this runs, and there is no env
+              # to join. The one the `if` was entered with is what the
+              # unreachable code is checked against.
+              envs.empty? ? env : env.join(*envs)
             end
 
             if truthy.unreachable
