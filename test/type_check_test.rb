@@ -323,6 +323,112 @@ class TypeCheckTest < Minitest::Test
   # read another, and each is wrong in its own way: one reads an array that does
   # not exist yet, one reads at a time other than the one it runs at, and one
   # reads a different variable that shares a name.
+  def test_an_array_written_out_where_a_body_ends_is_its_tuple
+    run_type_check_test(
+      signatures: {
+        "handed_back.rbs" => <<~RBS
+          class HandedBackArray
+            def fixed: () -> untyped
+            def satisfies_the_declaration: () -> Array[String]
+            def contradicts_the_declaration: () -> Array[Integer]
+            def one_arm_each: (untyped) -> untyped
+            def early: (untyped) -> untyped
+            def from_a_block: (untyped) -> untyped
+            def held_by_a_name: () -> untyped
+            def not_written_out: () -> untyped
+            def nothing_in_it: () -> untyped
+            def name: () -> String
+          end
+        RBS
+      },
+      code: {
+        "handed_back.rb" => <<~RUBY
+          class HandedBackArray
+            def fixed
+              ["a", "b", "c"]
+            end
+
+            # A tuple is what the declaration asks for, spelled exactly.
+            def satisfies_the_declaration
+              ["d", "e"]
+            end
+
+            # And where it is not, the declaration wins: this is the answer the
+            # body owes, not a place to be more precise than it.
+            def contradicts_the_declaration
+              ["f", "g"]
+            end
+
+            # A body that ends on an `if` ends on whichever arm ran.
+            def one_arm_each(flag)
+              if flag
+                ["h"]
+              else
+                ["i", "j"]
+              end
+            end
+
+            # `return` is the end written earlier.
+            def early(flag)
+              return ["k"] if flag
+              ["l"]
+            end
+
+            # Including from inside a block, which returns from the method
+            # around it rather than from itself.
+            def from_a_block(xs)
+              xs.each { return ["m"] }
+              ["n"]
+            end
+
+            # A name can reach this one, and `parts << "p"` written after it
+            # would be an error the widening exists to prevent.
+            def held_by_a_name
+              parts = ["o", "p"]
+              parts
+            end
+
+            # Nothing to read: an element that is not written out here has no
+            # literal to recover, and one element short is the whole tuple.
+            def not_written_out
+              [name, "q"]
+            end
+
+            # The literal the checker already asks to be annotated.
+            def nothing_in_it
+              []
+            end
+
+            def name
+              "r"
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("handed_back.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :array
+
+        actual[node.location.expression.source] = typing.type_of(node: node).to_s
+      end
+
+      assert_equal %q(["a", "b", "c"]), actual.fetch(%q(["a", "b", "c"]))
+      assert_equal %q(["d", "e"]), actual.fetch(%q(["d", "e"]))
+      assert_equal "::Array[::String]", actual.fetch(%q(["f", "g"]))
+      assert_equal %q(["h"]), actual.fetch(%q(["h"]))
+      assert_equal %q(["i", "j"]), actual.fetch(%q(["i", "j"]))
+      assert_equal %q(["k"]), actual.fetch(%q(["k"]))
+      assert_equal %q(["l"]), actual.fetch(%q(["l"]))
+      assert_equal %q(["m"]), actual.fetch(%q(["m"]))
+      assert_equal %q(["n"]), actual.fetch(%q(["n"]))
+      assert_equal "::Array[::String]", actual.fetch(%q(["o", "p"]))
+      assert_equal "::Array[::String]", actual.fetch(%q([name, "q"]))
+      assert_equal "untyped", actual.fetch("[]")
+    end
+  end
+
   def test_the_walk_stops_at_time_and_at_scope
     run_type_check_test(
       signatures: {
