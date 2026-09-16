@@ -258,6 +258,67 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # The value a body ENDS on leaves it, and nothing in the body runs afterwards
+  # to be told a lie about it — so a local handed back carries what was pushed
+  # into it, where one handed to something MID-BODY still does not.
+  def test_an_array_handed_back_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "returned.rbs" => <<~RBS
+          class ReturnedAccumulator
+            def built: () -> untyped
+            def from_a_literal: () -> untyped
+            def escapes_first: () -> untyped
+            def fill: (untyped) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "returned.rb" => <<~RUBY
+          class ReturnedAccumulator
+            def built
+              parts = []
+              parts << "a"
+              parts << "b"
+              parts
+            end
+
+            def from_a_literal
+              parts = ["a"]
+              parts << "b"
+              parts
+            end
+
+            # Handed out BEFORE the end: what follows could read an array the
+            # callee changed, so this one is still struck.
+            def escapes_first
+              parts = []
+              parts << "a"
+              fill(parts)
+              parts
+            end
+
+            def fill(parts)
+              parts << "z"
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("returned.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '["a", "b"]', actual.fetch("built")
+      assert_equal '["a", "b"]', actual.fetch("from_a_literal")
+      assert_equal "::Array[untyped]", actual.fetch("escapes_first")
+    end
+  end
+
   # Where the walk has to STOP. Each of these is a way to name one array and
   # read another, and each is wrong in its own way: one reads an array that does
   # not exist yet, one reads at a time other than the one it runs at, and one
@@ -326,9 +387,10 @@ class TypeCheckTest < Minitest::Test
   end
 
   # The answers that must not come out. Each of these hands the array to
-  # something that can push into it, or pushes where the count is unknown — and
-  # an implementation that answered anyway would be confidently wrong rather
-  # than vague, which is the worse failure of the two.
+  # something that can push into it, pushes where the count is unknown, or
+  # writes the name over so the pushes counted so far were into a different
+  # array — and an implementation that answered anyway would be confidently
+  # wrong rather than vague, which is the worse failure of the two.
   def test_an_array_that_can_be_reached_another_way_is_not_read
     run_type_check_test(
       signatures: {
@@ -339,6 +401,9 @@ class TypeCheckTest < Minitest::Test
             def fill: (Array[String]) -> void
             def looped: () -> String
             def conditional: (bool) -> String
+            def reassigned: () -> String
+            def reassigned_by_masgn: () -> String
+            def reassigned_by_or_asgn: () -> String
             def mutated: () -> String
             def returned: () -> Array[String]
           end
@@ -382,6 +447,34 @@ class TypeCheckTest < Minitest::Test
               parts.join(";")
             end
 
+            # WRITTEN over: the pushes above went into an array the name no
+            # longer holds, so this is `"b"` at runtime.
+            def reassigned
+              parts = []
+              parts << "a"
+              parts = Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
+            # The same write, reached through an `masgn` target.
+            def reassigned_by_masgn
+              parts = []
+              parts << "a"
+              _other, parts = 1, Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
+            # And through an `or_asgn`, which may or may not write at all.
+            def reassigned_by_or_asgn
+              parts = []
+              parts << "a"
+              parts ||= Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
             # A call that is not a read can do anything, `reverse!` included.
             def mutated
               parts = []
@@ -390,7 +483,9 @@ class TypeCheckTest < Minitest::Test
               parts.join(";")
             end
 
-            # Handed to the caller, who may push into it.
+            # Handed back, which `test_an_array_handed_back_carries_its_contents`
+            # is about — here only to pin that a tuple still satisfies the
+            # `Array[String]` the declaration asks for.
             def returned
               parts = []
               parts << "a"
@@ -412,6 +507,9 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::String", actual.fetch("through_a_call")
       assert_equal "::String", actual.fetch("looped")
       assert_equal "::String", actual.fetch("conditional")
+      assert_equal "::String", actual.fetch("reassigned")
+      assert_equal "::String", actual.fetch("reassigned_by_masgn")
+      assert_equal "::String", actual.fetch("reassigned_by_or_asgn")
       assert_equal "::String", actual.fetch("mutated")
     end
   end

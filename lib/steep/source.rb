@@ -396,6 +396,18 @@ module Steep
       node.updated(type, children)
     end
 
+    # What `Accumulators` reads out of this file's AST, computed once.
+    #
+    # It belongs here and not on `TypeConstruction` because a construction is
+    # built anew for every method body (and again for every branch within one),
+    # so memoising it there charged the whole file's AST once per method — a
+    # cost that grows with the SQUARE of the file. The analysis reads the AST
+    # and nothing else, so one answer serves every construction over this
+    # source, however many times a body is re-checked.
+    def accumulators
+      @accumulators ||= Accumulators.analyze(node)
+    end
+
     def annotations(block:, factory:, context:)
       annotations =
         if block
