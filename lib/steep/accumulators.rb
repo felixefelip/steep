@@ -59,10 +59,9 @@ module Steep
   # callee does more than append to — is a body this does not have, and the
   # local goes away as before.
   module Accumulators
-    # Methods that read an array without letting it escape. Anything else on the
-    # receiver — including one that merely looks harmless — is not on this list
-    # because the list is the claim.
-    READERS = %i[join first last size length empty? count fetch [] include?].freeze
+    # Shared with `Constants`, which vouches for a value on the same terms. See
+    # `CollectionReaders` for why a call is on the list or is not.
+    READERS = CollectionReaders::METHODS
 
     # Nodes that open a body of their own. A local named inside one is a
     # DIFFERENT variable that happens to share a name, so nothing outside says
@@ -499,6 +498,12 @@ module Steep
         strike(statement, found)
       end
 
+      # A read that hands back an ELEMENT of a local this walk is watching.
+      def element_read?(node)
+        node.is_a?(Parser::AST::Node) && node.type == :send &&
+          CollectionReaders.element?(node) && node.children[0]&.type == :lvar
+      end
+
       def push_onto(statement, found)
         return nil unless statement.type == :send && statement.children[1] == :<<
 
@@ -551,8 +556,21 @@ module Steep
           return
         end
 
-        if !closure && node.type == :send && READERS.include?(node.children[1]) && node.children[0]&.type == :lvar
+        if !closure && node.type == :send && CollectionReaders.read?(node) && node.children[0]&.type == :lvar
           node.children.drop(2).each { |argument| strike(argument, found, closure: closure) }
+          return
+        end
+
+        # A call ON the answer of one of those. `parts.first` hands back an
+        # ELEMENT, and the next call is free to change it in place:
+        #
+        #     parts.first << "b"    # parts is ["ab"] from here on
+        #
+        # The read itself is still a read; what takes the local away is that
+        # something else is holding one of its elements.
+        if node.type == :send && element_read?(node.children[0])
+          strike(node.children[0].children[0], found, closure: closure)
+          node.children.drop(1).each { |child| strike(child, found, closure: closure) }
           return
         end
 

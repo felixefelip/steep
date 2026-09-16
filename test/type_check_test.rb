@@ -643,6 +643,7 @@ class TypeCheckTest < Minitest::Test
             def reassigned_by_masgn: () -> String
             def reassigned_by_or_asgn: () -> String
             def mutated: () -> String
+            def element_mutated: () -> String
             def returned: () -> Array[String]
           end
         RBS
@@ -736,6 +737,16 @@ class TypeCheckTest < Minitest::Test
               parts.join(";")
             end
 
+            # `first` hands back an ELEMENT, and the call after it changes that
+            # element in place — so what the array holds is no longer what was
+            # pushed into it.
+            def element_mutated
+              parts = []
+              parts << "a"
+              parts.first << "b"
+              parts.join(";")
+            end
+
             # Handed back, which `test_an_array_handed_back_carries_its_contents`
             # is about — here only to pin that a tuple still satisfies the
             # `Array[String]` the declaration asks for.
@@ -765,6 +776,7 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::String", actual.fetch("reassigned_by_masgn")
       assert_equal "::String", actual.fetch("reassigned_by_or_asgn")
       assert_equal "::String", actual.fetch("mutated")
+      assert_equal "::String", actual.fetch("element_mutated")
     end
   end
 
@@ -907,6 +919,207 @@ class TypeCheckTest < Minitest::Test
 
       assert call_def
       assert_equal "::String", typing.type_of(node: call_def.children[2]).to_s
+    end
+  end
+
+  # `x = y if cond` with no `else`: the branch the condition rules out must not
+  # be joined back in. The truthy side has always been guarded this way; the
+  # falsy side was not, so a decided condition still produced a union of both.
+  def test_a_decided_condition_does_not_join_the_branch_that_cannot_run
+    run_type_check_test(
+      signatures: {
+        "decided.rbs" => <<~RBS
+          class DecidedCondition
+            def taken: (true, "a") -> String
+            def skipped: (false, "a") -> String
+            def undecided: (bool, "a") -> String
+          end
+        RBS
+      },
+      code: {
+        "decided.rb" => <<~'RUBY'
+          class DecidedCondition
+            # `piece` arrives literal, the way a macro's keyword does: a local
+            # written `piece = "a"` here would widen before the `if` is reached.
+            def taken(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+
+            def skipped(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+
+            # Nothing decides this one, and both values reach the end.
+            def undecided(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("decided.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"self.a"', actual.fetch("taken")
+      assert_equal '"a"', actual.fetch("skipped")
+      assert_equal '("self.a" | "a")', actual.fetch("undecided")
+    end
+  end
+
+  # A constant is the one name Ruby means to be written once, so the value at a
+  # read is the value at the assignment — provided this file is where the name
+  # is decided and nothing here changes the object behind it.
+  def test_a_constant_written_once_carries_its_value
+    run_type_check_test(
+      signatures: {
+        "constants.rbs" => <<~RBS
+          module OtherNamespace
+            RESERVED: Array[String]
+            def elsewhere: () -> bool
+          end
+
+          class WrittenConstants
+            RESERVED: Array[String]
+            FROZEN: Array[String]
+            TWICE: Array[String]
+            MUTATED: Array[String]
+            PASSED: Array[String]
+            EMPTY: Array[String]
+            MISDECLARED: Array[Integer]
+            CONDITIONAL: Array[String]
+            BLOCK_READ: Array[String]
+            ELEMENT_READ: Array[String]
+
+            def plain: () -> bool
+            def frozen: () -> String
+            def twice: () -> bool
+            def mutated: () -> bool
+            def passed: () -> bool
+            def empty: () -> bool
+            def misdeclared: () -> bool
+            def conditional: () -> bool
+            def through_a_block: () -> bool
+            def through_an_element: () -> bool
+            def guarded: (:user) -> String
+            def mutate: () -> void
+            def hand_over: () -> void
+            def sink: (Array[String]) -> void
+          end
+        RBS
+      },
+      code: {
+        "constants.rb" => <<~'RUBY'
+          module OtherNamespace
+            # A bare read of a name THIS file writes in another namespace. Both
+            # are declared `Array[String]`, so the relation check lets it
+            # through and only the resolved name tells them apart.
+            def elsewhere
+              RESERVED.include?("class")
+            end
+          end
+
+          class WrittenConstants
+            RESERVED = ["class", "def", "end"]
+            FROZEN = %w(class self).freeze
+            TWICE = ["a"]
+            TWICE = ["b"]
+            MUTATED = ["a"]
+            PASSED = ["a"]
+            EMPTY = []
+            MISDECLARED = ["a"]
+
+            # May not be assigned at all, in which case the read is a NameError
+            # or finds an inherited constant that is not this.
+            CONDITIONAL = ["a"] if ENV["FLAG"]
+
+            BLOCK_READ = ["a"]
+            ELEMENT_READ = ["a"]
+
+            def plain = RESERVED.include?("content")
+            def frozen = FROZEN.join(";")
+
+            # Written twice: which value a read means is a question about
+            # constant lookup, not about this walk.
+            def twice = TWICE.include?("a")
+
+            # Changed behind the read.
+            def mutated = MUTATED.include?("a")
+            def mutate
+              MUTATED << "b"
+            end
+
+            # Handed to something that can change it.
+            def passed = PASSED.include?("a")
+            def hand_over
+              sink(PASSED)
+            end
+
+            def empty = EMPTY.include?("a")
+
+            def conditional = CONDITIONAL.include?("a")
+
+            # `count` is a read, and with a block it hands every element to a
+            # body this walk does not follow.
+            def through_a_block
+              BLOCK_READ.count { |value| value << "b" }
+              BLOCK_READ.include?("a")
+            end
+
+            # `first` hands back an element, and the call after it changes that
+            # element in place.
+            def through_an_element
+              ELEMENT_READ.first << "b"
+              ELEMENT_READ.include?("a")
+            end
+
+            # The recovered value is held against the type the read RESOLVED to,
+            # so a name that turns out to be some other constant is refused.
+            def misdeclared = MISDECLARED.include?("a")
+
+            # What the whole thing is for: the guard decides, so the local keeps
+            # the value it had and the interpolation after it still folds.
+            def guarded(to)
+              receiver = to.to_s
+              receiver = "self.#{receiver}" if FROZEN.include?(receiver)
+              "  (#{receiver}).x(...)"
+            end
+
+            def sink(list)
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("constants.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "false", actual.fetch("plain")
+      assert_equal '"class;self"', actual.fetch("frozen")
+      assert_equal '"  (user).x(...)"', actual.fetch("guarded")
+
+      assert_equal "bool", actual.fetch("twice")
+      assert_equal "bool", actual.fetch("mutated")
+      assert_equal "bool", actual.fetch("passed")
+      assert_equal "bool", actual.fetch("empty")
+      assert_equal "bool", actual.fetch("misdeclared")
+      assert_equal "bool", actual.fetch("conditional")
+      assert_equal "bool", actual.fetch("through_a_block")
+      assert_equal "bool", actual.fetch("through_an_element")
+      # A different constant that happens to share a name and a type.
+      assert_equal "bool", actual.fetch("elsewhere")
     end
   end
 

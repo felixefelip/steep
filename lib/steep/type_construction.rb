@@ -2244,10 +2244,23 @@ module Steep
                   end
                 end
               else
-                envs << falsy.env
+                # `unless falsy.unreachable` here too, which the truthy side
+                # above has had all along. Without it an `x = y if cond` whose
+                # condition is DECIDED still joins the env of the branch that
+                # cannot run, and the value the condition just settled comes out
+                # a union of both:
+                #
+                #     receiver = "class"
+                #     receiver = "self.#{receiver}" if RESERVED.include?(receiver)
+                #     receiver   # ("self.class" | "class"), for a condition
+                #                #   the checker answered `true`
+                envs << falsy.env unless falsy.unreachable
               end
 
-              env.join(*envs)
+              # Both branches gone: nothing after this runs, and there is no env
+              # to join. The one the `if` was entered with is what the
+              # unreachable code is checked against.
+              envs.empty? ? env : env.join(*envs)
             end
 
             if truthy.unreachable
@@ -5323,13 +5336,51 @@ module Steep
       # time, through this same recovery.
       if node.type == :array
         elements = node.children.map do |child|
-          next unless typing.has_type?(child)
-
-          element = literal_operand_type(child, typing.type_of(node: child))
+          # An element the checker has not reached yet is still a node, and a
+          # node that spells a value out needs nothing else to be read. Only an
+          # interpolation needs the type, and one of those simply declines here
+          # as it would have before.
+          inferred = typing.has_type?(child) ? typing.type_of(node: child) : AST::Builtin.any_type
+          element = literal_operand_type(child, inferred)
           element if element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple)
         end
 
         return elements.all? ? AST::Types::Tuple.new(types: elements) : built_here_only(inferred_type)
+      end
+
+      # A constant whose value is written out ONCE in this file and only read
+      # afterwards. The array is not built at this call site, but it is built in
+      # this file and nothing here can have changed it since — the same claim
+      # `built_here_only` protects, reached through a name Ruby means to be
+      # written once instead of through the literal itself.
+      #
+      # Held against the type the read actually resolved to, so a name that
+      # turns out to be some other constant — one a gem declares under the
+      # namespace this read sits in — is refused rather than answered with this
+      # file's value.
+      if node.type == :const
+        initializer, written_as = source.constants[node]
+        # The walk keys by the bare name; only the CHECKER knows which constant
+        # a bare read resolved to. `RESERVED` read inside `module Other` is not
+        # `Owner::RESERVED` just because this file writes one of those, and the
+        # two can have the same type — so the relation check below would let it
+        # through and the name has to be compared outright.
+        resolved = initializer && typing.source_index.reference(constant_node: node)
+
+        # Read off the NODE, not off the initializer's type: a constant is
+        # written at the top of a body and read inside the methods below it, and
+        # the checker does not reach the two in that order.
+        recovered =
+          if resolved && resolved.to_s == written_as
+            literal_operand_type(initializer, AST::Builtin.any_type)
+          end
+
+        if recovered.is_a?(AST::Types::Tuple) &&
+           check_relation(sub_type: recovered, super_type: inferred_type).success?
+          return recovered
+        end
+
+        return built_here_only(inferred_type)
       end
 
       value =
