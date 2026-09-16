@@ -643,6 +643,7 @@ class TypeCheckTest < Minitest::Test
             def reassigned_by_masgn: () -> String
             def reassigned_by_or_asgn: () -> String
             def mutated: () -> String
+            def element_mutated: () -> String
             def returned: () -> Array[String]
           end
         RBS
@@ -736,6 +737,16 @@ class TypeCheckTest < Minitest::Test
               parts.join(";")
             end
 
+            # `first` hands back an ELEMENT, and the call after it changes that
+            # element in place — so what the array holds is no longer what was
+            # pushed into it.
+            def element_mutated
+              parts = []
+              parts << "a"
+              parts.first << "b"
+              parts.join(";")
+            end
+
             # Handed back, which `test_an_array_handed_back_carries_its_contents`
             # is about — here only to pin that a tuple still satisfies the
             # `Array[String]` the declaration asks for.
@@ -765,6 +776,7 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::String", actual.fetch("reassigned_by_masgn")
       assert_equal "::String", actual.fetch("reassigned_by_or_asgn")
       assert_equal "::String", actual.fetch("mutated")
+      assert_equal "::String", actual.fetch("element_mutated")
     end
   end
 
@@ -969,6 +981,11 @@ class TypeCheckTest < Minitest::Test
     run_type_check_test(
       signatures: {
         "constants.rbs" => <<~RBS
+          module OtherNamespace
+            RESERVED: Array[String]
+            def elsewhere: () -> bool
+          end
+
           class WrittenConstants
             RESERVED: Array[String]
             FROZEN: Array[String]
@@ -977,6 +994,9 @@ class TypeCheckTest < Minitest::Test
             PASSED: Array[String]
             EMPTY: Array[String]
             MISDECLARED: Array[Integer]
+            CONDITIONAL: Array[String]
+            BLOCK_READ: Array[String]
+            ELEMENT_READ: Array[String]
 
             def plain: () -> bool
             def frozen: () -> String
@@ -985,6 +1005,9 @@ class TypeCheckTest < Minitest::Test
             def passed: () -> bool
             def empty: () -> bool
             def misdeclared: () -> bool
+            def conditional: () -> bool
+            def through_a_block: () -> bool
+            def through_an_element: () -> bool
             def guarded: (:user) -> String
             def mutate: () -> void
             def hand_over: () -> void
@@ -994,6 +1017,15 @@ class TypeCheckTest < Minitest::Test
       },
       code: {
         "constants.rb" => <<~'RUBY'
+          module OtherNamespace
+            # A bare read of a name THIS file writes in another namespace. Both
+            # are declared `Array[String]`, so the relation check lets it
+            # through and only the resolved name tells them apart.
+            def elsewhere
+              RESERVED.include?("class")
+            end
+          end
+
           class WrittenConstants
             RESERVED = ["class", "def", "end"]
             FROZEN = %w(class self).freeze
@@ -1003,6 +1035,13 @@ class TypeCheckTest < Minitest::Test
             PASSED = ["a"]
             EMPTY = []
             MISDECLARED = ["a"]
+
+            # May not be assigned at all, in which case the read is a NameError
+            # or finds an inherited constant that is not this.
+            CONDITIONAL = ["a"] if ENV["FLAG"]
+
+            BLOCK_READ = ["a"]
+            ELEMENT_READ = ["a"]
 
             def plain = RESERVED.include?("content")
             def frozen = FROZEN.join(";")
@@ -1024,6 +1063,22 @@ class TypeCheckTest < Minitest::Test
             end
 
             def empty = EMPTY.include?("a")
+
+            def conditional = CONDITIONAL.include?("a")
+
+            # `count` is a read, and with a block it hands every element to a
+            # body this walk does not follow.
+            def through_a_block
+              BLOCK_READ.count { |value| value << "b" }
+              BLOCK_READ.include?("a")
+            end
+
+            # `first` hands back an element, and the call after it changes that
+            # element in place.
+            def through_an_element
+              ELEMENT_READ.first << "b"
+              ELEMENT_READ.include?("a")
+            end
 
             # The recovered value is held against the type the read RESOLVED to,
             # so a name that turns out to be some other constant is refused.
@@ -1060,6 +1115,11 @@ class TypeCheckTest < Minitest::Test
       assert_equal "bool", actual.fetch("passed")
       assert_equal "bool", actual.fetch("empty")
       assert_equal "bool", actual.fetch("misdeclared")
+      assert_equal "bool", actual.fetch("conditional")
+      assert_equal "bool", actual.fetch("through_a_block")
+      assert_equal "bool", actual.fetch("through_an_element")
+      # A different constant that happens to share a name and a type.
+      assert_equal "bool", actual.fetch("elsewhere")
     end
   end
 

@@ -5359,11 +5359,21 @@ module Steep
       # namespace this read sits in — is refused rather than answered with this
       # file's value.
       if node.type == :const
-        initializer = source.constants[node]
-        # Read off the NODE, not off its type: a constant is written at the top
-        # of a body and read inside the methods below it, and the checker does
-        # not reach the two in that order.
-        recovered = initializer && literal_operand_type(initializer, AST::Builtin.any_type)
+        initializer, written_as = source.constants[node]
+        # The walk keys by the bare name; only the CHECKER knows which constant
+        # a bare read resolved to. `RESERVED` read inside `module Other` is not
+        # `Owner::RESERVED` just because this file writes one of those, and the
+        # two can have the same type — so the relation check below would let it
+        # through and the name has to be compared outright.
+        resolved = initializer && typing.source_index.reference(constant_node: node)
+
+        # Read off the NODE, not off the initializer's type: a constant is
+        # written at the top of a body and read inside the methods below it, and
+        # the checker does not reach the two in that order.
+        recovered =
+          if resolved && resolved.to_s == written_as
+            literal_operand_type(initializer, AST::Builtin.any_type)
+          end
 
         if recovered.is_a?(AST::Types::Tuple) &&
            check_relation(sub_type: recovered, super_type: inferred_type).success?
