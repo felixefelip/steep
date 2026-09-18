@@ -213,6 +213,10 @@ module Steep
             # signature can say is `Set[Elem]`, and the members become the
             # element type on the way out.
             type_1(AST::Builtin::Set.instance_type(type.element_type))
+          when MetaClass, MethodObject
+            # A reflection names a module and a method; RBS can say neither, so
+            # what leaves is the class the value is one of.
+            type_1(type.back_type)
           when Record
             all_fields = {} #: Hash[Symbol, [RBS::Types::t, bool]]
             type.elements.each do |key, value|
@@ -525,6 +529,10 @@ module Steep
             AST::Types::Name::Singleton.new(
               name: env.normalize_module_name(type.name)
             )
+          when AST::Types::MetaClass
+            AST::Types::MetaClass.new(name: env.normalize_module_name(type.name))
+          when AST::Types::MethodObject
+            type.with(type_name: env.normalize_module_name(type.type_name))
           when AST::Types::Any, AST::Types::Boolean, AST::Types::Bot, AST::Types::Nil,
             AST::Types::Top, AST::Types::Void, AST::Types::Literal, AST::Types::Class, AST::Types::Instance,
             AST::Types::Self, AST::Types::Var, AST::Types::Logic::Base

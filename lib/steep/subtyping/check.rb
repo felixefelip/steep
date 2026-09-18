@@ -814,6 +814,15 @@ module Steep
           Expand(relation) do
             check_type(Relation.new(sub_type: relation.sub_type.back_type, super_type: relation.super_type))
           end
+
+        when relation.sub_type.is_a?(AST::Types::MetaClass) || relation.sub_type.is_a?(AST::Types::MethodObject)
+          # A reflection satisfies whatever the `::Class`, `::Method` or
+          # `::UnboundMethod` it names would. Nothing is claimed in the other
+          # direction, and nothing between two different reflections: `==`
+          # already answers when they name the same thing.
+          Expand(relation) do
+            check_type(Relation.new(sub_type: relation.sub_type.back_type, super_type: relation.super_type))
+          end
         else
           Failure(relation, Result::Failure::UnknownPairError.new(relation: relation))
         end
