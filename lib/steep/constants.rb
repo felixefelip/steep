@@ -22,6 +22,12 @@ module Steep
   # written twice is a name it cannot resolve to a value at all. The checker
   # then holds the recovered value against the type the read actually resolved
   # to, so a name that turns out to be some OTHER constant is refused there.
+  #
+  # What the value IS, this walk does not decide. It points at the node the
+  # constant is written as — `%w(…)`, or a chain like
+  # `(KEYWORDS + EXTRA).to_set.freeze` — and the checker folds that the way it
+  # folds any other expression. Naming those operations here would be a second
+  # table to keep in step with the first.
   module Constants
     # A body that runs on its own schedule. Unlike `Accumulators` this walk has
     # no reason to stop at a `def` — a constant is the same constant inside one
@@ -119,21 +125,36 @@ module Steep
         prefix + [node.children[1].to_s]
       end
 
-      # The value as written, with `.freeze` taken off — freezing is how a
-      # constant collection is spelled and says nothing about what is in it.
+      # The value as written. An array spelled out, another constant, or a chain
+      # of calls over those — `(KEYWORDS + EXTRA).to_set.freeze` is how a
+      # constant collection is usually written, and the checker folds the chain
+      # itself rather than this walk naming those operations a second time.
+      #
+      # What is refused here is only the shape: whether the chain actually
+      # answers a value is the fold's question, and a chain that does not simply
+      # recovers nothing later.
       def initializer_of(casgn)
         value = casgn.children[2]
-        value = value.children[0] if frozen?(value)
-        return nil unless value.is_a?(Parser::AST::Node) && value.type == :array
-        return nil if value.children.empty?
-        return nil if value.children.any? { |element| element.type == :splat }
-
-        value
+        collection_expression?(value) ? value : nil
       end
 
-      def frozen?(node)
-        node.is_a?(Parser::AST::Node) && node.type == :send &&
-          node.children[1] == :freeze && node.children.size == 2
+      def collection_expression?(node)
+        return false unless node.is_a?(Parser::AST::Node)
+
+        case node.type
+        when :array
+          !node.children.empty? && node.children.none? { |element| element.type == :splat }
+        when :const
+          read?(node)
+        when :send
+          collection_expression?(node.children[0])
+        when :begin
+          # `(KEYWORDS + EXTRA).to_set` — the parentheses are a node of their
+          # own, and the value is what is inside them.
+          node.children.one? && collection_expression?(node.children[0])
+        else
+          false
+        end
       end
 
       def read?(node)
@@ -168,7 +189,12 @@ module Steep
         end
 
         if !closure && node.type == :send && CollectionReaders.read?(node) && read?(node.children[0])
-          node.children.drop(2).each { |argument| strike(argument, found) }
+          node.children.drop(2).each do |argument|
+            # The other side of a `+` is read, not handed anywhere.
+            next if CollectionReaders.binary?(node) && read?(argument)
+
+            strike(argument, found)
+          end
           return
         end
 

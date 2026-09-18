@@ -58,9 +58,7 @@ module Steep
         return nil unless entry.preflight.call(receiver, arguments)
 
         value = entry.method.bind(receiver).call(*arguments)
-        return nil unless literal_value?(value)
-
-        type = AST::Types::Literal.new(value: value)
+        type = folded_type(value) or return nil
         return nil if type.to_s.bytesize > result_budget(receiver, arguments)
 
         type
@@ -109,21 +107,46 @@ module Steep
       def operand?(type)
         case type
         when AST::Types::Literal then true
-        when AST::Types::Tuple then type.types.all? { |element| operand?(element) }
+        when AST::Types::Tuple, AST::Types::FiniteSet then type.types.all? { |element| operand?(element) }
         else false
         end
       end
 
       def operand_value(type)
-        type.is_a?(AST::Types::Tuple) ? type.types.map { |element| operand_value(element) } : type.value
+        case type
+        when AST::Types::Tuple then type.types.map { |element| operand_value(element) }
+        when AST::Types::FiniteSet then ::Set.new(type.types.map { |element| operand_value(element) })
+        else type.value
+        end
+      end
+
+      # The type a folded VALUE is, or nil for one this does not carry. A
+      # collection answers as the type that names its contents — which is the
+      # only way an entry can return one at all, since every type here has to be
+      # something the checker can go on to ask questions about.
+      def folded_type(value)
+        case value
+        when ::Array
+          types = value.map { |element| folded_type(element) }
+          AST::Types::Tuple.new(types: types) if types.all?
+        when ::Set
+          types = value.map { |element| folded_type(element) }
+          AST::Types::FiniteSet.new(types: types) if types.all?
+        else
+          AST::Types::Literal.new(value: value) if literal_value?(value)
+        end
       end
 
       def within_input_budget?(receiver, arguments)
         [receiver, *arguments].all? do |value|
           next false if collection_size(value) > MAX_COLLECTION_SIZE
 
-          operand_width(value) <= (value.is_a?(::Array) ? MAX_OPERAND_WIDTH : MAX_LITERAL_WIDTH)
+          operand_width(value) <= (collection?(value) ? MAX_OPERAND_WIDTH : MAX_LITERAL_WIDTH)
         end
+      end
+
+      def collection?(value)
+        value.is_a?(::Array) || value.is_a?(::Set)
       end
 
       # How wide the result may be. A fold that only reassembles its operands —
@@ -136,13 +159,13 @@ module Steep
       end
 
       def operand_width(value)
-        return AST::Types::Literal.new(value: value).to_s.bytesize unless value.is_a?(::Array)
+        return AST::Types::Literal.new(value: value).to_s.bytesize unless collection?(value)
 
         value.sum { |element| operand_width(element) + 2 }
       end
 
       def collection_size(value)
-        return 0 unless value.is_a?(::Array)
+        return 0 unless collection?(value)
 
         value.sum { |element| 1 + collection_size(element) }
       end
@@ -182,6 +205,16 @@ module Steep
     # CALL. Confining both sides to the classes above is what makes the list of
     # methods that call reaches finite, and therefore watchable.
     COMPARABLE = ->(value) { COMPARABLE_ELEMENTS.any? { |klass| value.is_a?(klass) } }
+    # `+` walks its two operands and copies them; nothing is compared, nothing
+    # is dispatched.
+    ARRAY_CONCAT = ->(_receiver, arguments) { arguments.size == 1 && arguments.first.is_a?(::Array) }
+    # `to_set` and `Set#include?` both answer through `hash`/`eql?`, so both
+    # confine their elements to the classes those can be watched on.
+    SET_BUILD = ->(receiver, arguments) { arguments.empty? && receiver.all?(&COMPARABLE) }
+    SET_INCLUDE = lambda do |receiver, arguments|
+      arguments.size == 1 && COMPARABLE[arguments.first] && receiver.all?(&COMPARABLE)
+    end
+    FREEZE = ->(_receiver, arguments) { arguments.empty? }
     ARRAY_INCLUDE = lambda do |receiver, arguments|
       arguments.size == 1 && COMPARABLE[arguments.first] && receiver.all?(&COMPARABLE)
     end
@@ -235,6 +268,25 @@ module Steep
       ),
       "::Array#intersect?" => Entry.new(
         method: Array.instance_method(:intersect?), arity: 1, preflight: ARRAY_INTERSECT,
+        depends_on: EQUALITY_METHODS + HASH_METHODS
+      ),
+      "::Array#+" => Entry.new(method: Array.instance_method(:+), arity: 1, preflight: ARRAY_CONCAT),
+      # `freeze` answers the receiver, which is what makes it worth an entry: a
+      # collection constant is written `[…].freeze`, and without this the fold
+      # stops one call short of the value it just built.
+      "::Array#freeze" => Entry.new(method: Array.instance_method(:freeze), arity: 0, preflight: FREEZE),
+      # `Enumerable`'s, not `Array`'s — the table is keyed by what the call
+      # RESOLVED to, and `to_set` is declared where every collection gets it.
+      "::Enumerable#to_set" => Entry.new(
+        method: Enumerable.instance_method(:to_set), arity: 0, preflight: SET_BUILD,
+        depends_on: HASH_METHODS
+      ),
+      # `Kernel`'s, because that is where a `Set` resolves its `freeze` — and
+      # from there it answers for a literal as readily as for a collection,
+      # which is right: `freeze` hands back exactly what it was given.
+      "::Kernel#freeze" => Entry.new(method: ::Kernel.instance_method(:freeze), arity: 0, preflight: FREEZE),
+      "::Set#include?" => Entry.new(
+        method: ::Set.instance_method(:include?), arity: 1, preflight: SET_INCLUDE,
         depends_on: EQUALITY_METHODS + HASH_METHODS
       )
     }.freeze

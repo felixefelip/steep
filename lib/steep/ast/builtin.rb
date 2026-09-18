@@ -54,6 +54,9 @@ module Steep
       Array = Type.new("::Array", arity: 1)
       Range = Type.new("::Range", arity: 1)
       Hash = Type.new("::Hash", arity: 2)
+      # `::Set`, which `AST::Types::FiniteSet` widens to wherever exactness has
+      # to be written down.
+      Set = Type.new("::Set", arity: 1)
       Module = Type.new("::Module")
       Class = Type.new("::Class")
       Integer = Type.new("::Integer")

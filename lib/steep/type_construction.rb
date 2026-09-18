@@ -5348,6 +5348,21 @@ module Steep
         return elements.all? ? AST::Types::Tuple.new(types: elements) : built_here_only(inferred_type)
       end
 
+      # A collection the FOLD built at this very call. It is what this file's own
+      # expression evaluated to, not a type something else was annotated with —
+      # which is the difference `built_here_only` is about, and the node type is
+      # what tells the two apart.
+      return inferred_type if node.type == :send && collection_value?(inferred_type)
+
+      # Parentheses are a node of their own, and what is inside them is the
+      # value — a collection as much as a literal. The `:begin` arm further down
+      # passes only a `Literal` through, which is what `(KEYWORDS + EXTRA)` as
+      # the receiver of `.to_set` needed and did not get.
+      if node.type == :begin && node.children.one?
+        nested = literal_operand_type(node.children[0], inferred_type)
+        return nested if collection_value?(nested)
+      end
+
       # A constant whose value is written out ONCE in this file and only read
       # afterwards. The array is not built at this call site, but it is built in
       # this file and nothing here can have changed it since — the same claim
@@ -5367,15 +5382,18 @@ module Steep
         # through and the name has to be compared outright.
         resolved = initializer && typing.source_index.reference(constant_node: node)
 
-        # Read off the NODE, not off the initializer's type: a constant is
-        # written at the top of a body and read inside the methods below it, and
-        # the checker does not reach the two in that order.
         recovered =
           if resolved && resolved.to_s == written_as
-            literal_operand_type(initializer, AST::Builtin.any_type)
+            # A chain — `(KEYWORDS + EXTRA).to_set.freeze` — is a value the FOLD
+            # built, and the constant is typed in the class body above every
+            # method that reads it, so its type IS the answer. The node is the
+            # fallback, and it is what a plain `%w(…)` needs, since an array
+            # literal types as `Array[Elem]` however literal its elements.
+            built = typed_as(initializer)
+            collection_value?(built) ? built : literal_operand_type(initializer, AST::Builtin.any_type)
           end
 
-        if recovered.is_a?(AST::Types::Tuple) &&
+        if collection_value?(recovered) &&
            check_relation(sub_type: recovered, super_type: inferred_type).success?
           return recovered
         end
@@ -5418,6 +5436,20 @@ module Steep
     # So a tuple is BUILT above, out of the array written at this call site, and
     # never passed through from the type. `any` is what an operand this cannot
     # read exactly looks like, and the fold declines it.
+    # The type recorded for `node`, through the parent chain a method body's
+    # typing hangs off: `has_type?` asks only the child, and a constant is typed
+    # in the CLASS body, above every method that reads it.
+    def typed_as(node)
+      typing.type_of(node: node)
+    rescue Typing::UnknownNodeError
+      nil
+    end
+
+    # A value the fold can take as a collection operand.
+    def collection_value?(type)
+      type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::FiniteSet)
+    end
+
     def built_here_only(type)
       type.is_a?(AST::Types::Tuple) ? AST::Types::Any.new : type
     end

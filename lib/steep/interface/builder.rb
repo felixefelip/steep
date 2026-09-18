@@ -127,7 +127,8 @@ module Steep
       def config_free_shape?(type)
         case type
         when AST::Types::Name::Instance, AST::Types::Name::Singleton, AST::Types::Literal, AST::Types::Nil,
-             AST::Types::Boolean, AST::Types::Logic::Base, AST::Types::Proc, AST::Types::Tuple, AST::Types::Record
+             AST::Types::Boolean, AST::Types::Logic::Base, AST::Types::Proc, AST::Types::Tuple, AST::Types::Record,
+             AST::Types::FiniteSet
           true
         when AST::Types::Union, AST::Types::Intersection
           type.types.all? {|ty| config_free_shape?(ty) }
@@ -214,6 +215,14 @@ module Steep
               class_subst(array).update(self_type: type).merge(app_subst(array))
             )
           end
+        when AST::Types::FiniteSet
+          # Every method a `::Set` of these members has, and no specialised
+          # entry of its own: what a finite set answers differently is
+          # `include?`, and that is the fold's question rather than the shape's.
+          set = AST::Builtin::Set.instance_type(type.element_type)
+          object_shape(set.name).subst(
+            class_subst(set).update(self_type: type).merge(app_subst(set))
+          )
         when AST::Types::Record
           record_shape(type) do |hash|
             object_shape(hash.name).subst(
