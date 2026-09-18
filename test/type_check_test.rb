@@ -1046,6 +1046,107 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # Reflection answered out of the declaration the checker already has. The
+  # chain is `ActiveSupport::Delegation`'s, spelled exactly as it writes it —
+  # `owner.singleton_class.public_instance_method(method).parameters`.
+  def test_a_method_object_knows_which_method_it_is
+    run_type_check_test(
+      signatures: {
+        "reflected.rbs" => <<~RBS
+          class Reflected
+            def self.human_name: (String index) -> String
+            def self.overloaded: (String) -> String
+                               | (Integer) -> String
+
+            def email: (String address, ?Integer port, *String extra, key: bool, ?flag: bool) -> void
+            def unnamed: (String, ?Integer) -> void
+            private def secret: () -> String
+
+            def meta: () -> Class
+            def unbound: () -> UnboundMethod
+            def bound: () -> Method
+            def bound_instance: () -> Method
+            def instance_side: () -> UnboundMethod
+            def params: () -> Method::param_types
+            def instance_params: () -> Method::param_types
+            def unnamed_params: () -> Method::param_types
+
+            def no_such_method: () -> UnboundMethod
+            def private_method_publicly: () -> UnboundMethod
+            def private_method: () -> UnboundMethod
+            def name_from_a_variable: (Symbol name) -> UnboundMethod
+            def overloaded_params: () -> Method::param_types
+          end
+        RBS
+      },
+      code: {
+        "reflected.rb" => <<~'RUBY'
+          class Reflected
+            def self.human_name(index) = index
+            def self.overloaded(value) = value.to_s
+
+            def email(address, port = 1, *extra, key:, flag: false); end
+            def unnamed(one, two = 1); end
+            private def secret = "s"
+
+            # The step the whole chain used to break at.
+            def meta = Reflected.singleton_class
+
+            def unbound = Reflected.singleton_class.public_instance_method(:human_name)
+            def bound = Reflected.method(:human_name)
+            def bound_instance
+              other = Reflected.new
+              other.method(:email)
+            end
+            def instance_side = Reflected.instance_method(:email)
+
+            # What the macro actually asks for.
+            def params = Reflected.singleton_class.public_instance_method(:human_name).parameters
+            def instance_params = Reflected.instance_method(:email).parameters
+            def unnamed_params = Reflected.instance_method(:unnamed).parameters
+
+            # Everything below declines, and each for its own reason.
+            def no_such_method = Reflected.singleton_class.public_instance_method(:nope)
+            def private_method_publicly = Reflected.public_instance_method(:secret)
+            def private_method = Reflected.instance_method(:secret)
+            def name_from_a_variable(name) = Reflected.singleton_class.public_instance_method(name)
+            def overloaded_params = Reflected.singleton_class.public_instance_method(:overloaded).parameters
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("reflected.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "singleton_class(::Reflected)", actual.fetch("meta")
+      assert_equal "unbound_method(::Reflected.human_name)", actual.fetch("unbound")
+      assert_equal "method(::Reflected.human_name)", actual.fetch("bound")
+      assert_equal "method(::Reflected#email)", actual.fetch("bound_instance")
+      assert_equal "unbound_method(::Reflected#email)", actual.fetch("instance_side")
+
+      assert_equal "[[:req, :index]]", actual.fetch("params")
+      assert_equal "[[:req, :address], [:opt, :port], [:rest, :extra], [:keyreq, :key], [:key, :flag]]",
+                   actual.fetch("instance_params")
+      # RBS declares these without a name, so one is invented — the one place
+      # this departs from reading what is written.
+      assert_equal "[[:req, :arg1], [:opt, :arg2]]", actual.fetch("unnamed_params")
+
+      # A name nothing declares is a `NameError` at runtime, not a type.
+      assert_equal "::UnboundMethod", actual.fetch("no_such_method")
+      assert_equal "::UnboundMethod", actual.fetch("private_method_publicly")
+      # `instance_method` asks regardless of visibility, so this one answers.
+      assert_equal "unbound_method(::Reflected#secret)", actual.fetch("private_method")
+      assert_equal "::UnboundMethod", actual.fetch("name_from_a_variable")
+      # Several method types, and nothing says which one the implementation is.
+      assert_equal "::Method::param_types", actual.fetch("overloaded_params")
+    end
+  end
+
   # A constant is the one name Ruby means to be written once, so the value at a
   # read is the value at the assignment — provided this file is where the name
   # is decided and nothing here changes the object behind it.

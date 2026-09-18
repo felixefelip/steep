@@ -9,7 +9,18 @@ module Steep
       # on: a reopen is only watched for a class on this list, so a key whose
       # owner is missing is a key nothing can block — including when a parse
       # failure taints everything.
-      CORE_CLASSES = Set["String", "Integer", "Symbol", "Array", "Enumerable", "Set", "Kernel"]
+      # `Object`, `BasicObject`, `Module` and `Class` are here for the
+      # reflection table: its keys are declared on `Kernel` and `Module`, and a
+      # reopen of any class BETWEEN one of those and the receiver answers the
+      # call instead — which is what those entries name in `shadowed_by`.
+      CORE_CLASSES = Set[
+        "String", "Integer", "Symbol", "Array", "Enumerable", "Set", "Kernel",
+        "BasicObject", "Object", "Module", "Class", "Method", "UnboundMethod"
+      ]
+
+      # Both folds are keyed the same way and blocked the same way, so one
+      # registry watches both tables.
+      TABLES = [LiteralIntrinsics, ReflectionIntrinsics].freeze
       # Only `prepend` shadows an entry by LOOKUP. A module inserted by `include`
       # sits below the class in the chain, and every method in the table is one
       # the core class defines itself, so the class's own always wins:
@@ -145,7 +156,7 @@ module Steep
         return unless CORE_CLASSES.include?(owner)
 
         key = "::#{owner}##{method_name}"
-        @blocked << key if LiteralIntrinsics.watched_keys.include?(key)
+        @blocked << key if TABLES.any? { |table| table.watched_keys.include?(key) }
       end
 
       def note_hook(owner, method_name)
@@ -214,7 +225,7 @@ module Steep
       def taint(owner)
         return unless CORE_CLASSES.include?(owner)
 
-        @blocked.merge(LiteralIntrinsics.method_keys_for(owner))
+        TABLES.each { |table| @blocked.merge(table.method_keys_for(owner)) }
       end
 
       def taint_all

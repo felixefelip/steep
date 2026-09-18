@@ -44,7 +44,7 @@ module Steep
         return nil unless operand?(receiver_type)
         return nil unless argument_types.all? { |type| operand?(type) }
 
-        key = resolved_method_key(call) or return nil
+        key = MethodIdentity.key(call) or return nil
         entry = ENTRIES[key] or return nil
         return nil if override_registry.blocked?(key)
         return nil if entry.depends_on&.any? { |dependency| override_registry.blocked?(dependency) }
@@ -93,13 +93,6 @@ module Steep
       end
 
       private
-
-      def resolved_method_key(call)
-        names = call.method_decls.map { |decl| decl.method_name.to_s }.uniq
-        return nil unless names.size == 1
-
-        names.first.start_with?("::") ? names.first : "::#{names.first}"
-      end
 
       # A literal, or a tuple of things that are themselves operands. Nested
       # because a tuple of tuples is what a method's parameter list looks like,
