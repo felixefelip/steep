@@ -5,7 +5,11 @@ module Steep
     # the owner and name, but a Ruby reopen has the same owner and name; this
     # source index supplies the missing implementation provenance.
     class LiteralMethodRegistry
-      CORE_CLASSES = Set["String", "Integer", "Symbol", "Array"]
+      # Every owner the table names, its own entries and the methods they lean
+      # on: a reopen is only watched for a class on this list, so a key whose
+      # owner is missing is a key nothing can block — including when a parse
+      # failure taints everything.
+      CORE_CLASSES = Set["String", "Integer", "Symbol", "Array", "Enumerable", "Set", "Kernel"]
       # Only `prepend` shadows an entry by LOOKUP. A module inserted by `include`
       # sits below the class in the chain, and every method in the table is one
       # the core class defines itself, so the class's own always wins:

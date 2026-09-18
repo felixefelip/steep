@@ -974,6 +974,78 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # A set written out in the source, and the one question a set is asked. The
+  # chain is `ActiveSupport::Delegation`'s, spelled exactly as it writes it.
+  def test_a_set_written_out_answers_what_is_in_it
+    run_type_check_test(
+      signatures: {
+        "sets.rbs" => <<~RBS
+          class WrittenSets
+            KEYWORDS: Array[String]
+            EXTRA: Array[String]
+            RESERVED: Set[String]
+            HANDED_OVER: Set[String]
+
+            def spelled_out: () -> Set[String]
+            def concatenated: () -> Array[String]
+            def frozen: () -> Set[String]
+            def plain_name: (:user) -> bool
+            def reserved_name: (:class) -> bool
+            def handed_over: () -> bool
+            def sink: (Set[String]) -> void
+            def leak: () -> void
+          end
+        RBS
+      },
+      code: {
+        "sets.rb" => <<~'RUBY'
+          class WrittenSets
+            KEYWORDS = ["class", "def", "end"]
+            EXTRA = ["_", "arg"]
+            RESERVED = (KEYWORDS + EXTRA).to_set.freeze
+            HANDED_OVER = ["class"].to_set
+
+            def spelled_out = ["a", "b"].to_set
+            def concatenated = KEYWORDS + EXTRA
+            def frozen = ["a"].to_set.freeze
+
+            # The one line the whole chain exists for.
+            def plain_name(to) = RESERVED.include?(to.to_s)
+            def reserved_name(to) = RESERVED.include?(to.to_s)
+
+            # Handed to something that can change it, so the members are no
+            # longer what the file wrote.
+            def handed_over = HANDED_OVER.include?("class")
+            def leak
+              sink(HANDED_OVER)
+            end
+
+            def sink(names)
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("sets.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal %q(Set{"a", "b"}), actual.fetch("spelled_out")
+      assert_equal %q(["class", "def", "end", "_", "arg"]), actual.fetch("concatenated")
+      # `freeze` hands back what it was given, members and all.
+      assert_equal %q(Set{"a"}), actual.fetch("frozen")
+
+      assert_equal "false", actual.fetch("plain_name")
+      assert_equal "true", actual.fetch("reserved_name")
+
+      assert_equal "bool", actual.fetch("handed_over")
+    end
+  end
+
   # A constant is the one name Ruby means to be written once, so the value at a
   # read is the value at the assignment — provided this file is where the name
   # is decided and nothing here changes the object behind it.

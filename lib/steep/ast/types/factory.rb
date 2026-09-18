@@ -208,6 +208,11 @@ module Steep
               types: type.types.map {|ty| type_1(ty) },
               location: nil
             )
+          when FiniteSet
+            # RBS has no set literal, so this is where exactness stops: what a
+            # signature can say is `Set[Elem]`, and the members become the
+            # element type on the way out.
+            type_1(AST::Builtin::Set.instance_type(type.element_type))
           when Record
             all_fields = {} #: Hash[Symbol, [RBS::Types::t, bool]]
             type.elements.each do |key, value|
@@ -536,6 +541,10 @@ module Steep
             type.map_type {|type| normalize_type(type) }
           when AST::Types::Tuple
             AST::Types::Tuple.new(
+              types: type.types.map {|type| normalize_type(type) }
+            )
+          when AST::Types::FiniteSet
+            AST::Types::FiniteSet.new(
               types: type.types.map {|type| normalize_type(type) }
             )
           when AST::Types::Proc

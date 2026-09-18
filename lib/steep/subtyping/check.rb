@@ -699,6 +699,21 @@ module Steep
             Failure(relation, Result::Failure::UnknownPairError.new(relation: relation))
           end
 
+        when relation.sub_type.is_a?(AST::Types::FiniteSet)
+          # Exactly the set it names satisfies whatever `::Set` of its members
+          # would. Nothing is claimed in the other direction, and nothing
+          # between two DIFFERENT finite sets: `Set{"a"}` and `Set{"a", "b"}`
+          # are two values, not a value and a wider one, and `==` already
+          # answers when they are the same.
+          Expand(relation) do
+            check_type(
+              Relation.new(
+                sub_type: AST::Builtin::Set.instance_type(relation.sub_type.element_type),
+                super_type: relation.super_type
+              )
+            )
+          end
+
         when relation.sub_type.is_a?(AST::Types::Tuple) && (super_type = AST::Builtin::Array.instance_type?(relation.super_type))
           Expand(relation) do
             tuple_element_type =

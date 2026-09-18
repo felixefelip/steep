@@ -557,7 +557,12 @@ module Steep
         end
 
         if !closure && node.type == :send && CollectionReaders.read?(node) && node.children[0]&.type == :lvar
-          node.children.drop(2).each { |argument| strike(argument, found, closure: closure) }
+          node.children.drop(2).each do |argument|
+            # The other side of a `+` is read, not handed anywhere.
+            next if CollectionReaders.binary?(node) && argument.type == :lvar
+
+            strike(argument, found, closure: closure)
+          end
           return
         end
 

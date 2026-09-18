@@ -12,8 +12,11 @@ module Steep
   # vouch for costs an imprecise answer rather than a wrong one.
   module CollectionReaders
     # Answer with something NEW — a count, a boolean, a string built out of the
-    # elements. Nothing the caller is left holding is part of the collection.
-    WHOLE = %i[join size length empty? count include? intersect?].freeze
+    # elements, another collection. Nothing the caller is left holding is part
+    # of the receiver, so a constant is still the value it was written with
+    # after one of these: `(KEYWORDS + EXTRA).to_set` reads both and changes
+    # neither.
+    WHOLE = %i[join size length empty? count include? intersect? + - & | to_set].freeze
 
     # Answer with an ELEMENT, which the caller may then change in place:
     #
@@ -26,6 +29,12 @@ module Steep
     ELEMENT = %i[first last fetch []].freeze
 
     METHODS = (WHOLE + ELEMENT).freeze
+
+    # Calls whose ARGUMENT is another collection, read exactly the way the
+    # receiver is: `KEYWORDS + EXTRA` reads both and changes neither, where
+    # `parts.include?(x)` takes a value that has nothing to do with the
+    # collection it is being looked for in.
+    BINARY = %i[+ - & | intersect?].freeze
 
     class << self
       # Whether this send only READS its receiver. A block takes it out of the
@@ -40,6 +49,12 @@ module Steep
 
       def element?(send_node)
         ELEMENT.include?(send_node.children[1])
+      end
+
+      # Whether this send reads its argument as a collection rather than using
+      # it as a value.
+      def binary?(send_node)
+        BINARY.include?(send_node.children[1])
       end
     end
   end
