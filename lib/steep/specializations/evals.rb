@@ -324,13 +324,17 @@ module Steep
         #   Target.class_eval "…"          # singleton(::Outer::Target)
         #   target = Target; target.…      # the local keeps it
         #   self.class_eval "…"            # `self` — a type variable, not a name
-        #   Target.singleton_class.…       # ::Class — names nothing
+        #   Target.singleton_class.…       # singleton_class(::Target) — a class,
+        #                                  # on the side an entry has no field for
         #
         # nil for the first, which is the answer the consumer already has: an
         # eval on the caller's own self lands on the class whose body holds the
         # macro call, and only the call site knows which that is. nil for the
-        # last two as well, and those decline — a type that does not name one
-        # class cannot say where anything goes (felixefelip/steep#175).
+        # last two as well, and those decline: `self` names no class, and since
+        # S2 of #171 a singleton class names one — but on the SINGLETON side,
+        # and an entry records a class rather than a side, so a def written
+        # there would be placed as an instance method
+        # (felixefelip/steep#175).
         def eval_target(typing, node)
           receiver = node.children[0]
           return nil if receiver.nil? || receiver.type == :self
