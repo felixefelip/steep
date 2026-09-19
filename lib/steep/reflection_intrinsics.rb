@@ -45,6 +45,13 @@ module Steep
     # why the entry holds the method object rather than just its key.
     Entry = _ = Struct.new(:method, :handler, keyword_init: true)
 
+    # How many subclasses a reflected class may have before `parameters` stops
+    # asking them and declines. A bound on the work rather than on the answer:
+    # every one of them is read, so a class at the root of a large hierarchy —
+    # `Object`, in the limit — is a question this will not spend a whole
+    # program's definitions on.
+    MAX_DESCENDANTS = 128
+
     class << self
       def fold(call:, receiver_type:, argument_types:, factory:, override_registry:)
         key = MethodIdentity.key(call) or return nil
@@ -202,17 +209,39 @@ module Steep
       # Declined for a method with more than one overload: `parameters` answers
       # for the one implementation Ruby has, and a signature written as several
       # method types does not say which of them describes it.
+      #
+      # And declined unless every SUBCLASS answers the same list. A nominal type
+      # names a class, and `singleton(::Sub)` is a `singleton(::Base)` — so the
+      # class object this reflected on may be a subclass's, and an override with
+      # a parameter list of its own is exactly the difference being asked about.
+      # Reading the subclasses is what turns the declared class into the one the
+      # value can be, and the closed world is what makes that readable.
       def parameters(receiver, argument_types, factory)
         return nil unless argument_types.empty?
         return nil unless receiver.is_a?(AST::Types::MethodObject)
 
-        method = method_definition(receiver, factory, public_only: false) or return nil
+        entries = parameter_entries_of(receiver, factory) or return nil
+
+        descendants = factory.descendant_index.descendants(receiver.type_name, limit: MAX_DESCENDANTS)
+        return nil unless descendants
+        return nil unless descendants.all? do |name|
+          parameter_entries_of(receiver.with(type_name: name), factory) == entries
+        end
+
+        AST::Types::Tuple.new(types: entries.map { |entry| entry_type(entry) })
+      end
+
+      # What one class's declaration of the method says its parameters are, or
+      # nil where that is not one answer: no such method, more than one method
+      # type, or a signature that states no parameter list at all.
+      def parameter_entries_of(type, factory)
+        method = method_definition(type, factory, public_only: false) or return nil
         return nil unless method.method_types.size == 1
 
         function = method.method_types.fetch(0).type
         return nil unless function.is_a?(RBS::Types::Function)
 
-        AST::Types::Tuple.new(types: parameter_entries(function).map { |entry| entry_type(entry) })
+        parameter_entries(function)
       end
 
       def entry_type(entry)

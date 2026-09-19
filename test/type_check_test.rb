@@ -1149,6 +1149,81 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # `singleton(::Sub)` is a `singleton(::Base)`, so the class object a
+  # reflection ran on may be a subclass's — and what a method's parameter list
+  # IS does not survive an override the way its signature does. Every subclass
+  # is read, and the answer stands only where they all agree.
+  def test_a_reflection_reads_the_subclasses_before_it_answers
+    run_type_check_test(
+      signatures: {
+        "inherited.rbs" => <<~RBS
+          class Widened
+            def self.human_name: (String index) -> String
+          end
+          class WidenedSub < Widened
+            def self.human_name: (String index, ?Integer extra) -> String
+          end
+
+          class Restated
+            def self.human_name: (String index) -> String
+          end
+          class RestatedSub < Restated
+            def self.human_name: (String index) -> String
+          end
+
+          class Reflector
+            def widened: () -> Method::param_types
+            def restated: () -> Method::param_types
+            def leaf: () -> Method::param_types
+          end
+        RBS
+      },
+      code: {
+        "inherited.rb" => <<~'RUBY'
+          class Widened
+            def self.human_name(index) = index
+          end
+          class WidenedSub < Widened
+            def self.human_name(index, extra = 1) = index
+          end
+
+          class Restated
+            def self.human_name(index) = index
+          end
+          class RestatedSub < Restated
+            def self.human_name(index) = index
+          end
+
+          class Reflector
+            # `WidenedSub.human_name` takes a parameter its superclass does not,
+            # and `Widened` is the type a variable holding it would have.
+            def widened = Widened.singleton_class.public_instance_method(:human_name).parameters
+
+            # Redeclared, and the same: a reopen the generated signatures write
+            # is not an override, and answering it as one would decline
+            # everywhere.
+            def restated = Restated.singleton_class.public_instance_method(:human_name).parameters
+
+            # Nothing inherits from the subclass itself.
+            def leaf = RestatedSub.singleton_class.public_instance_method(:human_name).parameters
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("inherited.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::Method::param_types", actual.fetch("widened")
+      assert_equal "[[:req, :index]]", actual.fetch("restated")
+      assert_equal "[[:req, :index]]", actual.fetch("leaf")
+    end
+  end
+
   # The class that shadows a reflection is the RECEIVER's, and a redefinition
   # the project does not DECLARE is one dispatch never sees: `Shadowed.method`
   # still resolves to `::Kernel#method`, and Ruby runs the one written here.

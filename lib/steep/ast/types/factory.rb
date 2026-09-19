@@ -24,6 +24,13 @@ module Steep
           @type_name_resolver ||= RBS::Resolver::TypeNameResolver.build(definition_builder.env)
         end
 
+        # Which classes inherit from which — a question about the whole program
+        # rather than about one type, and one that has to be asked wherever a
+        # nominal type is read as naming the class a value actually is.
+        def descendant_index
+          @descendant_index ||= DescendantIndex.new(definition_builder.env)
+        end
+
         def type_opt(type)
           if type
             type(type)
