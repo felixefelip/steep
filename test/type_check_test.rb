@@ -1094,6 +1094,8 @@ class TypeCheckTest < Minitest::Test
 
             def unbound = Reflected.singleton_class.public_instance_method(:human_name)
             def bound = Reflected.method(:human_name)
+            # An instance receiver does not fix the method: a subclass may
+            # override `email` with a parameter list of its own.
             def bound_instance
               other = Reflected.new
               other.method(:email)
@@ -1126,7 +1128,7 @@ class TypeCheckTest < Minitest::Test
       assert_equal "singleton_class(::Reflected)", actual.fetch("meta")
       assert_equal "unbound_method(::Reflected.human_name)", actual.fetch("unbound")
       assert_equal "method(::Reflected.human_name)", actual.fetch("bound")
-      assert_equal "method(::Reflected#email)", actual.fetch("bound_instance")
+      assert_equal "::Method", actual.fetch("bound_instance")
       assert_equal "unbound_method(::Reflected#email)", actual.fetch("instance_side")
 
       assert_equal "[[:req, :index]]", actual.fetch("params")
@@ -1144,6 +1146,59 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::UnboundMethod", actual.fetch("name_from_a_variable")
       # Several method types, and nothing says which one the implementation is.
       assert_equal "::Method::param_types", actual.fetch("overloaded_params")
+    end
+  end
+
+  # The class that shadows a reflection is the RECEIVER's, and a redefinition
+  # the project does not DECLARE is one dispatch never sees: `Shadowed.method`
+  # still resolves to `::Kernel#method`, and Ruby runs the one written here.
+  def test_a_reflection_declines_where_the_receiver_redefines_it
+    run_type_check_test(
+      signatures: {
+        "shadowed.rbs" => <<~RBS
+          class Shadowed
+            def self.human_name: (String index) -> String
+            def shadowed_reflection: () -> Method
+          end
+
+          class Unshadowed
+            def self.human_name: (String index) -> String
+            def plain_reflection: () -> Method
+          end
+        RBS
+      },
+      code: {
+        "shadowed.rb" => <<~'RUBY'
+          class Shadowed
+            def self.human_name(index) = index
+            # Written in Ruby and left out of the signature, which is the only
+            # way a redefinition reaches this: one that IS declared resolves to
+            # its own key, and no table holds that.
+            def self.method(name) = name
+
+            def shadowed_reflection = Shadowed.method(:human_name)
+          end
+
+          class Unshadowed
+            def self.human_name(index) = index
+
+            # The same call one class over, where nothing is shadowed. The check
+            # is the receiver's chain and not the name.
+            def plain_reflection = Unshadowed.method(:human_name)
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("shadowed.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::Method", actual.fetch("shadowed_reflection")
+      assert_equal "method(::Unshadowed.human_name)", actual.fetch("plain_reflection")
     end
   end
 

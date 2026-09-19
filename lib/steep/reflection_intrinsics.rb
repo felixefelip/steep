@@ -23,42 +23,34 @@ module Steep
   # "every operand is a literal" is that the receiver must name one module
   # exactly, and the method it names must exist.
   #
-  # Where the override registry stops is worth stating, because a reflection's
-  # receiver can be any class rather than a core one. A project that redefines
-  # `method` or `instance_method` and DECLARES it declines here by itself: the
-  # call then resolves to that method's own key, which this table does not hold.
-  # One written in Ruby and left undeclared is watched on the core classes
-  # below, and outside them it is where it already was before this — Steep
-  # dispatches against the signature either way, and the answer it gives is the
-  # declaration's.
+  # A reflection's receiver is any class the project writes, not one of a fixed
+  # core list, so the override check is receiver-aware: the fold walks the
+  # LOOKUP CHAIN of the receiver, up to the class the entry is declared on, and
+  # declines if the project redefines that name anywhere before it. That is what
+  # `class Foo; def self.method(name); end` does to `Foo.method(:bar)` — Ruby
+  # runs Foo's while dispatch still resolves to Kernel's, because a redefinition
+  # the project DECLARES resolves to its own key and declines here by itself.
+  #
+  # Where that stops: a string eval whose receiver names no class, and a module
+  # mixed in without the signatures recording it. Neither the ancestry nor the
+  # registry can see those — the same boundary `LiteralMethodRegistry` already
+  # draws.
   module ReflectionIntrinsics
     # `method` is never CALLED. It is held for the same provenance check the
     # literal table makes — a key whose implementation is written in Ruby is one
     # this process cannot claim to model — and because asking for it is how the
     # table states that the method it is keyed by is the one Ruby ships.
     #
-    # `shadowed_by` names the keys a REOPEN could answer this call with. A
-    # method declared on `Kernel` is reached through every class between it and
-    # the receiver, so `class Object; def singleton_class; …; end` runs instead
-    # of the core one while dispatch still resolves to Kernel's. The entry's own
-    # key says nothing about that, so it lists them and they are checked with
-    # it — the same shape `LiteralIntrinsics`' `depends_on` has, for the other
-    # way a key can stop describing what runs.
-    Entry = _ = Struct.new(:method, :handler, :shadowed_by, keyword_init: true)
-
-    # Every class a module or class object reaches BEFORE `Kernel`. Not
-    # `BasicObject`, which the lookup reaches after it and so cannot shadow it.
-    KERNEL_SHADOWS = ["::Object", "::Module", "::Class"].freeze
-
-    # `Class < Module`, so a class object reaches a reopen of `Class` first.
-    MODULE_SHADOWS = ["::Class"].freeze
+    # `method` also carries the NAME the lookup chain is walked for, which is
+    # why the entry holds the method object rather than just its key.
+    Entry = _ = Struct.new(:method, :handler, keyword_init: true)
 
     class << self
       def fold(call:, receiver_type:, argument_types:, factory:, override_registry:)
         key = MethodIdentity.key(call) or return nil
         entry = ENTRIES[key] or return nil
         return nil if override_registry.blocked?(key)
-        return nil if entry.shadowed_by&.any? { |shadow| override_registry.blocked?(shadow) }
+        return nil if shadowed?(receiver_type, key, entry, factory, override_registry)
         source_location = entry.method.source_location
         return nil if source_location && !source_location.first.start_with?("<internal:")
 
@@ -76,9 +68,7 @@ module Steep
       # Every method key whose redefinition matters, for the override registry
       # to watch alongside the literal table's.
       def watched_keys
-        @watched_keys ||= Set.new(
-          ENTRIES.keys + ENTRIES.each_value.flat_map { |entry| entry.shadowed_by || [] }
-        )
+        @watched_keys ||= Set.new(ENTRIES.keys)
       end
 
       def method_keys_for(class_name)
@@ -86,7 +76,54 @@ module Steep
         watched_keys.select { |key| key.start_with?(prefix) }
       end
 
+      # The names a reflection is dispatched under. The registry records a
+      # definition of one of these whoever writes it, because the class that
+      # shadows a reflection is the receiver's, and the receiver is any class the
+      # project has.
+      def dispatched_names
+        @dispatched_names ||= Set.new(ENTRIES.each_value.map { |entry| entry.method.name })
+      end
+
       private
+
+      # Whether the project redefines this call's method somewhere Ruby reaches
+      # BEFORE the class the entry is declared on. The chain is the receiver's
+      # own, in lookup order, so `extend`ed modules and superclasses count and
+      # classes past the declaring one do not.
+      #
+      # A chain this cannot compute declines the fold: a receiver whose ancestry
+      # is unknown is one whose implementation is unknown.
+      def shadowed?(receiver_type, key, entry, factory, override_registry)
+        return false if override_registry.empty?
+
+        chain = dispatch_chain(receiver_type, entry.method.name, factory) or return true
+        index = chain.index(key) or return true
+
+        chain.take(index).any? { |candidate| override_registry.blocked?(candidate) }
+      end
+
+      # `method_name` keyed against every ancestor of the receiver, in the order
+      # Ruby searches them. A `Singleton` ancestor is a class's own `def self.x`
+      # and an `Instance` one is a method written in a class or a module body —
+      # which is how a module `extend`ed into the receiver appears here.
+      def dispatch_chain(receiver_type, method_name, factory)
+        builder = factory.definition_builder.ancestor_builder
+        ancestors =
+          case receiver_type
+          when AST::Types::Name::Singleton
+            builder.singleton_ancestors(receiver_type.name)
+          when AST::Types::MetaClass, AST::Types::MethodObject
+            builder.instance_ancestors(receiver_type.back_type.name)
+          end
+        return nil unless ancestors
+
+        ancestors.ancestors.map do |ancestor|
+          separator = ancestor.is_a?(RBS::Definition::Ancestor::Singleton) ? "." : "#"
+          "::#{ancestor.name.to_s.delete_prefix("::")}#{separator}#{method_name}"
+        end
+      rescue RBS::BaseError
+        nil
+      end
 
       # The method a reflection names, or nil when the declaration does not have
       # one: a module this cannot build, a name nothing declares (`NameError` at
@@ -141,21 +178,20 @@ module Steep
       end
 
       # `method` is the bound half, and its receiver is a VALUE rather than the
-      # module being reflected on: `Foo.method(:bar)` names a class method,
-      # `foo.method(:bar)` an instance one. A metaclass declines — the methods
-      # of a singleton class's own singleton class are a third object, which
-      # nothing asks for.
+      # module being reflected on: `Foo.method(:bar)` names a class method.
+      #
+      # Only a class object, deliberately. `foo.method(:bar)` names an instance
+      # method of whatever class `foo` turns out to be, and a nominal type does
+      # not fix that: a subclass of the declared one may override `bar` with a
+      # parameter list of its own, which is the one question a method object is
+      # asked. A metaclass declines too — the methods of a singleton class's own
+      # singleton class are a third object, which nothing asks for.
       def bound_method_object(receiver, argument_types, factory)
-        type_name, singleton =
-          case receiver
-          when AST::Types::Name::Singleton then [receiver.name, true]
-          when AST::Types::Name::Instance then [receiver.name, false]
-          end
-        return nil unless type_name
+        return nil unless receiver.is_a?(AST::Types::Name::Singleton)
 
         method_name = literal_method_name(argument_types) or return nil
         object = AST::Types::MethodObject.new(
-          type_name: type_name, method_name: method_name, singleton: singleton, unbound: false
+          type_name: receiver.name, method_name: method_name, singleton: true, unbound: false
         )
 
         object if method_definition(object, factory, public_only: false)
@@ -256,20 +292,16 @@ module Steep
       # `Kernel`'s, not `Object`'s — the table is keyed by what the call
       # RESOLVED to, and this is where the core declares it.
       "::Kernel#singleton_class" => Entry.new(
-        method: ::Kernel.instance_method(:singleton_class), handler: SINGLETON_CLASS,
-        shadowed_by: KERNEL_SHADOWS.map { |owner| "#{owner}#singleton_class" }
+        method: ::Kernel.instance_method(:singleton_class), handler: SINGLETON_CLASS
       ),
       "::Module#instance_method" => Entry.new(
-        method: ::Module.instance_method(:instance_method), handler: INSTANCE_METHOD,
-        shadowed_by: MODULE_SHADOWS.map { |owner| "#{owner}#instance_method" }
+        method: ::Module.instance_method(:instance_method), handler: INSTANCE_METHOD
       ),
       "::Module#public_instance_method" => Entry.new(
-        method: ::Module.instance_method(:public_instance_method), handler: PUBLIC_INSTANCE_METHOD,
-        shadowed_by: MODULE_SHADOWS.map { |owner| "#{owner}#public_instance_method" }
+        method: ::Module.instance_method(:public_instance_method), handler: PUBLIC_INSTANCE_METHOD
       ),
       "::Kernel#method" => Entry.new(
-        method: ::Kernel.instance_method(:method), handler: METHOD,
-        shadowed_by: KERNEL_SHADOWS.map { |owner| "#{owner}#method" }
+        method: ::Kernel.instance_method(:method), handler: METHOD
       ),
       "::Method#parameters" => Entry.new(
         method: ::Method.instance_method(:parameters), handler: PARAMETERS

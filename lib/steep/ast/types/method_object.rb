@@ -20,6 +20,8 @@ module Steep
       # A leaf, like `Literal`, answering everything else as the `::Method` or
       # `::UnboundMethod` it is one of.
       class MethodObject
+        include NotInRBS
+
         attr_reader :type_name
 
         attr_reader :method_name

@@ -208,14 +208,11 @@ module Steep
               types: type.types.map {|ty| type_1(ty) },
               location: nil
             )
-          when FiniteSet
-            # RBS has no set literal, so this is where exactness stops: what a
-            # signature can say is `Set[Elem]`, and the members become the
-            # element type on the way out.
-            type_1(AST::Builtin::Set.instance_type(type.element_type))
-          when MetaClass, MethodObject
-            # A reflection names a module and a method; RBS can say neither, so
-            # what leaves is the class the value is one of.
+          when NotInRBS
+            # Where exactness stops. A signature cannot say which values a set
+            # holds, which module a singleton class is of or which method a
+            # reflection names, so each of them leaves as the type it is
+            # written as.
             type_1(type.back_type)
           when Record
             all_fields = {} #: Hash[Symbol, [RBS::Types::t, bool]]

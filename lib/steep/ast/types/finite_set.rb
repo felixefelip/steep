@@ -18,6 +18,8 @@ module Steep
       # tuple: the members are normalised at construction, so two sets written
       # differently are the same type.
       class FiniteSet
+        include NotInRBS
+
         attr_reader :types
 
         def initialize(types:)
@@ -78,6 +80,10 @@ module Steep
         # a signature, into RBS, into any consumer that knows `Set` and not this.
         def element_type
           Union.build(types: types)
+        end
+
+        def back_type
+          AST::Builtin::Set.instance_type(element_type)
         end
       end
     end

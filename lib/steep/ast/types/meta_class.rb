@@ -17,6 +17,8 @@ module Steep
       # third object again, and nothing asks for it, so it declines rather than
       # being modelled.
       class MetaClass
+        include NotInRBS
+
         attr_reader :name
 
         def initialize(name:)

@@ -31,6 +31,19 @@ module Steep
         Store.empty
       end
 
+      # `type` written the way a signature can say it.
+      #
+      # An entry is recorded as `type.to_s` and read back through
+      # `RBS::Parser.parse_type`, so a type RBS cannot spell does not survive
+      # the sidecar — and does not fail loudly either: `method(::Foo#bar)`
+      # parses as the ALIAS `method`, and `Set{"a"}` as a bare `Set`. The
+      # boundary is here, where a type becomes the text of a record.
+      def rbs_writable(type)
+        return rbs_writable(type.back_type) if type.is_a?(AST::Types::NotInRBS)
+
+        type.map_type { |child| rbs_writable(child) }
+      end
+
       # `type` with every literal replaced by the class it instantiates. The
       # widening operator of the fixpoint: a value that keeps changing is a value
       # the program does not fix, and its class is what it does fix.

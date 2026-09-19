@@ -5,17 +5,20 @@ module Steep
     # the owner and name, but a Ruby reopen has the same owner and name; this
     # source index supplies the missing implementation provenance.
     class LiteralMethodRegistry
-      # Every owner the table names, its own entries and the methods they lean
+      # Every owner a table names, its own entries and the methods they lean
       # on: a reopen is only watched for a class on this list, so a key whose
       # owner is missing is a key nothing can block — including when a parse
       # failure taints everything.
-      # `Object`, `BasicObject`, `Module` and `Class` are here for the
-      # reflection table: its keys are declared on `Kernel` and `Module`, and a
-      # reopen of any class BETWEEN one of those and the receiver answers the
-      # call instead — which is what those entries name in `shadowed_by`.
+      #
+      # `Object`, `Module`, `Class`, `Method` and `UnboundMethod` are here for
+      # the reflection table, whose keys are declared on them: an opaque
+      # mutation of one of those has to block its entries the way one of `Array`
+      # blocks `join`. A reflection redefined anywhere ELSE is recorded too, by
+      # name rather than by owner — its receiver is any class the project has,
+      # which is not something a list can hold. See `block_method`.
       CORE_CLASSES = Set[
         "String", "Integer", "Symbol", "Array", "Enumerable", "Set", "Kernel",
-        "BasicObject", "Object", "Module", "Class", "Method", "UnboundMethod"
+        "Object", "Module", "Class", "Method", "UnboundMethod"
       ]
 
       # Both folds are keyed the same way and blocked the same way, so one
@@ -69,6 +72,9 @@ module Steep
       end
 
       def initialize
+        # Whether the body being walked is a `class << self`, where instance
+        # syntax writes singleton methods.
+        @singleton_side = false
         @blocked = Set[] #: Set[String]
         @mixins = [] #: Array[[String, String?]]
         @modules = Set[] #: Set[String]
@@ -152,11 +158,36 @@ module Steep
         string.start_with?("::") ? string : "::#{string}"
       end
 
-      def block_method(owner, method_name)
+      def block_method(owner, method_name, singleton: false)
+        return unless method_name
+
+        key = "::#{owner}#{singleton ? "." : "#"}#{method_name}"
+
+        # A reflection is shadowed by the RECEIVER's class, and a receiver is
+        # any class the project writes — so these are recorded whoever the owner
+        # is, and on the side they were written on. The literal table's keys
+        # stay confined to the core list below: its receivers are literals, and
+        # nothing else can hold one.
+        if ReflectionIntrinsics.dispatched_names.include?(method_name.to_sym)
+          @blocked << key unless owner.empty?
+          return
+        end
+
+        return if singleton
         return unless CORE_CLASSES.include?(owner)
 
-        key = "::#{owner}##{method_name}"
         @blocked << key if TABLES.any? { |table| table.watched_keys.include?(key) }
+      end
+
+      # Every key a reflection could be dispatched under for one owner, both
+      # sides. What an opaque mutation of that class blocks: the names are
+      # known, the method it writes is not.
+      def reflection_keys(owner)
+        return [] if owner.empty?
+
+        ReflectionIntrinsics.dispatched_names.flat_map do |name|
+          ["::#{owner}##{name}", "::#{owner}.#{name}"]
+        end
       end
 
       def note_hook(owner, method_name)
@@ -223,6 +254,10 @@ module Steep
       end
 
       def taint(owner)
+        return if owner.nil?
+        # A class this cannot read the methods of cannot be reflected on either,
+        # whether or not it is one of the core classes.
+        @blocked.merge(reflection_keys(owner))
         return unless CORE_CLASSES.include?(owner)
 
         TABLES.each { |table| @blocked.merge(table.method_keys_for(owner)) }
@@ -230,6 +265,14 @@ module Steep
 
       def taint_all
         CORE_CLASSES.each { |owner| taint(owner) }
+      end
+
+      def scan_side(singleton)
+        previous = @singleton_side
+        @singleton_side = singleton
+        yield
+      ensure
+        @singleton_side = previous
       end
 
       def scan(node, nesting, forced_owner = nil)
@@ -241,17 +284,26 @@ module Steep
           owner = absolute ? name : [*nesting, name].compact.join("::")
           body = node.type == :class ? node.children[2] : node.children[1]
           @modules << owner
-          scan(body, owner.split("::"), nil)
+          scan_side(false) { scan(body, owner.split("::"), nil) }
         when :def
           owner = forced_owner || nesting.join("::")
-          block_method(owner, node.children[0])
+          block_method(owner, node.children[0], singleton: @singleton_side)
           note_hook(owner, node.children[0])
           scan(node.children[2], nesting, forced_owner)
         when :defs
           # `def self.included(base)` — the common spelling of a hook, and one
-          # the instance-method branch above never sees.
-          note_hook(forced_owner || nesting.join("::"), node.children[1])
+          # the instance-method branch above never sees. It is also where a
+          # reflection is shadowed on the side that matters: `Foo.method(:x)`
+          # reaches `def self.method` before it reaches Kernel's.
+          owner = forced_owner || nesting.join("::")
+          block_method(owner, node.children[1], singleton: true)
+          note_hook(owner, node.children[1])
           scan(node.children[3], nesting, forced_owner)
+        when :sclass
+          # `class << self` writes singleton methods with instance-method
+          # syntax, so the bodies below have to know which side they are on.
+          singleton = node.children[0]&.type == :self
+          scan_side(singleton) { scan(node.children[1], nesting, forced_owner) }
         when :block
           send_node, _args, body = node.children
           if (owner = eval_owner(send_node, nesting))
@@ -267,6 +319,12 @@ module Steep
           receiver, method_name, arguments = call_parts(node)
 
           target = receiver ? core_receiver(receiver, nesting) : (owner if CORE_CLASSES.include?(owner))
+          # The same call on a class that is nobody's core: it can write a
+          # reflection into it, and `taint` blocks exactly that much for one.
+          # Not for a mixin, whose module IS read — a project module that
+          # redefines a reflection is recorded under its own name, and the
+          # receiver's ancestry is where the two meet.
+          named = receiver ? named_receiver(receiver, nesting) : (owner unless owner.empty?)
 
           if LOOKUP_MUTATORS.include?(method_name) && target
             taint(target)
@@ -275,10 +333,10 @@ module Steep
             # for the call. The names are kept unresolved: which constant each
             # denotes depends on modules this may not have read yet.
             @mixins << [target, arguments.map { |argument| const_name(argument) }, nesting.dup]
-          elsif EVAL_METHODS.include?(method_name) && target && !arguments.empty?
+          elsif EVAL_METHODS.include?(method_name) && named && !arguments.empty?
             # String/evaluated forms are opaque to the AST. Any method in the
             # target's lookup table could be replaced.
-            taint(target)
+            taint(named)
           elsif METHOD_MUTATORS.include?(method_name) && target
             if method_name == :define_method || method_name == :alias_method
               note_hook(owner, literal_method_name(arguments.first))
@@ -306,14 +364,14 @@ module Steep
         when :alias
           owner = forced_owner || nesting.join("::")
           if (aliased = literal_alias_name(node.children[0]))
-            block_method(owner, aliased)
+            block_method(owner, aliased, singleton: @singleton_side)
             # `alias included install` gives the module a hook under a name the
             # `def` above never wrote.
             note_hook(owner, aliased)
           end
         when :undef
           owner = forced_owner || nesting.join("::")
-          node.children.each { |name| block_method(owner, literal_method_name(name)) }
+          node.children.each { |name| block_method(owner, literal_method_name(name), singleton: @singleton_side) }
         else
           node.children.each { |child| scan(child, nesting, forced_owner) }
         end
@@ -362,6 +420,18 @@ module Steep
 
         resolved = absolute ? name : [*nesting, name].join("::")
         CORE_CLASSES.include?(resolved) ? resolved : nil
+      end
+
+      # The class a receiver NAMES, core or not, resolved the way Ruby's lexical
+      # lookup would. nil for anything that is not a plain constant.
+      def named_receiver(node, nesting)
+        core = core_receiver(node, nesting)
+        return core if core
+
+        name, absolute = const_name(node)
+        return nil unless name
+
+        absolute ? name : [*nesting, name].join("::")
       end
 
       def const_name(node)
