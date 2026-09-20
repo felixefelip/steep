@@ -102,6 +102,10 @@ module Steep
       # is unknown is one whose implementation is unknown.
       def shadowed?(receiver_type, key, entry, factory, override_registry)
         return false if override_registry.empty?
+        # A redefinition whose owner could not be read at all — `def
+        # obj.method(name)`. There is no chain to place it on, so it counts
+        # against every receiver.
+        return true if override_registry.name_blocked?(entry.method.name)
 
         chain = dispatch_chain(receiver_type, entry.method.name, factory) or return true
         index = chain.index(key) or return true
@@ -181,7 +185,19 @@ module Steep
           type_name: type_name, method_name: method_name, singleton: singleton, unbound: true
         )
 
-        object if method_definition(object, factory, public_only: public_only)
+        return nil unless method_definition(object, factory, public_only: public_only)
+
+        if public_only
+          # `public_instance_method` RAISES on a private method, and the class
+          # this ran on may be a subclass's: one that redeclares the method
+          # private answers `NameError` where this would answer a method
+          # object. Settled here, where Ruby would raise, rather than at the
+          # question asked of the result.
+          subjects = across_descendants(object, factory) or return nil
+          return nil unless subjects.all? { |subject| method_definition(subject, factory, public_only: true) }
+        end
+
+        object
       end
 
       # `method` is the bound half, and its receiver is a VALUE rather than the
@@ -222,13 +238,20 @@ module Steep
 
         entries = parameter_entries_of(receiver, factory) or return nil
 
-        descendants = factory.descendant_index.descendants(receiver.type_name, limit: MAX_DESCENDANTS)
-        return nil unless descendants
-        return nil unless descendants.all? do |name|
-          parameter_entries_of(receiver.with(type_name: name), factory) == entries
-        end
+        subjects = across_descendants(receiver, factory) or return nil
+        return nil unless subjects.all? { |subject| parameter_entries_of(subject, factory) == entries }
 
         AST::Types::Tuple.new(types: entries.map { |entry| entry_type(entry) })
+      end
+
+      # The same method object, once per class the receiver could actually have
+      # been — every subclass of the one it names. nil where there are more of
+      # them than `MAX_DESCENDANTS`, which declines whatever was being asked.
+      def across_descendants(object, factory)
+        descendants = factory.descendant_index.descendants(object.type_name, limit: MAX_DESCENDANTS)
+        return nil unless descendants
+
+        descendants.map { |name| object.with(type_name: name) }
       end
 
       # What one class's declaration of the method says its parameters are, or

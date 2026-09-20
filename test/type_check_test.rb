@@ -1171,10 +1171,19 @@ class TypeCheckTest < Minitest::Test
             def self.human_name: (String index) -> String
           end
 
+          class Visible
+            def secret: () -> String
+          end
+          class VisibleSub < Visible
+            private def secret: () -> String
+          end
+
           class Reflector
             def widened: () -> Method::param_types
             def restated: () -> Method::param_types
             def leaf: () -> Method::param_types
+            def hidden_in_a_subclass: () -> UnboundMethod
+            def asked_regardless: () -> UnboundMethod
           end
         RBS
       },
@@ -1194,6 +1203,13 @@ class TypeCheckTest < Minitest::Test
             def self.human_name(index) = index
           end
 
+          class Visible
+            def secret = "s"
+          end
+          class VisibleSub < Visible
+            private def secret = "s"
+          end
+
           class Reflector
             # `WidenedSub.human_name` takes a parameter its superclass does not,
             # and `Widened` is the type a variable holding it would have.
@@ -1206,6 +1222,14 @@ class TypeCheckTest < Minitest::Test
 
             # Nothing inherits from the subclass itself.
             def leaf = RestatedSub.singleton_class.public_instance_method(:human_name).parameters
+
+            # `public_instance_method` RAISES on a private method, and the class
+            # this ran on may be the subclass that made it one.
+            def hidden_in_a_subclass = Visible.public_instance_method(:secret)
+
+            # `instance_method` asks whatever the visibility, so the subclass
+            # says nothing about this one.
+            def asked_regardless = Visible.instance_method(:secret)
           end
         RUBY
       }
@@ -1221,6 +1245,9 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::Method::param_types", actual.fetch("widened")
       assert_equal "[[:req, :index]]", actual.fetch("restated")
       assert_equal "[[:req, :index]]", actual.fetch("leaf")
+
+      assert_equal "::UnboundMethod", actual.fetch("hidden_in_a_subclass")
+      assert_equal "unbound_method(::Visible#secret)", actual.fetch("asked_regardless")
     end
   end
 

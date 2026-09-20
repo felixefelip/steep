@@ -76,6 +76,9 @@ module Steep
         # syntax writes singleton methods.
         @singleton_side = false
         @blocked = Set[] #: Set[String]
+        # Reflections whose owner could not be read at all, blocked by name
+        # rather than by key.
+        @blocked_names = Set[] #: Set[Symbol]
         @mixins = [] #: Array[[String, String?]]
         @modules = Set[] #: Set[String]
         @opaque_modules = Set[] #: Set[String]
@@ -84,6 +87,7 @@ module Steep
       def initialize_copy(original)
         super
         @blocked = original.to_set
+        @blocked_names = original.blocked_names
         @mixins = []
         @modules = Set[]
         @opaque_modules = Set[]
@@ -108,9 +112,19 @@ module Steep
         @blocked.include?(normalize(method_name))
       end
 
+      # A method name that cannot be keyed to an owner: blocked wherever it is
+      # dispatched, which is what an unreadable receiver leaves.
+      def name_blocked?(method_name)
+        @blocked_names.include?(method_name.to_sym)
+      end
+
+      def blocked_names
+        @blocked_names.dup
+      end
+
       def empty?
         resolve_mixins
-        @blocked.empty?
+        @blocked.empty? && @blocked_names.empty?
       end
 
       def to_set
@@ -177,6 +191,33 @@ module Steep
         return unless CORE_CLASSES.include?(owner)
 
         @blocked << key if TABLES.any? { |table| table.watched_keys.include?(key) }
+      end
+
+      # The class `def <receiver>.name` writes to: the enclosing one for `self`,
+      # the constant itself for a constant, and nil for anything else — an
+      # expression, a local, a `self` at the top level where there is no class
+      # to name.
+      def defs_owner(receiver, nesting, forced_owner)
+        case receiver&.type
+        when :self
+          owner = forced_owner || nesting.join("::")
+          owner unless owner.empty?
+        when :const
+          name, absolute = const_name(receiver)
+          if name
+            absolute ? name : [*nesting, name].join("::")
+          end
+        end
+      end
+
+      # A reflection whose OWNER cannot be read stops the fold for that name
+      # everywhere. There is no class to record it against, and the one it
+      # lands on is one a call site may well be holding.
+      def block_method_everywhere(method_name)
+        return unless method_name
+        return unless ReflectionIntrinsics.dispatched_names.include?(method_name.to_sym)
+
+        @blocked_names << method_name.to_sym
       end
 
       # Every key a reflection could be dispatched under for one owner, both
@@ -295,9 +336,20 @@ module Steep
           # the instance-method branch above never sees. It is also where a
           # reflection is shadowed on the side that matters: `Foo.method(:x)`
           # reaches `def self.method` before it reaches Kernel's.
-          owner = forced_owner || nesting.join("::")
-          block_method(owner, node.children[1], singleton: true)
-          note_hook(owner, node.children[1])
+          #
+          # The receiver is READ rather than assumed to be `self`: `def
+          # Foo.method(name)` written at the top level belongs to Foo, where
+          # the nesting is empty and would have recorded nothing.
+          owner = defs_owner(node.children[0], nesting, forced_owner)
+          if owner
+            block_method(owner, node.children[1], singleton: true)
+            note_hook(owner, node.children[1])
+          else
+            # A receiver this cannot name — `def obj.method(name)`. Which class
+            # gets the method is not readable here, so the name stops being
+            # foldable anywhere rather than in a class this cannot point at.
+            block_method_everywhere(node.children[1])
+          end
           scan(node.children[3], nesting, forced_owner)
         when :sclass
           # `class << self` writes singleton methods with instance-method
@@ -377,13 +429,16 @@ module Steep
         end
       end
 
+      # `Foo.class_eval { … }` writes into Foo, whatever Foo is: the block form
+      # is READ, so what it defines is attributed rather than guessed at, and
+      # that is as true of an app's class as of `Array`.
       def eval_owner(node, nesting)
         return nil unless node&.type == :send
 
         receiver, method_name, = call_parts(node)
         return nil unless EVAL_METHODS.include?(method_name)
 
-        receiver ? core_receiver(receiver, nesting) : nil
+        receiver ? named_receiver(receiver, nesting) : nil
       end
 
       def refinement_owner(node, nesting)
