@@ -320,4 +320,31 @@ class LiteralMethodRegistryTest < Minitest::Test
     assert registry.blocked?("::Widget.method")
     assert registry.blocked?("::Widget#singleton_class")
   end
+
+  # A macro evals a string into its OWN class, which is what example75 and
+  # example76 in rbs_infer's dummy are. Tainting the class that writes one would
+  # decline the reflection on exactly the classes the fold is for, over a method
+  # the eval does not write.
+  def test_a_string_eval_does_not_blind_the_class_that_writes_it
+    registry = registry_for(<<~RUBY)
+      class Macro
+        def self.build(name)
+          class_eval "def \#{name}; 1; end"
+        end
+      end
+    RUBY
+
+    refute registry.blocked?("::Macro.singleton_class")
+    refute registry.blocked?("::Macro#public_instance_method")
+  end
+
+  # A core class is the other way round: its methods are the literal table's
+  # own, and a string is where one of them could be replaced unseen.
+  def test_a_string_eval_on_a_core_class_still_taints_it
+    registry = registry_for(<<~RUBY)
+      Array.class_eval "def join(*) = 'hijacked'"
+    RUBY
+
+    assert registry.blocked?("::Array#join")
+  end
 end

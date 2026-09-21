@@ -31,10 +31,11 @@ module Steep
   # runs Foo's while dispatch still resolves to Kernel's, because a redefinition
   # the project DECLARES resolves to its own key and declines here by itself.
   #
-  # Where that stops: a string eval whose receiver names no class, and a module
-  # mixed in without the signatures recording it. Neither the ancestry nor the
-  # registry can see those — the same boundary `LiteralMethodRegistry` already
-  # draws.
+  # Where that stops: a name written into a class from inside a string eval, and
+  # a module mixed in without the signatures recording it. Neither the ancestry
+  # nor the registry can see those — the same boundary `LiteralMethodRegistry`
+  # already draws. Writing a string eval is not itself disqualifying, and must
+  # not be: a macro that evals into its own class is what this reads for.
   module ReflectionIntrinsics
     # `method` is never CALLED. It is held for the same provenance check the
     # literal table makes — a key whose implementation is written in Ruby is one
