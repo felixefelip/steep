@@ -276,4 +276,48 @@ class LiteralMethodRegistryTest < Minitest::Test
 
     refute registry.blocked?("::String#upcase")
   end
+
+  # `def Foo.method(name)` belongs to Foo, not to whatever encloses it — and at
+  # the top level there is no enclosing class at all, which is where reading the
+  # receiver stops being optional.
+  def test_records_a_singleton_def_against_its_receiver
+    registry = registry_for(<<~RUBY)
+      def Widget.method(name) = name
+
+      class Host
+        def self.singleton_class = self
+      end
+    RUBY
+
+    assert registry.blocked?("::Widget.method")
+    assert registry.blocked?("::Host.singleton_class")
+    refute registry.blocked?("::Widget#method")
+  end
+
+  # A receiver this cannot name leaves no class to record against, so the name
+  # stops folding anywhere rather than in a class it cannot point at.
+  def test_a_singleton_def_on_an_unreadable_receiver_blocks_the_name
+    registry = registry_for(<<~RUBY)
+      obj = Object.new
+      def obj.method(name) = name
+    RUBY
+
+    assert registry.name_blocked?(:method)
+    refute registry.name_blocked?(:singleton_class)
+    refute_predicate registry, :empty?
+  end
+
+  # The block form of an eval is READ, so what it writes is attributed to the
+  # class it was called on — an app's class as much as `Array`.
+  def test_a_class_eval_block_is_attributed_to_its_receiver
+    registry = registry_for(<<~RUBY)
+      Widget.class_eval do
+        def self.method(name) = name
+        def singleton_class = self
+      end
+    RUBY
+
+    assert registry.blocked?("::Widget.method")
+    assert registry.blocked?("::Widget#singleton_class")
+  end
 end

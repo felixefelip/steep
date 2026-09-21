@@ -3821,6 +3821,12 @@ module Steep
                 arguments: arguments,
                 declared_return_type: declared_return_type
               )
+              call = constr.reflection_intrinsic_call(
+                call,
+                receiver_type: receiver_type,
+                arguments: arguments,
+                declared_return_type: declared_return_type
+              )
             end
 
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
@@ -5313,6 +5319,36 @@ module Steep
         call: call,
         receiver_type: receiver_type,
         argument_types: argument_types,
+        override_registry: literal_method_registry
+      ) or return call
+
+      return call unless check_relation(sub_type: type, super_type: declared_return_type).success?
+
+      call.with_return_type(type)
+    end
+
+    # Replaces a reflection's nominal return — `::Class`, `::UnboundMethod`,
+    # `::Method::param_types` — with what the DECLARATION being reflected on
+    # says. Nothing is evaluated: `public_instance_method(:name).parameters`
+    # asks for the parameter list an RBS method type already states, and the
+    # selected declaration remains the upper bound.
+    #
+    # The receiver is taken as it was inferred rather than recovered from the
+    # source: what a reflection needs is the module a type NAMES, and a type is
+    # where that is written. Only the method name is read as a literal, the way
+    # every other argument is.
+    def reflection_intrinsic_call(call, receiver_type:, arguments:, declared_return_type:)
+      argument_types = arguments.map do |argument|
+        return call unless typing.has_type?(argument)
+
+        literal_operand_type(argument, typing.type_of(node: argument))
+      end
+
+      type = ReflectionIntrinsics.fold(
+        call: call,
+        receiver_type: receiver_type,
+        argument_types: argument_types,
+        factory: checker.factory,
         override_registry: literal_method_registry
       ) or return call
 

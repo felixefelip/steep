@@ -308,6 +308,55 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # A sidecar entry is TEXT, read back through `RBS::Parser.parse_type`, and a
+  # type RBS cannot spell does not survive that round trip — silently, since
+  # `singleton_class(::Probe)` parses as the alias `singleton_class`. So what is
+  # recorded is what a signature can say.
+  def test_runner_records_a_type_a_signature_can_say
+    in_tmpdir do
+      write("sig/probe.rbs", <<~RBS)
+        class Probe
+          def self.human_name: (String index) -> String
+          def reflect: (bool wrap) -> Array[untyped]
+          def call_reflect: () -> Array[untyped]
+        end
+      RBS
+      write("app/probe.rb", <<~RUBY)
+        class Probe
+          def self.human_name(index) = index
+
+          def reflect(wrap)
+            [Probe.singleton_class, wrap]
+          end
+
+          def call_reflect = reflect(true)
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+      recorded = methods.fetch("Probe#reflect").fetch("(true)")
+
+      assert_includes recorded, "::Class"
+      refute_match(/singleton_class\(/, recorded)
+      # Reads back as the type it says, and stays it.
+      parsed = RBS::Parser.parse_type(recorded)
+      refute_instance_of RBS::Types::Alias, parsed
+      assert_equal parsed.to_s, RBS::Parser.parse_type(parsed.to_s).to_s
+    end
+  end
+
+  # What that is worth avoiding: the spelling of a type RBS cannot say parses
+  # as something else rather than failing.
+  def test_a_type_rbs_cannot_say_is_written_as_the_one_it_can
+    metaclass = Steep::AST::Types::MetaClass.new(name: RBS::TypeName.parse("::Probe"))
+    written = Specializations.rbs_writable(
+      Steep::AST::Types::Tuple.new(types: [metaclass, Steep::AST::Types::Literal.new(value: 1)])
+    )
+
+    assert_equal "[::Class, 1]", written.to_s
+    assert_instance_of RBS::Types::Alias, RBS::Parser.parse_type(metaclass.to_s)
+  end
+
   def test_store_ignores_a_sidecar_from_another_schema_version
     store = Specializations::Store.from_hash(
       { "version" => 99, "methods" => { "Foo#bar" => { "(1)" => "Integer" } } },

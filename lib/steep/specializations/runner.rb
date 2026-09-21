@@ -513,7 +513,9 @@ module Steep
         type = typing.type_of(node: body)
         return nil if type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Bot)
 
-        type
+        # Every recorded return passes through here, which is why the sidecar's
+        # spelling is settled here too rather than at each `to_s` below.
+        Specializations.rbs_writable(type)
       end
     end
   end

@@ -70,6 +70,9 @@ module Steep
       Proc = Type.new("::Proc")
       Kernel = Type.new("::Kernel")
       Method = Type.new("::Method")
+      # The other half of `AST::Types::MethodObject`: a reflection that names
+      # its method widens to one of these wherever the name cannot travel.
+      UnboundMethod = Type.new("::UnboundMethod")
 
       def self.nil_type
         AST::Types::Nil.instance

@@ -24,6 +24,13 @@ module Steep
           @type_name_resolver ||= RBS::Resolver::TypeNameResolver.build(definition_builder.env)
         end
 
+        # Which classes inherit from which — a question about the whole program
+        # rather than about one type, and one that has to be asked wherever a
+        # nominal type is read as naming the class a value actually is.
+        def descendant_index
+          @descendant_index ||= DescendantIndex.new(definition_builder.env)
+        end
+
         def type_opt(type)
           if type
             type(type)
@@ -208,11 +215,12 @@ module Steep
               types: type.types.map {|ty| type_1(ty) },
               location: nil
             )
-          when FiniteSet
-            # RBS has no set literal, so this is where exactness stops: what a
-            # signature can say is `Set[Elem]`, and the members become the
-            # element type on the way out.
-            type_1(AST::Builtin::Set.instance_type(type.element_type))
+          when NotInRBS
+            # Where exactness stops. A signature cannot say which values a set
+            # holds, which module a singleton class is of or which method a
+            # reflection names, so each of them leaves as the type it is
+            # written as.
+            type_1(type.back_type)
           when Record
             all_fields = {} #: Hash[Symbol, [RBS::Types::t, bool]]
             type.elements.each do |key, value|
@@ -525,6 +533,10 @@ module Steep
             AST::Types::Name::Singleton.new(
               name: env.normalize_module_name(type.name)
             )
+          when AST::Types::MetaClass
+            AST::Types::MetaClass.new(name: env.normalize_module_name(type.name))
+          when AST::Types::MethodObject
+            type.with(type_name: env.normalize_module_name(type.type_name))
           when AST::Types::Any, AST::Types::Boolean, AST::Types::Bot, AST::Types::Nil,
             AST::Types::Top, AST::Types::Void, AST::Types::Literal, AST::Types::Class, AST::Types::Instance,
             AST::Types::Self, AST::Types::Var, AST::Types::Logic::Base
