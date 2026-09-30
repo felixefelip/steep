@@ -371,12 +371,6 @@ module Steep
           receiver, method_name, arguments = call_parts(node)
 
           target = receiver ? core_receiver(receiver, nesting) : (owner if CORE_CLASSES.include?(owner))
-          # The same call on a class that is nobody's core: it can write a
-          # reflection into it, and `taint` blocks exactly that much for one.
-          # Not for a mixin, whose module IS read — a project module that
-          # redefines a reflection is recorded under its own name, and the
-          # receiver's ancestry is where the two meet.
-          named = receiver ? named_receiver(receiver, nesting) : (owner unless owner.empty?)
 
           if LOOKUP_MUTATORS.include?(method_name) && target
             taint(target)
@@ -385,10 +379,20 @@ module Steep
             # for the call. The names are kept unresolved: which constant each
             # denotes depends on modules this may not have read yet.
             @mixins << [target, arguments.map { |argument| const_name(argument) }, nesting.dup]
-          elsif EVAL_METHODS.include?(method_name) && named && !arguments.empty?
+          elsif EVAL_METHODS.include?(method_name) && target && !arguments.empty?
             # String/evaluated forms are opaque to the AST. Any method in the
             # target's lookup table could be replaced.
-            taint(named)
+            #
+            # A core class only, deliberately. Evaling a string INTO ITSELF is
+            # what a plain-Ruby macro does — example75 and example76 in
+            # rbs_infer's dummy are two — and tainting the class that writes one
+            # would decline the reflection on exactly the classes this is for,
+            # for a method the eval does not write. What it does write is read
+            # rather than guessed at (felixefelip/steep#169), so the class's own
+            # source stays the thing that speaks for it; a reflection redefined
+            # from inside a string is the boundary `ReflectionIntrinsics` states
+            # and does not claim to cover.
+            taint(target)
           elsif METHOD_MUTATORS.include?(method_name) && target
             if method_name == :define_method || method_name == :alias_method
               note_hook(owner, literal_method_name(arguments.first))
