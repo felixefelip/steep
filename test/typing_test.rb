@@ -131,4 +131,33 @@ class TypingTest < Minitest::Test
       child2.save!
     end
   end
+
+  # Calls in `a.foo(b.bar)`: the outer send is recorded on the parent, the inner
+  # one on a child. A child reads the parent's, and a saved child hands its own
+  # back, the same way `call_of` does.
+  def test_self_type_of_call_follows_the_parent_and_is_saved_with_the_child
+    source = parse_ruby("a.foo(b.bar)")
+    outer = source.node
+    inner = outer.children[2]
+
+    typing = Steep::Typing.new(source: source, root_context: context, cursor: nil)
+    call_context = Steep::TypeInference::MethodCall::TopLevelContext.new
+
+    outer_self = parse_type("singleton(::Object)")
+    inner_self = parse_type("::Object")
+
+    typing.add_call(outer, Steep::TypeInference::MethodCall::Untyped.new(node: outer, context: call_context, method_name: :foo), self_type: outer_self)
+
+    typing.new_child do |child|
+      assert_equal outer_self, child.self_type_of_call(node: outer)
+      assert_nil child.self_type_of_call(node: inner)
+
+      child.add_call(inner, Steep::TypeInference::MethodCall::Untyped.new(node: inner, context: call_context, method_name: :bar), self_type: inner_self)
+      assert_nil typing.self_type_of_call(node: inner)
+
+      child.save!
+    end
+
+    assert_equal inner_self, typing.self_type_of_call(node: inner)
+  end
 end
