@@ -104,11 +104,58 @@ module Steep
         new(positionals: positionals, keywords: keywords)
       end
 
-      def initialize(positionals:, keywords:, positional_defaults: {}, keyword_defaults: {})
+      def initialize(positionals:, keywords:, positional_defaults: {}, keyword_defaults: {}, self_type: nil)
         @positionals = positionals
         @keywords = keywords
         @positional_defaults = positional_defaults
         @keyword_defaults = keyword_defaults
+        @self_type = self_type
+      end
+
+      # The `self` the body runs with at this call site, or nil for the one its
+      # definition gives it.
+      #
+      # A macro inherited by a subclass runs there with `self` being the
+      # subclass, and what it reflects on is then the subclass too:
+      #
+      #   class Peel;      def self.macro(m) = Writer.generate(self, m); end
+      #   class Rind < Peel; macro :nick; end    # `self` is Rind, not Peel
+      #
+      # Only the call site says so, so it is part of what keys the call — and
+      # unlike `defaults`, it is part of `==`: two call sites passing the same
+      # arguments from two classes run the body twice.
+      #
+      # It stays out of `key`. A return recorded under a self no declaration
+      # names would be read back by every caller of the tuple, so only the eval
+      # harvest, which attributes to one call site, sets it.
+      attr_reader :self_type
+
+      def with_self(self_type)
+        Arguments.new(
+          positionals: @positionals,
+          keywords: @keywords,
+          positional_defaults: @positional_defaults,
+          keyword_defaults: @keyword_defaults,
+          self_type: self_type
+        )
+      end
+
+      # The same arguments with every `self` among them read as `self_type`.
+      #
+      # A `self` argument is typed `self`, a variable the CALLEE would bind to
+      # its own receiver: `Writer.generate(self, name)` handed on as written
+      # makes `owner` the `Writer` that `generate` is defined on. What was
+      # handed is the caller's self, so it is resolved in the caller's frame.
+      def resolve_self(self_type)
+        substitution = Interface::Substitution.build([], self_type: self_type)
+
+        Arguments.new(
+          positionals: @positionals.map { |type| type.subst(substitution) },
+          keywords: @keywords.transform_values { |type| type.subst(substitution) },
+          positional_defaults: @positional_defaults,
+          keyword_defaults: @keyword_defaults,
+          self_type: @self_type
+        )
       end
 
       # The same call, with the parameters it leaves out fixed to the values the
@@ -124,7 +171,8 @@ module Steep
           positionals: @positionals,
           keywords: @keywords,
           positional_defaults: positionals,
-          keyword_defaults: keywords
+          keyword_defaults: keywords,
+          self_type: @self_type
         )
       end
 
@@ -160,13 +208,14 @@ module Steep
       end
 
       def ==(other)
-        other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords
+        other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords &&
+          other.self_type == self_type
       end
 
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash
+        positionals.hash ^ keywords.hash ^ self_type.hash
       end
 
       private

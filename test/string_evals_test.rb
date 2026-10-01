@@ -427,6 +427,60 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # The handed `self` is the CALLER's: typed as written it is `self`, which the
+  # callee would bind to `Writer`. And which class the caller is depends on the
+  # call site, not on where the macro is defined — `Rind` runs the inherited
+  # macro with `self` being `Rind`, and only `Rind` has `nick`.
+  def test_a_handed_self_is_the_class_whose_call_site_ran_the_macro
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol method) -> untyped
+        end
+
+        class Peel
+          def self.human_name: (String index) -> String
+          def self.banana_delegate: (Symbol method) -> untyped
+        end
+
+        class Rind < Peel
+          def self.nick: (String name) -> String
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, method)
+            argument = owner.singleton_class.public_instance_method(method).parameters[0][1]
+
+            owner.class_eval "def \#{method}(\#{argument}); end"
+          end
+        end
+
+        class Peel
+          def self.banana_delegate(method)
+            Writer.generate(self, method)
+          end
+
+          banana_delegate :human_name
+        end
+
+        class Rind < Peel
+          banana_delegate :nick
+        end
+      RUBY
+
+      chunks = chunks_of(setup_project)
+
+      assert_equal(
+        {
+          "app/base.rb:14:2" => ["def human_name(index); end", "::Peel"],
+          "app/base.rb:18:2" => ["def nick(name); end", "::Rind"]
+        },
+        chunks.transform_values { |list| list.flat_map { |chunk| [chunk&.source, chunk&.target] } }
+      )
+    end
+  end
+
   def test_a_frame_that_does_not_pass_its_own_self_is_not_read
     in_tmpdir do
       write("sig/base.rbs", DELEGATION_RBS)

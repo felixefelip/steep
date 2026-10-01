@@ -189,6 +189,11 @@ module Steep
     attr_reader :contexts
     attr_reader :root_context
     attr_reader :method_calls
+    # The `self` each call was made from, by the send node. A receiverless call
+    # and a `self` argument are both written `self`, and which object that is
+    # belongs to the frame the call sits in, not to the call — the one fact a
+    # reader of the typing cannot get back from the node.
+    attr_reader :call_self_types
     attr_reader :source_index
     attr_reader :cursor_context
 
@@ -209,6 +214,7 @@ module Steep
       (@typing = {}).compare_by_identity
       @root_context = root_context
       (@method_calls = {}).compare_by_identity
+      (@call_self_types = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -254,8 +260,9 @@ module Steep
       type
     end
 
-    def add_call(node, call)
+    def add_call(node, call, self_type:)
       method_calls[node] = call
+      call_self_types[node] = self_type
 
       call
     end
@@ -290,6 +297,12 @@ module Steep
           raise UnknownNodeError.new(:call, node: node)
         end
       end
+    end
+
+    # The type `self` had where `node` was called, or nil for a node this typing
+    # recorded no call for.
+    def self_type_of_call(node:)
+      call_self_types.fetch(node) { parent&.self_type_of_call(node: node) }
     end
 
     def block_range(node)
@@ -364,6 +377,7 @@ module Steep
       end
 
       parent.method_calls.merge!(method_calls)
+      parent.call_self_types.merge!(call_self_types)
       parent.branch_envs.merge!(branch_envs)
 
       errors.each do |error|

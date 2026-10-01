@@ -65,6 +65,8 @@ module Steep
 
     attr_reader method_calls: Hash[Parser::AST::Node, MethodCall::t]
 
+    attr_reader call_self_types: Hash[Parser::AST::Node, AST::Types::t?]
+
     attr_reader source_index: Index::SourceIndex
 
     type branch_env_record = { entry: TypeInference::TypeEnv, truthy: TypeInference::TypeEnv, falsy: TypeInference::TypeEnv }
@@ -87,13 +89,15 @@ module Steep
 
     def add_typing: (Parser::AST::Node node, AST::Types::t `type`, top) -> void
 
-    def add_call: (Parser::AST::Node node, MethodCall::t call) -> void
+    def add_call: (Parser::AST::Node node, MethodCall::t call, self_type: AST::Types::t) -> void
 
     def has_type?: (Parser::AST::Node node) -> bool
 
     def type_of: (node: Parser::AST::Node) -> AST::Types::t
 
     def call_of: (node: Parser::AST::Node) -> TypeInference::MethodCall::t
+
+    def self_type_of_call: (node: Parser::AST::Node) -> AST::Types::t?
 
     def block_range: (Parser::AST::Node node) -> Range[Integer]
 

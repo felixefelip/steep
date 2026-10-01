@@ -306,6 +306,7 @@ module Steep
 
       if method_type && (arguments = specialization_arguments(node))
         method_type = arguments.substitute(method_type)
+        self_type = arguments.self_type if arguments.self_type
       end
 
       unless method_type
@@ -1042,7 +1043,7 @@ module Steep
       end
 
       typing.add_typing(call.node, call.return_type, nil)
-      typing.add_call(call.node, call)
+      typing.add_call(call.node, call, self_type: self_type)
 
       Pair.new(type: call.return_type, constr: self)
     end
@@ -8319,7 +8320,8 @@ module Steep
             actual_method_type: inlined_call.actual_method_type,
             method_decls: inlined_call.method_decls,
             return_type: inlined_call.return_type
-          )
+          ),
+          self_type: constr.self_type
         )
       when TypeInference::MethodCall::Untyped
         constr.typing.add_call(
@@ -8328,7 +8330,8 @@ module Steep
             node: original,
             context: inlined_call.context,
             method_name: method_name
-          )
+          ),
+          self_type: constr.self_type
         )
       end
     end

@@ -272,6 +272,8 @@ module Steep
         entry = definitions[effect.callee] or return [nil]
         path, callee_node = entry
         arguments = Specializations::Arguments.from_send(effect.node, typing) or return [nil]
+        frame_self = typing.self_type_of_call(node: effect.node) or return [nil]
+        arguments = arguments.resolve_self(frame_self)
         receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]
 
         positionals, keywords = Collector.defaults(callee_node)
@@ -370,18 +372,35 @@ module Steep
             next unless definitions.key?(key)
 
             (tuples[key] ||= Set.new) << arguments if arguments.literal?
-            record_location(locations, key, arguments, path, node) if writers.include?(key)
+            record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
         end
 
         tuples
       end
 
-      def record_location(locations, key, arguments, path, node)
+      # Keyed by the `self` the body runs with there as well as by the
+      # arguments: what a macro writes can depend on which class it runs in, and
+      # one inherited by a subclass runs in the subclass.
+      def record_location(locations, key, arguments, path, node, typing)
         expression = node.loc.expression or return
         site = "#{@project.relative_path(path)}:#{expression.line}:#{expression.column}"
+        arguments = arguments.with_self(callee_self(typing, node))
 
         ((locations[key] ||= {})[arguments] ||= Set.new) << site
+      end
+
+      # What `self` is inside the method `node` calls: its receiver, or — for a
+      # call written on `self`, explicitly or not — the self of the frame the
+      # call sits in. nil for a receiver naming no one class, which leaves the
+      # body to the self its definition gives it.
+      def callee_self(typing, node)
+        type = typing.call_of(node: node).receiver_type
+        type = typing.self_type_of_call(node: node) if type.is_a?(AST::Types::Self)
+
+        case type
+        when AST::Types::Name::Singleton, AST::Types::Name::Instance then type
+        end
       end
 
       # The methods whose entries this generation changed.
@@ -442,7 +461,7 @@ module Steep
 
           Collector.each_call_site(typing) do |key, arguments, node|
             (tuples[key] ||= Set.new) << arguments if arguments.literal?
-            record_location(locations, key, arguments, path, node) if writers.include?(key)
+            record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
 
           callees[path] = Collector.callees(typing) if typing
