@@ -168,21 +168,59 @@ module Steep
         #
         #   Writer.generate(self, name)   # `Writer.generate` evals on parameter 0
         #
-        # Read off the AST, so the target has to be named by a constant. That is
-        # the shape a framework writes (`::ActiveSupport::Delegation.generate`),
-        # and a receiver this cannot name is one whose method this cannot find.
+        # Which method that is, the checker says. A constant is written relative
+        # to where the call sits — `Module#delegate` calls `Delegation.generate`
+        # from inside `module ActiveSupport` — and only the typing knows what it
+        # names, so the callee is keyed as every call site is: by its
+        # declaration.
+        #
+        # The cheap gate has no typing. It takes every writer the spelling could
+        # name, as a suffix of its full name, and the typed walk that follows
+        # decides: a frame the gate lets through for nothing records nothing.
         #
         # `self` written at the call site is the whole proof that the two frames
         # share an object — a syntactic check, not an alias analysis.
-        def delegated_write(node, parameter_writers)
+        def delegated_write(node, parameter_writers, typing)
           return nil if parameter_writers.empty?
           return nil unless node.type == :send
 
-          key = constant_send_key(node) or return nil
-          indices = parameter_writers[key] or return nil
-          index = indices.find { |position| node.children[2 + position]&.type == :self } or return nil
+          keys = typing ? [resolved_send_key(node, typing)].compact : spelled_send_keys(node, parameter_writers)
 
-          [key, index]
+          keys.each do |key|
+            indices = parameter_writers[key] or next
+            index = indices.find { |position| node.children[2 + position]&.type == :self } or next
+
+            return [key, index]
+          end
+
+          nil
+        end
+
+        def resolved_send_key(node, typing)
+          call = typing.call_of(node: node)
+          return nil unless call.is_a?(TypeInference::MethodCall::Typed)
+
+          Specializations.method_key(call.method_decls)
+        rescue Typing::UnknownNodeError
+          nil
+        end
+
+        # The writers `Writer.generate(…)` could name before anything resolves
+        # it: `Writer` itself, or a `Writer` nested anywhere. `::Writer` names
+        # only the first.
+        def spelled_send_keys(node, parameter_writers)
+          spelled = constant_send_key(node) or return []
+          return [spelled] if absolute_constant?(node.children[0])
+
+          parameter_writers.keys.select { |key| key == spelled || key.end_with?("::#{spelled}") }
+        end
+
+        def absolute_constant?(node)
+          parent = node.children[0]
+          return true if parent&.type == :cbase
+          return false unless parent&.type == :const
+
+          absolute_constant?(parent)
         end
 
         # `"Writer.generate"` for `Writer.generate(…)`, matching how a singleton
@@ -225,7 +263,7 @@ module Steep
             return
           end
 
-          if (delegation = delegated_write(node, parameter_writers))
+          if (delegation = delegated_write(node, parameter_writers, typing))
             callee, index = delegation
             yield Effect.new(kind: :delegated, node: node, callee: callee, index: index, certain: certain)
             return
