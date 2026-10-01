@@ -347,4 +347,41 @@ class LiteralMethodRegistryTest < Minitest::Test
 
     assert registry.blocked?("::Array#join")
   end
+
+  # A source ingested again, into the same registry or a copy of it, replays
+  # what its first scan found rather than parsing it again — and ends exactly
+  # where scanning it again would, deferred mixins included.
+  def test_ingesting_a_source_again_replays_its_scan
+    mixin_site = "Array.include Conversions\n"
+    module_site = <<~RUBY
+      module Conversions
+        def self.included(base) = nil
+      end
+    RUBY
+
+    parses = 0
+    parser = ::Parser::Ruby33.method(:new)
+    counting = ->(*args) { parses += 1; parser.call(*args) }
+
+    corpus = Registry.new
+    replayed = ::Parser::Ruby33.stub(:new, counting) do
+      corpus.ingest_source(mixin_site)
+      corpus.ingest_source(module_site)
+      corpus.dup.tap do |copy|
+        copy.ingest_source(mixin_site)
+        copy.ingest_source(module_site)
+      end
+    end
+
+    rescanned = Registry.new
+    rescanned.ingest_source(mixin_site)
+    rescanned.ingest_source(module_site)
+    rescanned = rescanned.dup
+    rescanned.ingest_source(mixin_site)
+    rescanned.ingest_source(module_site)
+
+    assert_equal 2, parses
+    assert_equal rescanned.to_set, replayed.to_set
+    assert replayed.blocked?("::Array#join")
+  end
 end

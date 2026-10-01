@@ -21,6 +21,12 @@ module Steep
         "Object", "Module", "Class", "Method", "UnboundMethod"
       ]
 
+      # Scanning never reads the registry, only adds to it, so what one source
+      # contributes is fixed by its text: parsed once, replayed on every ingest.
+      # The parse is the expensive half, and rbs_infer ingests the same source
+      # once per type check.
+      Scan = Struct.new(:blocked, :blocked_names, :modules, :opaque_modules, :mixins)
+
       # Both folds are keyed the same way and blocked the same way, so one
       # registry watches both tables.
       TABLES = [LiteralIntrinsics, ReflectionIntrinsics].freeze
@@ -82,6 +88,8 @@ module Steep
         @mixins = [] #: Array[[String, String?]]
         @modules = Set[] #: Set[String]
         @opaque_modules = Set[] #: Set[String]
+        # What scanning a source adds, by source digest. Shared with every copy.
+        @scans = {} #: Hash[String, Scan]
       end
 
       def initialize_copy(original)
@@ -141,6 +149,19 @@ module Steep
       end
 
       def ingest_source(content, path_name: "(source)")
+        scan = @scans[Digest::SHA256.digest(content)] ||=
+          LiteralMethodRegistry.new.scan_source(content, path_name).scan_result
+        @blocked.merge(scan.blocked)
+        @blocked_names.merge(scan.blocked_names)
+        @modules.merge(scan.modules)
+        @opaque_modules.merge(scan.opaque_modules)
+        @mixins.concat(scan.mixins)
+        self
+      end
+
+      protected
+
+      def scan_source(content, path_name)
         node = parse(content, path_name)
         scan(node, []) if node
         self
@@ -148,6 +169,10 @@ module Steep
         Steep.logger.warn { "[literal_method_registry] failed to ingest #{path_name}: #{exn.message}" }
         taint_all
         self
+      end
+
+      def scan_result
+        Scan.new(@blocked, @blocked_names, @modules, @opaque_modules, @mixins)
       end
 
       private
