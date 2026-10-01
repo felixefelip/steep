@@ -427,40 +427,56 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  HANDED_SELF_RBS = <<~RBS
+    module Writer
+      def self.generate: (untyped owner, Symbol method) -> untyped
+    end
+
+    class Peel
+      def self.human_name: (String index) -> String
+      def self.banana_delegate: (Symbol method) -> untyped
+    end
+
+    class Rind < Peel
+      def self.nick: (String name) -> String
+    end
+
+    class Other
+      def self.go: () -> void
+    end
+  RBS
+
+  HANDED_SELF_WRITER = <<~RUBY
+    module Writer
+      def self.generate(owner, method)
+        argument = owner.singleton_class.public_instance_method(method).parameters[0][1]
+
+        owner.class_eval "def \#{method}(\#{argument}); end"
+      end
+    end
+
+    class Peel
+      def self.banana_delegate(method)
+        Writer.generate(self, method)
+      end
+    end
+  RUBY
+
+  def handed_self_chunks(call_sites)
+    write("sig/base.rbs", HANDED_SELF_RBS)
+    write("app/base.rb", HANDED_SELF_WRITER + call_sites)
+
+    chunks_of(setup_project).transform_values { |list| list.flat_map { |chunk| [chunk&.source, chunk&.target] } }
+  end
+
   # The handed `self` is the CALLER's: typed as written it is `self`, which the
   # callee would bind to `Writer`. And which class the caller is depends on the
   # call site, not on where the macro is defined — `Rind` runs the inherited
   # macro with `self` being `Rind`, and only `Rind` has `nick`.
   def test_a_handed_self_is_the_class_whose_call_site_ran_the_macro
     in_tmpdir do
-      write("sig/base.rbs", <<~RBS)
-        module Writer
-          def self.generate: (untyped owner, Symbol method) -> untyped
-        end
-
+      chunks = handed_self_chunks(<<~RUBY)
         class Peel
-          def self.human_name: (String index) -> String
-          def self.banana_delegate: (Symbol method) -> untyped
-        end
-
-        class Rind < Peel
-          def self.nick: (String name) -> String
-        end
-      RBS
-      write("app/base.rb", <<~RUBY)
-        module Writer
-          def self.generate(owner, method)
-            argument = owner.singleton_class.public_instance_method(method).parameters[0][1]
-
-            owner.class_eval "def \#{method}(\#{argument}); end"
-          end
-        end
-
-        class Peel
-          def self.banana_delegate(method)
-            Writer.generate(self, method)
-          end
-
           banana_delegate :human_name
         end
 
@@ -469,14 +485,54 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
-      chunks = chunks_of(setup_project)
+      assert_equal(
+        {
+          "app/base.rb:15:2" => ["def human_name(index); end", "::Peel"],
+          "app/base.rb:19:2" => ["def nick(name); end", "::Rind"]
+        },
+        chunks
+      )
+    end
+  end
+
+  # A receiver names the class the body runs in, wherever the call is written:
+  # `Rind.banana_delegate` inside `Other` writes on `Rind`, not on `Other` and
+  # not on `Peel`, where the macro is defined.
+  def test_an_explicit_receiver_is_the_class_the_macro_runs_in
+    in_tmpdir do
+      chunks = handed_self_chunks(<<~RUBY)
+        class Other
+          def self.go
+            Rind.banana_delegate :nick
+          end
+        end
+      RUBY
+
+      assert_equal({ "app/base.rb:16:4" => ["def nick(name); end", "::Rind"] }, chunks)
+    end
+  end
+
+  # The same arguments from two classes are two bodies: what the macro writes is
+  # written on the class it runs in, and reading both call sites under one check
+  # would write both on the same one.
+  def test_the_same_arguments_from_two_classes_run_the_macro_twice
+    in_tmpdir do
+      chunks = handed_self_chunks(<<~RUBY)
+        class Peel
+          banana_delegate :human_name
+        end
+
+        class Rind < Peel
+          banana_delegate :human_name
+        end
+      RUBY
 
       assert_equal(
         {
-          "app/base.rb:14:2" => ["def human_name(index); end", "::Peel"],
-          "app/base.rb:18:2" => ["def nick(name); end", "::Rind"]
+          "app/base.rb:15:2" => ["def human_name(index); end", "::Peel"],
+          "app/base.rb:19:2" => ["def human_name(index); end", "::Rind"]
         },
-        chunks.transform_values { |list| list.flat_map { |chunk| [chunk&.source, chunk&.target] } }
+        chunks
       )
     end
   end
