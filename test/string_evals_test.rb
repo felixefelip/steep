@@ -427,6 +427,106 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # A gem namespaces its writer and calls it by the relative name, the way
+  # `Module#delegate` calls `ActiveSupport::Delegation.generate` from inside
+  # `class Module`. The constant is spelled `Writer` and names
+  # `Gem::Writer`; the callee is known by the second, so the spelling cannot
+  # be what finds it.
+  def test_a_writer_called_by_a_relative_constant_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Gem
+          module Writer
+            def self.generate: (untyped owner, Symbol name) -> void
+          end
+
+          class Base
+            def self.has_rich_text: (Symbol name) -> untyped
+          end
+        end
+
+        class Article < Gem::Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Gem
+          module Writer
+            def self.generate(owner, name)
+              owner.module_eval "def \#{name}; end"
+            end
+          end
+
+          class Base
+            def self.has_rich_text(name)
+              Writer.generate(self, name)
+            end
+          end
+        end
+
+        class Article < Gem::Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:16:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  # The same spelling naming ANOTHER method: inside `Gem`, `Writer` is
+  # `Gem::Writer`, which writes nothing, and the `::Writer` that does is never
+  # called. What a constant names is the checker's answer, not a suffix match.
+  def test_a_relative_constant_naming_another_class_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        module Gem
+          module Writer
+            def self.generate: (untyped owner, Symbol name) -> void
+          end
+
+          class Base
+            def self.has_rich_text: (Symbol name) -> untyped
+          end
+        end
+
+        class Article < Gem::Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        module Gem
+          module Writer
+            def self.generate(owner, name)
+            end
+          end
+
+          class Base
+            def self.has_rich_text(name)
+              Writer.generate(self, name)
+            end
+          end
+        end
+
+        class Article < Gem::Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal({}, evals_of(setup_project))
+    end
+  end
+
   HANDED_SELF_RBS = <<~RBS
     module Writer
       def self.generate: (untyped owner, Symbol method) -> untyped
