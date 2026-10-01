@@ -14,6 +14,7 @@ require "stringio"
 require 'uri'
 require "yaml"
 require "securerandom"
+require "digest/sha2"
 require "time"
 require 'socket'
 
