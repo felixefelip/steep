@@ -207,6 +207,39 @@ module Steep
         method_type.with(type: function.with(params: params))
       end
 
+      # The arguments that land in `def_node`'s positional rest parameter, as a
+      # tuple — or nil where it has none, or this call does not reach it.
+      #
+      # The parameter's TYPE can only say what each element is. The call also
+      # says how many there are and in which order, and it BUILDS the array, so
+      # what the body is handed is exactly those:
+      #
+      #   def delegate(*methods, to:)          # Array[Symbol] by type
+      #   delegate :email, :name, to: :user    # [:email, :name] at this call
+      #
+      # Read off the definition rather than the method type, which has no place
+      # for a positional AFTER the rest. Ruby fills the required ones on both
+      # sides first, then the optionals in order, and the rest takes what is
+      # left between them.
+      def rest_tuple(def_node)
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        return nil unless args.is_a?(::Parser::AST::Node)
+
+        params = args.children
+        rest_index = params.index { |param| param.type == :restarg } or return nil
+        positional = %i[arg optarg mlhs]
+
+        leading = params[0...rest_index].count { |param| param.type == :arg || param.type == :mlhs }
+        optional = params[0...rest_index].count { |param| param.type == :optarg }
+        trailing = params[(rest_index + 1)..].count { |param| positional.include?(param.type) }
+
+        free = positionals.size - leading - trailing
+        return nil if free.negative?
+
+        filled = [optional, free].min
+        AST::Types::Tuple.new(types: positionals[leading + filled, free - filled] || [])
+      end
+
       def ==(other)
         other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords &&
           other.self_type == self_type

@@ -140,6 +140,112 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # A rest parameter holds the arguments its call passed, in order and no more:
+  # the call builds that array, so the body checked for that call reads it as
+  # a tuple — the count of an `each` over it included. Anything that could
+  # change it unseen (a mutating call, a second name) takes that away.
+  def test_runner_reads_a_rest_parameter_as_the_arguments_passed
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def two: () -> String
+          def one: () -> String
+          def trailing: () -> String
+          def after_optional: () -> String
+          def nothing_left: () -> String
+          def with_a_push: () -> String
+          def through_join: () -> String
+          def reversed: () -> String
+          def aliased: () -> String
+          def names: (*Symbol) -> String
+          def pair: (Symbol, *Symbol, Symbol) -> String
+          def opt: (Symbol, ?Symbol, *Symbol) -> String
+          def tail: (Symbol, *Symbol) -> String
+          def pushed: (*Symbol) -> String
+          def joined: (*String) -> String
+          def mutated: (*Symbol) -> String
+          def leaked: (*Symbol) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~'RUBY')
+        class Bar
+          def two = names(:a, :b)
+          def one = names(:a)
+          def trailing = pair(:h, :m1, :m2, :t)
+          def after_optional = opt(:a, :b, :c)
+          def nothing_left = tail(:a)
+          def with_a_push = pushed(:a)
+          def through_join = joined("a", "b")
+          def reversed = mutated(:a, :b)
+          def aliased = leaked(:a)
+
+          def names(*ms)
+            parts = []
+            ms.each { |m| parts << "def #{m}" }
+            parts.join(";")
+          end
+
+          # The type of a method has no place for a positional after the rest,
+          # so the count comes from the definition: `:t` is not one of `ms`.
+          def pair(h, *ms, t)
+            parts = []
+            ms.each { |m| parts << "#{h}#{m}" }
+            parts.join(";")
+          end
+
+          def opt(a, b = :d, *ms)
+            parts = ["#{a}#{b}"]
+            ms.each { |m| parts << "#{m}" }
+            parts.join(";")
+          end
+
+          def tail(a, *ms)
+            parts = ["#{a}"]
+            ms.each { |m| parts << "#{m}" }
+            parts.join(";")
+          end
+
+          def pushed(*ms)
+            ms << :z
+            parts = []
+            ms.each { |m| parts << "#{m}" }
+            parts.join(";")
+          end
+
+          def joined(*ms)
+            ms.join(",")
+          end
+
+          def mutated(*ms)
+            ms.reverse!
+            parts = []
+            ms.each { |m| parts << "#{m}" }
+            parts.join(";")
+          end
+
+          def leaked(*ms)
+            other = ms
+            other << :q
+            parts = []
+            ms.each { |m| parts << "#{m}" }
+            parts.join(";")
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(:a, :b)" => '"def a;def b"', "(:a)" => '"def a"' }, methods.fetch("Bar#names"))
+      assert_equal({ "(:h, :m1, :m2, :t)" => '"hm1;hm2"' }, methods.fetch("Bar#pair"))
+      assert_equal({ "(:a, :b, :c)" => '"ab;c"' }, methods.fetch("Bar#opt"))
+      assert_equal({ "(:a)" => '"a"' }, methods.fetch("Bar#tail"))
+      assert_equal({ "(:a)" => '"a;z"' }, methods.fetch("Bar#pushed"))
+      assert_equal({ '("a", "b")' => '"a,b"' }, methods.fetch("Bar#joined"))
+      refute methods.key?("Bar#mutated")
+      refute methods.key?("Bar#leaked")
+    end
+  end
+
   # An expanded `each` runs its passes in order, so a pass reads what the one
   # before it wrote. The argument fixes `first` and `cur` for the first pass
   # only: decided again on the second, from the write.

@@ -109,6 +109,14 @@ module Steep
     # answers it where it checks the `if`.
     Branch = Struct.new(:node, :then_values, :else_values)
 
+    # What a rest parameter holds on entry: the arguments the call put in it.
+    # The array is BUILT by the call, so nothing but this body can reach it —
+    # it is born here as surely as `parts = []` is, only with contents the call
+    # site writes rather than the body. Which they are is the checker's to say,
+    # from the call this body is being checked for; checked for none, it has
+    # no contents.
+    Arrived = Struct.new(:def_node, :name)
+
     # What can end a pass early, or end the loop: each one makes "one push per
     # element" a claim about the elements that ran, which is not all of them.
     JUMPS = %i[break next redo retry return].freeze
@@ -136,6 +144,9 @@ module Steep
         body = body_of(def_node) or return {}
 
         found = {} #: Hash[Symbol, Array[untyped]?]
+        if (rest = rest_param(def_node))
+          found[rest] = [Arrived.new(def_node, rest)]
+        end
         lines = statements(body)
         # The value a body ENDS on leaves it, and nothing in this body runs
         # afterwards to be told a lie about it. `parts` written last is the
@@ -229,6 +240,13 @@ module Steep
           last = {} #: Hash[Symbol, [untyped, Array[untyped]]]
 
           replay(def_node, builders_for(builders, owner, def_node)) do |statement, pushed, contents|
+            # A loop over a local this vouches for READS it, and the checker asks
+            # for the count of passes at the `each`. The loop cannot push onto
+            # the local it runs over, so the contents are the same either side.
+            if (over = looped_local(statement, contents))
+              at_reads[statement.children[0]] = contents.fetch(over)
+            end
+
             unless pushed.empty?
               pushed.each do |name|
                 elements = contents.fetch(name)
@@ -289,6 +307,11 @@ module Steep
         return if readable.empty?
 
         contents = {} #: Hash[Symbol, Array[untyped]]
+        # Born on entry, before any statement runs.
+        if (rest = rest_param(def_node)) && readable.key?(rest)
+          contents[rest] = [Arrived.new(def_node, rest)]
+        end
+
         statements(body).each do |statement|
           if (seed = seed_from(statement)) && readable.key?(seed[0])
             contents[seed[0]] = seed[1]
@@ -649,7 +672,10 @@ module Steep
         # Inside the block the parameter IS that name, so a push onto it is a
         # push onto the element.
         return nil if watched.include?(param)
-        return nil if mentions?(collection, watched)
+        # The collection may be a local this vouches for — that is a READ, and
+        # its contents are the count. Named any other way it is a mention.
+        over = looped_local(statement, found)
+        return nil if !over && mentions?(collection, watched)
 
         lines = statements(body)
         return nil if lines.empty?
@@ -657,8 +683,35 @@ module Steep
 
         pushes = pushes_in(lines, found, watched) or return nil
         return nil if pushes.empty?
+        # Pushing onto the array being run over: one more pass per push, which
+        # is no count at all.
+        return nil if over && pushes.key?(over)
 
         pushes.transform_values { |values| Loop.new(statement, values) }
+      end
+
+      # The name of the watched local an `each` statement runs over, or nil.
+      def looped_local(statement, found)
+        return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :block
+
+        call = statement.children[0]
+        return nil unless call.type == :send && call.children[1] == :each && call.children.size == 2
+
+        collection = call.children[0]
+        return nil unless collection&.type == :lvar
+
+        name = collection.children[0]
+        found[name] ? name : nil
+      end
+
+      # The positional rest parameter of `def_node`, by name. An anonymous `*`
+      # has no local to read.
+      def rest_param(def_node)
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        return nil unless args.is_a?(Parser::AST::Node)
+
+        rest = args.children.find { |arg| arg.type == :restarg } or return nil
+        rest.children[0]
       end
 
       # `{ name => Branch }` where this statement is an `if` whose arms push
