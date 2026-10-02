@@ -29,7 +29,7 @@ module Steep
 
       # Both folds are keyed the same way and blocked the same way, so one
       # registry watches both tables.
-      TABLES = [LiteralIntrinsics, ReflectionIntrinsics].freeze
+      TABLES = [LiteralIntrinsics, ReflectionIntrinsics, IterationIntrinsics].freeze
       # Only `prepend` shadows an entry by LOOKUP. A module inserted by `include`
       # sits below the class in the chain, and every method in the table is one
       # the core class defines itself, so the class's own always wins:
