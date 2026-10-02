@@ -313,28 +313,25 @@ module Steep
           return false unless EVAL_METHODS.include?(node.children[1])
           return false unless accepted_receiver?(node, receivers, typing, parameters)
 
-          accepted_argument?(node.children[2], typing)
+          accepted_argument?(node.children[2])
         end
 
-        # What the eval is handed. Written as a string or an interpolation, it is
-        # readable on the syntax alone — and that is the cheap gate, which has no
-        # typing to consult.
+        # Whether this is the STRING form. `class_eval` handed an argument at all
+        # is: the block form takes none. So the argument's value is not what
+        # decides it — a `join` that does not fold has written code exactly as a
+        # heredoc has, only code this call site does not fix, and that is a hole
+        # (`literal_string` answers nil), not an absence. `ActiveSupport::
+        # Delegation` hands `module_eval` a `join`.
         #
-        # With a typing, what matters is the TYPE: a call site that folds to a
-        # string literal has written its source as surely as a heredoc does, and
-        # `ActiveSupport::Delegation` hands `module_eval` a `join` rather than a
-        # literal. Reading the node alone declined it before the value was ever
-        # looked at, while `literal_string` — which decides the same question one
-        # step later — has always read the type.
-        def accepted_argument?(argument, typing)
+        # `&block` and `*args` are the exceptions: a forwarder written with them
+        # does not say which form runs, and the block one writes no string.
+        def accepted_argument?(argument)
           return false if argument.nil?
-          return true if argument.type == :str || argument.type == :dstr
-          return true if typing.nil?
-          return false unless typing.has_type?(argument)
 
-          type = typing.type_of(node: argument)
-          type.is_a?(AST::Types::Literal) && type.value.is_a?(String)
+          !FORWARDED_ARGUMENTS.include?(argument.type)
         end
+
+        FORWARDED_ARGUMENTS = %i[block_pass splat].freeze
 
         # `typing` is nil for the cheap gate that only asks WHETHER a method
         # writes code, and that pass takes a named receiver on the syntax alone —
