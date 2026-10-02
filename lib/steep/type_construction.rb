@@ -498,21 +498,34 @@ module Steep
     # The types of an accumulator's contents, in order, or nil where any one of
     # them is not a literal. A `Loop` stands for one run of its pushes per pass,
     # and the passes are the ones `record_iterations` checked; a loop it did not
-    # expand has no count, so the contents have none either.
-    def accumulated_element_types(elements)
-      types = [] #: Array[AST::Types::t]
-
+    # expand has no count, so the contents have none either. A `Branch` stands
+    # for the pushes of the arm the check left reachable — per pass, inside a
+    # loop — and one whose condition stayed open has no contents to give.
+    def accumulated_element_types(elements, pass = nil, types = [])
       elements.each do |element|
-        if element.is_a?(Accumulators::Loop)
+        case element
+        when Accumulators::Loop
           passes = typing.iterations_of(node: element.block) or return nil
 
-          passes.each do |pass|
-            element.values.each do |value|
-              types << (pass[value] or return nil)
-            end
+          passes.each do |each_pass|
+            accumulated_element_types(element.values, each_pass, types) or return nil
+          end
+        when Accumulators::Branch
+          arm = pass ? pass[element.node] : typing.arm_of(node: element.node)
+
+          case arm
+          when :then
+            accumulated_element_types(element.then_values, pass, types) or return nil
+          when :else
+            accumulated_element_types(element.else_values, pass, types) or return nil
+          else
+            return nil
           end
         else
-          types << (accumulated_element_type(element) or return nil)
+          type = pass ? pass[element] : accumulated_element_type(element)
+          return nil unless type.is_a?(AST::Types::Literal)
+
+          types << type
         end
       end
 
@@ -520,16 +533,17 @@ module Steep
     end
 
     # Checks the body of an `each` that `Accumulators` counted once per element
-    # of its receiver, with the parameter bound to that element, and keeps what
-    # each pass pushes. Every pass runs in a typing of its own that is never
-    # saved: the program's typing of the body is the ordinary one, and a pass is
-    # only asked for the values it pushed.
+    # of its receiver, with the parameter bound to that element and the env the
+    # pass before it left, and keeps what each pass pushes — and which arm of
+    # every conditional it pushes under the pass took. Every pass runs in a
+    # typing of its own that is never saved: the program's typing of the body
+    # is the ordinary one, and a pass is only asked for what it pushed.
     #
     # Declined — the loop left unexpanded, so the local has no contents — unless
     # the call is Array's own `each`, unreplaced by the project, over a
     # collection whose length the receiver's type states.
     def record_iterations(node, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
-      values = source.accumulators.loops[node] or return
+      entries = source.accumulators.loops[node] or return
       typing.add_iterations(node, nil)
 
       names = decls.map { |decl| decl.method_name.to_s }.uniq
@@ -547,20 +561,71 @@ module Steep
       # Each pass is a check of the whole body, so the bound is on the work.
       return if collection.types.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
 
+      # Each pass starts where the one before it left off, as it does when the
+      # loop runs: a local of the method written in the body, or an ivar, is
+      # what the next pass reads.
+      #
+      #     ["x", "y"].each do |p|
+      #       if first then parts << p else parts << "rest" end   # "x;rest"
+      #       first = false
+      #     end
+      #
+      # A block body is entered with the method's locals PINNED to the types they
+      # have at the call (`for_block`), because nothing says when or how often a
+      # closure runs, and a write in it must keep what every run assumes. Here
+      # the runs are known — one per element, in order — so the pins are lifted:
+      # exactly the ones `for_block` added, and nothing an annotation enforces.
+      #
+      # Only the locals the body is entered with carry over. One born in the
+      # body is bound anew on every pass, and the parameter is the next element.
+      env = entry.context.type_env
+      outer = context.type_env.local_variable_types
+      unpinned = outer.select { |name, (type, enforced)| enforced.nil? && env.local_variable_types[name] == [type, type] }
+      env = env.merge(local_variable_types: unpinned)
+      carried = env.local_variable_types.keys
+
       passes = collection.types.map do |element|
         pass = entry
           .with_new_typing(typing.new_child)
-          .update_type_env { |env| env.refine_types(local_variable_types: { param.var => element }) }
-        pass.synthesize_block(node: node, block_body: block_body, block_type_hint: block_type_hint)
+          .update_type_env { env.refine_types(local_variable_types: { param.var => element }) }
+        body_type, pass_context = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
+        # A pass that cannot finish is the last one that runs, and the count
+        # is of every element.
+        return if body_type.is_a?(AST::Types::Bot)
 
-        values.to_h do |value|
-          type = pass.typing.has_type?(value) ? pass.typing.type_of(node: value) : AST::Builtin.any_type
-          type = pass.literal_operand_type(value, type)
-          [value, (type if type.is_a?(AST::Types::Literal))]
+        exit_env = pass_context.type_env
+        env = exit_env.update(local_variable_types: exit_env.local_variable_types.slice(*carried))
+
+        record = {}.compare_by_identity #: Typing::iteration_pass
+        Accumulators.each_entry(entries) do |value|
+          if value.is_a?(Accumulators::Branch)
+            record[value.node] = pass.typing.arm_of(node: value.node)
+          else
+            type = pass.typing.has_type?(value) ? pass.typing.type_of(node: value) : AST::Builtin.any_type
+            type = pass.literal_operand_type(value, type)
+            record[value] = (type if type.is_a?(AST::Types::Literal))
+          end
         end
+        record
       end
 
       typing.add_iterations(node, passes)
+    end
+
+    # Which arm of `node` this check leaves reachable, for a conditional some
+    # push sits under. Read off the same answer the checker reports
+    # `UnreachableBranch` from, so the arm counted is the arm it type-checked.
+    def record_arm(node, truthy:, falsy:)
+      return unless source.accumulators.branches[node]
+
+      arm =
+        if falsy.unreachable && !truthy.unreachable
+          :then
+        elsif truthy.unreachable && !falsy.unreachable
+          :else
+        end
+
+      typing.add_arm(node, arm)
     end
 
     # The tuple an array built by `<<` holds where this call reads it, or nil for
@@ -587,8 +652,9 @@ module Steep
     # More than one name because a single `fill(parts, others)` can be the last
     # thing that happens to each of them.
     def accumulated_final_types(node)
-      # A loop completes a local as a `<<` does: the block node is the statement.
-      return nil unless node.type == :send || node.type == :block
+      # A loop or a conditional completes a local as a `<<` does: the block or
+      # `if` node is the statement.
+      return nil unless node.type == :send || node.type == :block || node.type == :if
 
       entries = source.accumulators.final[node] or return nil
 
@@ -2266,6 +2332,7 @@ module Steep
             # checker's own answer about this condition instead of re-deriving it
             # from the AST. No-op unless the typing was asked to record.
             constr.typing.record_branch_envs(node, entry: constr.context.type_env, truthy: truthy.env, falsy: falsy.env)
+            constr.record_arm(node, truthy: truthy, falsy: falsy)
 
             if true_clause
               true_pair =
@@ -2394,6 +2461,14 @@ module Steep
               else
                 union_type_unify(true_type, false_type)
               end
+
+            # A decided conditional can be the last push into an array, as a
+            # `<<` can — see the same refinement in `:send`.
+            if (finals = constr.accumulated_final_types(node))
+              constr = constr.update_type_env do |env|
+                env.refine_types(local_variable_types: finals)
+              end
+            end
 
             add_typing(node, type: node_type, constr: constr)
           end
@@ -6780,9 +6855,7 @@ module Steep
 
     def synthesize_block(node:, block_type_hint:, block_body:)
       if block_body
-        body_type, _, context = synthesize(block_body, hint: block_context&.body_type || block_type_hint)
-
-        check_reopened_modules(block_body, hint: block_context&.body_type || block_type_hint)
+        body_type, context = synthesize_block_body(node: node, block_type_hint: block_type_hint, block_body: block_body)
 
         if annotated_body_type = block_context&.body_type
           if result = no_subtyping?(sub_type: body_type, super_type: annotated_body_type)
@@ -6805,6 +6878,17 @@ module Steep
       else
         AST::Builtin.nil_type
       end
+    end
+
+    # The type `block_body` synthesizes to — before any annotation replaces it
+    # — and the context it leaves, which is the env a next run of the same
+    # block starts from (`record_iterations`).
+    def synthesize_block_body(node:, block_type_hint:, block_body:)
+      body_type, _, context = synthesize(block_body, hint: block_context&.body_type || block_type_hint)
+
+      check_reopened_modules(block_body, hint: block_context&.body_type || block_type_hint)
+
+      [body_type, context]
     end
 
     # Re-checks the block body under every module the annotation names beyond the
