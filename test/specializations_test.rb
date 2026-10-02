@@ -246,6 +246,84 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # A frame that hands its rest parameter on: the array it hands is the one the
+  # call built, and nothing touched it before the hand-off, so the callee's
+  # parameter arrives holding exactly that — and the call site is keyed on it.
+  # Anything that could have changed it first, or a second name for it in the
+  # same call, takes that away.
+  def test_runner_follows_a_collection_handed_to_another_method
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def positional: () -> String
+          def keyword: () -> String
+          def mutated_first: () -> String
+          def handed_twice: () -> String
+          def outer: (*Symbol) -> String
+          def outer_kw: (*Symbol) -> String
+          def outer_mutates: (*Symbol) -> String
+          def outer_twice: (*Symbol) -> String
+          def gen: (untyped owner, Array[Symbol] methods) -> String
+          def gen_kw: (methods: Array[Symbol]) -> String
+          def gen_pair: (Array[Symbol] a, Array[Symbol] b) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~'RUBY')
+        class Bar
+          def positional = outer(:email)
+          def keyword = outer_kw(:a, :b)
+          def mutated_first = outer_mutates(:a, :b)
+          def handed_twice = outer_twice(:a)
+
+          def outer(*methods)
+            gen(self, methods)
+          end
+
+          def outer_kw(*methods)
+            gen_kw(methods: methods)
+          end
+
+          def outer_mutates(*methods)
+            methods.reverse!
+            gen(self, methods)
+          end
+
+          def outer_twice(*methods)
+            gen_pair(methods, methods)
+          end
+
+          def gen(owner, methods)
+            parts = []
+            methods.each { |m| parts << "def #{m}" }
+            parts.join(";")
+          end
+
+          def gen_kw(methods:)
+            parts = []
+            methods.each { |m| parts << "def #{m}" }
+            parts.join(";")
+          end
+
+          def gen_pair(a, b)
+            parts = []
+            a.each { |m| parts << "def #{m}" }
+            parts.join(";")
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(:email)" => '"def email"' }, methods.fetch("Bar#outer"))
+      assert_equal({ "(self, [:email])" => '"def email"' }, methods.fetch("Bar#gen"))
+      assert_equal({ "(:a, :b)" => '"def a;def b"' }, methods.fetch("Bar#outer_kw"))
+      assert_equal({ "(methods: [:a, :b])" => '"def a;def b"' }, methods.fetch("Bar#gen_kw"))
+      refute methods.key?("Bar#outer_mutates")
+      refute methods.key?("Bar#outer_twice")
+      refute methods.key?("Bar#gen_pair")
+    end
+  end
+
   # An expanded `each` runs its passes in order, so a pass reads what the one
   # before it wrote. The argument fixes `first` and `cur` for the first pass
   # only: decided again on the second, from the write.

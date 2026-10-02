@@ -683,6 +683,68 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # `Module#delegate`'s shape: the macro takes its names as a rest parameter and
+  # hands the array to a writer, which loops over it and evals one `join`. The
+  # writer's parameter arrives holding what the call site wrote, so each call
+  # site writes its own methods — one pass per name, the branch decided by its
+  # keyword.
+  def test_a_rest_parameter_handed_to_a_writer_is_looped_over
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Array[Symbol] methods, to: Symbol, ?allow_nil: bool?) -> void
+        end
+
+        class Base
+          def self.my_delegate: (*Symbol methods, to: Symbol, ?allow_nil: bool?) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~'RUBY')
+        module Writer
+          def self.generate(owner, methods, to:, allow_nil: nil)
+            receiver = to.to_s
+            method_def = []
+            methods.each do |method|
+              if allow_nil
+                method_def << "def #{method}" << "  _ = #{receiver}" << "  _&.#{method}" << "end"
+              else
+                method_def << "def #{method}" << "  #{receiver}.#{method}" << "end"
+              end
+            end
+            owner.module_eval(method_def.join(";"))
+            nil
+          end
+        end
+
+        class Base
+          def self.my_delegate(*methods, to:, allow_nil: nil)
+            Writer.generate(self, methods, to: to, allow_nil: allow_nil)
+          end
+        end
+
+        class Article < Base
+          my_delegate :email, :name, to: :user
+          my_delegate :title, to: :post, allow_nil: true
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal(
+        {
+          "app/base.rb:24:2" => [["def email;  user.email;end;def name;  user.name;end", "::Article"]],
+          "app/base.rb:25:2" => [["def title;  _ = post;  _&.title;end", "::Article"]]
+        },
+        chunks
+      )
+    end
+  end
+
   # The same arguments from two classes are two bodies: what the macro writes is
   # written on the class it runs in, and reading both call sites under one check
   # would write both on the same one.

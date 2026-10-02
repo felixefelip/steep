@@ -535,15 +535,35 @@ module Steep
       types
     end
 
-    # What a rest parameter was handed by the call this body is being checked
-    # for, or nil when it is checked for none — the ordinary check, where the
+    # What a parameter was handed by the call this body is being checked for,
+    # or nil when it is checked for none — the ordinary check, where the
     # parameter holds whatever any caller passes.
     def arrived_types(element)
       arguments = specialization_arguments(element.def_node) or return nil
-      tuple = arguments.rest_tuple(element.def_node) or return nil
+      tuple = arguments.arrived(element.def_node, element.name) or return nil
       return nil unless tuple.types.all? { |type| type.is_a?(AST::Types::Literal) }
 
       tuple.types
+    end
+
+    # Records, for every local this call is handed that `Accumulators` vouches
+    # for, the tuple it holds as the call is made — which is what the callee's
+    # parameter arrives holding, and what the call site's specialization is
+    # keyed on (`Specializations::Arguments.from_send`).
+    def record_vouched_arguments(arguments)
+      handed = source.accumulators.at_args
+      return if handed.empty?
+
+      arguments.each do |argument|
+        values = argument.type == :kwargs ? argument.children.filter_map { |pair| pair.children[1] if pair.type == :pair } : [argument]
+
+        values.each do |value|
+          elements = handed[value] or next
+          types = accumulated_element_types(elements) or next
+
+          typing.add_vouched(value, AST::Types::Tuple.new(types: types))
+        end
+      end
     end
 
     # Checks the body of an `each` that `Accumulators` counted once per element
@@ -3972,6 +3992,7 @@ module Steep
 
           if call.is_a?(TypeInference::MethodCall::Typed)
             declared_return_type = call.return_type
+            record_vouched_arguments(arguments)
             call = specialized_call(node, call, block_params: block_params, block_body: block_body)
             unless block_params || block_body
               call = constr.literal_intrinsic_call(

@@ -86,10 +86,9 @@ module Steep
             key, value = pair.children
             return nil unless key.type == :sym
 
-            type = typing.has_type?(value) ? typing.type_of(node: value) : nil
-            return nil unless type
+            return nil unless typing.has_type?(value)
 
-            keywords[key.children[0]] = type
+            keywords[key.children[0]] = argument_type(value, typing)
           end
         end
 
@@ -98,10 +97,32 @@ module Steep
           return nil if arg.type == :splat || arg.type == :block_pass
           return nil unless typing.has_type?(arg)
 
-          positionals << typing.type_of(node: arg)
+          positionals << argument_type(arg, typing)
         end
 
         new(positionals: positionals, keywords: keywords)
+      end
+
+      # The type a call site keys this argument on. A tuple stands for the
+      # contents a callee's parameter ARRIVES holding (`Arrived`), so it is only
+      # kept where those contents are known: an array the checker vouched for
+      # where it was handed on, or one built at this very argument. A tuple that
+      # is only a TYPE — a local annotated with one, a declaration's — says
+      # nothing about what the array holds now, and is widened to the array it
+      # describes:
+      #
+      #   # @type var parts: ["a", "b"]
+      #   parts.reverse!
+      #   fill(parts)          # ["b", "a"] at runtime
+      def self.argument_type(arg, typing)
+        vouched = typing.vouched_of(node: arg)
+        return vouched if vouched
+
+        type = typing.type_of(node: arg)
+        return type unless type.is_a?(AST::Types::Tuple)
+        return type if arg.type == :array || arg.type == :send
+
+        AST::Builtin::Array.instance_type(type.types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: type.types))
       end
 
       def initialize(positionals:, keywords:, positional_defaults: {}, keyword_defaults: {}, self_type: nil)
@@ -207,6 +228,35 @@ module Steep
         method_type.with(type: function.with(params: params))
       end
 
+      # What parameter `name` of `def_node` arrives holding at this call, as a
+      # tuple, or nil where that is not a collection this call fixes.
+      def arrived(def_node, name)
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        return nil unless args.is_a?(::Parser::AST::Node)
+
+        params = args.children
+        index = params.index { |param| %i[arg restarg kwarg].include?(param.type) && param.children[0] == name } or return nil
+        return rest_tuple(def_node) if params[index].type == :restarg
+
+        if params[index].type == :kwarg
+          type = keywords[name]
+          return type.is_a?(AST::Types::Tuple) ? type : nil
+        end
+
+        required = %i[arg mlhs]
+        type =
+          if params[0...index].all? { |param| required.include?(param.type) }
+            positionals[index]
+          else
+            # After an optional or the rest, a required positional takes its
+            # argument counted from the END.
+            from_end = params[(index + 1)..].count { |param| required.include?(param.type) }
+            positionals[positionals.size - 1 - from_end] if positionals.size > from_end
+          end
+
+        type if type.is_a?(AST::Types::Tuple)
+      end
+
       # The arguments that land in `def_node`'s positional rest parameter, as a
       # tuple — or nil where it has none, or this call does not reach it.
       #
@@ -253,8 +303,10 @@ module Steep
 
       private
 
+      # A tuple fixes an argument as surely as a literal does — it is only ever
+      # one whose contents are known (`argument_type`).
       def literal_type?(type)
-        type.is_a?(AST::Types::Literal)
+        type.is_a?(AST::Types::Literal) || type.is_a?(AST::Types::Tuple)
       end
 
       # A positional index names one parameter only up to the first rest

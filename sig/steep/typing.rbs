@@ -75,6 +75,8 @@ module Steep
 
     attr_reader arms: Hash[Parser::AST::Node, arm?]
 
+    attr_reader vouched: Hash[Parser::AST::Node, AST::Types::Tuple]
+
     attr_reader source_index: Index::SourceIndex
 
     type branch_env_record = { entry: TypeInference::TypeEnv, truthy: TypeInference::TypeEnv, falsy: TypeInference::TypeEnv }
@@ -114,6 +116,10 @@ module Steep
     def add_arm: (Parser::AST::Node node, arm? arm) -> void
 
     def arm_of: (node: Parser::AST::Node) -> arm?
+
+    def add_vouched: (Parser::AST::Node node, AST::Types::Tuple type) -> void
+
+    def vouched_of: (node: Parser::AST::Node) -> AST::Types::Tuple?
 
     def block_range: (Parser::AST::Node node) -> Range[Integer]
 

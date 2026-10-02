@@ -205,6 +205,11 @@ module Steep
     # the conditionals `Accumulators` asks about, and per pass of a loop, since
     # each pass is checked in a typing of its own.
     attr_reader :arms
+    # The contents a local held where it was handed to a call as an argument:
+    # `{ lvar node => tuple }`, for the locals `Accumulators` vouches for there.
+    # What a call site keys its specialization on, in place of the local's
+    # declared type, which says nothing about how many elements there are.
+    attr_reader :vouched
     attr_reader :source_index
     attr_reader :cursor_context
 
@@ -228,6 +233,7 @@ module Steep
       (@call_self_types = {}).compare_by_identity
       (@iterations = {}).compare_by_identity
       (@arms = {}).compare_by_identity
+      (@vouched = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -294,6 +300,14 @@ module Steep
 
     def arm_of(node:)
       arms.fetch(node) { parent&.arm_of(node: node) }
+    end
+
+    def add_vouched(node, type)
+      vouched[node] = type
+    end
+
+    def vouched_of(node:)
+      vouched.fetch(node) { parent&.vouched_of(node: node) }
     end
 
     def has_type?(node)
@@ -409,6 +423,7 @@ module Steep
       parent.call_self_types.merge!(call_self_types)
       parent.iterations.merge!(iterations)
       parent.arms.merge!(arms)
+      parent.vouched.merge!(vouched)
       parent.branch_envs.merge!(branch_envs)
 
       errors.each do |error|
