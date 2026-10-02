@@ -256,6 +256,77 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # A computed argument is as much an eval as an interpolation is. `class_eval`
+  # handed an argument at all is the string form — the block form takes none —
+  # so a `join` that does not fold has written code this call site does not
+  # decide: a hole, not nothing. `ActiveSupport::Delegation` hands
+  # `module_eval` a `join`.
+  def test_a_computed_argument_that_does_not_fold_records_a_hole
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+          def self.suffix: () -> String
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval ["def \#{name}", "end"].join(";")
+            class_eval ["def \#{name}_\#{suffix}", "end"].join(";")
+          end
+
+          def self.suffix
+            "ro"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content;end", nil], evals_of(setup_project).fetch("app/base.rb:13:2")
+    end
+  end
+
+  # The block form, forwarded: `&block` and `*args` say nothing about which
+  # form runs, and the block one writes no string at all.
+  def test_a_forwarded_block_or_splat_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.with_block: () { () -> void } -> untyped
+          def self.forward: (*untyped) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.with_block(&block)
+            class_eval(&block)
+          end
+
+          def self.forward(*args)
+            class_eval(*args)
+          end
+        end
+
+        class Article < Base
+          with_block { }
+          forward "def content; end"
+        end
+      RUBY
+
+      assert_equal({}, evals_of(setup_project))
+    end
+  end
+
   def test_module_eval_is_read_the_same_way
     in_tmpdir do
       write("sig/base.rbs", MACRO_RBS)
