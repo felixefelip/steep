@@ -205,10 +205,13 @@ module Steep
     # the conditionals `Accumulators` asks about, and per pass of a loop, since
     # each pass is checked in a typing of its own.
     attr_reader :arms
-    # The contents a local held where it was handed to a call as an argument:
-    # `{ lvar node => tuple }`, for the locals `Accumulators` vouches for there.
-    # What a call site keys its specialization on, in place of the local's
-    # declared type, which says nothing about how many elements there are.
+    # Collections whose contents someone vouched for, by the node that holds
+    # them: a local where it was handed to a call as an argument (`{ lvar node
+    # => tuple }`, for the locals `Accumulators` vouches for there), and a call
+    # whose value the checker computed rather than read off its declaration
+    # (`TypeConstruction#record_built_value`). What a call site keys its
+    # specialization on, and what the fold takes as an operand, in place of a
+    # declared type, which says nothing about what the array holds now.
     attr_reader :vouched
     attr_reader :source_index
     attr_reader :cursor_context

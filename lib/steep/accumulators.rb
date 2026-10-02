@@ -122,6 +122,9 @@ module Steep
     # element" a claim about the elements that ran, which is not all of them.
     JUMPS = %i[break next redo retry return].freeze
 
+    # Loops whose condition and body both run once per turn.
+    REPEATS = %i[while until while_post until_post].freeze
+
     class << self
       # `{ name => [element node, …] }` for every local in `def_node` whose
       # contents this can read, with the pushes in the order they happen.
@@ -667,12 +670,17 @@ module Steep
       # positional or keyword — and names nowhere else. A second mention in the
       # same statement could change the array before the call or after it, in an
       # order nothing here follows.
+      #
+      # Only a call the statement makes ONCE hands anything on. One in a loop,
+      # or in a block, runs any number of times, and the contents recorded here
+      # are only what the first run receives — the callee may push onto the
+      # array, and the next run receives that:
+      #
+      #     [1, 2].each { fill(parts) }   # `fill` gets `parts`, then `parts` + what it pushed
       def handed_arguments(statement, found)
         candidates = [] #: Array[untyped]
 
-        each_node(statement) do |child|
-          next unless child.type == :send
-
+        each_call_once(statement) do |child|
           arguments = child.children.drop(2)
           if arguments.last&.type == :kwargs
             pairs = arguments.pop.children
@@ -692,6 +700,37 @@ module Steep
           end
           count == 1
         end
+      end
+
+      # Every `send` in `node` that runs at most once each time `node` does. A
+      # loop's condition and body run once per turn, and a closure's body on a
+      # schedule of its own — only the call a block is attached to is made where
+      # it is written. A `retry` runs the whole statement again.
+      def each_call_once(node, &block)
+        return if jumps_back?(node)
+
+        each_call_in(node, &block)
+      end
+
+      def each_call_in(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        return if SCOPES.include?(node.type) || REPEATS.include?(node.type)
+
+        # `items.each { … }`: the call is made here, the body later.
+        return each_call_in(node.children[0], &block) if CLOSURES.include?(node.type)
+        # `for x in items`: the collection is read once, the body per item.
+        return each_call_in(node.children[1], &block) if node.type == :for
+
+        yield node if node.type == :send
+        node.children.each { |child| each_call_in(child, &block) }
+      end
+
+      def jumps_back?(node)
+        each_node(node) do |child|
+          return true if child.type == :retry
+        end
+
+        false
       end
 
       # A read that hands back an ELEMENT of a local this walk is watching.

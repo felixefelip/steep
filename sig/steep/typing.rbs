@@ -75,7 +75,7 @@ module Steep
 
     attr_reader arms: Hash[Parser::AST::Node, arm?]
 
-    attr_reader vouched: Hash[Parser::AST::Node, AST::Types::Tuple]
+    attr_reader vouched: Hash[Parser::AST::Node, AST::Types::t]
 
     attr_reader source_index: Index::SourceIndex
 
@@ -117,9 +117,9 @@ module Steep
 
     def arm_of: (node: Parser::AST::Node) -> arm?
 
-    def add_vouched: (Parser::AST::Node node, AST::Types::Tuple type) -> void
+    def add_vouched: (Parser::AST::Node node, AST::Types::t type) -> void
 
-    def vouched_of: (node: Parser::AST::Node) -> AST::Types::Tuple?
+    def vouched_of: (node: Parser::AST::Node) -> AST::Types::t?
 
     def block_range: (Parser::AST::Node node) -> Range[Integer]
 

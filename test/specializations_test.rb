@@ -324,6 +324,53 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # What a callee's parameter arrives holding is known only for a call made
+  # once, with an array nothing but this body could have changed. A hand-off in
+  # a block runs once per pass, the callee pushing onto the array each time; a
+  # method DECLARED to return a tuple may hand back an array anyone pushed onto.
+  def test_runner_declines_a_hand_off_it_cannot_follow
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          @names: [:a]
+          def looped: () -> void
+          def outer_loops: (*Symbol) -> void
+          def declared: () -> String
+          def names: () -> [:a]
+          def gen: (Array[Symbol] methods) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~'RUBY')
+        class Bar
+          def looped = outer_loops(:a)
+
+          def outer_loops(*methods)
+            [1, 2].each { gen(methods) }
+            nil
+          end
+
+          def names = (@names ||= [:a])
+
+          def declared
+            names.push(:z)
+            gen(names)
+          end
+
+          def gen(methods)
+            methods << :b
+            parts = []
+            methods.each { |m| parts << "def #{m}" }
+            parts.join(";")
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      refute methods.key?("Bar#gen")
+    end
+  end
+
   # An expanded `each` runs its passes in order, so a pass reads what the one
   # before it wrote. The argument fixes `first` and `cur` for the first pass
   # only: decided again on the second, from the write.

@@ -105,22 +105,26 @@ module Steep
 
       # The type a call site keys this argument on. A tuple stands for the
       # contents a callee's parameter ARRIVES holding (`Arrived`), so it is only
-      # kept where those contents are known: an array the checker vouched for
-      # where it was handed on, or one built at this very argument. A tuple that
-      # is only a TYPE — a local annotated with one, a declaration's — says
-      # nothing about what the array holds now, and is widened to the array it
-      # describes:
+      # kept where those contents are known: an array written at this very
+      # argument, or one the checker vouched for — a local where it was handed
+      # on, a call whose value the checker computed rather than read off its
+      # declaration (`TypeConstruction#record_built_value`). A tuple that is only
+      # a TYPE — a local annotated with one, a method declared to return one —
+      # says nothing about what the array holds now, and is widened to the array
+      # it describes:
       #
       #   # @type var parts: ["a", "b"]
       #   parts.reverse!
       #   fill(parts)          # ["b", "a"] at runtime
       def self.argument_type(arg, typing)
-        vouched = typing.vouched_of(node: arg)
-        return vouched if vouched
-
         type = typing.type_of(node: arg)
+        vouched = typing.vouched_of(node: arg)
+        # A local is vouched for IN PLACE of its declared type; a call only while
+        # its type is still the one the checker computed.
+        return vouched if vouched && (arg.type == :lvar || vouched == type)
+
         return type unless type.is_a?(AST::Types::Tuple)
-        return type if arg.type == :array || arg.type == :send
+        return type if arg.type == :array
 
         AST::Builtin::Array.instance_type(type.types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: type.types))
       end
