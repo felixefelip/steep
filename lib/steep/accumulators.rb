@@ -35,6 +35,20 @@ module Steep
   # element of a collection whose length it knows, with the block parameter
   # bound to that element (`TypeConstruction#record_iterations`).
   #
+  # And one conditional is the exception for the same reason, once the checker
+  # has DECIDED it:
+  #
+  #     parts << "self.private" if private     # `private` is `nil` here
+  #
+  # pushes nothing on a call site that passes no `private:`, and the check of
+  # the body knows that — it reported the arm unreachable. So a `Branch` takes
+  # its place among the pushes, holding what each arm would push, and the
+  # checker says which arm ran where it checks the `if`
+  # (`TypeConstruction#record_arm`). A condition it leaves open leaves the local
+  # without contents, which is what every conditional push did before. Inside a
+  # loop the arm is decided once per pass, so `if method == :a` can push on one
+  # element and not on the next.
+  #
   # Three boundaries this must not cross, each of which is a way to name one
   # array and read another:
   #
@@ -89,6 +103,12 @@ module Steep
     # collection only its type spells out.
     Loop = Struct.new(:block, :values)
 
+    # The pushes under one `if`, arm by arm, in the order each arm makes them —
+    # an `elsif` is a `Branch` of its own inside `else_values`. Which arm runs
+    # is not here: it is a question about the condition's type, and the checker
+    # answers it where it checks the `if`.
+    Branch = Struct.new(:node, :then_values, :else_values)
+
     # What can end a pass early, or end the loop: each one makes "one push per
     # element" a claim about the elements that ran, which is not all of them.
     JUMPS = %i[break next redo retry return].freeze
@@ -101,11 +121,13 @@ module Steep
       # not one inside an `if`, a loop or a block. That is the whole soundness
       # argument and it is deliberately blunt —
       #
-      #     parts << "b" if flag        # one content or two, and no way to know
-      #     names.each { parts << x if x }   # once per element, or not
+      #     fill = -> { parts << "b" }  # when, and how many times?
+      #     while more?; parts << x; end  # once per turn, and nothing counts them
       #
       # — so a push this cannot count simply disqualifies the local. A loop whose
-      # body is itself a straight line is the one block that is counted. Every other
+      # body is itself a straight line is the one block that is counted, and an
+      # `if` whose arms are is the one conditional; both are only SHAPES here,
+      # and the checker declines what it cannot count or decide. Every other
       # mention of the name disqualifies it too: `other = parts` and
       # `fill(parts)` both hand the array to someone who can push into it, and a
       # tracker that answered anyway would be confidently wrong rather than
@@ -158,10 +180,31 @@ module Steep
       # replayed for these: what is in one is written in it, and the only
       # question was whether anything here could change it before it leaves.
       #
-      # `loops` — `{ block node => [value node, …] }`, every `each` some local's
-      # contents run through, with what its body pushes. The checker re-checks
-      # those bodies once per element, so this is where it learns which ones.
-      Analysis = Struct.new(:at_reads, :final, :returned, :loops, keyword_init: true)
+      # `loops` — `{ block node => [value node or Branch, …] }`, every `each`
+      # some local's contents run through, with what its body pushes. The
+      # checker re-checks those bodies once per element, so this is where it
+      # learns which ones.
+      #
+      # `branches` — `{ if node => true }`, every conditional some push sits
+      # under, so the checker records the arm it decided only where someone
+      # will ask for it.
+      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, keyword_init: true)
+
+      # Every value node and every `Branch` in a list of pushes, however deeply
+      # nested in arms. What a pass of a loop has to keep is exactly these.
+      def each_entry(entries, &block)
+        entries.each do |entry|
+          yield entry
+
+          case entry
+          when Branch
+            each_entry(entry.then_values, &block)
+            each_entry(entry.else_values, &block)
+          when Loop
+            each_entry(entry.values, &block)
+          end
+        end
+      end
 
       # Both maps, from one pass. Ask a `Source` for this rather than calling it
       # per method — `Source#accumulators` holds the answer for the whole file,
@@ -176,6 +219,7 @@ module Steep
         final = {}.compare_by_identity #: Hash[untyped, Hash[Symbol, Array[untyped]]]
         returned = {}.compare_by_identity #: Hash[untyped, bool]
         loops = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
+        branches = {}.compare_by_identity #: Hash[untyped, bool]
 
         builders = builders_in(node)
 
@@ -190,8 +234,19 @@ module Steep
                 elements = contents.fetch(name)
                 last[name] = [statement, elements]
 
-                loop = elements.last
-                (loops[loop.block] ||= []).concat(loop.values) if loop.is_a?(Loop) && loop.block.equal?(statement)
+                entry = elements.last
+                case entry
+                when Loop
+                  next unless entry.block.equal?(statement)
+
+                  (loops[entry.block] ||= []).concat(entry.values)
+                when Branch
+                  next unless entry.node.equal?(statement)
+                else
+                  next
+                end
+
+                each_entry([entry]) { |nested| branches[nested.node] = true if nested.is_a?(Branch) }
               end
               next
             end
@@ -211,7 +266,7 @@ module Steep
           end
         end
 
-        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops)
+        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches)
       end
 
       private
@@ -248,9 +303,9 @@ module Steep
               contents[name] = contents.fetch(name) + elements
               pushed << name
             end
-          elsif (looped = loop_onto(statement, contents))
-            looped.each do |name, loop|
-              contents[name] = contents.fetch(name) + [loop]
+          elsif (looped = loop_onto(statement, contents) || branch_onto(statement, contents))
+            looped.each do |name, entry|
+              contents[name] = contents.fetch(name) + [entry]
               pushed << name
             end
           elsif (push = push_onto(statement, contents))
@@ -432,10 +487,11 @@ module Steep
           read(statement, found, {})
         end
 
-        # A loop is expanded by the checker where the BLOCK is checked, which is
-        # in this body and not at the call — so a caller has nothing to expand
-        # it with, and a summary that left it out would undercount.
-        return nil if found.each_value.any? { |pushes| pushes&.any?(Loop) }
+        # A loop is expanded by the checker where the BLOCK is checked, and a
+        # conditional decided where the `if` is — both in this body and not at
+        # the call, so a caller has nothing to expand them with, and a summary
+        # that left them out would miscount.
+        return nil if found.each_value.any? { |pushes| pushes&.any? { |entry| entry.is_a?(Loop) || entry.is_a?(Branch) } }
 
         summary = names.map { |name| found[name]&.any? ? found[name] : nil }
         summary.any? ? summary : nil
@@ -524,8 +580,8 @@ module Steep
           return
         end
 
-        if (looped = loop_onto(statement, found))
-          looped.each { |name, loop| found[name] = found[name] + [loop] }
+        if (looped = loop_onto(statement, found) || branch_onto(statement, found))
+          looped.each { |name, entry| found[name] = found[name] + [entry] }
           return
         end
 
@@ -599,19 +655,64 @@ module Steep
         return nil if lines.empty?
         return nil if lines.any? { |line| jumps?(line) }
 
-        loops = {} #: Hash[Symbol, Loop]
+        pushes = pushes_in(lines, found, watched) or return nil
+        return nil if pushes.empty?
+
+        pushes.transform_values { |values| Loop.new(statement, values) }
+      end
+
+      # `{ name => Branch }` where this statement is an `if` whose arms push
+      # onto watched locals in a straight line of their own, and whose condition
+      # names none of them. Which arm runs is the checker's to say; only the
+      # shape is decided here.
+      def branch_onto(statement, found)
+        watched = found.select { |_, pushes| pushes }.keys
+        branch_in(statement, found, watched)
+      end
+
+      def branch_in(statement, found, watched)
+        return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :if
+
+        predicate, then_clause, else_clause = statement.children
+        return nil if mentions?(predicate, watched)
+        # An arm that may leave early pushes what it reached, which is not what
+        # it says.
+        return nil if jumps?(statement)
+
+        arms = [then_clause, else_clause].map do |clause|
+          pushes_in(statements(clause), found, watched) or return nil
+        end
+
+        names = arms.flat_map(&:keys).uniq
+        return nil if names.empty?
+
+        names.to_h do |name|
+          [name, Branch.new(statement, arms[0].fetch(name, []), arms[1].fetch(name, []))]
+        end
+      end
+
+      # `{ name => [value node or Branch, …] }` for a straight line of a body
+      # this walk reads but does not own — a loop's, or an arm's — or nil where
+      # one of its statements names a watched local in any other way. A loop
+      # inside it is such a statement: its passes would have to be expanded per
+      # pass of the outer body, which nothing does.
+      def pushes_in(lines, found, watched)
+        pushes = {} #: Hash[Symbol, Array[untyped]]
+
         lines.each do |line|
           if (push = push_onto(line, found))
             name, values = push
             return nil if values.any? { |value| mentions?(value, watched) }
 
-            (loops[name] ||= Loop.new(statement, [])).values.concat(values)
+            (pushes[name] ||= []).concat(values)
+          elsif (branched = branch_in(line, found, watched))
+            branched.each { |name, branch| (pushes[name] ||= []) << branch }
           elsif mentions?(line, watched)
             return nil
           end
         end
 
-        loops.empty? ? nil : loops
+        pushes
       end
 
       # The one parameter of `{ |x| … }`, or nil for any other list — two

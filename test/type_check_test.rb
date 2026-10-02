@@ -359,6 +359,124 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # A push under a conditional the check DECIDES counts as the arm it left
+  # reachable — the shape `ActiveSupport::Delegation.generate` builds its
+  # source in, where every push sits under `if nilable == false / elsif
+  # allow_nil / else` and each of those is fixed by the call site.
+  def test_a_push_under_a_decided_condition_counts_its_arm
+    run_type_check_test(
+      signatures: {
+        "decided.rbs" => <<~RBS
+          class DecidedAccumulator
+            def modifier_off: (nil flag) -> String
+            def modifier_on: (true flag) -> String
+            def elsif_chain: (false nilable, nil allow_nil) -> String
+            def per_pass: () -> String
+            def per_pass_modifier: () -> String
+            def delegation_shaped: (true nilable, true allow_nil) -> String
+            def last_push: (true flag) -> untyped
+            def open: (bool flag) -> String
+          end
+        RBS
+      },
+      code: {
+        "decided.rb" => <<~'RUBY'
+          class DecidedAccumulator
+            def modifier_off(flag)
+              parts = ["a"]
+              parts << "b" if flag
+              parts.join(";")
+            end
+
+            def modifier_on(flag)
+              parts = ["a"]
+              parts << "b" if flag
+              parts.join(";")
+            end
+
+            def elsif_chain(nilable, allow_nil)
+              parts = []
+              if nilable == false
+                parts << "strict"
+              elsif allow_nil
+                parts << "lenient"
+              else
+                parts << "raising" << "rescue"
+              end
+              parts.join(";")
+            end
+
+            # Decided once per pass: the arm can differ from one element to the
+            # next.
+            def per_pass
+              parts = []
+              ["x", "y"].each do |piece|
+                if piece == "x"
+                  parts << "first #{piece}"
+                else
+                  parts << "then #{piece}"
+                end
+              end
+              parts.join(";")
+            end
+
+            def per_pass_modifier
+              parts = []
+              ["x", "y"].each { |piece| parts << piece if piece == "x" }
+              parts.join(";")
+            end
+
+            def delegation_shaped(nilable, allow_nil)
+              method_def = []
+              [:email, :name].each do |method|
+                if nilable == false
+                  method_def << "def #{method}" << "end"
+                elsif allow_nil
+                  method = method.to_s
+                  method_def << "def #{method}" << "  _ = user" << "end"
+                else
+                  method_def << "raise"
+                end
+              end
+              method_def.join(";")
+            end
+
+            # The conditional is the last push, so the local is complete there.
+            def last_push(flag)
+              parts = ["a"]
+              parts << "b" if flag
+              parts
+            end
+
+            # The condition stays `bool`: one content or two.
+            def open(flag)
+              parts = ["a"]
+              parts << "b" if flag
+              parts.join(";")
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("decided.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"a"', actual.fetch("modifier_off")
+      assert_equal '"a;b"', actual.fetch("modifier_on")
+      assert_equal '"strict"', actual.fetch("elsif_chain")
+      assert_equal '"first x;then y"', actual.fetch("per_pass")
+      assert_equal '"x"', actual.fetch("per_pass_modifier")
+      assert_equal '"def email;  _ = user;end;def name;  _ = user;end"', actual.fetch("delegation_shaped")
+      assert_equal '["a", "b"]', actual.fetch("last_push")
+      assert_equal "::String", actual.fetch("open")
+    end
+  end
+
   # The value a body ENDS on leaves it, and nothing in the body runs afterwards
   # to be told a lie about it — so a local handed back carries what was pushed
   # into it, where one handed MID-BODY to something this cannot read still does
@@ -734,7 +852,6 @@ class TypeCheckTest < Minitest::Test
             def leaks: (Array[String]) -> void
             def looped: (Array[String]) -> String
             def looped_with_next: () -> String
-            def looped_conditionally: () -> String
             def looped_and_read: () -> String
             def conditional: (bool) -> String
             def reassigned: () -> String
@@ -798,13 +915,6 @@ class TypeCheckTest < Minitest::Test
                 next if piece == "x"
                 parts << piece
               end
-              parts.join(";")
-            end
-
-            # The same question one level down: the push is not the body's.
-            def looped_conditionally
-              parts = []
-              ["x", "y"].each { |piece| parts << piece if piece == "x" }
               parts.join(";")
             end
 
@@ -895,7 +1005,6 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::String", actual.fetch("through_a_call_that_does_more")
       assert_equal "::String", actual.fetch("looped")
       assert_equal "::String", actual.fetch("looped_with_next")
-      assert_equal "::String", actual.fetch("looped_conditionally")
       assert_equal "::String", actual.fetch("looped_and_read")
       assert_equal "::String", actual.fetch("conditional")
       assert_equal "::String", actual.fetch("reassigned")

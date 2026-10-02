@@ -200,6 +200,11 @@ module Steep
     # and thrown away — the node has ONE type in the program, and these are the
     # types it has on a given pass — so this is where they are kept.
     attr_reader :iterations
+    # Which arm of an `if` a push sits under the check left reachable: `{ if
+    # node => :then | :else | nil }`, nil where it left both. Recorded only for
+    # the conditionals `Accumulators` asks about, and per pass of a loop, since
+    # each pass is checked in a typing of its own.
+    attr_reader :arms
     attr_reader :source_index
     attr_reader :cursor_context
 
@@ -222,6 +227,7 @@ module Steep
       (@method_calls = {}).compare_by_identity
       (@call_self_types = {}).compare_by_identity
       (@iterations = {}).compare_by_identity
+      (@arms = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -280,6 +286,14 @@ module Steep
 
     def iterations_of(node:)
       iterations.fetch(node) { parent&.iterations_of(node: node) }
+    end
+
+    def add_arm(node, arm)
+      arms[node] = arm
+    end
+
+    def arm_of(node:)
+      arms.fetch(node) { parent&.arm_of(node: node) }
     end
 
     def has_type?(node)
@@ -394,6 +408,7 @@ module Steep
       parent.method_calls.merge!(method_calls)
       parent.call_self_types.merge!(call_self_types)
       parent.iterations.merge!(iterations)
+      parent.arms.merge!(arms)
       parent.branch_envs.merge!(branch_envs)
 
       errors.each do |error|

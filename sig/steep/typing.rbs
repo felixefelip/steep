@@ -67,9 +67,13 @@ module Steep
 
     attr_reader call_self_types: Hash[Parser::AST::Node, AST::Types::t?]
 
-    type iteration_pass = Hash[Parser::AST::Node, AST::Types::t?]
+    type iteration_pass = Hash[Parser::AST::Node, AST::Types::t | arm | nil]
+
+    type arm = :then | :else
 
     attr_reader iterations: Hash[Parser::AST::Node, Array[iteration_pass]?]
+
+    attr_reader arms: Hash[Parser::AST::Node, arm?]
 
     attr_reader source_index: Index::SourceIndex
 
@@ -106,6 +110,10 @@ module Steep
     def add_iterations: (Parser::AST::Node node, Array[iteration_pass]? passes) -> void
 
     def iterations_of: (node: Parser::AST::Node) -> Array[iteration_pass]?
+
+    def add_arm: (Parser::AST::Node node, arm? arm) -> void
+
+    def arm_of: (node: Parser::AST::Node) -> arm?
 
     def block_range: (Parser::AST::Node node) -> Range[Integer]
 
