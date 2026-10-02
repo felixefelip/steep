@@ -510,6 +510,9 @@ module Steep
           passes.each do |each_pass|
             accumulated_element_types(element.values, each_pass, types) or return nil
           end
+        when Accumulators::Arrived
+          arrived = arrived_types(element) or return nil
+          types.concat(arrived)
         when Accumulators::Branch
           arm = pass ? pass[element.node] : typing.arm_of(node: element.node)
 
@@ -530,6 +533,17 @@ module Steep
       end
 
       types
+    end
+
+    # What a rest parameter was handed by the call this body is being checked
+    # for, or nil when it is checked for none — the ordinary check, where the
+    # parameter holds whatever any caller passes.
+    def arrived_types(element)
+      arguments = specialization_arguments(element.def_node) or return nil
+      tuple = arguments.rest_tuple(element.def_node) or return nil
+      return nil unless tuple.types.all? { |type| type.is_a?(AST::Types::Literal) }
+
+      tuple.types
     end
 
     # Checks the body of an `each` that `Accumulators` counted once per element
@@ -556,7 +570,10 @@ module Steep
       param = block_params.params.first
       return unless block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
 
-      collection = literal_operand_type(node.children[0].children[0], receiver_type)
+      # A local `Accumulators` vouches for is read where the loop starts; any
+      # other receiver has to be a collection written out here.
+      collection = accumulated_type(node.children[0]) ||
+                   literal_operand_type(node.children[0].children[0], receiver_type)
       return unless collection.is_a?(AST::Types::Tuple)
       # Each pass is a check of the whole body, so the bound is on the work.
       return if collection.types.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
