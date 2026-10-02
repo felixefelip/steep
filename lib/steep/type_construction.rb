@@ -533,11 +533,11 @@ module Steep
     end
 
     # Checks the body of an `each` that `Accumulators` counted once per element
-    # of its receiver, with the parameter bound to that element, and keeps what
-    # each pass pushes — and which arm of every conditional it pushes under the
-    # pass took. Every pass runs in a typing of its own that is never saved: the
-    # program's typing of the body is the ordinary one, and a pass is only asked
-    # for what it pushed.
+    # of its receiver, with the parameter bound to that element and the env the
+    # pass before it left, and keeps what each pass pushes — and which arm of
+    # every conditional it pushes under the pass took. Every pass runs in a
+    # typing of its own that is never saved: the program's typing of the body
+    # is the ordinary one, and a pass is only asked for what it pushed.
     #
     # Declined — the loop left unexpanded, so the local has no contents — unless
     # the call is Array's own `each`, unreplaced by the project, over a
@@ -561,11 +561,40 @@ module Steep
       # Each pass is a check of the whole body, so the bound is on the work.
       return if collection.types.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
 
+      # Each pass starts where the one before it left off, as it does when the
+      # loop runs: a local of the method written in the body, or an ivar, is
+      # what the next pass reads.
+      #
+      #     ["x", "y"].each do |p|
+      #       if first then parts << p else parts << "rest" end   # "x;rest"
+      #       first = false
+      #     end
+      #
+      # A block body is entered with the method's locals PINNED to the types they
+      # have at the call (`for_block`), because nothing says when or how often a
+      # closure runs, and a write in it must keep what every run assumes. Here
+      # the runs are known — one per element, in order — so the pins are lifted:
+      # exactly the ones `for_block` added, and nothing an annotation enforces.
+      #
+      # Only the locals the body is entered with carry over. One born in the
+      # body is bound anew on every pass, and the parameter is the next element.
+      env = entry.context.type_env
+      outer = context.type_env.local_variable_types
+      unpinned = outer.select { |name, (type, enforced)| enforced.nil? && env.local_variable_types[name] == [type, type] }
+      env = env.merge(local_variable_types: unpinned)
+      carried = env.local_variable_types.keys
+
       passes = collection.types.map do |element|
         pass = entry
           .with_new_typing(typing.new_child)
-          .update_type_env { |env| env.refine_types(local_variable_types: { param.var => element }) }
-        pass.synthesize_block(node: node, block_body: block_body, block_type_hint: block_type_hint)
+          .update_type_env { env.refine_types(local_variable_types: { param.var => element }) }
+        body_type, pass_context = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
+        # A pass that cannot finish is the last one that runs, and the count
+        # is of every element.
+        return if body_type.is_a?(AST::Types::Bot)
+
+        exit_env = pass_context.type_env
+        env = exit_env.update(local_variable_types: exit_env.local_variable_types.slice(*carried))
 
         record = {}.compare_by_identity #: Typing::iteration_pass
         Accumulators.each_entry(entries) do |value|
@@ -6826,9 +6855,7 @@ module Steep
 
     def synthesize_block(node:, block_type_hint:, block_body:)
       if block_body
-        body_type, _, context = synthesize(block_body, hint: block_context&.body_type || block_type_hint)
-
-        check_reopened_modules(block_body, hint: block_context&.body_type || block_type_hint)
+        body_type, context = synthesize_block_body(node: node, block_type_hint: block_type_hint, block_body: block_body)
 
         if annotated_body_type = block_context&.body_type
           if result = no_subtyping?(sub_type: body_type, super_type: annotated_body_type)
@@ -6851,6 +6878,17 @@ module Steep
       else
         AST::Builtin.nil_type
       end
+    end
+
+    # The type `block_body` synthesizes to — before any annotation replaces it
+    # — and the context it leaves, which is the env a next run of the same
+    # block starts from (`record_iterations`).
+    def synthesize_block_body(node:, block_type_hint:, block_body:)
+      body_type, _, context = synthesize(block_body, hint: block_context&.body_type || block_type_hint)
+
+      check_reopened_modules(block_body, hint: block_context&.body_type || block_type_hint)
+
+      [body_type, context]
     end
 
     # Re-checks the block body under every module the annotation names beyond the

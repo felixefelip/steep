@@ -140,6 +140,60 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # An expanded `each` runs its passes in order, so a pass reads what the one
+  # before it wrote. The argument fixes `first` and `cur` for the first pass
+  # only: decided again on the second, from the write.
+  def test_runner_threads_a_loop_pass_into_the_next
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: () -> String
+          def shout: () -> String
+          def label: (bool) -> String
+          def echo: (String) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def greet
+            label(true)
+          end
+
+          def shout
+            echo("a")
+          end
+
+          def label(first)
+            parts = []
+            ["x", "y"].each do |piece|
+              if first
+                parts << piece
+              else
+                parts << "rest"
+              end
+              first = false
+            end
+            parts.join(";")
+          end
+
+          def echo(cur)
+            parts = []
+            ["x", "y"].each do |piece|
+              parts << cur
+              cur = "b"
+            end
+            parts.join(";")
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(true)" => '"x;rest"' }, methods.fetch("Bar#label"))
+      assert_equal({ '("a")' => '"a;b"' }, methods.fetch("Bar#echo"))
+    end
+  end
+
   # felixefelip/rbs_infer#345 stage S5. `relay` has no literal in its own body —
   # it hands its parameter on — so its return is only specializable once `label`
   # already is, which is a second generation.
