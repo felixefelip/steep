@@ -18,7 +18,7 @@ module Steep
       # which is not something a list can hold. See `block_method`.
       CORE_CLASSES = Set[
         "String", "Integer", "Symbol", "Array", "Enumerable", "Set", "Kernel",
-        "Object", "Module", "Class", "Method", "UnboundMethod"
+        "Object", "Module", "Class", "Method", "UnboundMethod", "Regexp"
       ]
 
       # Scanning never reads the registry, only adds to it, so what one source
