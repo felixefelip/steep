@@ -495,6 +495,74 @@ module Steep
       type if type.is_a?(AST::Types::Literal)
     end
 
+    # The types of an accumulator's contents, in order, or nil where any one of
+    # them is not a literal. A `Loop` stands for one run of its pushes per pass,
+    # and the passes are the ones `record_iterations` checked; a loop it did not
+    # expand has no count, so the contents have none either.
+    def accumulated_element_types(elements)
+      types = [] #: Array[AST::Types::t]
+
+      elements.each do |element|
+        if element.is_a?(Accumulators::Loop)
+          passes = typing.iterations_of(node: element.block) or return nil
+
+          passes.each do |pass|
+            element.values.each do |value|
+              types << (pass[value] or return nil)
+            end
+          end
+        else
+          types << (accumulated_element_type(element) or return nil)
+        end
+      end
+
+      types
+    end
+
+    # Checks the body of an `each` that `Accumulators` counted once per element
+    # of its receiver, with the parameter bound to that element, and keeps what
+    # each pass pushes. Every pass runs in a typing of its own that is never
+    # saved: the program's typing of the body is the ordinary one, and a pass is
+    # only asked for the values it pushed.
+    #
+    # Declined — the loop left unexpanded, so the local has no contents — unless
+    # the call is Array's own `each`, unreplaced by the project, over a
+    # collection whose length the receiver's type states.
+    def record_iterations(node, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
+      values = source.accumulators.loops[node] or return
+      typing.add_iterations(node, nil)
+
+      names = decls.map { |decl| decl.method_name.to_s }.uniq
+      return unless names.size == 1
+
+      key = MethodIdentity.normalize(names.first)
+      return unless key == "::Array#each"
+      return if literal_method_registry.blocked?(key)
+
+      param = block_params.params.first
+      return unless block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
+
+      collection = literal_operand_type(node.children[0].children[0], receiver_type)
+      return unless collection.is_a?(AST::Types::Tuple)
+      # Each pass is a check of the whole body, so the bound is on the work.
+      return if collection.types.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
+
+      passes = collection.types.map do |element|
+        pass = entry
+          .with_new_typing(typing.new_child)
+          .update_type_env { |env| env.refine_types(local_variable_types: { param.var => element }) }
+        pass.synthesize_block(node: node, block_body: block_body, block_type_hint: block_type_hint)
+
+        values.to_h do |value|
+          type = pass.typing.has_type?(value) ? pass.typing.type_of(node: value) : AST::Builtin.any_type
+          type = pass.literal_operand_type(value, type)
+          [value, (type if type.is_a?(AST::Types::Literal))]
+        end
+      end
+
+      typing.add_iterations(node, passes)
+    end
+
     # The tuple an array built by `<<` holds where this call reads it, or nil for
     # every other call — which is nearly all of them.
     #
@@ -509,9 +577,7 @@ module Steep
       return nil unless node.type == :send
 
       elements = source.accumulators.at_reads[node] or return nil
-
-      types = elements.map { |element| accumulated_element_type(element) }
-      return nil unless types.all?
+      types = accumulated_element_types(elements) or return nil
 
       AST::Types::Tuple.new(types: types)
     end
@@ -521,14 +587,14 @@ module Steep
     # More than one name because a single `fill(parts, others)` can be the last
     # thing that happens to each of them.
     def accumulated_final_types(node)
-      return nil unless node.type == :send
+      # A loop completes a local as a `<<` does: the block node is the statement.
+      return nil unless node.type == :send || node.type == :block
 
       entries = source.accumulators.final[node] or return nil
 
       types = {} #: Hash[Symbol, AST::Types::t]
       entries.each do |name, elements|
-        element_types = elements.map { |element| accumulated_element_type(element) }
-        next unless element_types.all?
+        element_types = accumulated_element_types(elements) or next
 
         types[name] = AST::Types::Tuple.new(types: element_types)
       end
@@ -6135,6 +6201,7 @@ module Steep
                   )
                 }
 
+                entry_constr = block_constr
                 block_body_type = block_constr.synthesize_block(
                   node: node,
                   block_body: block_body,
@@ -6182,6 +6249,16 @@ module Steep
                 end
 
                 block_constr.typing.save!
+
+                constr.record_iterations(
+                  node,
+                  entry: entry_constr,
+                  receiver_type: receiver_type,
+                  block_params: block_params_,
+                  block_body: block_body,
+                  block_type_hint: method_type.block.type.return_type,
+                  decls: decls
+                )
               else
                 # Failed to infer the type of block parameters
                 constr.type_block_without_hint(node: node, block_annotations: block_annotations, block_params: block_params_, block_body: block_body) do |error|

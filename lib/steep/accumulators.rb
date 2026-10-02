@@ -26,6 +26,15 @@ module Steep
   # times, that body runs). What is left is a local that is born from an array
   # literal, pushed to in a straight line, and read.
   #
+  # One block is the exception, because both of those are answerable for it:
+  #
+  #     ["x", "y"].each { |piece| parts << piece }
+  #
+  # runs NOW, once per element, and the elements are written out. So a `Loop`
+  # takes its place among the pushes and the checker expands it — once per
+  # element of a collection whose length it knows, with the block parameter
+  # bound to that element (`TypeConstruction#record_iterations`).
+  #
   # Three boundaries this must not cross, each of which is a way to name one
   # array and read another:
   #
@@ -74,6 +83,16 @@ module Steep
     # so a mention inside one takes the local away.
     CLOSURES = %i[block numblock].freeze
 
+    # The pushes one `each` makes on every pass, in the order it makes them.
+    # The count is not here: it is the length of the collection, which the
+    # checker knows and this walk may not — a constant or a parameter is a
+    # collection only its type spells out.
+    Loop = Struct.new(:block, :values)
+
+    # What can end a pass early, or end the loop: each one makes "one push per
+    # element" a claim about the elements that ran, which is not all of them.
+    JUMPS = %i[break next redo retry return].freeze
+
     class << self
       # `{ name => [element node, …] }` for every local in `def_node` whose
       # contents this can read, with the pushes in the order they happen.
@@ -83,9 +102,10 @@ module Steep
       # argument and it is deliberately blunt —
       #
       #     parts << "b" if flag        # one content or two, and no way to know
-      #     names.each { parts << x }   # read once, runs any number of times
+      #     names.each { parts << x if x }   # once per element, or not
       #
-      # — so a push this cannot count simply disqualifies the local. Every other
+      # — so a push this cannot count simply disqualifies the local. A loop whose
+      # body is itself a straight line is the one block that is counted. Every other
       # mention of the name disqualifies it too: `other = parts` and
       # `fill(parts)` both hand the array to someone who can push into it, and a
       # tracker that answered anyway would be confidently wrong rather than
@@ -137,7 +157,11 @@ module Steep
       # `returned` — the array LITERALS a body hands back. Nothing has to be
       # replayed for these: what is in one is written in it, and the only
       # question was whether anything here could change it before it leaves.
-      Analysis = Struct.new(:at_reads, :final, :returned, keyword_init: true)
+      #
+      # `loops` — `{ block node => [value node, …] }`, every `each` some local's
+      # contents run through, with what its body pushes. The checker re-checks
+      # those bodies once per element, so this is where it learns which ones.
+      Analysis = Struct.new(:at_reads, :final, :returned, :loops, keyword_init: true)
 
       # Both maps, from one pass. Ask a `Source` for this rather than calling it
       # per method — `Source#accumulators` holds the answer for the whole file,
@@ -151,6 +175,7 @@ module Steep
         at_reads = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
         final = {}.compare_by_identity #: Hash[untyped, Hash[Symbol, Array[untyped]]]
         returned = {}.compare_by_identity #: Hash[untyped, bool]
+        loops = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
 
         builders = builders_in(node)
 
@@ -161,7 +186,13 @@ module Steep
 
           replay(def_node, builders_for(builders, owner, def_node)) do |statement, pushed, contents|
             unless pushed.empty?
-              pushed.each { |name| last[name] = [statement, contents.fetch(name)] }
+              pushed.each do |name|
+                elements = contents.fetch(name)
+                last[name] = [statement, elements]
+
+                loop = elements.last
+                (loops[loop.block] ||= []).concat(loop.values) if loop.is_a?(Loop) && loop.block.equal?(statement)
+              end
               next
             end
 
@@ -180,7 +211,7 @@ module Steep
           end
         end
 
-        Analysis.new(at_reads: at_reads, final: final, returned: returned)
+        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops)
       end
 
       private
@@ -217,9 +248,14 @@ module Steep
               contents[name] = contents.fetch(name) + elements
               pushed << name
             end
+          elsif (looped = loop_onto(statement, contents))
+            looped.each do |name, loop|
+              contents[name] = contents.fetch(name) + [loop]
+              pushed << name
+            end
           elsif (push = push_onto(statement, contents))
-            name, value = push
-            contents[name] = contents.fetch(name) + [value]
+            name, values = push
+            contents[name] = contents.fetch(name) + values
             pushed << name
           end
 
@@ -396,6 +432,11 @@ module Steep
           read(statement, found, {})
         end
 
+        # A loop is expanded by the checker where the BLOCK is checked, which is
+        # in this body and not at the call — so a caller has nothing to expand
+        # it with, and a summary that left it out would undercount.
+        return nil if found.each_value.any? { |pushes| pushes&.any?(Loop) }
+
         summary = names.map { |name| found[name]&.any? ? found[name] : nil }
         summary.any? ? summary : nil
       end
@@ -478,8 +519,13 @@ module Steep
         end
 
         if (push = push_onto(statement, found))
-          name, value = push
-          found[name] = found[name] + [value]
+          name, values = push
+          found[name] = found[name] + values
+          return
+        end
+
+        if (looped = loop_onto(statement, found))
+          looped.each { |name, loop| found[name] = found[name] + [loop] }
           return
         end
 
@@ -504,16 +550,102 @@ module Steep
           CollectionReaders.element?(node) && node.children[0]&.type == :lvar
       end
 
+      # `[name, [value, …]]` where this statement pushes onto a watched local.
+      # More than one value for `parts << a << b`: `<<` hands back the array it
+      # was called on, so each link of the chain pushes onto the same one.
       def push_onto(statement, found)
-        return nil unless statement.type == :send && statement.children[1] == :<<
+        values = [] #: Array[untyped]
+        node = statement
 
-        receiver = statement.children[0]
-        return nil unless receiver&.type == :lvar
+        while node.is_a?(Parser::AST::Node) && node.type == :send && node.children[1] == :<< && node.children.size == 3
+          values.unshift(node.children[2])
+          node = node.children[0]
+        end
 
-        name = receiver.children[0]
+        return nil if values.empty?
+        return nil unless node&.type == :lvar
+
+        name = node.children[0]
         return nil unless found[name]
 
-        [name, statement.children[2]]
+        [name, values]
+      end
+
+      # `{ name => Loop }` where this statement is an `each` over a collection,
+      # whose body pushes onto watched locals in a straight line of its own —
+      # and mentions them nowhere else. Anything short of that is a closure like
+      # any other, and `strike` takes every local it names.
+      #
+      # Only the shape is decided here. Whether the receiver is a collection of
+      # known length, and that `each` is Array's own, are questions about types,
+      # and the checker answers them where it expands the loop: one it cannot
+      # expand leaves the local without contents rather than with wrong ones.
+      def loop_onto(statement, found)
+        return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :block
+
+        call, args, body = statement.children
+        return nil unless call.type == :send && call.children[1] == :each && call.children.size == 2
+
+        collection = call.children[0] or return nil
+        param = block_param(args) or return nil
+
+        watched = found.select { |_, pushes| pushes }.keys
+        # Inside the block the parameter IS that name, so a push onto it is a
+        # push onto the element.
+        return nil if watched.include?(param)
+        return nil if mentions?(collection, watched)
+
+        lines = statements(body)
+        return nil if lines.empty?
+        return nil if lines.any? { |line| jumps?(line) }
+
+        loops = {} #: Hash[Symbol, Loop]
+        lines.each do |line|
+          if (push = push_onto(line, found))
+            name, values = push
+            return nil if values.any? { |value| mentions?(value, watched) }
+
+            (loops[name] ||= Loop.new(statement, [])).values.concat(values)
+          elsif mentions?(line, watched)
+            return nil
+          end
+        end
+
+        loops.empty? ? nil : loops
+      end
+
+      # The one parameter of `{ |x| … }`, or nil for any other list — two
+      # parameters destructure the element, which is a different question.
+      def block_param(args)
+        return nil unless args.is_a?(Parser::AST::Node) && args.type == :args && args.children.size == 1
+
+        param = args.children[0]
+        param = param.children[0] if param.type == :procarg0 && param.children.size == 1 && param.children[0].is_a?(Parser::AST::Node)
+
+        case param.type
+        when :arg
+          param.children[0]
+        when :procarg0
+          param.children[0].is_a?(Symbol) ? param.children[0] : nil
+        end
+      end
+
+      # Whether `node` reads or writes one of `names`, stopping at a body of its
+      # own.
+      def mentions?(node, names)
+        each_node(node) do |child|
+          return true if (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0])
+        end
+
+        false
+      end
+
+      def jumps?(node)
+        each_node(node) do |child|
+          return true if JUMPS.include?(child.type)
+        end
+
+        false
       end
 
       def array_literal?(node)

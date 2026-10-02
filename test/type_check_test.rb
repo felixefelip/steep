@@ -264,6 +264,101 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # An `each` over a collection whose length is written out runs its body once
+  # per element, NOW — so its pushes are counted the way a straight line's are,
+  # each pass checked with the parameter bound to its element.
+  def test_an_array_built_in_a_loop_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "looped.rbs" => <<~RBS
+          class LoopedAccumulator
+            def looped: () -> String
+            def chained: () -> String
+            def looped_and_chained: () -> String
+            def through_a_local: () -> String
+            def around_a_loop: () -> String
+            def two_arrays: () -> String
+            def built: () -> untyped
+          end
+        RBS
+      },
+      code: {
+        "looped.rb" => <<~RUBY
+          class LoopedAccumulator
+            def looped
+              parts = []
+              ["x", "y"].each { |piece| parts << piece }
+              parts.join(";")
+            end
+
+            # `<<` hands back the array, so every link pushes onto it.
+            def chained
+              parts = []
+              parts << "a" << "b" << "c"
+              parts.join(";")
+            end
+
+            def looped_and_chained
+              parts = []
+              [:a, :b].each do |name|
+                parts << "def \#{name}" << "end"
+              end
+              parts.join(";")
+            end
+
+            def through_a_local
+              parts = []
+              [:a, :b].each do |name|
+                text = "\#{name}!"
+                parts << text
+              end
+              parts.join(";")
+            end
+
+            def around_a_loop
+              parts = ["begin"]
+              ["x", "y"].each { |piece| parts << piece }
+              parts << "end"
+              parts.join(";")
+            end
+
+            def two_arrays
+              heads = []
+              tails = []
+              ["x", "y"].each do |piece|
+                heads << "h\#{piece}"
+                tails << "t\#{piece}"
+              end
+              heads.join(",") + tails.join(",")
+            end
+
+            def built
+              parts = []
+              [:a, :b].each { |name| parts << "def \#{name}" }
+              parts
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("looped.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"x;y"', actual.fetch("looped")
+      assert_equal '"a;b;c"', actual.fetch("chained")
+      assert_equal '"def a;end;def b;end"', actual.fetch("looped_and_chained")
+      assert_equal '"a!;b!"', actual.fetch("through_a_local")
+      assert_equal '"begin;x;y;end"', actual.fetch("around_a_loop")
+      assert_equal '"hx,hytx,ty"', actual.fetch("two_arrays")
+      assert_equal '["def a", "def b"]', actual.fetch("built")
+    end
+  end
+
   # The value a body ENDS on leaves it, and nothing in the body runs afterwards
   # to be told a lie about it — so a local handed back carries what was pushed
   # into it, where one handed MID-BODY to something this cannot read still does
@@ -637,7 +732,10 @@ class TypeCheckTest < Minitest::Test
             def through_a_call_that_does_more: () -> String
             def fill: (Array[String]) -> void
             def leaks: (Array[String]) -> void
-            def looped: () -> String
+            def looped: (Array[String]) -> String
+            def looped_with_next: () -> String
+            def looped_conditionally: () -> String
+            def looped_and_read: () -> String
             def conditional: (bool) -> String
             def reassigned: () -> String
             def reassigned_by_masgn: () -> String
@@ -686,10 +784,35 @@ class TypeCheckTest < Minitest::Test
               parts.join(";")
             end
 
-            # Read once, runs any number of times.
-            def looped
+            # Runs once per element, and nothing says how many there are.
+            def looped(pieces)
               parts = []
-              ["x", "y"].each { |piece| parts << piece }
+              pieces.each { |piece| parts << piece }
+              parts.join(";")
+            end
+
+            # A pass that may end before its push: one per element no longer.
+            def looped_with_next
+              parts = []
+              ["x", "y"].each do |piece|
+                next if piece == "x"
+                parts << piece
+              end
+              parts.join(";")
+            end
+
+            # The same question one level down: the push is not the body's.
+            def looped_conditionally
+              parts = []
+              ["x", "y"].each { |piece| parts << piece if piece == "x" }
+              parts.join(";")
+            end
+
+            # Named inside the body as well as pushed onto — the read sees an
+            # array mid-loop, and the loop is a closure like any other.
+            def looped_and_read
+              parts = []
+              ["x", "y"].each { |piece| parts << parts.join(piece) }
               parts.join(";")
             end
 
@@ -771,6 +894,9 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::String", actual.fetch("through_a_foreign_call")
       assert_equal "::String", actual.fetch("through_a_call_that_does_more")
       assert_equal "::String", actual.fetch("looped")
+      assert_equal "::String", actual.fetch("looped_with_next")
+      assert_equal "::String", actual.fetch("looped_conditionally")
+      assert_equal "::String", actual.fetch("looped_and_read")
       assert_equal "::String", actual.fetch("conditional")
       assert_equal "::String", actual.fetch("reassigned")
       assert_equal "::String", actual.fetch("reassigned_by_masgn")
