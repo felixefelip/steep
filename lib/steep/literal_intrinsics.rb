@@ -22,6 +22,11 @@ module Steep
     # source cannot make the checker assemble an unbounded string.
     MAX_OPERAND_WIDTH = 4096
 
+    # How long one match may run, in seconds. The subject is held to a single
+    # literal's width, but a pattern written to backtrack does not need a long
+    # subject to take forever, and this one runs inside the checker.
+    REGEXP_TIMEOUT = 0.05
+
     # `depends_on` names the methods a fold LEANS on without owning: `join`
     # owns nothing beyond itself, but `include?` answers by calling `==` on the
     # elements and `intersect?` by calling `eql?`/`hash`. A project that
@@ -62,7 +67,7 @@ module Steep
         return nil if type.to_s.bytesize > result_budget(receiver, arguments)
 
         type
-      rescue ArgumentError, EncodingError, RangeError, ZeroDivisionError => exn
+      rescue ArgumentError, EncodingError, RangeError, ZeroDivisionError, Regexp::TimeoutError => exn
         Steep.logger.debug do
           "[literal_intrinsics] declined #{key || "(unresolved)"}: #{exn.class}: #{exn.message}"
         end
@@ -99,7 +104,7 @@ module Steep
       # and there is nothing to gain by refusing one depth.
       def operand?(type)
         case type
-        when AST::Types::Literal then true
+        when AST::Types::Literal, AST::Types::RegexpLiteral then true
         when AST::Types::Tuple, AST::Types::FiniteSet then type.types.all? { |element| operand?(element) }
         else false
         end
@@ -109,6 +114,8 @@ module Steep
         case type
         when AST::Types::Tuple then type.types.map { |element| operand_value(element) }
         when AST::Types::FiniteSet then ::Set.new(type.types.map { |element| operand_value(element) })
+        # Rebuilt rather than handed over, so the match runs under a timeout.
+        when AST::Types::RegexpLiteral then ::Regexp.new(type.value.source, type.value.options, timeout: REGEXP_TIMEOUT)
         else type.value
         end
       end
@@ -125,6 +132,10 @@ module Steep
         when ::Set
           types = value.map { |element| folded_type(element) }
           AST::Types::FiniteSet.new(types: types) if types.all?
+        # `=~` that finds nothing. Exact, and what decides the `if` it is
+        # written in.
+        when nil
+          AST::Types::Nil.instance
         else
           AST::Types::Literal.new(value: value) if literal_value?(value)
         end
@@ -134,12 +145,19 @@ module Steep
         [receiver, *arguments].all? do |value|
           next false if collection_size(value) > MAX_COLLECTION_SIZE
 
-          operand_width(value) <= (collection?(value) ? MAX_OPERAND_WIDTH : MAX_LITERAL_WIDTH)
+          operand_width(value) <= (written_out?(value) ? MAX_OPERAND_WIDTH : MAX_LITERAL_WIDTH)
         end
       end
 
       def collection?(value)
         value.is_a?(::Array) || value.is_a?(::Set)
+      end
+
+      # An operand whose bytes are the file's own, so it may be wider than one
+      # literal: a collection, or a pattern — whose cost is bounded by the
+      # timeout and the subject's width, not by its own length.
+      def written_out?(value)
+        collection?(value) || value.is_a?(::Regexp)
       end
 
       # How wide the result may be. A fold that only reassembles its operands —
@@ -152,7 +170,7 @@ module Steep
       end
 
       def operand_width(value)
-        return AST::Types::Literal.new(value: value).to_s.bytesize unless collection?(value)
+        return value.inspect.bytesize unless collection?(value)
 
         value.sum { |element| operand_width(element) + 2 }
       end
@@ -216,6 +234,23 @@ module Steep
       arguments.size == 1 && other.is_a?(::Array) &&
         receiver.all?(&COMPARABLE) && other.all?(&COMPARABLE)
     end
+    # A pattern matched against a string or a symbol, which `Regexp` reads
+    # without calling anything — a symbol is taken as its name in C, not
+    # through `to_s`. Anything else is converted by a call, and declines.
+    SUBJECT = ->(value) { value.is_a?(String) || value.is_a?(Symbol) }
+    REGEXP_MATCH = lambda do |_receiver, arguments|
+      subject, position = arguments
+      SUBJECT[subject] && (arguments.size == 1 || position.is_a?(Integer))
+    end
+    REGEXP_TILDE = ->(_receiver, arguments) { SUBJECT[arguments.first] }
+    # The same question asked from the other side. A string pattern is quoted,
+    # not compiled, and that too happens without a call.
+    SUBJECT_MATCH = lambda do |_receiver, arguments|
+      pattern, position = arguments
+      (pattern.is_a?(::Regexp) || pattern.is_a?(String)) && (arguments.size == 1 || position.is_a?(Integer))
+    end
+    # `String#=~` hands anything but a `Regexp` to the argument's own `=~`.
+    SUBJECT_TILDE = ->(_receiver, arguments) { arguments.first.is_a?(::Regexp) }
     INTEGER_POWER = lambda do |receiver, arguments|
       exponent = arguments.first
       next false unless exponent.is_a?(Integer) && exponent >= 0
@@ -247,6 +282,16 @@ module Steep
       "::Integer#succ" => Entry.new(method: Integer.instance_method(:succ), arity: 0, preflight: ALWAYS),
       "::Integer#to_s" => Entry.new(method: Integer.instance_method(:to_s), arity: 0, preflight: ALWAYS),
       "::Symbol#to_s" => Entry.new(method: Symbol.instance_method(:to_s), arity: 0, preflight: ALWAYS),
+      # `match?` and not `match`: a `MatchData` is not a value a type holds.
+      # `=~` folds where it is a call, which is when the pattern is on the
+      # RIGHT or is not written out there: Ruby parses `/re/ =~ s` as a match
+      # that may assign locals, a node of its own that this table never sees.
+      "::Regexp#match?" => Entry.new(method: ::Regexp.instance_method(:match?), arity: 1..2, preflight: REGEXP_MATCH),
+      "::Regexp#=~" => Entry.new(method: ::Regexp.instance_method(:=~), arity: 1, preflight: REGEXP_TILDE),
+      "::String#match?" => Entry.new(method: String.instance_method(:match?), arity: 1..2, preflight: SUBJECT_MATCH),
+      "::String#=~" => Entry.new(method: String.instance_method(:=~), arity: 1, preflight: SUBJECT_TILDE),
+      "::Symbol#match?" => Entry.new(method: Symbol.instance_method(:match?), arity: 1..2, preflight: SUBJECT_MATCH),
+      "::Symbol#=~" => Entry.new(method: Symbol.instance_method(:=~), arity: 1, preflight: SUBJECT_TILDE),
       # `::Array#first` is deliberately NOT here, though it folds as safely as
       # these do. `[1].first` is how a good deal of code — the checker's own
       # tests included — asks for an `Integer?`, and sharpening it to `1` turns

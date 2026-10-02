@@ -539,7 +539,7 @@ module Steep
             type.with(type_name: env.normalize_module_name(type.type_name))
           when AST::Types::Any, AST::Types::Boolean, AST::Types::Bot, AST::Types::Nil,
             AST::Types::Top, AST::Types::Void, AST::Types::Literal, AST::Types::Class, AST::Types::Instance,
-            AST::Types::Self, AST::Types::Var, AST::Types::Logic::Base
+            AST::Types::Self, AST::Types::Var, AST::Types::Logic::Base, AST::Types::RegexpLiteral
             type
           when AST::Types::Intersection
             AST::Types::Intersection.build(

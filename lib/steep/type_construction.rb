@@ -5594,7 +5594,13 @@ module Steep
       # the receiver of `.to_set` needed and did not get.
       if node.type == :begin && node.children.one?
         nested = literal_operand_type(node.children[0], inferred_type)
-        return nested if collection_value?(nested)
+        return nested if written_out_value?(nested)
+      end
+
+      # A pattern has no RBS literal to arrive as, so the node is the only
+      # place one is ever read — the way `:str` is read below, one type over.
+      if node.type == :regexp
+        return regexp_literal(node) || built_here_only(inferred_type)
       end
 
       # A constant whose value is written out ONCE in this file and only read
@@ -5627,7 +5633,7 @@ module Steep
             collection_value?(built) ? built : literal_operand_type(initializer, AST::Builtin.any_type)
           end
 
-        if collection_value?(recovered) &&
+        if written_out_value?(recovered) &&
            check_relation(sub_type: recovered, super_type: inferred_type).success?
           return recovered
         end
@@ -5682,6 +5688,28 @@ module Steep
     # A value the fold can take as a collection operand.
     def collection_value?(type)
       type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::FiniteSet)
+    end
+
+    # A value the fold can take whole, that no scalar `Literal` spells.
+    def written_out_value?(type)
+      collection_value?(type) || type.is_a?(AST::Types::RegexpLiteral)
+    end
+
+    # The flags a literal can carry without changing what its source means.
+    # `o` only says when an interpolation is evaluated, and there is none; the
+    # encoding flags (`n`, `e`, `s`, `u`) change how the bytes are read, and
+    # decline.
+    REGEXP_OPTIONS = { i: Regexp::IGNORECASE, x: Regexp::EXTENDED, m: Regexp::MULTILINE, o: 0 }.freeze
+
+    # `/…/` with no interpolation, as the value it evaluates to.
+    def regexp_literal(node)
+      *parts, flags = node.children
+      return unless parts.all? { |part| part.type == :str }
+
+      options = flags.children.sum { |flag| REGEXP_OPTIONS.fetch(flag) { return } }
+      AST::Types::RegexpLiteral.new(value: Regexp.new(parts.map { |part| part.children[0] }.join, options))
+    rescue RegexpError
+      nil
     end
 
     # `type` is the collection the checker built at `node` (`record_built_value`),

@@ -45,7 +45,11 @@ module Steep
       # `Owner::RESERVED` just because this file writes one of those.
       def analyze(node)
         found = assignments(node)
+        # A regexp literal is frozen, so nothing a read hands one to can change
+        # the pattern; only a collection needs the walk that strikes.
+        patterns = found.select { |_, (value, _)| value.type == :regexp }
         strike(node, found)
+        found.merge!(patterns)
 
         reads = {}.compare_by_identity #: Hash[untyped, untyped]
         return reads if found.empty?
@@ -130,12 +134,15 @@ module Steep
       # constant collection is usually written, and the checker folds the chain
       # itself rather than this walk naming those operations a second time.
       #
+      # A pattern is the other value written out whole. Whether it holds an
+      # interpolation is, again, the checker's question.
+      #
       # What is refused here is only the shape: whether the chain actually
       # answers a value is the fold's question, and a chain that does not simply
       # recovers nothing later.
       def initializer_of(casgn)
         value = casgn.children[2]
-        collection_expression?(value) ? value : nil
+        collection_expression?(value) || value&.type == :regexp ? value : nil
       end
 
       def collection_expression?(node)

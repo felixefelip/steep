@@ -1281,6 +1281,133 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # A pattern written out in the source, and the question it is asked. The
+  # setter line is `ActiveSupport::Delegation.generate`'s, spelled exactly as
+  # it writes it, with `method` arriving as the literal a call site passes.
+  def test_a_regexp_written_out_answers_what_it_matches
+    run_type_check_test(
+      signatures: {
+        "patterns.rbs" => <<~RBS
+          class WrittenPatterns
+            SETTER: Regexp
+
+            def setter: (:email=) -> bool
+            def reader: (:email) -> bool
+            def index_setter: (:[]=) -> bool
+            def prefix: (:_user) -> bool
+            def ignoring_case: ("EMAIL") -> bool
+            def from_the_string: ("email=") -> bool
+            def from_the_symbol: (:email=) -> bool
+            def position: ("email") -> Integer?
+            def no_position: ("user") -> Integer?
+            def through_a_constant: (:email=) -> bool
+            def branch: (:email=) -> String
+            def interpolated: (:email=, String) -> bool
+            def undecided: (Symbol) -> bool
+          end
+        RBS
+      },
+      code: {
+        "patterns.rb" => <<~'RUBY'
+          class WrittenPatterns
+            SETTER = /[^\]]=\z/
+
+            def setter(method) = /[^\]]=\z/.match?(method)
+            def reader(method) = /[^\]]=\z/.match?(method)
+            def index_setter(method) = /[^\]]=\z/.match?(method)
+            def prefix(to) = /^[^a-z_]/.match?(to)
+            def ignoring_case(name) = /email/i.match?(name)
+            def from_the_string(name) = name.match?(/=\z/)
+            def from_the_symbol(name) = name.match?(/=\z/)
+            def position(name) = name =~ /ma/
+            def no_position(name) = name =~ /ma/
+            def through_a_constant(method) = SETTER.match?(method)
+
+            def branch(method)
+              if /[^\]]=\z/.match?(method)
+                "setter"
+              else
+                "reader"
+              end
+            end
+
+            # Neither of these is a value the file fixes.
+            def interpolated(method, suffix) = /#{suffix}\z/.match?(method)
+            def undecided(method) = /=\z/.match?(method)
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("patterns.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "true", actual.fetch("setter")
+      assert_equal "false", actual.fetch("reader")
+      assert_equal "false", actual.fetch("index_setter")
+      assert_equal "false", actual.fetch("prefix")
+      assert_equal "true", actual.fetch("ignoring_case")
+      assert_equal "true", actual.fetch("from_the_string")
+      assert_equal "true", actual.fetch("from_the_symbol")
+      assert_equal "1", actual.fetch("position")
+      assert_equal "nil", actual.fetch("no_position")
+      assert_equal "true", actual.fetch("through_a_constant")
+      assert_equal '"setter"', actual.fetch("branch")
+
+      assert_equal "bool", actual.fetch("interpolated")
+      assert_equal "bool", actual.fetch("undecided")
+    end
+  end
+
+  # A match the checker cannot run safely, or cannot run as the program would,
+  # stays `bool`.
+  def test_a_regexp_declines_a_match_it_cannot_run_as_written
+    run_type_check_test(
+      signatures: {
+        "patterns.rbs" => <<~RBS
+          class DeclinedPatterns
+            def backtracking: () -> bool
+            def encoding_flag: () -> bool
+            def overridden: () -> bool
+          end
+        RBS
+      },
+      code: {
+        "override.rb" => <<~'RUBY',
+          class Regexp
+            def match?(subject, position = 0) = true
+          end
+        RUBY
+        "patterns.rb" => <<~'RUBY'
+          class DeclinedPatterns
+            # A backreference turns Ruby's memoization off, so this backtracks
+            # for as long as it is allowed to.
+            def backtracking = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!".match?(/^(a|aa)+\1$/)
+            def encoding_flag = "a".match?(/a/n)
+            def overridden = /a/.match?("a")
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("patterns.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "bool", actual.fetch("backtracking")
+      assert_equal "bool", actual.fetch("encoding_flag")
+      # The project's own `match?` runs, not the one this process has.
+      assert_equal "bool", actual.fetch("overridden")
+    end
+  end
+
   # Reflection answered out of the declaration the checker already has. The
   # chain is `ActiveSupport::Delegation`'s, spelled exactly as it writes it —
   # `owner.singleton_class.public_instance_method(method).parameters`.
