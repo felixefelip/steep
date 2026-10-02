@@ -109,17 +109,21 @@ module Steep
     # answers it where it checks the `if`.
     Branch = Struct.new(:node, :then_values, :else_values)
 
-    # What a rest parameter holds on entry: the arguments the call put in it.
-    # The array is BUILT by the call, so nothing but this body can reach it —
-    # it is born here as surely as `parts = []` is, only with contents the call
-    # site writes rather than the body. Which they are is the checker's to say,
-    # from the call this body is being checked for; checked for none, it has
-    # no contents.
+    # What a parameter holds on entry: what the call handed it. A rest
+    # parameter's array is BUILT by the call, so nothing but this body can reach
+    # it — it is born here as surely as `parts = []` is, only with contents the
+    # call site writes rather than the body. A required one holds the array a
+    # caller handed on, and the caller vouched for it when it did (see
+    # `handed_arguments`). Which contents they are is the checker's to say, from
+    # the call this body is being checked for; checked for none, they have none.
     Arrived = Struct.new(:def_node, :name)
 
     # What can end a pass early, or end the loop: each one makes "one push per
     # element" a claim about the elements that ran, which is not all of them.
     JUMPS = %i[break next redo retry return].freeze
+
+    # Loops whose condition and body both run once per turn.
+    REPEATS = %i[while until while_post until_post].freeze
 
     class << self
       # `{ name => [element node, …] }` for every local in `def_node` whose
@@ -144,9 +148,8 @@ module Steep
         body = body_of(def_node) or return {}
 
         found = {} #: Hash[Symbol, Array[untyped]?]
-        if (rest = rest_param(def_node))
-          found[rest] = [Arrived.new(def_node, rest)]
-        end
+        entry_params(def_node).each { |name| found[name] = [Arrived.new(def_node, name)] }
+        handed = Set.new #: Set[Symbol]
         lines = statements(body)
         # The value a body ENDS on leaves it, and nothing in this body runs
         # afterwards to be told a lie about it. `parts` written last is the
@@ -158,8 +161,12 @@ module Steep
         lines.each_with_index do |statement, index|
           next if index == lines.size - 1 && returned
 
-          read(statement, found, builders)
+          read(statement, found, builders, handed)
         end
+
+        # Handed back after being handed on: what leaves is what the callee
+        # left in it.
+        found[returned] = nil if returned && handed.include?(returned)
 
         found.reject { |_, pushes| pushes.nil? }
       end
@@ -199,7 +206,12 @@ module Steep
       # `branches` — `{ if node => true }`, every conditional some push sits
       # under, so the checker records the arm it decided only where someone
       # will ask for it.
-      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, keyword_init: true)
+      #
+      # `at_args` — `{ lvar node => [element node, …] }`, a local handed to a
+      # call as an argument, with what it holds as the call is made. The callee
+      # reads it from its own parameter, so this is what that parameter arrives
+      # holding.
+      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, :at_args, keyword_init: true)
 
       # Every value node and every `Branch` in a list of pushes, however deeply
       # nested in arms. What a pass of a loop has to keep is exactly these.
@@ -231,6 +243,7 @@ module Steep
         returned = {}.compare_by_identity #: Hash[untyped, bool]
         loops = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
         branches = {}.compare_by_identity #: Hash[untyped, bool]
+        at_args = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
 
         builders = builders_in(node)
 
@@ -269,6 +282,10 @@ module Steep
               next
             end
 
+            handed_arguments(statement, contents).each do |argument|
+              at_args[argument] = contents.fetch(argument.children[0])
+            end
+
             each_node(statement) do |child|
               next unless child.type == :send && READERS.include?(child.children[1])
 
@@ -284,7 +301,7 @@ module Steep
           end
         end
 
-        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches)
+        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches, at_args: at_args)
       end
 
       private
@@ -308,8 +325,8 @@ module Steep
 
         contents = {} #: Hash[Symbol, Array[untyped]]
         # Born on entry, before any statement runs.
-        if (rest = rest_param(def_node)) && readable.key?(rest)
-          contents[rest] = [Arrived.new(def_node, rest)]
+        entry_params(def_node).each do |name|
+          contents[name] = [Arrived.new(def_node, name)] if readable.key?(name)
         end
 
         statements(body).each do |statement|
@@ -326,8 +343,11 @@ module Steep
               contents[name] = contents.fetch(name) + elements
               pushed << name
             end
-          elsif (looped = loop_onto(statement, contents) || branch_onto(statement, contents))
-            looped.each do |name, entry|
+          elsif (counted = loop_onto(statement, contents) || branch_onto(statement, contents))
+            entries, mentioned = counted
+            entries.each do |name, entry|
+              next if mentioned.include?(name)
+
               contents[name] = contents.fetch(name) + [entry]
               pushed << name
             end
@@ -507,7 +527,9 @@ module Steep
         lines.each_with_index do |statement, index|
           next if index == lines.size - 1 && returned
 
-          read(statement, found, {})
+          # Strict: the CALLER reads the array after this body returns, so an
+          # array handed on from here is one it cannot count.
+          read(statement, found, {}, nil)
         end
 
         # A loop is expanded by the checker where the BLOCK is checked, and a
@@ -586,8 +608,14 @@ module Steep
 
       # One statement of the straight line. It either seeds a local, pushes onto
       # one, or is everything else — and everything else only takes locals away.
-      def read(statement, found, builders)
+      def read(statement, found, builders, handed)
         return unless statement.is_a?(Parser::AST::Node)
+
+        # Named again after it was handed on: what it holds now is whatever the
+        # callee left in it.
+        handed&.each do |name|
+          found[name] = nil if found[name] && mentions?(statement, [name])
+        end
 
         if (seed = seed_from(statement))
           name, elements = seed
@@ -603,8 +631,10 @@ module Steep
           return
         end
 
-        if (looped = loop_onto(statement, found) || branch_onto(statement, found))
-          looped.each { |name, entry| found[name] = found[name] + [entry] }
+        if (counted = loop_onto(statement, found) || branch_onto(statement, found))
+          entries, mentioned = counted
+          mentioned.each { |name| found[name] = nil if found.key?(name) }
+          entries.each { |name, entry| found[name] = found[name] + [entry] if found[name] }
           return
         end
 
@@ -620,7 +650,87 @@ module Steep
           return
         end
 
+        # Handed to a call and named nowhere else in the statement. What it held
+        # as the call was made is known, and is what the callee receives; only
+        # what the callee does to it is not — so it stays readable for that
+        # moment, and any later mention takes it away (above).
+        if handed && (arguments = handed_arguments(statement, found)).any?
+          names = arguments.map { |argument| argument.children[0] }
+          kept = names.to_h { |name| [name, found[name]] }
+          strike(statement, found)
+          kept.each { |name, elements| found[name] = elements }
+          handed.merge(names)
+          return
+        end
+
         strike(statement, found)
+      end
+
+      # The locals this statement hands to a call as a direct argument —
+      # positional or keyword — and names nowhere else. A second mention in the
+      # same statement could change the array before the call or after it, in an
+      # order nothing here follows.
+      #
+      # Only a call the statement makes ONCE hands anything on. One in a loop,
+      # or in a block, runs any number of times, and the contents recorded here
+      # are only what the first run receives — the callee may push onto the
+      # array, and the next run receives that:
+      #
+      #     [1, 2].each { fill(parts) }   # `fill` gets `parts`, then `parts` + what it pushed
+      def handed_arguments(statement, found)
+        candidates = [] #: Array[untyped]
+
+        each_call_once(statement) do |child|
+          arguments = child.children.drop(2)
+          if arguments.last&.type == :kwargs
+            pairs = arguments.pop.children
+            arguments.concat(pairs.filter_map { |pair| pair.children[1] if pair.type == :pair })
+          end
+
+          arguments.each do |argument|
+            candidates << argument if argument.type == :lvar && found[argument.children[0]]
+          end
+        end
+
+        candidates.select do |argument|
+          name = argument.children[0]
+          count = 0
+          each_node(statement) do |child|
+            count += 1 if (child.type == :lvar || child.type == :lvasgn) && child.children[0] == name
+          end
+          count == 1
+        end
+      end
+
+      # Every `send` in `node` that runs at most once each time `node` does. A
+      # loop's condition and body run once per turn, and a closure's body on a
+      # schedule of its own — only the call a block is attached to is made where
+      # it is written. A `retry` runs the whole statement again.
+      def each_call_once(node, &block)
+        return if jumps_back?(node)
+
+        each_call_in(node, &block)
+      end
+
+      def each_call_in(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        return if SCOPES.include?(node.type) || REPEATS.include?(node.type)
+
+        # `items.each { … }`: the call is made here, the body later.
+        return each_call_in(node.children[0], &block) if CLOSURES.include?(node.type)
+        # `for x in items`: the collection is read once, the body per item.
+        return each_call_in(node.children[1], &block) if node.type == :for
+
+        yield node if node.type == :send
+        node.children.each { |child| each_call_in(child, &block) }
+      end
+
+      def jumps_back?(node)
+        each_node(node) do |child|
+          return true if child.type == :retry
+        end
+
+        false
       end
 
       # A read that hands back an ELEMENT of a local this walk is watching.
@@ -681,13 +791,14 @@ module Steep
         return nil if lines.empty?
         return nil if lines.any? { |line| jumps?(line) }
 
-        pushes = pushes_in(lines, found, watched) or return nil
+        pushes, mentioned = pushes_in(lines, found, watched)
         return nil if pushes.empty?
         # Pushing onto the array being run over: one more pass per push, which
         # is no count at all.
         return nil if over && pushes.key?(over)
 
-        pushes.transform_values { |values| Loop.new(statement, values) }
+        loops = pushes.reject { |name, _| mentioned.include?(name) }
+        [loops.transform_values { |values| Loop.new(statement, values) }, mentioned]
       end
 
       # The name of the watched local an `each` statement runs over, or nil.
@@ -704,20 +815,23 @@ module Steep
         found[name] ? name : nil
       end
 
-      # The positional rest parameter of `def_node`, by name. An anonymous `*`
-      # has no local to read.
-      def rest_param(def_node)
+      # The parameters of `def_node` that hold an array a call handed in: the
+      # positional rest, every required positional and every required keyword.
+      # An anonymous `*` has no local to read.
+      def entry_params(def_node)
         args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
-        return nil unless args.is_a?(Parser::AST::Node)
+        return [] unless args.is_a?(Parser::AST::Node)
 
-        rest = args.children.find { |arg| arg.type == :restarg } or return nil
-        rest.children[0]
+        args.children.filter_map do |arg|
+          arg.children[0] if %i[restarg arg kwarg].include?(arg.type) && arg.children[0]
+        end
       end
 
-      # `{ name => Branch }` where this statement is an `if` whose arms push
-      # onto watched locals in a straight line of their own, and whose condition
-      # names none of them. Which arm runs is the checker's to say; only the
-      # shape is decided here.
+      # `[{ name => Branch }, mentioned]` where this statement is an `if` whose
+      # arms push onto watched locals in a straight line of their own. Which arm
+      # runs is the checker's to say; only the shape is decided here. A watched
+      # local the condition or an arm names in any other way is `mentioned`,
+      # and only that one is taken away.
       def branch_onto(statement, found)
         watched = found.select { |_, pushes| pushes }.keys
         branch_in(statement, found, watched)
@@ -727,45 +841,62 @@ module Steep
         return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :if
 
         predicate, then_clause, else_clause = statement.children
-        return nil if mentions?(predicate, watched)
         # An arm that may leave early pushes what it reached, which is not what
         # it says.
         return nil if jumps?(statement)
 
+        mentioned = names_in(predicate, watched)
         arms = [then_clause, else_clause].map do |clause|
-          pushes_in(statements(clause), found, watched) or return nil
+          pushes, inner = pushes_in(statements(clause), found, watched)
+          mentioned.merge(inner)
+          pushes
         end
 
-        names = arms.flat_map(&:keys).uniq
+        names = arms.flat_map(&:keys).uniq - mentioned.to_a
         return nil if names.empty?
 
-        names.to_h do |name|
+        branches = names.to_h do |name|
           [name, Branch.new(statement, arms[0].fetch(name, []), arms[1].fetch(name, []))]
         end
+        [branches, mentioned]
       end
 
-      # `{ name => [value node or Branch, …] }` for a straight line of a body
-      # this walk reads but does not own — a loop's, or an arm's — or nil where
-      # one of its statements names a watched local in any other way. A loop
-      # inside it is such a statement: its passes would have to be expanded per
-      # pass of the outer body, which nothing does.
+      # `[{ name => [value node or Branch, …] }, mentioned]` for a straight line
+      # of a body this walk reads but does not own — a loop's, or an arm's.
+      # `mentioned` is every watched local one of its statements names in any
+      # other way: that local cannot be counted, but the others still can, so
+      # it alone is taken away. A loop inside the line is such a mention: its
+      # passes would have to be expanded per pass of the outer body, which
+      # nothing does.
       def pushes_in(lines, found, watched)
         pushes = {} #: Hash[Symbol, Array[untyped]]
+        mentioned = Set.new #: Set[Symbol]
 
         lines.each do |line|
           if (push = push_onto(line, found))
             name, values = push
-            return nil if values.any? { |value| mentions?(value, watched) }
+            values.each { |value| mentioned.merge(names_in(value, watched)) }
 
             (pushes[name] ||= []).concat(values)
           elsif (branched = branch_in(line, found, watched))
-            branched.each { |name, branch| (pushes[name] ||= []) << branch }
-          elsif mentions?(line, watched)
-            return nil
+            branches, inner = branched
+            mentioned.merge(inner)
+            branches.each { |name, branch| (pushes[name] ||= []) << branch }
+          else
+            mentioned.merge(names_in(line, watched))
           end
         end
 
-        pushes
+        [pushes, mentioned]
+      end
+
+      # The watched locals `node` reads or writes, stopping at a body of its own.
+      def names_in(node, names)
+        found = Set.new #: Set[Symbol]
+        each_node(node) do |child|
+          found << child.children[0] if (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0])
+        end
+        found
       end
 
       # The one parameter of `{ |x| … }`, or nil for any other list — two

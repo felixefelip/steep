@@ -535,15 +535,51 @@ module Steep
       types
     end
 
-    # What a rest parameter was handed by the call this body is being checked
-    # for, or nil when it is checked for none — the ordinary check, where the
+    # What a parameter was handed by the call this body is being checked for,
+    # or nil when it is checked for none — the ordinary check, where the
     # parameter holds whatever any caller passes.
     def arrived_types(element)
       arguments = specialization_arguments(element.def_node) or return nil
-      tuple = arguments.rest_tuple(element.def_node) or return nil
+      tuple = arguments.arrived(element.def_node, element.name) or return nil
       return nil unless tuple.types.all? { |type| type.is_a?(AST::Types::Literal) }
 
       tuple.types
+    end
+
+    # Records, for every local this call is handed that `Accumulators` vouches
+    # for, the tuple it holds as the call is made — which is what the callee's
+    # parameter arrives holding, and what the call site's specialization is
+    # keyed on (`Specializations::Arguments.from_send`).
+    def record_vouched_arguments(arguments)
+      handed = source.accumulators.at_args
+      return if handed.empty?
+
+      arguments.each do |argument|
+        values = argument.type == :kwargs ? argument.children.filter_map { |pair| pair.children[1] if pair.type == :pair } : [argument]
+
+        values.each do |value|
+          elements = handed[value] or next
+          types = accumulated_element_types(elements) or next
+
+          typing.add_vouched(value, AST::Types::Tuple.new(types: types))
+        end
+      end
+    end
+
+    # Records the collection this call evaluates to where the checker COMPUTED
+    # it — folded it, read it off a reflection, or took the return recorded for
+    # the arguments this call passes — rather than read it off the declaration.
+    # Only such a tuple says what the array holds; a declared one describes an
+    # array the call may hand back from anywhere:
+    #
+    #   def names: () -> [:a]          # `@names ||= [:a]`
+    #   names.push(:z)
+    #   gen(names)                     # `[:a, :z]` at runtime
+    #
+    # Read back by `built_value?` and `Specializations::Arguments.argument_type`.
+    def record_built_value(node, call)
+      type = call.return_type
+      typing.add_vouched(node, type) if collection_value?(type)
     end
 
     # Checks the body of an `each` that `Accumulators` counted once per element
@@ -3972,6 +4008,8 @@ module Steep
 
           if call.is_a?(TypeInference::MethodCall::Typed)
             declared_return_type = call.return_type
+            record_vouched_arguments(arguments)
+            nominal = call
             call = specialized_call(node, call, block_params: block_params, block_body: block_body)
             unless block_params || block_body
               call = constr.literal_intrinsic_call(
@@ -3987,6 +4025,7 @@ module Steep
                 declared_return_type: declared_return_type
               )
             end
+            record_built_value(node, call) unless call.equal?(nominal)
 
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
 
@@ -5543,11 +5582,11 @@ module Steep
         return elements.all? ? AST::Types::Tuple.new(types: elements) : built_here_only(inferred_type)
       end
 
-      # A collection the FOLD built at this very call. It is what this file's own
-      # expression evaluated to, not a type something else was annotated with —
-      # which is the difference `built_here_only` is about, and the node type is
-      # what tells the two apart.
-      return inferred_type if node.type == :send && collection_value?(inferred_type)
+      # A collection the checker built at this very call. It is what this file's
+      # own expression evaluated to, not a type something else was annotated
+      # with — which is the difference `built_here_only` is about, and
+      # `record_built_value` is where the checker says which one it is.
+      return inferred_type if node.type == :send && built_value?(node, inferred_type)
 
       # Parentheses are a node of their own, and what is inside them is the
       # value — a collection as much as a literal. The `:begin` arm further down
@@ -5643,6 +5682,12 @@ module Steep
     # A value the fold can take as a collection operand.
     def collection_value?(type)
       type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::FiniteSet)
+    end
+
+    # `type` is the collection the checker built at `node` (`record_built_value`),
+    # and nothing narrowed the call's type after it did.
+    def built_value?(node, type)
+      collection_value?(type) && typing.vouched_of(node: node) == type
     end
 
     def built_here_only(type)
