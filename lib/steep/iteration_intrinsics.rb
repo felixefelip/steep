@@ -18,7 +18,9 @@ module Steep
     #
     # `depends_on` as in `LiteralIntrinsics`: `Enumerable#filter_map` walks the
     # receiver by calling its `each`, so an `Array#each` the project replaced is
-    # what the program runs instead.
+    # what the program runs instead. And it is reached through `Array`: a
+    # `filter_map` the project writes on `Array` — reopened, or from a module
+    # it includes — is found first and still resolves, by its RBS, here.
     Entry = _ = Struct.new(:collect, :depends_on, keyword_init: true)
 
     ENTRIES = {
@@ -28,7 +30,7 @@ module Steep
       # it was.
       "::Array#map" => Entry.new(collect: :map),
       "::Array#collect" => Entry.new(collect: :map),
-      "::Enumerable#filter_map" => Entry.new(collect: :filter_map, depends_on: ["::Array#each"])
+      "::Enumerable#filter_map" => Entry.new(collect: :filter_map, depends_on: ["::Array#each", "::Array#filter_map"])
     }.freeze
 
     # What `map(&:first)` leans on to call `first` at all.

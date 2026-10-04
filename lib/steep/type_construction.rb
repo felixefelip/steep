@@ -739,16 +739,20 @@ module Steep
     # The block's parameters bound to one element, the way `yield element`
     # binds them: one parameter takes the element, several take it apart.
     # Anything else — a rest, an optional, a nested pattern — declines.
+    #
+    # One parameter is `procarg0` only when written `|k|`. `|k,|` parses as a
+    # plain `arg`, and Ruby takes the element apart for it as for several:
+    # `[["ab", "cde"]].map { |k,| k }` is `["ab"]`.
     def element_bindings(block_params, element)
       return if block_params.rest_param || block_params.block_param || !block_params.optional_params.empty?
 
       params = block_params.params
       return unless params.all? { |param| param.is_a?(TypeInference::BlockParams::Param) }
 
-      case params.size
-      when 0
+      case
+      when params.empty?
         {}
-      when 1
+      when params.size == 1 && params[0].node.type == :procarg0
         { params[0].var => element }
       else
         return unless element.is_a?(AST::Types::Tuple)

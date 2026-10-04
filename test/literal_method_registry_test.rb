@@ -265,6 +265,33 @@ class LiteralMethodRegistryTest < Minitest::Test
     refute registry.blocked?("::Integer#succ")
   end
 
+  # `Array#filter_map` is `Enumerable`'s, and an included module sits ABOVE
+  # `Enumerable` in Array's chain: the module's own is the one that runs.
+  def test_an_included_module_shadows_an_inherited_entry
+    registry = registry_for(<<~RUBY)
+      module Filtering
+        def filter_map = []
+      end
+
+      Array.include Filtering
+    RUBY
+
+    assert registry.blocked?("::Array#filter_map")
+    refute registry.blocked?("::Array#map")
+  end
+
+  def test_an_extended_module_does_not_shadow_an_inherited_entry
+    registry = registry_for(<<~RUBY)
+      module Filtering
+        def filter_map = []
+      end
+
+      Array.extend Filtering
+    RUBY
+
+    refute registry.blocked?("::Array#filter_map")
+  end
+
   def test_does_not_confuse_a_nested_constant_with_the_core_class
     registry = registry_for(<<~RUBY)
       module Application

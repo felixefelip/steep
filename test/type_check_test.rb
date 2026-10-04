@@ -1426,6 +1426,8 @@ class TypeCheckTest < Minitest::Test
             def upcased: () -> Array[String]
             def collected: () -> Array[String]
             def undecided: (Symbol) -> Array[Symbol]
+            def first_of_each: () -> Array[String?]
+            def whole: () -> Array[Array[String]]
             def not_exact: (String) -> Array[String]
             def jumps: () -> Array[String]
           end
@@ -1442,6 +1444,10 @@ class TypeCheckTest < Minitest::Test
             def none_optional = Iterated.singleton_class.public_instance_method(:human_name).parameters.map(&:first).intersect?([:opt, :rest, :keyreq, :key, :keyrest])
             def required = Iterated.singleton_class.public_instance_method(:many).parameters.filter_map { |type, arg| arg if type == :req }
             def upcased = ["a", "b"].map { |piece| piece.upcase }
+            # `|k,|` takes the element apart, as several parameters would;
+            # `|k|` takes it whole.
+            def first_of_each = [["ab", "cde"]].map { |k,| k }
+            def whole = [["ab", "cde"]].map { |k| k }
             def collected = ["a", "b"].collect(&:upcase)
 
             # Each of these stays what the declaration says, for its own reason:
@@ -1468,6 +1474,8 @@ class TypeCheckTest < Minitest::Test
       assert_equal "[:a]", actual.fetch("required")
       assert_equal '["A", "B"]', actual.fetch("upcased")
       assert_equal '["A", "B"]', actual.fetch("collected")
+      assert_equal '["ab"]', actual.fetch("first_of_each")
+      assert_equal '[["ab", "cde"]]', actual.fetch("whole")
 
       assert_equal "::Array[::Symbol]", actual.fetch("undecided")
       assert_equal "::Array[::String]", actual.fetch("not_exact")
@@ -1481,12 +1489,17 @@ class TypeCheckTest < Minitest::Test
     overrides = {
       "map" => "def map = []",
       "each" => "def each = self",
+      "filter_map" => "def filter_map = []",
+      "included filter_map" => nil,
       "to_proc" => nil
     }
 
     overrides.each do |replaced, body|
-      override = if replaced == "to_proc"
+      override = case replaced
+                 when "to_proc"
                    "class Symbol\n  def to_proc = proc { nil }\nend\n"
+                 when "included filter_map"
+                   "module Filtering\n  def filter_map = []\nend\n\nArray.include Filtering\n"
                  else
                    "class Array\n  #{body}\nend\n"
                  end
@@ -1533,6 +1546,9 @@ class TypeCheckTest < Minitest::Test
           when "each"
             # `filter_map` walks the array by calling `each`; `map` does not.
             { "mapped" => '["A"]', "by_symbol" => '["A"]', "filtered" => "::Array[::String]", "looped" => "::String" }
+          when "filter_map", "included filter_map"
+            # Found on Array before Enumerable's, which is the one the RBS names.
+            { "mapped" => '["A"]', "by_symbol" => '["A"]', "filtered" => "::Array[::String]", "looped" => '"a"' }
           when "to_proc"
             { "mapped" => '["A"]', "by_symbol" => "::Array[::String]", "filtered" => '["A"]', "looped" => '"a"' }
           end
