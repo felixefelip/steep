@@ -415,6 +415,12 @@ module Steep
       @constants ||= Constants.analyze(node)
     end
 
+    # The assignments whose local is typed by how the method goes on to use it
+    # — see `LocalAssignments`. Once per file, for the reason above.
+    def local_assignments
+      @local_assignments ||= LocalAssignments.analyze(node)
+    end
+
     def annotations(block:, factory:, context:)
       annotations =
         if block

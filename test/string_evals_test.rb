@@ -745,6 +745,88 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # `Delegation.generate`'s reflection branch, for `to: :class`: the parameter
+  # list is read off the target's declaration, and built the way ActiveSupport
+  # builds it — a `filter_map` over `parameters`, a `<<`, a `join` — inside the
+  # loop and the arms it sits in.
+  def test_a_delegation_to_the_class_reads_the_parameter_list
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Array[Symbol] methods, to: Symbol) -> void
+        end
+
+        class Base
+          def self.my_delegate: (*Symbol methods, to: Symbol) -> untyped
+        end
+
+        class Article < Base
+          def self.human_name: (String index) -> String
+          def self.many: (String a, ?Integer b) -> String
+        end
+      RBS
+      write("app/base.rb", <<~'RUBY')
+        module Writer
+          def self.generate(owner, methods, to:)
+            receiver = to.to_s
+            receiver = "self.#{receiver}" if receiver == "class"
+            receiver_class = owner.singleton_class if receiver == "self.class"
+            method_def = []
+            methods.each do |method|
+              definition =
+                if /[^\]]=\z/.match?(method)
+                  "arg"
+                else
+                  method_object = (receiver_class.public_instance_method(method) if receiver_class)
+                  if method_object
+                    parameters = method_object.parameters
+                    if parameters.map(&:first).intersect?([:opt, :rest, :keyreq, :key, :keyrest])
+                      "..."
+                    else
+                      defn = parameters.filter_map { |type, arg| arg if type == :req }
+                      defn << "&"
+                      defn.join(", ")
+                    end
+                  else
+                    "..."
+                  end
+                end
+              method_def << "def #{method}(#{definition})" << "  (#{receiver}).#{method}(#{definition})" << "end"
+            end
+            owner.module_eval(method_def.join(";"))
+            nil
+          end
+        end
+
+        class Base
+          def self.my_delegate(*methods, to:)
+            Writer.generate(self, methods, to: to)
+          end
+        end
+
+        class Article < Base
+          def self.human_name(index) = index
+          def self.many(a, b = 1) = a
+
+          my_delegate :human_name, to: :class
+          my_delegate :many, to: :class
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal(
+        {
+          "app/base.rb:43:2" => [["def human_name(index, &);  (self.class).human_name(index, &);end", "::Article"]],
+          "app/base.rb:44:2" => [["def many(...);  (self.class).many(...);end", "::Article"]]
+        },
+        chunks
+      )
+    end
+  end
+
   # The same arguments from two classes are two bodies: what the macro writes is
   # written on the class it runs in, and reading both call sites under one check
   # would write both on the same one.
