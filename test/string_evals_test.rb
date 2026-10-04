@@ -827,6 +827,131 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # `delegate` as ActiveSupport 8.0.4 writes it, transcribed verbatim, with the
+  # signatures rbs_infer infers for it. Each call site folds to the source the
+  # gem evals — compared byte for byte with what Ruby itself passes to
+  # `module_eval` for the same six lines.
+  def test_active_support_delegation_as_installed_writes_every_shape
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Module
+          def delegate: (*(:email | :human_name | :name | :fetch) methods, ?to: (:user | :class | :@owner | singleton(Store))?, ?prefix: true?, ?allow_nil: true?, ?private: untyped) -> Array[untyped]
+          def delegate_missing_to: (untyped target, ?allow_nil: untyped) -> untyped
+        end
+
+        module ActiveSupport
+          module Delegation
+            RUBY_RESERVED_KEYWORDS: Array[String]
+            RESERVED_METHOD_NAMES: Set[String]
+
+            def self.generate: (Module owner, Array[untyped] methods, ?location: untyped, ?to: untyped, ?prefix: untyped, ?allow_nil: untyped, ?nilable: untyped, ?private: untyped, ?as: untyped, ?signature: untyped) -> Array[untyped]
+            def self.generate_method_missing: (Module owner, untyped target, ?allow_nil: untyped) -> untyped
+          end
+        end
+
+        class User
+          def email: () -> String
+          def name: () -> String
+        end
+
+        module Store
+          def self.fetch: (String key) -> String
+        end
+
+        class Post
+          @owner: User
+          def user: () -> User
+          def self.human_name: (String index) -> String
+        end
+      RBS
+      write("app/delegation.rb", File.read(File.expand_path("string_evals/active_support_delegation.rb", __dir__)))
+      write("app/post.rb", <<~'RUBY')
+        class Post
+          def user = User.new
+          def self.human_name(index) = index
+
+          delegate :email, to: :user
+          delegate :human_name, to: :class
+          delegate :email, to: :user, prefix: true
+          delegate :name, to: :user, allow_nil: true
+          delegate :name, to: :@owner
+          delegate :fetch, to: Store
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      raises = ->(name, method, receiver) {
+        ";rescue NoMethodError => e;  if _.nil? && e.name == :#{method};    raise ::ActiveSupport::DelegationError.nil_target(:#{name}, :'#{receiver}');  else;    raise;  end;end"
+      }
+
+      assert_equal(
+        {
+          "app/post.rb:5:2" => [["def email(...);  _ = user;  _.email(...)" + raises.("email", "email", "user"), "::Post"]],
+          "app/post.rb:6:2" => [["def human_name(index, &);  (self.class).human_name(index, &);end", "::Post"]],
+          "app/post.rb:7:2" => [["def user_email(...);  _ = user;  _.email(...)" + raises.("user_email", "email", "user"), "::Post"]],
+          "app/post.rb:8:2" => [["def name(...);  _ = user;  if !_.nil? || nil.respond_to?(:name);    _.name(...);  end;end", "::Post"]],
+          "app/post.rb:9:2" => [["def name(...);  _ = @owner;  _.name(...)" + raises.("name", "name", "@owner"), "::Post"]],
+          "app/post.rb:10:2" => [["def fetch(key, &);  _ = ::Store;  _.fetch(key, &)" + raises.("fetch", "fetch", "::Store"), "::Post"]]
+        },
+        chunks
+      )
+    end
+  end
+
+  # A concern is annotated `singleton(Host) & singleton(Concern)` so its body
+  # types against the host — but a macro its body calls RUNS on the module, so
+  # the module is the `self` the writer is checked with, and what it evals lands
+  # there.
+  def test_a_macro_in_an_annotated_module_body_runs_on_the_module
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Module
+          def slot: (Symbol name) -> void
+        end
+
+        class Host
+        end
+
+        module Mixin
+        end
+      RBS
+      write("app/base.rb", <<~'RUBY')
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval("def #{name}; end")
+            nil
+          end
+        end
+
+        class Module
+          def slot(name) = Writer.generate(self, name)
+        end
+
+        class Host
+          include Mixin
+        end
+
+        module Mixin
+          # @type self: singleton(Host) & singleton(Mixin)
+          slot :content
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal({ "app/base.rb:18:2" => [["def content; end", "::Mixin"]] }, chunks)
+    end
+  end
+
   # The same arguments from two classes are two bodies: what the macro writes is
   # written on the class it runs in, and reading both call sites under one check
   # would write both on the same one.

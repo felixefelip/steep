@@ -1691,6 +1691,221 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  def def_body_types(typing)
+    typing.each_typing.each_with_object({}) do |(node, _type), actual|
+      next unless node.type == :def && node.children[2]
+
+      actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+    end
+  end
+
+  # `ActiveSupport::Delegation`'s `RESERVED_METHOD_NAMES`, at its real length.
+  # A set reassembled from an array is as wide as its elements; it was measured
+  # by its printed form, `Set{…}`, which is three bytes wider, and a long
+  # enough set came out over its own budget.
+  def test_a_long_set_written_out_answers_what_is_in_it
+    run_type_check_test(
+      signatures: {
+        "reserved.rbs" => <<~RBS
+          class Reserved
+            KEYWORDS: Array[String]
+            NAMES: Set[String]
+
+            def plain: (:user) -> bool
+            def reserved: (:class) -> bool
+          end
+        RBS
+      },
+      code: {
+        "reserved.rb" => <<~'RUBY'
+          class Reserved
+            KEYWORDS = %w(__ENCODING__ __LINE__ __FILE__ alias and BEGIN begin break
+            case class def defined? do else elsif END end ensure false for if in module next nil
+            not or redo rescue retry return self super then true undef unless until when while yield)
+            NAMES = (KEYWORDS + %w(_ arg args block)).to_set.freeze
+
+            def plain(to) = NAMES.include?(to.to_s)
+            def reserved(to) = NAMES.include?(to.to_s)
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("reserved.rb"))
+
+      assert_equal "false", actual.fetch("plain")
+      assert_equal "true", actual.fetch("reserved")
+    end
+  end
+
+  # `nilable = false … if nilable == false`, from `Delegation.generate`: a
+  # local read only as a condition keeps the `true`/`false` it is assigned.
+  # Read as anything else, or written in a block, it stays `bool`.
+  def test_a_local_read_only_as_a_condition_keeps_its_boolean
+    run_type_check_test(
+      signatures: {
+        "decided.rbs" => <<~RBS
+          class Decided
+            def compared: (:class) -> Integer
+            def tested: () -> Integer
+            def two_writes: (bool) -> Integer
+            def written_in_a_block: () -> Integer
+            def read_as_a_value: () -> Array[bool]
+          end
+        RBS
+      },
+      code: {
+        "decided.rb" => <<~'RUBY'
+          class Decided
+            def compared(to)
+              nilable = true
+              nilable = false if to == :class
+              if nilable == false then 1 else 2 end
+            end
+
+            def tested
+              flag = false
+              flag ? 1 : 2
+            end
+
+            # Each write is in the straight line or an arm, which the
+            # checker's flow follows.
+            def two_writes(go)
+              explicit = false
+              explicit = true if go
+              explicit ? 1 : 2
+            end
+
+            def written_in_a_block
+              flag = true
+              [1].each { flag = false }
+              flag ? 1 : 2
+            end
+
+            def read_as_a_value
+              flag = true
+              [flag]
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("decided.rb")
+      actual = def_body_types(typing)
+
+      assert_equal "1", actual.fetch("compared")
+      assert_equal "2", actual.fetch("tested")
+      assert_equal "(1 | 2)", actual.fetch("two_writes")
+      assert_equal "(1 | 2)", actual.fetch("written_in_a_block")
+      assert_equal "::Array[bool]", actual.fetch("read_as_a_value")
+
+      assert_empty typing.errors.reject { |error| error.is_a?(Diagnostic::Ruby::UnreachableBranch) }.map(&:header_line)
+    end
+  end
+
+  # A reflection the checker resolved found its method, and a missing method
+  # is the one thing it raises for — so the `rescue NameError` around it in
+  # `Delegation.generate` does not run. One on a method nothing declares
+  # raises, so only the rescue does. An ordinary call keeps both.
+  def test_a_rescue_around_a_resolved_reflection_does_not_run
+    run_type_check_test(
+      signatures: {
+        "rescued.rbs" => <<~RBS
+          class Rescued
+            def self.two: (String a, String b) -> String
+
+            def reflected: () -> UnboundMethod?
+            def missing: () -> UnboundMethod?
+            def ordinary: () -> String?
+          end
+        RBS
+      },
+      code: {
+        "rescued.rb" => <<~'RUBY'
+          class Rescued
+            def self.two(a, b) = a
+
+            def reflected
+              begin
+                Rescued.singleton_class.public_instance_method(:two)
+              rescue NameError
+                nil
+              end
+            end
+
+            # Not declared: it raises, and the rescue is all that runs.
+            def missing
+              begin
+                Rescued.singleton_class.public_instance_method(:three)
+              rescue NameError
+                nil
+              end
+            end
+
+            def ordinary
+              begin
+                "a".upcase
+              rescue NameError
+                nil
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rescued.rb"))
+
+      assert_equal "unbound_method(::Rescued.two)", actual.fetch("reflected")
+      assert_equal "nil", actual.fetch("missing")
+      assert_equal '("A" | nil)', actual.fetch("ordinary")
+    end
+  end
+
+  # `"::#{to.name}"`, for `delegate :fetch, to: Store`, and `"#{prefix}_"`
+  # after `method_name.to_s` under `prefix:`.
+  def test_a_module_knows_its_name_and_a_string_is_its_own_string
+    [nil, "class Store\n  def self.name = \"Elsewhere\"\nend\n"].each do |override|
+      code = {
+        "named.rb" => <<~'RUBY'
+          class Named
+            def store = Store.name
+            def nested = Store::Shelf.name
+            def string = "writer_email".to_s
+          end
+        RUBY
+      }
+      code["override.rb"] = override if override
+
+      run_type_check_test(
+        signatures: {
+          "named.rbs" => <<~RBS
+            class Store
+              class Shelf
+              end
+            end
+
+            class Named
+              def store: () -> String?
+              def nested: () -> String?
+              def string: () -> String
+            end
+          RBS
+        },
+        code: code
+      ) do |typings|
+        actual = def_body_types(typings.fetch("named.rb"))
+
+        if override
+          # `def self.name` on the receiver's own chain is what runs instead.
+          assert_equal "(::String | nil)", actual.fetch("store")
+        else
+          assert_equal '"Store"', actual.fetch("store")
+          assert_equal '"Store::Shelf"', actual.fetch("nested")
+          assert_equal '"writer_email"', actual.fetch("string")
+        end
+      end
+    end
+  end
+
   # A project that replaces one of these methods runs its own, so the passes
   # answer nothing for a call that reaches it — and only for those calls.
   def test_a_block_over_known_elements_declines_a_method_the_project_replaces

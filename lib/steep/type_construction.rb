@@ -807,6 +807,50 @@ module Steep
       node.children.any? { |child| jumps_out?(child) }
     end
 
+    # A single reflection call the checker answered with the method it found.
+    def resolved_reflection?(node, type)
+      node.type == :send && type.is_a?(AST::Types::MethodObject)
+    end
+
+    # A single reflection call on a method the module does not have.
+    def raising_reflection?(node)
+      return false unless node.type == :send
+
+      call = typing.call_of(node: node)
+      return false unless call.is_a?(TypeInference::MethodCall::Typed)
+
+      receiver = node.children[0] or return false
+      argument_types = node.children.drop(2).map do |argument|
+        return false unless typing.has_type?(argument)
+
+        literal_operand_type(argument, typing.type_of(node: argument))
+      end
+
+      ReflectionIntrinsics.raises_name_error?(
+        call: call,
+        receiver_type: typing.type_of(node: receiver),
+        argument_types: argument_types,
+        factory: checker.factory,
+        override_registry: literal_method_registry
+      )
+    rescue Typing::UnknownNodeError
+      false
+    end
+
+    # Whether one of these clauses catches a `NameError`: a bare `rescue`, or
+    # one naming `NameError` or a class above it.
+    def rescues_name_error?(resbodies)
+      resbodies.any? do |resbody|
+        classes = resbody.children[0]
+        next true unless classes
+
+        classes.children.any? do |klass|
+          klass.type == :const && %w[NameError StandardError Exception].include?(klass.children[1].to_s) &&
+            (klass.children[0].nil? || klass.children[0].type == :cbase)
+        end
+      end
+    end
+
     # The literal `node` evaluates to where each `if` it is chosen by is
     # decided: a plain string spelled in the arm the check kept, or a value
     # already typed as a literal. nil where an `if` stayed open.
@@ -1467,6 +1511,12 @@ module Steep
                   if source.local_assignments.interpolated[node] && !type_env.enforced_type(name) &&
                      (literal = rhs_constr.decided_literal(rhs))
                     var_type = literal
+                  end
+
+                  # A local read only as a condition keeps the `true`/`false` it
+                  # is assigned — see `LocalAssignments` (`decided`).
+                  if source.local_assignments.decided[node] && !type_env.enforced_type(name)
+                    var_type = AST::Types::Literal.new(value: rhs.type == :true)
                   end
 
                   if enforced_type = type_env.enforced_type(name)
@@ -2863,12 +2913,34 @@ module Steep
               no_subtyping?(sub_type: pair.type, super_type: AST::Types::Bot.instance)
             end
 
+            # A reflection the checker resolved found the method it names, and
+            # a missing method is the one thing it raises for. So the rescue
+            # clauses are still checked, but do not run:
+            #
+            #   method_object = begin
+            #     receiver_class.public_instance_method(method)   # unbound_method(::Post.human_name)
+            #   rescue NameError
+            #     nil                                             # not this
+            #   end
+            #
+            # which is how `ActiveSupport::Delegation.generate` reads a target's
+            # parameter list.
+            resbody_pairs = [] if body_pair && resolved_reflection?(node.children[0], body_pair.type)
+
+            # …and the other half: a reflection on a method the module does not
+            # have raises, so only the rescue runs. `Delegation.generate`'s
+            # fallback to `"..."`, for a target that has no such method.
+            raises = body_pair && rescues_name_error?(resbodies) && raising_reflection?(node.children[0])
+
             resbody_types = resbody_pairs.map(&:type)
             resbody_envs = resbody_pairs.map {|pair| pair.context.type_env }
 
             else_constr = body_pair&.constr || self
 
-            if else_node
+            if raises
+              update_type_env { |env| env.join(*resbody_envs) }
+                .add_typing(node, type: resbody_types.empty? ? AST::Types::Bot.instance : union_type(*resbody_types))
+            elsif else_node
               else_type, else_constr = else_constr.for_branch(else_node).synthesize(else_node, hint: hint)
               else_constr
                 .update_type_env {|env| env.join(*resbody_envs, env) }

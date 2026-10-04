@@ -169,12 +169,12 @@ class ReflectionIntrinsicsTest < Minitest::Test
   def test_watched_keys_and_dispatched_names
     assert_equal(
       ["::Kernel#method", "::Kernel#singleton_class", "::Method#parameters",
-       "::Module#instance_method", "::Module#public_instance_method", "::UnboundMethod#parameters"],
+       "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::UnboundMethod#parameters"],
       Steep::ReflectionIntrinsics.watched_keys.to_a.sort
     )
     assert_equal ["::Method#parameters"], Steep::ReflectionIntrinsics.method_keys_for("Method")
     assert_equal(
-      [:instance_method, :method, :parameters, :public_instance_method, :singleton_class],
+      [:instance_method, :method, :name, :parameters, :public_instance_method, :singleton_class],
       Steep::ReflectionIntrinsics.dispatched_names.to_a.sort
     )
   end

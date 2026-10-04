@@ -173,11 +173,13 @@ module Steep
           missing = annotations.reject { |line| source_code.include?(line) }
           return source_code if missing.empty?
 
-          node = find_target_scope(source_code, anchor)
-          if node
-            insert_in_body(source_code, node, missing)
-          else
+          nodes = find_target_scopes(source_code, anchor)
+          if nodes.empty?
             append_at_end(source_code, missing)
+          else
+            # Back to front, so an earlier insertion cannot shift a later one.
+            nodes.sort_by { |node| -node.location.start_offset }
+                 .reduce(source_code) { |code, node| insert_in_body(code, node, missing) }
           end
         rescue StandardError
           append_at_end(source_code, missing)
@@ -366,6 +368,38 @@ module Steep
         end
 
         # The innermost ModuleNode/ClassNode named `anchor`, or nil.
+        # The scope `find_target_scope` picks, and every other declaration of
+        # the SAME module in the file — the same lexical path, not only the same
+        # last segment. A module's instance `self` is one thing however many
+        # times it is reopened, and a reopen is where generated code lands:
+        # `StringEvalMacroExpander` places what a `class_eval` string writes in
+        # a reopen of its target, and that method runs on the host as surely as
+        # the module's own.
+        def find_target_scopes(source_code, anchor)
+          result = Prism.parse(source_code)
+          return [] unless result.success?
+
+          target = find_target_scope(source_code, anchor) or return []
+          paths = {} #: Hash[Prism::Node, String]
+          walk = lambda do |node, nesting|
+            return unless node.is_a?(Prism::Node)
+
+            if node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::ClassNode)
+              path = [*nesting, node.constant_path.slice].join("::")
+              paths[node] = path
+              node.compact_child_nodes.each { |c| walk.call(c, [path]) }
+            else
+              node.compact_child_nodes.each { |c| walk.call(c, nesting) }
+            end
+          end
+          walk.call(result.value, [])
+
+          target_path = paths.find { |node, _| node.location.start_offset == target.location.start_offset }&.last
+          return [target] unless target_path
+
+          paths.select { |_, path| path == target_path }.keys
+        end
+
         def find_target_scope(source_code, anchor)
           result = Prism.parse(source_code)
           return nil unless result.success?

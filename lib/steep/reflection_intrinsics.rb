@@ -73,6 +73,46 @@ module Steep
         nil
       end
 
+      # Whether this reflection is one Ruby answers by RAISING: `NameError`,
+      # for a method the module does not have. The other half of `fold`, and
+      # asked only where the program rescues it (`TypeConstruction`'s
+      # `:rescue`) — which is where `ActiveSupport::Delegation.generate` falls
+      # back to `"..."`:
+      #
+      #   module Labels
+      #     delegate :human_name, to: :class   # Labels.singleton_class has none
+      #     class_methods do                   # …it is ClassMethods', the host's
+      #       def human_name(index) = index
+      #     end
+      #   end
+      #
+      # Absent from the receiver AND every descendant: a `singleton(X)` may be
+      # a subclass's class object, and one that declares the method answers
+      # it. A module this cannot build is a question, not an absence.
+      def raises_name_error?(call:, receiver_type:, argument_types:, factory:, override_registry:)
+        key = MethodIdentity.key(call) or return false
+        public_only = RAISING_KEYS[key]
+        return false if public_only.nil?
+
+        entry = ENTRIES.fetch(key)
+        return false if override_registry.blocked?(key)
+        return false if shadowed?(receiver_type, key, entry, factory, override_registry)
+
+        type_name, singleton = reflected_target(receiver_type)
+        return false unless type_name
+
+        method_name = literal_method_name(argument_types) or return false
+        object = AST::Types::MethodObject.new(
+          type_name: type_name, method_name: method_name, singleton: singleton, unbound: true
+        )
+        subjects = across_descendants(object, factory) or return false
+
+        [object, *subjects].all? { |subject| declares?(subject, factory, public_only: public_only) == false }
+      rescue StandardError => exn
+        Steep.logger.warn { "[reflection_intrinsics] unexpected failure in raises_name_error?: #{exn.class}: #{exn.message}" }
+        false
+      end
+
       # Every method key whose redefinition matters, for the override registry
       # to watch alongside the literal table's.
       def watched_keys
@@ -153,6 +193,18 @@ module Steep
         return nil if public_only && !method.public?
 
         method
+      rescue RBS::BaseError
+        nil
+      end
+
+      # `true`/`false` for whether the declaration has the method (publicly,
+      # where asked), or nil when the module cannot be built at all.
+      def declares?(type, factory, public_only:)
+        builder = factory.definition_builder
+        definition = type.singleton ? builder.build_singleton(type.type_name) : builder.build_instance(type.type_name)
+        method = definition.methods[type.method_name] or return false
+
+        public_only ? method.public? : true
       rescue RBS::BaseError
         nil
       end
@@ -340,6 +392,24 @@ module Steep
     PARAMETERS = lambda do |receiver, argument_types, factory|
       parameters(receiver, argument_types, factory)
     end
+    # The name a module named exactly is reached by: `Store.name` is
+    # `"Store"`. `ActiveSupport::Delegation` writes it into the receiver of a
+    # method delegated `to:` a module — `"::#{to.name}"`. A `def self.name`
+    # the project writes anywhere on the receiver's chain shadows it, as for
+    # every entry here.
+    NAME = lambda do |receiver, argument_types, _factory|
+      next nil unless argument_types.empty?
+      next nil unless receiver.is_a?(AST::Types::Name::Singleton)
+
+      AST::Types::Literal.new(value: receiver.name.to_s.delete_prefix("::"))
+    end
+
+    # The reflections that raise `NameError` for a missing method, with whether
+    # a private one counts as missing.
+    RAISING_KEYS = {
+      "::Module#instance_method" => false,
+      "::Module#public_instance_method" => true
+    }.freeze
 
     ENTRIES = {
       # `Kernel`'s, not `Object`'s — the table is keyed by what the call
@@ -361,6 +431,9 @@ module Steep
       ),
       "::UnboundMethod#parameters" => Entry.new(
         method: ::UnboundMethod.instance_method(:parameters), handler: PARAMETERS
+      ),
+      "::Module#name" => Entry.new(
+        method: ::Module.instance_method(:name), handler: NAME
       )
     }.freeze
   end
