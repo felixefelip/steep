@@ -1533,6 +1533,11 @@ class TypeCheckTest < Minitest::Test
             def mapped_kept: () -> bool
             def aliased: () -> String
             def element_kept: () -> String
+
+            def reassigned_in_a_block: () -> String
+            def reassigned_in_a_loop: (Integer) -> String
+            def pushed_by_name: () -> Array[String]
+            def read_under_a_modifier: () -> bool?
           end
         RBS
       },
@@ -1620,6 +1625,39 @@ class TypeCheckTest < Minitest::Test
               first << "b" if first
               parts.join(",")
             end
+
+            # Two assignments: which one reaches the read is a question of
+            # flow. "def b" at runtime.
+            def reassigned_in_a_block
+              name = "a"
+              [1].each { name = "b" }
+              "def #{name}"
+            end
+
+            def reassigned_in_a_loop(n)
+              name = "a"
+              while n > 0
+                name = "b"
+                n -= 1
+              end
+              "def #{name}"
+            end
+
+            # Not only `<<`: the local holds what `map` declares, so `push`
+            # neither errors nor leaves the tuple stale. ["A", "B", "C"] at
+            # runtime.
+            def pushed_by_name
+              upcased = ["a", "b"].map(&:upcase)
+              upcased.push("C")
+              upcased
+            end
+
+            # The condition runs first, and its block changes the elements the
+            # body reads. `true` at runtime.
+            def read_under_a_modifier
+              parameters = Built.singleton_class.public_instance_method(:two).parameters
+              parameters.map(&:first).include?(:a) if parameters.filter_map { |pair| pair.reverse! && nil }.empty?
+            end
           end
         RUBY
       }
@@ -1643,6 +1681,11 @@ class TypeCheckTest < Minitest::Test
       assert_equal "bool", actual.fetch("mapped_kept")
       assert_equal "::String", actual.fetch("aliased")
       assert_equal "::String", actual.fetch("element_kept")
+
+      assert_equal "::String", actual.fetch("reassigned_in_a_block")
+      assert_equal "::String", actual.fetch("reassigned_in_a_loop")
+      assert_equal "::Array[::String]", actual.fetch("pushed_by_name")
+      assert_equal "(bool | nil)", actual.fetch("read_under_a_modifier")
 
       assert_empty typing.errors.reject { |error| error.is_a?(Diagnostic::Ruby::UnreachableBranch) }.map(&:header_line)
     end

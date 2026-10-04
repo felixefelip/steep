@@ -1,50 +1,44 @@
 module Steep
-  # Assignments to a local whose TYPE the checker sets otherwise than from the
-  # value's own type, because of how the method goes on to use the local.
+  # Assignments whose local keeps the literal its value spells, where the
+  # checker would otherwise widen it to `::String`. Read off the source once
+  # per file.
   #
-  # Two cases, both read off the source once per file:
-  #
-  # `pushed_births` — a local born from a call whose collection the checker
-  # computed, which the method then pushes onto:
-  #
-  #     upcased = ["a", "b"].map(&:upcase)   # the call answers ["A", "B"]
-  #     upcased << "C"                       # a tuple would demand "A" here
-  #
-  # The local holds what the call DECLARES instead, and `Accumulators` keeps
-  # its contents. Readable or not: a local this cannot follow still must not
-  # turn its first push into an error.
-  #
-  # `interpolated` — every assignment to a local the method reads ONLY as an
-  # interpolation operand:
+  # `interpolated` — the ONE assignment to a local the method reads only as
+  # an interpolation operand:
   #
   #     definition = if signature then signature else "..." end
   #     "def #{name}(#{definition})"
   #
   # A plain string is typed `::String`, so that `x = "a"; [x] << "b"` is not an
   # error. A local read only inside `#{}` hands its value to nothing that could
-  # hold the literal type, so the checker keeps the literal its decided value
-  # spells. `choices` holds the `if`s such a value is chosen by, so the checker
-  # records which arm it kept (`TypeConstruction#record_arm`).
+  # hold the literal type. And with one assignment, that value is the only one
+  # any read can see — with two, which of them reaches a read is a question of
+  # flow, and a block or a loop can answer it after the read is typed:
+  #
+  #     name = "a"
+  #     [1].each { name = "b" }
+  #     "def #{name}"          # "def b"
+  #
+  # `choices` holds the `if`s such a value is chosen by, so the checker records
+  # which arm it kept (`TypeConstruction#record_arm`).
   module LocalAssignments
-    Analysis = Struct.new(:pushed_births, :interpolated, :choices, keyword_init: true)
+    Analysis = Struct.new(:interpolated, :choices, keyword_init: true)
 
     class << self
       def analyze(node)
         # By identity: parser nodes compare structurally, and the same
         # assignment written in two methods is two assignments.
-        pushed_births = {}.compare_by_identity #: Hash[untyped, bool]
         interpolated = {}.compare_by_identity #: Hash[untyped, bool]
         choices = {}.compare_by_identity #: Hash[untyped, bool]
 
         each_body(node) do |def_node, body|
-          each_pushed_birth(body) { |assignment| pushed_births[assignment] = true }
           each_interpolated(def_node, body) do |assignment|
             interpolated[assignment] = true
             each_choice(assignment.children[1]) { |choice| choices[choice] = true }
           end
         end
 
-        Analysis.new(pushed_births: pushed_births, interpolated: interpolated, choices: choices)
+        Analysis.new(interpolated: interpolated, choices: choices)
       end
 
       private
@@ -62,25 +56,9 @@ module Steep
         node.children.each { |child| each_body(child, &block) }
       end
 
-      # Every `name = <call>` in the body whose `name` is the receiver of a
-      # `<<` somewhere in it.
-      def each_pushed_birth(body)
-        pushed = Set.new #: Set[Symbol]
-        each_node(body) do |node|
-          next unless node.type == :send && node.children[1] == :<< && node.children[0]&.type == :lvar
-
-          pushed << node.children[0].children[0]
-        end
-        return if pushed.empty?
-
-        each_node(body) do |node|
-          next unless node.type == :lvasgn && pushed.include?(node.children[0])
-
-          yield node if Accumulators.built_call?(node.children[1])
-        end
-      end
-
-      # Every assignment to a local that the body reads only as `"#{local}"`.
+      # The single assignment to each local that the body reads only as
+      # `"#{local}"`. Every write counts, `x += …` and `a, x = …` included —
+      # each holds an `lvasgn` of its own.
       def each_interpolated(def_node, body)
         reads = Hash.new(0) #: Hash[Symbol, Integer]
         interpolations = Hash.new(0) #: Hash[Symbol, Integer]
@@ -104,8 +82,11 @@ module Steep
         args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
         params = args.is_a?(Parser::AST::Node) ? args.children.map { |arg| arg.children[0] } : []
 
+        writes = assignments.group_by { |assignment| assignment.children[0] }
+
         assignments.each do |assignment|
           name = assignment.children[0]
+          next unless writes.fetch(name).size == 1
           next if params.include?(name) || reads[name].zero?
           next unless reads[name] == interpolations[name]
 

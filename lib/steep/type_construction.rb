@@ -559,14 +559,19 @@ module Steep
       return nil unless tuple.is_a?(AST::Types::Tuple)
       return nil unless built_value?(node, tuple)
 
-      call = typing.call_of(node: node)
-      return nil unless call.is_a?(TypeInference::MethodCall::Typed)
-      return nil unless Accumulators::FRESH.include?(MethodIdentity.key(call))
+      return nil unless fresh_call?(node)
       return nil unless tuple.types.all? { |type| fold_value?(type) }
 
       tuple.types
+    end
+
+    # Whether `node` is a call to a method in `Accumulators::FRESH`, which
+    # hands back an array nobody else holds.
+    def fresh_call?(node)
+      call = typing.call_of(node: node)
+      call.is_a?(TypeInference::MethodCall::Typed) && Accumulators::FRESH.include?(MethodIdentity.key(call))
     rescue Typing::UnknownNodeError
-      nil
+      false
     end
 
     def fold_value?(type)
@@ -1448,12 +1453,13 @@ module Steep
                 constr = rhs_constr.update_type_env do |type_env|
                   var_type = rhs_type
 
-                  # A collection the checker computed, held by a local the body
-                  # goes on to push onto. Its contents are `Accumulators`' to
-                  # follow; as a tuple TYPE the first push would have to be the
-                  # first element, so the local holds what the call declares.
-                  if source.local_assignments.pushed_births[node] && (nominal = typing.nominal_of(node: rhs))
-                    var_type = nominal if typing.vouched_of(node: rhs) == rhs_type
+                  # A new array the checker computed, held by a local. Its
+                  # contents are `Accumulators`' to follow (a `Built` birth); as
+                  # a tuple TYPE they would go stale at the first `push`, and
+                  # the first `<<` would have to be the first element. So the
+                  # local holds what the call declares.
+                  if (nominal = typing.nominal_of(node: rhs)) && typing.vouched_of(node: rhs) == rhs_type && fresh_call?(rhs)
+                    var_type = nominal
                   end
 
                   # A local read only inside `#{}` keeps the literal its

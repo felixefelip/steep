@@ -395,16 +395,15 @@ module Steep
         Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches, at_args: at_args)
       end
 
+      private
+
       # A value a local can be born from as a `Built`: a call, with or without
-      # a block. Shared with `LocalAssignments`, whose pushed births are the
-      # same locals seen from the type side.
+      # a block.
       def built_call?(node)
         return false unless node.is_a?(Parser::AST::Node)
 
         node.type == :send || (node.type == :block && node.children[0].type == :send)
       end
-
-      private
 
       # Replays one body, yielding each statement with the name it pushes onto
       # (nil where it pushes onto nothing) and the contents of every readable
@@ -793,6 +792,13 @@ module Steep
       # in `node` a `map(&:reader)` consumed by a scalar read, written before it
       # and outside any body of its own.
       #
+      # "Written before" stands for "runs before", which a modifier breaks: its
+      # condition is written after the body and runs first.
+      #
+      #     parameters.map(&:first).include?(:a) if parameters.filter_map { |pair| pair.reverse! }.empty?
+      #
+      # So a block read under one is never the last read.
+      #
       #     if parameters.map(&:first).intersect?([:opt, :rest])   # read
       #       "..."
       #     else
@@ -807,12 +813,43 @@ module Steep
           next if blocks.size > 1
 
           block = blocks.first
+          next if under_modifier?(node, block)
+
           start = block.location.expression.begin_pos
           others = mention_nodes(node, name).reject { |mention| mention.equal?(block.children[0].children[0]) }
           next unless others.all? { |mention| mention.location.expression.end_pos <= start && mapped_read_of?(node, mention) }
 
           name
         end
+      end
+
+      # Whether `target` sits, inside `node`, under a node whose keyword is
+      # written after its start — `body if cond`, `body while cond`, `begin …
+      # end until cond` — and so runs what is written later first.
+      def under_modifier?(node, target)
+        return false if node.equal?(target)
+        return false unless node.is_a?(Parser::AST::Node)
+
+        node.children.any? do |child|
+          next false unless child.is_a?(Parser::AST::Node) && contains?(child, target)
+
+          modifier?(node) || under_modifier?(child, target)
+        end
+      end
+
+      def contains?(node, target)
+        return true if node.equal?(target)
+        return false unless node.is_a?(Parser::AST::Node)
+
+        node.children.any? { |child| contains?(child, target) }
+      end
+
+      def modifier?(node)
+        return false unless %i[if while until while_post until_post].include?(node.type)
+
+        location = node.location
+        keyword = location.keyword if location.respond_to?(:keyword)
+        !keyword.nil? && keyword.begin_pos > location.expression.begin_pos
       end
 
       # Block reads of watched locals made at most once each time `node` runs.
