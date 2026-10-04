@@ -823,10 +823,11 @@ module Steep
     end
 
     # Which arm of `node` this check leaves reachable, for a conditional some
-    # push sits under. Read off the same answer the checker reports
-    # `UnreachableBranch` from, so the arm counted is the arm it type-checked.
+    # push sits under, or that chooses an interpolated local's value. Read off
+    # the same answer the checker reports `UnreachableBranch` from, so the arm
+    # counted is the arm it type-checked.
     def record_arm(node, truthy:, falsy:)
-      return unless source.accumulators.branches[node]
+      return unless source.accumulators.branches[node] || source.local_assignments.choices[node]
 
       arm =
         if falsy.unreachable && !truthy.unreachable
@@ -1451,13 +1452,13 @@ module Steep
                   # goes on to push onto. Its contents are `Accumulators`' to
                   # follow; as a tuple TYPE the first push would have to be the
                   # first element, so the local holds what the call declares.
-                  if source.accumulators.pushed_births[node] && (nominal = typing.nominal_of(node: rhs))
+                  if source.local_assignments.pushed_births[node] && (nominal = typing.nominal_of(node: rhs))
                     var_type = nominal if typing.vouched_of(node: rhs) == rhs_type
                   end
 
                   # A local read only inside `#{}` keeps the literal its
-                  # decided value spells — see `Accumulators` (`interpolated`).
-                  if source.accumulators.interpolated[node] && !type_env.enforced_type(name) &&
+                  # decided value spells — see `LocalAssignments`.
+                  if source.local_assignments.interpolated[node] && !type_env.enforced_type(name) &&
                      (literal = rhs_constr.decided_literal(rhs))
                     var_type = literal
                   end

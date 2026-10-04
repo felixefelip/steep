@@ -228,74 +228,6 @@ module Steep
         found.select { |name, pushes| pushes && local_to?(def_node, lines, name) }
       end
 
-      # Every `name = <call>` in the method whose `name` is the receiver of a
-      # `<<` somewhere in it.
-      def each_pushed_birth(def_node)
-        body = body_of(def_node) or return
-
-        pushed = Set.new #: Set[Symbol]
-        each_node(body) do |node|
-          next unless node.type == :send && node.children[1] == :<< && node.children[0]&.type == :lvar
-
-          pushed << node.children[0].children[0]
-        end
-        return if pushed.empty?
-
-        each_node(body) do |node|
-          yield node if node.type == :lvasgn && pushed.include?(node.children[0]) && built_call?(node.children[1])
-        end
-      end
-
-      # Every assignment to a local that the method reads only as `"#{local}"`.
-      def each_interpolated(def_node)
-        body = body_of(def_node) or return
-
-        reads = Hash.new(0) #: Hash[Symbol, Integer]
-        interpolations = Hash.new(0) #: Hash[Symbol, Integer]
-        assignments = [] #: Array[untyped]
-
-        each_node(body) do |node|
-          case node.type
-          when :lvar
-            reads[node.children[0]] += 1
-          when :lvasgn
-            assignments << node
-          when :dstr
-            node.children.each do |part|
-              next unless part.type == :begin && part.children.size == 1 && part.children[0].type == :lvar
-
-              interpolations[part.children[0].children[0]] += 1
-            end
-          end
-        end
-
-        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
-        params = args.is_a?(Parser::AST::Node) ? args.children.map { |arg| arg.children[0] } : []
-
-        assignments.each do |assignment|
-          name = assignment.children[0]
-          next if params.include?(name) || reads[name].zero?
-          next unless reads[name] == interpolations[name]
-
-          yield assignment
-        end
-      end
-
-      # The `if`s that choose which of a value's ends it evaluates to: the
-      # arms of each, and the last statement of a `begin`.
-      def each_choice(node, &block)
-        return unless node.is_a?(Parser::AST::Node)
-
-        case node.type
-        when :if
-          yield node
-          each_choice(node.children[1], &block)
-          each_choice(node.children[2], &block)
-        when :begin
-          each_choice(node.children.last, &block)
-        end
-      end
-
       # The method's own straight line, then every nested one in it. A `begin`
       # is the only node holding more than one statement, and a local has to be
       # born and read for a list to have anything to say.
@@ -366,24 +298,7 @@ module Steep
       # call as an argument, with what it holds as the call is made. The callee
       # reads it from its own parameter, so this is what that parameter arrives
       # holding.
-      #
-      # `pushed_births` — `{ lvasgn node => true }`, every local born from a
-      # call that the method pushes onto somewhere, readable or not. The checker
-      # types such a local by what the call declares rather than the tuple it
-      # computed, which the first push would otherwise have to match.
-      #
-      # `interpolated` — `{ lvasgn node => true }`, every assignment to a local
-      # the method reads ONLY as an interpolation operand:
-      #
-      #     definition = if signature then signature else "..." end
-      #     "def #{name}(#{definition})"
-      #
-      # A plain string is typed `::String`, so that `x = "a"; [x] << "b"` is not
-      # an error — but a local read only inside `#{}` hands its value to nothing
-      # that could hold the literal type, so the checker keeps the literal its
-      # decided value spells. The `if`s such a value is chosen by are recorded
-      # in `branches`, so the checker says which arm it kept.
-      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, :at_args, :pushed_births, :interpolated, keyword_init: true)
+      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, :at_args, keyword_init: true)
 
       # Every value node and every `Branch` in a list of pushes, however deeply
       # nested in arms. What a pass of a loop has to keep is exactly these.
@@ -416,18 +331,11 @@ module Steep
         loops = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
         branches = {}.compare_by_identity #: Hash[untyped, bool]
         at_args = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
-        pushed_births = {}.compare_by_identity #: Hash[untyped, bool]
-        interpolated = {}.compare_by_identity #: Hash[untyped, bool]
 
         builders = builders_in(node)
 
         each_def_with_owner(node) do |def_node, owner|
           each_returned(def_node) { |array| returned[array] = true }
-          each_pushed_birth(def_node) { |assignment| pushed_births[assignment] = true }
-          each_interpolated(def_node) do |assignment|
-            interpolated[assignment] = true
-            each_choice(assignment.children[1]) { |choice| branches[choice] = true }
-          end
           methods = builders_for(builders, owner, def_node)
 
           each_line_list(def_node) do |lines, top|
@@ -484,10 +392,16 @@ module Steep
           end
         end
 
-        Analysis.new(
-          at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches,
-          at_args: at_args, pushed_births: pushed_births, interpolated: interpolated
-        )
+        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches, at_args: at_args)
+      end
+
+      # A value a local can be born from as a `Built`: a call, with or without
+      # a block. Shared with `LocalAssignments`, whose pushed births are the
+      # same locals seen from the type side.
+      def built_call?(node)
+        return false unless node.is_a?(Parser::AST::Node)
+
+        node.type == :send || (node.type == :block && node.children[0].type == :send)
       end
 
       private
@@ -781,11 +695,6 @@ module Steep
         nil
       end
 
-      def built_call?(node)
-        return false unless node.is_a?(Parser::AST::Node)
-
-        node.type == :send || (node.type == :block && node.children[0].type == :send)
-      end
 
       # The local a body hands back, for `parts` or `return parts` written last.
       def returned_local(statement)
