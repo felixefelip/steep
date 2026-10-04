@@ -26,6 +26,21 @@ module Steep
   # times, that body runs). What is left is a local that is born from an array
   # literal, pushed to in a straight line, and read.
   #
+  # Or born from a CALL that hands back a new array, whose contents the checker
+  # computed — a `filter_map` it answered per element, a method's `parameters`:
+  #
+  #     defn = parameters.filter_map { |type, arg| arg if type == :req }
+  #     defn << "&"
+  #     defn.join(", ")      # "a, &"
+  #
+  # The call is only a shape here (`Built`); which calls hand back an array
+  # nobody else holds is the checker's to say (`FRESH`), and one it cannot
+  # vouch for leaves the local without contents.
+  #
+  # The straight line need not be the method's own. A local born in an arm, or
+  # in a loop's body, and named nowhere outside that list of statements lives
+  # its whole life in it — so that list is read the same way.
+  #
   # One block is the exception, because both of those are answerable for it:
   #
   #     ["x", "y"].each { |piece| parts << piece }
@@ -118,9 +133,35 @@ module Steep
     # the call this body is being checked for; checked for none, they have none.
     Arrived = Struct.new(:def_node, :name)
 
+    # What a local born from a call holds: the array `node` evaluates to. Which
+    # one it is the checker says, and only for a call in `FRESH`.
+    Built = Struct.new(:node)
+
+    # The calls whose array is new on every call and held by nothing else, so a
+    # local born from one is as private as one born from `[]`. Keyed like the
+    # intrinsic tables, by the method the call resolved to.
+    FRESH = Set[
+      "::Array#map", "::Array#collect", "::Enumerable#filter_map",
+      "::Method#parameters", "::UnboundMethod#parameters"
+    ].freeze
+
+    # Block calls that hand each element to a body and leave the receiver as it
+    # was — unless the body changes an element in place, which nothing here
+    # follows. So one of these is the LAST thing that may read the local: a
+    # mention after it takes the local away.
+    BLOCK_READS = %i[map collect filter_map].freeze
+
+    # Calls that answer with a value holding none of the receiver's elements.
+    # `parameters.map(&:first)` shares the elements it picks; read by one of
+    # these and dropped, nothing is left holding them.
+    SCALAR_READS = %i[join size length empty? count include? intersect?].freeze
+
     # What can end a pass early, or end the loop: each one makes "one push per
     # element" a claim about the elements that ran, which is not all of them.
     JUMPS = %i[break next redo retry return].freeze
+
+    # Writes of a value to a name other than a local's.
+    ASSIGNMENTS = %i[ivasgn gvasgn cvasgn casgn].freeze
 
     # Loops whose condition and body both run once per turn.
     REPEATS = %i[while until while_post until_post].freeze
@@ -171,6 +212,120 @@ module Steep
         found.reject { |_, pushes| pushes.nil? }
       end
 
+      # The locals born in one nested list of statements — an arm, a loop's body
+      # — that this can read, by the same straight-line rules as `in_body`. Only
+      # a local named nowhere else in the method qualifies: its whole life is in
+      # these statements, so nothing outside them can reach its array.
+      #
+      # Nothing arrives here and nothing leaves: a local written last is a value
+      # handed to whatever the list is part of (`definition = if … else defn
+      # end`), which is a second name for the array, and is struck like one.
+      def in_lines(def_node, lines, builders)
+        found = {} #: Hash[Symbol, Array[untyped]?]
+        handed = Set.new #: Set[Symbol]
+        lines.each { |statement| read(statement, found, builders, handed) }
+
+        found.select { |name, pushes| pushes && local_to?(def_node, lines, name) }
+      end
+
+      # Every `name = <call>` in the method whose `name` is the receiver of a
+      # `<<` somewhere in it.
+      def each_pushed_birth(def_node)
+        body = body_of(def_node) or return
+
+        pushed = Set.new #: Set[Symbol]
+        each_node(body) do |node|
+          next unless node.type == :send && node.children[1] == :<< && node.children[0]&.type == :lvar
+
+          pushed << node.children[0].children[0]
+        end
+        return if pushed.empty?
+
+        each_node(body) do |node|
+          yield node if node.type == :lvasgn && pushed.include?(node.children[0]) && built_call?(node.children[1])
+        end
+      end
+
+      # Every assignment to a local that the method reads only as `"#{local}"`.
+      def each_interpolated(def_node)
+        body = body_of(def_node) or return
+
+        reads = Hash.new(0) #: Hash[Symbol, Integer]
+        interpolations = Hash.new(0) #: Hash[Symbol, Integer]
+        assignments = [] #: Array[untyped]
+
+        each_node(body) do |node|
+          case node.type
+          when :lvar
+            reads[node.children[0]] += 1
+          when :lvasgn
+            assignments << node
+          when :dstr
+            node.children.each do |part|
+              next unless part.type == :begin && part.children.size == 1 && part.children[0].type == :lvar
+
+              interpolations[part.children[0].children[0]] += 1
+            end
+          end
+        end
+
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        params = args.is_a?(Parser::AST::Node) ? args.children.map { |arg| arg.children[0] } : []
+
+        assignments.each do |assignment|
+          name = assignment.children[0]
+          next if params.include?(name) || reads[name].zero?
+          next unless reads[name] == interpolations[name]
+
+          yield assignment
+        end
+      end
+
+      # The `if`s that choose which of a value's ends it evaluates to: the
+      # arms of each, and the last statement of a `begin`.
+      def each_choice(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+
+        case node.type
+        when :if
+          yield node
+          each_choice(node.children[1], &block)
+          each_choice(node.children[2], &block)
+        when :begin
+          each_choice(node.children.last, &block)
+        end
+      end
+
+      # The method's own straight line, then every nested one in it. A `begin`
+      # is the only node holding more than one statement, and a local has to be
+      # born and read for a list to have anything to say.
+      def each_line_list(def_node)
+        body = body_of(def_node) or return
+
+        yield statements(body), true
+
+        each_node(body) do |node|
+          yield node.children, false if node.type == :begin && !node.equal?(body)
+        end
+      end
+
+      # Whether every mention of `name` in the method is in `lines`, and the
+      # method takes no parameter of that name.
+      def local_to?(def_node, lines, name)
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        return false if args.is_a?(Parser::AST::Node) && args.children.any? { |arg| arg.children[0] == name }
+
+        mentions_of(body_of(def_node), name) == lines.sum { |line| mentions_of(line, name) }
+      end
+
+      def mentions_of(node, name)
+        count = 0
+        each_node(node) do |child|
+          count += 1 if (child.type == :lvar || child.type == :lvasgn) && child.children[0] == name
+        end
+        count
+      end
+
       # What one walk of a whole source says, for the checker to ask node by
       # node. Both halves come out of the SAME replay — the reads and the last
       # pushes are two things to notice about one pass over a body, and walking
@@ -211,7 +366,24 @@ module Steep
       # call as an argument, with what it holds as the call is made. The callee
       # reads it from its own parameter, so this is what that parameter arrives
       # holding.
-      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, :at_args, keyword_init: true)
+      #
+      # `pushed_births` — `{ lvasgn node => true }`, every local born from a
+      # call that the method pushes onto somewhere, readable or not. The checker
+      # types such a local by what the call declares rather than the tuple it
+      # computed, which the first push would otherwise have to match.
+      #
+      # `interpolated` — `{ lvasgn node => true }`, every assignment to a local
+      # the method reads ONLY as an interpolation operand:
+      #
+      #     definition = if signature then signature else "..." end
+      #     "def #{name}(#{definition})"
+      #
+      # A plain string is typed `::String`, so that `x = "a"; [x] << "b"` is not
+      # an error — but a local read only inside `#{}` hands its value to nothing
+      # that could hold the literal type, so the checker keeps the literal its
+      # decided value spells. The `if`s such a value is chosen by are recorded
+      # in `branches`, so the checker says which arm it kept.
+      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, :at_args, :pushed_births, :interpolated, keyword_init: true)
 
       # Every value node and every `Branch` in a list of pushes, however deeply
       # nested in arms. What a pass of a loop has to keep is exactly these.
@@ -244,15 +416,24 @@ module Steep
         loops = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
         branches = {}.compare_by_identity #: Hash[untyped, bool]
         at_args = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
+        pushed_births = {}.compare_by_identity #: Hash[untyped, bool]
+        interpolated = {}.compare_by_identity #: Hash[untyped, bool]
 
         builders = builders_in(node)
 
         each_def_with_owner(node) do |def_node, owner|
           each_returned(def_node) { |array| returned[array] = true }
+          each_pushed_birth(def_node) { |assignment| pushed_births[assignment] = true }
+          each_interpolated(def_node) do |assignment|
+            interpolated[assignment] = true
+            each_choice(assignment.children[1]) { |choice| branches[choice] = true }
+          end
+          methods = builders_for(builders, owner, def_node)
 
+          each_line_list(def_node) do |lines, top|
           last = {} #: Hash[Symbol, [untyped, Array[untyped]]]
 
-          replay(def_node, builders_for(builders, owner, def_node)) do |statement, pushed, contents|
+          replay(def_node, lines, top, methods) do |statement, pushed, contents|
             # A loop over a local this vouches for READS it, and the checker asks
             # for the count of passes at the `each`. The loop cannot push onto
             # the local it runs over, so the contents are the same either side.
@@ -287,7 +468,8 @@ module Steep
             end
 
             each_node(statement) do |child|
-              next unless child.type == :send && READERS.include?(child.children[1])
+              next unless child.type == :send
+              next unless READERS.include?(child.children[1]) || BLOCK_READS.include?(child.children[1])
 
               receiver = child.children[0]
               next unless receiver&.type == :lvar && contents.key?(receiver.children[0])
@@ -299,9 +481,13 @@ module Steep
           last.each do |name, (statement, elements)|
             (final[statement] ||= {})[name] = elements
           end
+          end
         end
 
-        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches, at_args: at_args)
+        Analysis.new(
+          at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches,
+          at_args: at_args, pushed_births: pushed_births, interpolated: interpolated
+        )
       end
 
       private
@@ -317,19 +503,19 @@ module Steep
       # answered with the contents of an array that does not exist yet — while
       # the `parts` it actually reads is whatever else that name holds there, a
       # method argument included.
-      def replay(def_node, builders)
-        body = body_of(def_node) or return
-
-        readable = in_body(def_node, builders)
+      def replay(def_node, lines, top, builders)
+        readable = top ? in_body(def_node, builders) : in_lines(def_node, lines, builders)
         return if readable.empty?
 
         contents = {} #: Hash[Symbol, Array[untyped]]
         # Born on entry, before any statement runs.
-        entry_params(def_node).each do |name|
-          contents[name] = [Arrived.new(def_node, name)] if readable.key?(name)
+        if top
+          entry_params(def_node).each do |name|
+            contents[name] = [Arrived.new(def_node, name)] if readable.key?(name)
+          end
         end
 
-        statements(body).each do |statement|
+        lines.each do |statement|
           if (seed = seed_from(statement)) && readable.key?(seed[0])
             contents[seed[0]] = seed[1]
             yield statement, [], contents
@@ -584,12 +770,21 @@ module Steep
       end
 
       # `[name, elements]` where this statement is a local born from an array
-      # literal, the only birth this vouches for.
+      # literal, or from a call (`Built`) the checker may vouch for.
       def seed_from(statement)
-        return nil unless statement.is_a?(Parser::AST::Node)
-        return nil unless statement.type == :lvasgn && array_literal?(statement.children[1])
+        return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :lvasgn
 
-        [statement.children[0], statement.children[1].children.dup]
+        name, value = statement.children
+        return [name, value.children.dup] if array_literal?(value)
+        return [name, [Built.new(value)]] if built_call?(value)
+
+        nil
+      end
+
+      def built_call?(node)
+        return false unless node.is_a?(Parser::AST::Node)
+
+        node.type == :send || (node.type == :block && node.children[0].type == :send)
       end
 
       # The local a body hands back, for `parts` or `return parts` written last.
@@ -619,6 +814,11 @@ module Steep
 
         if (seed = seed_from(statement))
           name, elements = seed
+          # What the value names is read like any other statement: a local an
+          # element is taken from, or one handed to the call, is reachable
+          # under the new name too.
+          strike_held_element(statement.children[1], found)
+          consume(statement.children[1], found, handed)
           # A second assignment is a different array, and nothing here orders
           # the two.
           found[name] = found.key?(name) ? nil : elements
@@ -663,7 +863,104 @@ module Steep
           return
         end
 
-        strike(statement, found)
+        consume(statement, found, handed)
+      end
+
+      # Strikes what `node` names, except a local whose block read in it is the
+      # last thing that reads it (`last_reads`). That one stays readable for
+      # this statement, and like a local handed on, any later mention takes it
+      # away. Strict where there is no `handed` to say so: a builder's caller
+      # reads the array after the body returns.
+      def consume(node, found, handed)
+        names = handed ? last_reads(node, found) : []
+        kept = names.to_h { |name| [name, found[name]] }
+        strike(node, found)
+        kept.each { |name, elements| found[name] = elements }
+        handed&.merge(names)
+      end
+
+      # The watched locals whose `map`/`collect`/`filter_map` with a block in
+      # `node` is the last read of them there: run once, and every other mention
+      # in `node` a `map(&:reader)` consumed by a scalar read, written before it
+      # and outside any body of its own.
+      #
+      #     if parameters.map(&:first).intersect?([:opt, :rest])   # read
+      #       "..."
+      #     else
+      #       defn = parameters.filter_map { |type, arg| … }       # last read
+      #     end
+      def last_reads(node, found)
+        reads = [] #: Array[untyped]
+        block_reads_in(node, found, reads)
+
+        by_name = reads.group_by { |block| block.children[0].children[0].children[0] }
+        by_name.filter_map do |name, blocks|
+          next if blocks.size > 1
+
+          block = blocks.first
+          start = block.location.expression.begin_pos
+          others = mention_nodes(node, name).reject { |mention| mention.equal?(block.children[0].children[0]) }
+          next unless others.all? { |mention| mention.location.expression.end_pos <= start && mapped_read_of?(node, mention) }
+
+          name
+        end
+      end
+
+      # Block reads of watched locals made at most once each time `node` runs.
+      def block_reads_in(node, found, reads)
+        return unless node.is_a?(Parser::AST::Node)
+        return if SCOPES.include?(node.type) || REPEATS.include?(node.type)
+
+        if CLOSURES.include?(node.type)
+          call = node.children[0]
+          receiver = call.children[0] if call.type == :send
+          if receiver&.type == :lvar && found[receiver.children[0]] &&
+             BLOCK_READS.include?(call.children[1]) && call.children.size == 2 && node.type == :block
+            reads << node
+          end
+          # The body runs on a schedule of its own.
+          return block_reads_in(call, found, reads)
+        end
+
+        node.children.each { |child| block_reads_in(child, found, reads) }
+      end
+
+      def mention_nodes(node, name)
+        mentions = [] #: Array[untyped]
+        each_node(node) do |child|
+          mentions << child if (child.type == :lvar || child.type == :lvasgn) && child.children[0] == name
+        end
+        mentions
+      end
+
+      # Whether `mention` is the receiver of a `map(&:reader)` that a scalar
+      # read consumes, outside any closure or loop in `node`.
+      def mapped_read_of?(node, mention, inside = false)
+        return false unless node.is_a?(Parser::AST::Node)
+        return false if SCOPES.include?(node.type)
+
+        if !inside && node.type == :send && scalar_mapped_read?(node)
+          return true if node.children[0].children[0].equal?(mention)
+        end
+
+        repeats = inside || CLOSURES.include?(node.type) || REPEATS.include?(node.type)
+        node.children.any? { |child| mapped_read_of?(child, mention, repeats) }
+      end
+
+      # `local.map(&:first).intersect?(…)`: the elements `map` picks are shared
+      # with the local, and the scalar read hands none of them on.
+      def scalar_mapped_read?(node)
+        node.type == :send && SCALAR_READS.include?(node.children[1]) && mapped_read?(node.children[0])
+      end
+
+      def mapped_read?(node)
+        return false unless node.is_a?(Parser::AST::Node) && node.type == :send
+        return false unless BLOCK_READS.include?(node.children[1]) && node.children.size == 3
+        return false unless node.children[0]&.type == :lvar
+
+        pass = node.children[2]
+        pass.type == :block_pass && pass.children[0]&.type == :sym &&
+          READERS.include?(pass.children[0].children[0])
       end
 
       # The locals this statement hands to a call as a direct argument —
@@ -938,6 +1235,18 @@ module Steep
           node.children.none? { |child| child.type == :splat }
       end
 
+      # An element read whose answer is KEPT under another name: that name can
+      # change the element in place, as a call on the answer can.
+      #
+      #     y = parts.first
+      #     y << "b"              # parts is ["ab"] from here on
+      def strike_held_element(value, found)
+        return unless element_read?(value)
+
+        name = value.children[0].children[0]
+        found[name] = nil if found.key?(name)
+      end
+
       # Every local this statement so much as names stops being readable, except
       # where it is the receiver of a call that only READS the array — and not
       # even then inside a closure, whose body runs at a time this walk does not
@@ -969,7 +1278,21 @@ module Steep
         if node.type == :lvasgn
           name = node.children[0]
           found[name] = nil if found.key?(name)
+          strike_held_element(node.children[1], found)
           strike(node.children[1], found, closure: closure)
+          return
+        end
+
+        if ASSIGNMENTS.include?(node.type)
+          strike_held_element(node.children.last, found)
+        end
+
+        if !closure && scalar_mapped_read?(node)
+          node.children.drop(2).each do |argument|
+            next if CollectionReaders.binary?(node) && argument.type == :lvar
+
+            strike(argument, found, closure: closure)
+          end
           return
         end
 

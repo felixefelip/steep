@@ -213,6 +213,10 @@ module Steep
     # specialization on, and what the fold takes as an operand, in place of a
     # declared type, which says nothing about what the array holds now.
     attr_reader :vouched
+    # What each of those calls DECLARES it returns, for a local that holds the
+    # computed tuple but goes on to be pushed onto (`Accumulators` keeps its
+    # contents; a tuple type would make the push demand the first element).
+    attr_reader :nominals
     attr_reader :source_index
     attr_reader :cursor_context
 
@@ -237,6 +241,7 @@ module Steep
       (@iterations = {}).compare_by_identity
       (@arms = {}).compare_by_identity
       (@vouched = {}).compare_by_identity
+      (@nominals = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -311,6 +316,14 @@ module Steep
 
     def vouched_of(node:)
       vouched.fetch(node) { parent&.vouched_of(node: node) }
+    end
+
+    def add_nominal(node, type)
+      nominals[node] = type
+    end
+
+    def nominal_of(node:)
+      nominals.fetch(node) { parent&.nominal_of(node: node) }
     end
 
     def has_type?(node)
@@ -427,6 +440,7 @@ module Steep
       parent.iterations.merge!(iterations)
       parent.arms.merge!(arms)
       parent.vouched.merge!(vouched)
+      parent.nominals.merge!(nominals)
       parent.branch_envs.merge!(branch_envs)
 
       errors.each do |error|

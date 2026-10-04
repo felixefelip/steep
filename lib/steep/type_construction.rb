@@ -513,6 +513,9 @@ module Steep
         when Accumulators::Arrived
           arrived = arrived_types(element) or return nil
           types.concat(arrived)
+        when Accumulators::Built
+          built = built_types(element) or return nil
+          types.concat(built)
         when Accumulators::Branch
           arm = pass ? pass[element.node] : typing.arm_of(node: element.node)
 
@@ -546,6 +549,34 @@ module Steep
       tuple.types
     end
 
+    # What a local born from a call holds: the collection the checker computed
+    # for that call, where the call is one that hands back an array nobody else
+    # holds (`Accumulators::FRESH`). Elements need only be values the fold can
+    # read — `parameters` holds `[kind, name]` pairs.
+    def built_types(element)
+      node = element.node
+      tuple = typing.vouched_of(node: node)
+      return nil unless tuple.is_a?(AST::Types::Tuple)
+      return nil unless built_value?(node, tuple)
+
+      call = typing.call_of(node: node)
+      return nil unless call.is_a?(TypeInference::MethodCall::Typed)
+      return nil unless Accumulators::FRESH.include?(MethodIdentity.key(call))
+      return nil unless tuple.types.all? { |type| fold_value?(type) }
+
+      tuple.types
+    rescue Typing::UnknownNodeError
+      nil
+    end
+
+    def fold_value?(type)
+      case type
+      when AST::Types::Literal, AST::Types::Nil then true
+      when AST::Types::Tuple then type.types.all? { |element| fold_value?(element) }
+      else false
+      end
+    end
+
     # Records, for every local this call is handed that `Accumulators` vouches
     # for, the tuple it holds as the call is made — which is what the callee's
     # parameter arrives holding, and what the call site's specialization is
@@ -577,9 +608,12 @@ module Steep
     #   gen(names)                     # `[:a, :z]` at runtime
     #
     # Read back by `built_value?` and `Specializations::Arguments.argument_type`.
-    def record_built_value(node, call)
+    def record_built_value(node, call, declared_return_type)
       type = call.return_type
-      typing.add_vouched(node, type) if collection_value?(type)
+      return unless collection_value?(type)
+
+      typing.add_vouched(node, type)
+      typing.add_nominal(node, declared_return_type)
     end
 
     # Checks the body of an `each` that `Accumulators` counted once per element
@@ -766,6 +800,26 @@ module Steep
       return true if Accumulators::JUMPS.include?(node.type)
 
       node.children.any? { |child| jumps_out?(child) }
+    end
+
+    # The literal `node` evaluates to where each `if` it is chosen by is
+    # decided: a plain string spelled in the arm the check kept, or a value
+    # already typed as a literal. nil where an `if` stayed open.
+    def decided_literal(node)
+      case node.type
+      when :str
+        AST::Types::Literal.new(value: node.children[0])
+      when :begin
+        decided_literal(node.children.last)
+      when :if
+        case typing.arm_of(node: node)
+        when :then then node.children[1] && decided_literal(node.children[1])
+        when :else then node.children[2] && decided_literal(node.children[2])
+        end
+      else
+        type = typed_as(node)
+        type if type.is_a?(AST::Types::Literal)
+      end
     end
 
     # Which arm of `node` this check leaves reachable, for a conditional some
@@ -1392,6 +1446,21 @@ module Steep
 
                 constr = rhs_constr.update_type_env do |type_env|
                   var_type = rhs_type
+
+                  # A collection the checker computed, held by a local the body
+                  # goes on to push onto. Its contents are `Accumulators`' to
+                  # follow; as a tuple TYPE the first push would have to be the
+                  # first element, so the local holds what the call declares.
+                  if source.accumulators.pushed_births[node] && (nominal = typing.nominal_of(node: rhs))
+                    var_type = nominal if typing.vouched_of(node: rhs) == rhs_type
+                  end
+
+                  # A local read only inside `#{}` keeps the literal its
+                  # decided value spells — see `Accumulators` (`interpolated`).
+                  if source.accumulators.interpolated[node] && !type_env.enforced_type(name) &&
+                     (literal = rhs_constr.decided_literal(rhs))
+                    var_type = literal
+                  end
 
                   if enforced_type = type_env.enforced_type(name)
                     if result = no_subtyping?(sub_type: rhs_type, super_type: enforced_type)
@@ -4128,7 +4197,7 @@ module Steep
                 declared_return_type: declared_return_type
               )
             end
-            record_built_value(node, call) unless call.equal?(nominal)
+            record_built_value(node, call, declared_return_type) unless call.equal?(nominal)
 
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
 
@@ -6725,6 +6794,7 @@ module Steep
         # for as built here — it is a new array, and nothing else holds it.
         if iterated && errors.empty? &&
            check_relation(sub_type: iterated, super_type: return_type || method_type.type.return_type).success?
+          constr.typing.add_nominal(node, return_type || method_type.type.return_type)
           return_type = iterated
           constr.typing.add_vouched(node, iterated)
         end

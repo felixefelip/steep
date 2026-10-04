@@ -44,6 +44,22 @@ module Steep
     EQUALITY_METHODS = %w[::String#== ::Symbol#== ::Integer#==].freeze
     HASH_METHODS = %w[::String#eql? ::Symbol#eql? ::Integer#eql? ::String#hash ::Symbol#hash ::Integer#hash].freeze
 
+    # What `join` asks a Symbol element before it renders it. It is not a
+    # String, so `join` first probes for `to_str` and `to_ary` — and a probe
+    # consults `respond_to?`, `respond_to_missing?` and `method_missing` where
+    # the method is missing — and only then calls `to_s`. Each was measured:
+    #
+    #   class Symbol; def to_str = "T"; end   #=> [:a].join(",") == "T"
+    #   class Symbol; def to_ary = ["x", "y"]; end  #=> "x,y"
+    #
+    # The probes find the method anywhere in Symbol's chain, which is finite.
+    SYMBOL_JOIN_METHODS = (
+      ["::Symbol#to_s"] +
+      %w[Symbol Comparable Object Kernel BasicObject].product(
+        %w[to_str to_ary respond_to? respond_to_missing? method_missing]
+      ).map { |owner, name| "::#{owner}##{name}" }
+    ).freeze
+
     class << self
       def fold(call:, receiver_type:, argument_types:, override_registry:)
         return nil unless operand?(receiver_type)
@@ -208,9 +224,14 @@ module Steep
     # `[1, 2].join(",")` runs as `"hijacked,hijacked"`. Omitting the separator
     # reads `$,`, a global this cannot see. With neither, `join` walks its
     # elements and concatenates them — no dispatch, nothing global.
+    #
+    # Symbols are the one exception, because what they dispatch to is a list
+    # the registry can watch (`SYMBOL_JOIN_METHODS`). `parameters` names are
+    # symbols, and `defn.join(", ")` over them is how ActiveSupport writes a
+    # parameter list.
     ARRAY_JOIN = lambda do |receiver, arguments|
       arguments.size == 1 && arguments.first.is_a?(String) &&
-        receiver.all? { |element| element.is_a?(String) }
+        receiver.all? { |element| element.is_a?(String) || element.is_a?(Symbol) }
     end
     # `include?` and `intersect?` compare their operands, and comparison is a
     # CALL. Confining both sides to the classes above is what makes the list of
@@ -299,7 +320,10 @@ module Steep
       # is right and the change is real, so it belongs in the stage that has a
       # use for it (`parameters.map(&:first)`, S2/S3 of #171) and can carry the
       # test edits it forces, not in the one that needs `join`.
-      "::Array#join" => Entry.new(method: Array.instance_method(:join), arity: 1, preflight: ARRAY_JOIN),
+      "::Array#join" => Entry.new(
+        method: Array.instance_method(:join), arity: 1, preflight: ARRAY_JOIN,
+        depends_on: SYMBOL_JOIN_METHODS
+      ),
       "::Array#include?" => Entry.new(
         method: Array.instance_method(:include?), arity: 1, preflight: ARRAY_INCLUDE,
         depends_on: EQUALITY_METHODS

@@ -10,6 +10,9 @@ module Steep
       # owner is missing is a key nothing can block — including when a parse
       # failure taints everything.
       #
+      # `Comparable` and `BasicObject` are here for `join` over symbols, which
+      # probes Symbol's whole chain (`LiteralIntrinsics::SYMBOL_JOIN_METHODS`).
+      #
       # `Object`, `Module`, `Class`, `Method` and `UnboundMethod` are here for
       # the reflection table, whose keys are declared on them: an opaque
       # mutation of one of those has to block its entries the way one of `Array`
@@ -18,7 +21,8 @@ module Steep
       # which is not something a list can hold. See `block_method`.
       CORE_CLASSES = Set[
         "String", "Integer", "Symbol", "Array", "Enumerable", "Set", "Kernel",
-        "Object", "Module", "Class", "Method", "UnboundMethod", "Regexp"
+        "Object", "Module", "Class", "Method", "UnboundMethod", "Regexp",
+        "Comparable", "BasicObject"
       ]
 
       # Scanning never reads the registry, only adds to it, so what one source

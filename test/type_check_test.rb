@@ -1015,6 +1015,39 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # `join` renders a Symbol through `to_s`, after probing it for `to_str` and
+  # `to_ary` — and the probes go through `respond_to?`, `respond_to_missing?`
+  # and `method_missing` anywhere in Symbol's chain. Each of those is watched;
+  # replacing any one of them turns the fold off.
+  def test_join_over_symbols_folds_unless_the_project_replaces_what_it_calls
+    overrides = {
+      nil => '"a,b"',
+      "class Symbol\n  def to_s = \"S\"\nend\n" => "::String",
+      "class Symbol\n  def to_str = \"T\"\nend\n" => "::String",
+      "class Object\n  def to_ary = [1]\nend\n" => "::String",
+      "module Comparable\n  def method_missing(*) = nil\nend\n" => "::String",
+      "module Probing\n  def to_str = \"T\"\nend\n\nSymbol.include Probing\n" => "::String"
+    }
+
+    overrides.each do |override, expected|
+      code = { "joined.rb" => "class Joined\n  def symbols = [:a, :b].join(\",\")\nend\n" }
+      code["override.rb"] = override if override
+
+      run_type_check_test(
+        signatures: { "joined.rbs" => "class Joined\n  def symbols: () -> String\nend\n" },
+        code: code
+      ) do |typings|
+        typing = typings.fetch("joined.rb")
+        actual = nil
+        typing.each_typing do |node, _type|
+          actual = typing.type_of(node: node.children[2]).to_s if node.type == :def
+        end
+
+        assert_equal expected, actual, "with #{override.inspect}"
+      end
+    end
+  end
+
   def test_literal_intrinsics_decline_collections_that_fix_nothing
     run_type_check_test(
       signatures: {
@@ -1025,7 +1058,6 @@ class TypeCheckTest < Minitest::Test
             def splatted: (Array[String]) -> String
             def taken_first: () -> String?
             def joined_bare: () -> String
-            def joined_symbols: () -> String
             def stale_tuple: () -> String
           end
         RBS
@@ -1049,10 +1081,6 @@ class TypeCheckTest < Minitest::Test
 
             # Reads `$,`, which this cannot see.
             def joined_bare = ["a", "b"].join
-
-            # Renders its elements through `Symbol#to_s`, which the program is
-            # free to replace.
-            def joined_symbols = [:a, :b].join(",")
 
             def stale_tuple
               # @type var parts: ["a", "b"]
@@ -1079,7 +1107,6 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::String", actual.fetch("splatted")
       assert_equal "(::String | nil)", actual.fetch("taken_first")
       assert_equal "::String", actual.fetch("joined_bare")
-      assert_equal "::String", actual.fetch("joined_symbols")
       # The tuple describes an array this call did not build, and `reverse!` has
       # run since: folding it would answer "a;b" where the program says "b;a".
       assert_equal "::String", actual.fetch("stale_tuple")
@@ -1480,6 +1507,144 @@ class TypeCheckTest < Minitest::Test
       assert_equal "::Array[::Symbol]", actual.fetch("undecided")
       assert_equal "::Array[::String]", actual.fetch("not_exact")
       assert_equal "::Array[::String]", actual.fetch("jumps")
+    end
+  end
+
+  # `Delegation.generate`'s reflection branch, as locals: a local born from a
+  # collection the checker computed is followed like one born from `[]`, in an
+  # arm as well as at the top of the method. A local read only inside `#{}`
+  # keeps the literal its decided arm spells.
+  def test_a_local_born_from_a_built_value_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "built.rbs" => <<~RBS
+          class Built
+            def self.two: (String a, String b) -> String
+            def self.many: (String a, ?Integer b) -> String
+
+            def joined: () -> String
+            def in_an_arm: (bool) -> String?
+            def optional: () -> String
+            def pushed: () -> Array[String]
+            def interpolated: () -> String
+            def widened: () -> Array[String]
+
+            def read_after_last: () -> bool
+            def mapped_kept: () -> bool
+            def aliased: () -> String
+            def element_kept: () -> String
+          end
+        RBS
+      },
+      code: {
+        "built.rb" => <<~'RUBY'
+          class Built
+            def self.two(a, b) = a
+            def self.many(a, b = 1) = a
+
+            def joined
+              parameters = Built.singleton_class.public_instance_method(:two).parameters
+              defn = parameters.filter_map { |type, arg| arg if type == :req }
+              defn << "&"
+              defn.join(", ")
+            end
+
+            def in_an_arm(go)
+              if go
+                parameters = Built.singleton_class.public_instance_method(:two).parameters
+                if parameters.map(&:first).intersect?([:opt, :rest])
+                  "..."
+                else
+                  defn = parameters.filter_map { |type, arg| arg if type == :req }
+                  defn << "&"
+                  defn.join(", ")
+                end
+              end
+            end
+
+            def optional
+              parameters = Built.singleton_class.public_instance_method(:many).parameters
+              definition = if parameters.map(&:first).intersect?([:opt, :rest])
+                "..."
+              else
+                "x"
+              end
+              "def many(#{definition})"
+            end
+
+            # Typed by what `map` declares, so the push is not held to the
+            # first element; the contents come out at the last push.
+            def pushed
+              upcased = ["a", "b"].map(&:upcase)
+              upcased << "C"
+              upcased
+            end
+
+            def interpolated
+              name = "email"
+              "def #{name}"
+            end
+
+            # Read as something other than an interpolation: stays `::String`,
+            # so the array is not an array of one literal.
+            def widened
+              name = "email"
+              [name]
+            end
+
+            # After the block read that was its last, a local is not read again.
+            def read_after_last
+              parameters = Built.singleton_class.public_instance_method(:many).parameters
+              parameters.filter_map { |type, arg| arg if type == :req }
+              parameters.map(&:first).intersect?([:opt])
+            end
+
+            # `map(&:first)` kept under a name shares the elements it picked.
+            def mapped_kept
+              parameters = Built.singleton_class.public_instance_method(:many).parameters
+              picked = parameters.map(&:first)
+              parameters.map(&:first).intersect?([:opt])
+            end
+
+            def aliased
+              parameters = Built.singleton_class.public_instance_method(:two).parameters
+              defn = parameters.filter_map { |type, arg| arg if type == :req }
+              other = defn
+              other.clear
+              defn.join(", ")
+            end
+
+            def element_kept
+              parts = ["a"]
+              first = parts.first
+              first << "b" if first
+              parts.join(",")
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("built.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"a, b, &"', actual.fetch("joined")
+      assert_equal '("a, b, &" | nil)', actual.fetch("in_an_arm")
+      assert_equal '"def many(...)"', actual.fetch("optional")
+      assert_equal '["A", "B", "C"]', actual.fetch("pushed")
+      assert_equal '"def email"', actual.fetch("interpolated")
+      assert_equal "::Array[::String]", actual.fetch("widened")
+
+      assert_equal "bool", actual.fetch("read_after_last")
+      assert_equal "bool", actual.fetch("mapped_kept")
+      assert_equal "::String", actual.fetch("aliased")
+      assert_equal "::String", actual.fetch("element_kept")
+
+      assert_empty typing.errors.reject { |error| error.is_a?(Diagnostic::Ruby::UnreachableBranch) }.map(&:header_line)
     end
   end
 
