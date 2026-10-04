@@ -201,7 +201,12 @@ RUBY
         assert_instance_of HoverProvider::MethodCallContent, content
         assert_equal [1,8]...[1,11], [content.location.line,content.location.column]...[content.location.last_line, content.location.last_column]
         assert_instance_of TypeInference::MethodCall::Typed, content.method_call
-        assert_equal "::Array[::String]", content.method_call.return_type.to_s
+        # The block runs once per element of a collection the checker knows
+        # (#198), so the call answers the value. Hover shows what the check
+        # sees, and the declaration is still there underneath.
+        assert_equal '["1", "2", "3"]', content.method_call.return_type.to_s
+        assert_equal '["1", "2", "3"]', content.narrowed_type.to_s
+        assert_equal "::Array[::String]", content.method_call.actual_method_type.type.return_type.to_s
       end
 
       hover.content_for(target: target, path: Pathname("hello.rb"), line: 1, column: 21).tap do |content|
