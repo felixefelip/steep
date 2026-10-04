@@ -596,12 +596,8 @@ module Steep
       entries = source.accumulators.loops[node] or return
       typing.add_iterations(node, nil)
 
-      names = decls.map { |decl| decl.method_name.to_s }.uniq
-      return unless names.size == 1
-
-      key = MethodIdentity.normalize(names.first)
-      return unless key == "::Array#each"
-      return if literal_method_registry.blocked?(key)
+      intrinsic = iteration_intrinsic(decls)
+      return unless intrinsic&.collect == :each
 
       param = block_params.params.first
       return unless block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
@@ -663,6 +659,113 @@ module Steep
       end
 
       typing.add_iterations(node, passes)
+    end
+
+    # The entry of `IterationIntrinsics` a block call resolved to, or nil.
+    def iteration_intrinsic(decls)
+      names = decls.map { |decl| decl.method_name.to_s }.uniq
+      return unless names.size == 1
+
+      IterationIntrinsics.entry(MethodIdentity.normalize(names.first), override_registry: literal_method_registry)
+    end
+
+    # The receiver of a block call as a collection the checker knows, or nil.
+    # A local `Accumulators` vouches for is read where the call reads it; any
+    # other receiver has to be a collection the checker built or this file
+    # writes out.
+    def iterated_collection(send_node, receiver_type)
+      collection = accumulated_type(send_node) || literal_operand_type(send_node.children[0], receiver_type)
+      return unless collection.is_a?(AST::Types::Tuple)
+      # Each element is a check of the whole body, so the bound is on the work.
+      return if collection.types.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
+
+      collection
+    end
+
+    # What a `map` or `filter_map` block hands back over a collection the
+    # checker knows: the body checked once per element, with its parameters
+    # bound to that element, and the values collected in order.
+    #
+    # Unlike `record_iterations` the passes do not carry anything from one to
+    # the next — only the VALUE of each is asked for, and the locals the body
+    # closes over keep the types every run of a block assumes. A body that can
+    # leave early is declined: `next` hands back a value this does not read,
+    # and `break` a value for the whole call.
+    def iterated_value(node, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
+      return unless block_body
+      intrinsic = iteration_intrinsic(decls) or return
+      return if intrinsic.collect == :each
+      return if jumps_out?(block_body)
+
+      collection = iterated_collection(node.children[0], receiver_type) or return
+
+      results = collection.types.map do |element|
+        bindings = element_bindings(block_params, element) or return
+        pass = entry
+          .with_new_typing(typing.new_child)
+          .update_type_env { |env| env.refine_types(local_variable_types: bindings) }
+        type, _ = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
+        type
+      end
+
+      IterationIntrinsics.collect(intrinsic, results)
+    end
+
+    # The same, for `map(&:first)`: `Symbol#to_proc` calls the method on each
+    # element, so each pass is that call, checked with the element as receiver.
+    def iterated_by_symbol(node, symbol, receiver_type:, decls:)
+      intrinsic = iteration_intrinsic(decls) or return
+      return if intrinsic.collect == :each
+      return if literal_method_registry.blocked?(IterationIntrinsics::SYMBOL_TO_PROC)
+
+      collection = iterated_collection(node, receiver_type) or return
+      element_node = node.updated(:lvar, [ITERATED_ELEMENT])
+      call_node = node.updated(:send, [element_node, symbol])
+
+      results = collection.types.map do |element|
+        pass = with_new_typing(typing.new_child)
+          .update_type_env { |env| env.assign_local_variable(ITERATED_ELEMENT, element, nil) }
+        type, _ = pass.synthesize(call_node)
+        type
+      end
+
+      IterationIntrinsics.collect(intrinsic, results)
+    end
+
+    # The local a symbol's pass binds the element to. Not a name Ruby can
+    # spell, so it can shadow nothing the program reads.
+    ITERATED_ELEMENT = :"*element"
+
+    # The block's parameters bound to one element, the way `yield element`
+    # binds them: one parameter takes the element, several take it apart.
+    # Anything else — a rest, an optional, a nested pattern — declines.
+    #
+    # One parameter is `procarg0` only when written `|k|`. `|k,|` parses as a
+    # plain `arg`, and Ruby takes the element apart for it as for several:
+    # `[["ab", "cde"]].map { |k,| k }` is `["ab"]`.
+    def element_bindings(block_params, element)
+      return if block_params.rest_param || block_params.block_param || !block_params.optional_params.empty?
+
+      params = block_params.params
+      return unless params.all? { |param| param.is_a?(TypeInference::BlockParams::Param) }
+
+      case
+      when params.empty?
+        {}
+      when params.size == 1 && params[0].node.type == :procarg0
+        { params[0].var => element }
+      else
+        return unless element.is_a?(AST::Types::Tuple)
+
+        params.each_with_index.to_h { |param, index| [param.var, element.types[index] || AST::Builtin.nil_type] }
+      end
+    end
+
+    def jumps_out?(node)
+      return false unless node.is_a?(::Parser::AST::Node)
+      return true if Accumulators::JUMPS.include?(node.type)
+
+      node.children.any? { |child| jumps_out?(child) }
     end
 
     # Which arm of `node` this check leaves reachable, for a conditional some
@@ -5586,7 +5689,7 @@ module Steep
       # own expression evaluated to, not a type something else was annotated
       # with — which is the difference `built_here_only` is about, and
       # `record_built_value` is where the checker says which one it is.
-      return inferred_type if node.type == :send && built_value?(node, inferred_type)
+      return inferred_type if (node.type == :send || node.type == :block) && built_value?(node, inferred_type)
 
       # Parentheses are a node of their own, and what is inside them is the
       # value — a collection as much as a literal. The `:begin` arm further down
@@ -6424,6 +6527,16 @@ module Steep
                   block_type_hint: method_type.block.type.return_type,
                   decls: decls
                 )
+
+                iterated = constr.iterated_value(
+                  node,
+                  entry: entry_constr,
+                  receiver_type: receiver_type,
+                  block_params: block_params_,
+                  block_body: block_body,
+                  block_type_hint: method_type.block.type.return_type,
+                  decls: decls
+                )
               else
                 # Failed to infer the type of block parameters
                 constr.type_block_without_hint(node: node, block_annotations: block_annotations, block_params: block_params_, block_body: block_body) do |error|
@@ -6554,6 +6667,11 @@ module Steep
                     constraints.solution(checker, variables: method_type.free_variables, context: ccontext)
                   }
                   method_type = eliminate_vars(method_type, type_param_names) unless solved
+
+                  symbol = arg.node.children[0]
+                  if symbol&.type == :sym
+                    iterated = constr.iterated_by_symbol(node, symbol.children[0], receiver_type: receiver_type, decls: decls)
+                  end
                 end
               else
                 # Block is not given
@@ -6600,6 +6718,15 @@ module Steep
               end
             end
           end
+        end
+
+        # A collection the passes above answered exactly, held to the
+        # declaration like every other value the checker computes, and vouched
+        # for as built here — it is a new array, and nothing else holds it.
+        if iterated && errors.empty? &&
+           check_relation(sub_type: iterated, super_type: return_type || method_type.type.return_type).success?
+          return_type = iterated
+          constr.typing.add_vouched(node, iterated)
         end
 
         call = if errors.empty?

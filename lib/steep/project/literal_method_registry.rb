@@ -25,18 +25,24 @@ module Steep
       # contributes is fixed by its text: parsed once, replayed on every ingest.
       # The parse is the expensive half, and rbs_infer ingests the same source
       # once per type check.
-      Scan = Struct.new(:blocked, :blocked_names, :modules, :opaque_modules, :mixins)
+      Scan = Struct.new(:blocked, :blocked_names, :modules, :opaque_modules, :mixins, :module_methods)
 
       # Both folds are keyed the same way and blocked the same way, so one
       # registry watches both tables.
-      TABLES = [LiteralIntrinsics, ReflectionIntrinsics].freeze
-      # Only `prepend` shadows an entry by LOOKUP. A module inserted by `include`
-      # sits below the class in the chain, and every method in the table is one
-      # the core class defines itself, so the class's own always wins:
+      TABLES = [LiteralIntrinsics, ReflectionIntrinsics, IterationIntrinsics].freeze
+      # Only `prepend` shadows every entry by LOOKUP. A module inserted by
+      # `include` sits below the class in the chain, so a method the core class
+      # defines itself always wins:
       #
       #   module M; def join(*) = "hijacked"; end
       #   Array.include M  #=> [1, 2].join(",") == "1,2"
       #   Array.prepend M  #=> [1, 2].join(",") == "hijacked"
+      #
+      # It does NOT win over one the class inherits: `Array#filter_map` is
+      # `Enumerable`'s, and an included module sits above `Enumerable`. So an
+      # inert `include` still blocks, under the class's key, each method the
+      # module writes that is not one of the class's own entries — see
+      # `resolve_mixins`.
       #
       # `extend` reaches the singleton, and the table holds no singleton method.
       LOOKUP_MUTATORS = Set[:prepend]
@@ -88,6 +94,9 @@ module Steep
         @mixins = [] #: Array[[String, String?]]
         @modules = Set[] #: Set[String]
         @opaque_modules = Set[] #: Set[String]
+        # The instance methods each module writes — `def`, `alias`, `undef` and
+        # their method-call forms — for an `include` to shadow.
+        @module_methods = {} #: Hash[String, Set[Symbol]]
         # What scanning a source adds, by source digest. Shared with every copy.
         @scans = {} #: Hash[String, Scan]
       end
@@ -99,6 +108,7 @@ module Steep
         @mixins = []
         @modules = Set[]
         @opaque_modules = Set[]
+        @module_methods = {} #: Hash[String, Set[Symbol]]
       end
 
       def build(project)
@@ -156,6 +166,7 @@ module Steep
         @modules.merge(scan.modules)
         @opaque_modules.merge(scan.opaque_modules)
         @mixins.concat(scan.mixins)
+        scan.module_methods.each { |owner, names| (@module_methods[owner] ||= Set[]).merge(names) }
         self
       end
 
@@ -172,7 +183,7 @@ module Steep
       end
 
       def scan_result
-        Scan.new(@blocked, @blocked_names, @modules, @opaque_modules, @mixins)
+        Scan.new(@blocked, @blocked_names, @modules, @opaque_modules, @mixins, @module_methods)
       end
 
       private
@@ -201,6 +212,7 @@ module Steep
         return unless method_name
 
         key = "::#{owner}#{singleton ? "." : "#"}#{method_name}"
+        (@module_methods[owner] ||= Set[]) << method_name.to_sym unless singleton || owner.empty?
 
         # A reflection is shadowed by the RECEIVER's class, and a receiver is
         # any class the project writes — so these are recorded whoever the owner
@@ -289,24 +301,43 @@ module Steep
       # resolved here rather than at the scan: a module may be defined in a file
       # ingested after the mixin site, and deciding earlier makes the answer
       # depend on ingestion order.
+      #
+      # An inert `include` still shadows what the class inherits, so each
+      # method the module writes, other than the class's own entries, is
+      # blocked as if the class had written it.
       def resolve_mixins
         return if @mixins.empty?
 
         pending = @mixins
         @mixins = []
-        pending.each do |target, references, nesting|
-          inert = references.any? && references.all? { |reference| inert_mixin?(reference, nesting) }
-          taint(target) unless inert
+        pending.each do |target, method_name, references, nesting|
+          modules = references.map { |reference| inert_mixin(reference, nesting) }
+          next taint(target) if modules.empty? || modules.any?(&:nil?)
+          next unless method_name == :include
+
+          modules.each do |mod|
+            @module_methods.fetch(mod, Set[]).each do |name|
+              block_method(target, name) unless own_entry?(target, name)
+            end
+          end
         end
       end
 
-      # Whether one named module is known to be harmless. A relative constant is
-      # matched against the lexical scopes Ruby would search; more than one
-      # match is a question this cannot settle, so it counts as unknown — as
-      # does a name never read, and anything that is not a plain constant.
-      def inert_mixin?(reference, nesting)
+      # Whether a table keys an entry to the class itself — a method the class
+      # defines, which an `include` lands below. Anything else under its name is
+      # one it may inherit, and the included module comes first.
+      def own_entry?(owner, method_name)
+        key = "::#{owner}##{method_name}"
+        TABLES.any? { |table| table::ENTRIES.key?(key) }
+      end
+
+      # The module one name denotes, when it is known to be harmless. A relative
+      # constant is matched against the lexical scopes Ruby would search; more
+      # than one match is a question this cannot settle, so it counts as unknown
+      # — as does a name never read, and anything that is not a plain constant.
+      def inert_mixin(reference, nesting)
         name, absolute = reference
-        return false unless name
+        return nil unless name
 
         candidates =
           if absolute
@@ -316,7 +347,7 @@ module Steep
           end
 
         found = candidates.uniq.select { |candidate| @modules.include?(candidate) }
-        found.size == 1 && !@opaque_modules.include?(found.first)
+        found.first if found.size == 1 && !@opaque_modules.include?(found.first)
       end
 
       def taint(owner)
@@ -403,7 +434,7 @@ module Steep
             # `include A, B` mixes in BOTH, so one inert module does not speak
             # for the call. The names are kept unresolved: which constant each
             # denotes depends on modules this may not have read yet.
-            @mixins << [target, arguments.map { |argument| const_name(argument) }, nesting.dup]
+            @mixins << [target, method_name, arguments.map { |argument| const_name(argument) }, nesting.dup]
           elsif EVAL_METHODS.include?(method_name) && target && !arguments.empty?
             # String/evaluated forms are opaque to the AST. Any method in the
             # target's lookup table could be replaced.

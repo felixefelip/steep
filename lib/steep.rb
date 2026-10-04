@@ -66,6 +66,7 @@ require "steep/descendant_index"
 require "steep/method_identity"
 require "steep/literal_intrinsics"
 require "steep/reflection_intrinsics"
+require "steep/iteration_intrinsics"
 
 require "steep/range_extension"
 

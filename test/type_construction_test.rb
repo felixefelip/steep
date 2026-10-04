@@ -8282,9 +8282,9 @@ end
   def test_block_generic_with_uninformative_hint
     with_checker(<<-RBS) do |checker|
 class UninformativeHintBlock
-  def untyped_hint: () -> untyped
-  def object_hint: () -> Object
-  def array_hint: () -> Array[Integer?]
+  def untyped_hint: (Array[Integer]) -> untyped
+  def object_hint: (Array[Integer]) -> Object
+  def array_hint: (Array[Integer]) -> Array[Integer?]
 end
     RBS
 
@@ -8297,10 +8297,12 @@ end
       }.each do |method_name, expected|
         body = method_name == :array_hint ? "1" : '"a"'
 
+        # A parameter, not `[1]`: over a collection the checker knows, `map` is
+        # answered per element, and this is about what the generic solves to.
         source = parse_ruby(<<-RUBY)
 class UninformativeHintBlock
-  def #{method_name}
-    [1].map { #{body} }
+  def #{method_name}(numbers)
+    numbers.map { #{body} }
   end
 end
         RUBY

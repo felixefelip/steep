@@ -1408,6 +1408,156 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # A block run once per element of a collection the checker knows, and the
+  # values it hands back collected in order. The chains are
+  # `ActiveSupport::Delegation`'s reflection branch, spelled as it writes them.
+  def test_a_block_over_known_elements_answers_each_of_them
+    run_type_check_test(
+      signatures: {
+        "iterated.rbs" => <<~RBS
+          class Iterated
+            def self.human_name: (String index) -> String
+            def self.many: (String a, ?Integer b) -> String
+
+            def kinds: () -> Array[Symbol]
+            def any_optional: () -> bool
+            def none_optional: () -> bool
+            def required: () -> Array[Symbol]
+            def upcased: () -> Array[String]
+            def collected: () -> Array[String]
+            def undecided: (Symbol) -> Array[Symbol]
+            def first_of_each: () -> Array[String?]
+            def whole: () -> Array[Array[String]]
+            def not_exact: (String) -> Array[String]
+            def jumps: () -> Array[String]
+          end
+        RBS
+      },
+      code: {
+        "iterated.rb" => <<~'RUBY'
+          class Iterated
+            def self.human_name(index) = index
+            def self.many(a, b = 1) = a
+
+            def kinds = Iterated.singleton_class.public_instance_method(:many).parameters.map(&:first)
+            def any_optional = Iterated.singleton_class.public_instance_method(:many).parameters.map(&:first).intersect?([:opt, :rest, :keyreq, :key, :keyrest])
+            def none_optional = Iterated.singleton_class.public_instance_method(:human_name).parameters.map(&:first).intersect?([:opt, :rest, :keyreq, :key, :keyrest])
+            def required = Iterated.singleton_class.public_instance_method(:many).parameters.filter_map { |type, arg| arg if type == :req }
+            def upcased = ["a", "b"].map { |piece| piece.upcase }
+            # `|k,|` takes the element apart, as several parameters would;
+            # `|k|` takes it whole.
+            def first_of_each = [["ab", "cde"]].map { |k,| k }
+            def whole = [["ab", "cde"]].map { |k| k }
+            def collected = ["a", "b"].collect(&:upcase)
+
+            # Each of these stays what the declaration says, for its own reason:
+            # a condition no element decides, a value no element fixes, and a
+            # body that can leave before it hands anything back.
+            def undecided(kind) = [[:req, :a]].filter_map { |type, arg| arg if type == kind }
+            def not_exact(suffix) = ["a"].map { |piece| piece + suffix }
+            def jumps = ["a", "b"].map { |piece| next "x" if piece == "a"; piece }
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("iterated.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "[:req, :opt]", actual.fetch("kinds")
+      assert_equal "true", actual.fetch("any_optional")
+      assert_equal "false", actual.fetch("none_optional")
+      assert_equal "[:a]", actual.fetch("required")
+      assert_equal '["A", "B"]', actual.fetch("upcased")
+      assert_equal '["A", "B"]', actual.fetch("collected")
+      assert_equal '["ab"]', actual.fetch("first_of_each")
+      assert_equal '[["ab", "cde"]]', actual.fetch("whole")
+
+      assert_equal "::Array[::Symbol]", actual.fetch("undecided")
+      assert_equal "::Array[::String]", actual.fetch("not_exact")
+      assert_equal "::Array[::String]", actual.fetch("jumps")
+    end
+  end
+
+  # A project that replaces one of these methods runs its own, so the passes
+  # answer nothing for a call that reaches it — and only for those calls.
+  def test_a_block_over_known_elements_declines_a_method_the_project_replaces
+    overrides = {
+      "map" => "def map = []",
+      "each" => "def each = self",
+      "filter_map" => "def filter_map = []",
+      "included filter_map" => nil,
+      "to_proc" => nil
+    }
+
+    overrides.each do |replaced, body|
+      override = case replaced
+                 when "to_proc"
+                   "class Symbol\n  def to_proc = proc { nil }\nend\n"
+                 when "included filter_map"
+                   "module Filtering\n  def filter_map = []\nend\n\nArray.include Filtering\n"
+                 else
+                   "class Array\n  #{body}\nend\n"
+                 end
+
+      run_type_check_test(
+        signatures: {
+          "iterated.rbs" => <<~RBS
+            class ReplacedIteration
+              def mapped: () -> Array[String]
+              def by_symbol: () -> Array[String]
+              def filtered: () -> Array[String]
+              def looped: () -> String
+            end
+          RBS
+        },
+        code: {
+          "override.rb" => override,
+          "iterated.rb" => <<~'RUBY'
+            class ReplacedIteration
+              def mapped = ["a"].map { |piece| piece.upcase }
+              def by_symbol = ["a"].collect(&:upcase)
+              def filtered = ["a"].filter_map { |piece| piece.upcase }
+              def looped
+                parts = []
+                ["a"].each { |piece| parts << piece }
+                parts.join(";")
+              end
+            end
+          RUBY
+        }
+      ) do |typings|
+        typing = typings.fetch("iterated.rb")
+        actual = {}
+        typing.each_typing do |node, _type|
+          next unless node.type == :def && node.children[2]
+
+          actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+        end
+
+        expected =
+          case replaced
+          when "map"
+            { "mapped" => "::Array[::String]", "by_symbol" => '["A"]', "filtered" => '["A"]', "looped" => '"a"' }
+          when "each"
+            # `filter_map` walks the array by calling `each`; `map` does not.
+            { "mapped" => '["A"]', "by_symbol" => '["A"]', "filtered" => "::Array[::String]", "looped" => "::String" }
+          when "filter_map", "included filter_map"
+            # Found on Array before Enumerable's, which is the one the RBS names.
+            { "mapped" => '["A"]', "by_symbol" => '["A"]', "filtered" => "::Array[::String]", "looped" => '"a"' }
+          when "to_proc"
+            { "mapped" => '["A"]', "by_symbol" => "::Array[::String]", "filtered" => '["A"]', "looped" => '"a"' }
+          end
+
+        assert_equal expected, actual.slice(*expected.keys), "with #{replaced} replaced"
+      end
+    end
+  end
+
   # Reflection answered out of the declaration the checker already has. The
   # chain is `ActiveSupport::Delegation`'s, spelled exactly as it writes it —
   # `owner.singleton_class.public_instance_method(method).parameters`.
