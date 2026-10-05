@@ -39,6 +39,22 @@ module Steep
 
     SPECIAL_LVAR_NAMES = Set[:_, :__any__, :__skip__]
 
+    # Whether a local by this name is a cast: written, it is `untyped` whatever
+    # it is assigned, and read, it is `untyped`. `__any__` and `__skip__`
+    # always; `_` only where the target asks for upstream's convention
+    # (`underscore_casts!`) — otherwise `_ = user` is an ordinary local, typed
+    # by `user`, as in any Ruby that was not written for this checker.
+    #
+    # A PARAMETER named `_` is still not typed: there the name says "unused",
+    # and `|_, _|` binds one name twice.
+    def self.cast_lvar?(name, underscore_casts:)
+      name == :__any__ || name == :__skip__ || (name == :_ && underscore_casts)
+    end
+
+    def cast_lvar?(name)
+      TypeConstruction.cast_lvar?(name, underscore_casts: checker.builder.underscore_casts)
+    end
+
     # a synthetic variable name for anonymous block params (can't conflict with
     # user variables since Ruby doesn't allow * in local variable names).
     ANONYMOUS_BLOCK_PASSABLE_LVAR = :"*block"
@@ -392,8 +408,12 @@ module Steep
 
       local_variable_types = method_params.each_param.with_object({}) do |param, hash| #$ Hash[Symbol, AST::Types::t]
         if param.name
-          unless SPECIAL_LVAR_NAMES.include?(param.name)
+          if !SPECIAL_LVAR_NAMES.include?(param.name)
             hash[param.name] = param.var_type
+          elsif param.name == :_ && !cast_lvar?(:_)
+            # Untyped as before, but bound: an ordinary `_` from outside must
+            # not show through it.
+            hash[param.name] = AST::Builtin.any_type
           end
         elsif param.is_a?(TypeInference::MethodParams::BlockParameter)
           hash[ANONYMOUS_BLOCK_PASSABLE_LVAR] = param.var_type
@@ -1472,13 +1492,13 @@ module Steep
           yield_self do
             name, rhs = node.children
 
-            case name
-            when :_, :__any__
+            case
+            when name == :__skip__
+              add_typing(node, type: AST::Builtin.any_type)
+            when cast_lvar?(name)
               synthesize(rhs, hint: AST::Builtin.any_type).yield_self do |pair|
                 add_typing(node, type: AST::Builtin.any_type, constr: pair.constr)
               end
-            when :__skip__
-              add_typing(node, type: AST::Builtin.any_type)
             else
               if enforced_type = context.type_env.enforced_type(name)
                 case
@@ -1557,7 +1577,8 @@ module Steep
           yield_self do
             var = node.children[0]
 
-            if SPECIAL_LVAR_NAMES.include?(var)
+            if cast_lvar?(var) || (var == :_ && !context.type_env[var])
+              # …or a `_` nothing assigned: a parameter, which stays untyped.
               add_typing node, type: AST::Builtin.any_type
             else
               if (type = context.type_env[var])
@@ -3601,7 +3622,7 @@ module Steep
     def lvasgn(node, type)
       name = node.children[0]
 
-      if SPECIAL_LVAR_NAMES.include?(name)
+      if cast_lvar?(name)
         add_typing(node, type: AST::Builtin.any_type)
       else
         if enforced_type = context.type_env.enforced_type(name)
@@ -7113,7 +7134,12 @@ module Steep
         end
       end
 
+      # A block parameter `_` is still untyped, but where `_` is an ordinary
+      # local it is BOUND: `_ = user; items.each { |_| _.name }` reads the
+      # element, not the user.
+      shadows_underscore = param_types_hash.key?(:_) && !cast_lvar?(:_)
       param_types_hash.delete_if {|name, _| name && SPECIAL_LVAR_NAMES.include?(name) }
+      param_types_hash[:_] = AST::Builtin.any_type if shadows_underscore
 
       param_types = param_types_hash.each.with_object({}) do |pair, hash| #$ Hash[Symbol, [AST::Types::t, AST::Types::t?]]
         name, type = pair

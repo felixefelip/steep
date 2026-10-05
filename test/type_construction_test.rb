@@ -55,12 +55,12 @@ module Foo[A]
 end
   EOS
 
-  def with_checker(*files, no_default: false, &block)
+  def with_checker(*files, no_default: false, underscore_casts: true, &block)
     unless no_default
       files << DEFAULT_SIGS
     end
 
-    super(*files, &block)
+    super(*files, underscore_casts: underscore_casts, &block)
   end
 
   def test_lvar_with_annotation
@@ -12603,6 +12603,140 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
         assert_equal parse_type("::Rational"), pair.context.type_env[:r]
         assert_equal parse_type("::Complex"), pair.context.type_env[:c]
         assert_equal parse_type("::Complex"), pair.context.type_env[:rc]
+        assert_no_error typing
+      end
+    end
+  end
+
+  # `_` is an ordinary local in this fork unless the target asks for
+  # upstream's cast (`underscore_casts!`).
+
+  def test_underscore_is_an_ordinary_local
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        _ = "foo"
+        a = _.size
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::String"), context.type_env[:_]
+        assert_equal parse_type("::Integer"), context.type_env[:a]
+      end
+    end
+  end
+
+  def test_underscore_is_not_a_cast
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var x: String
+        x = (_ = 3)
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) { assert_instance_of Diagnostic::Ruby::IncompatibleAssignment, _1 }
+        end
+      end
+    end
+  end
+
+  def test_underscore_cast_on_request
+    with_checker(underscore_casts: true) do |checker|
+      source = parse_ruby(<<~RUBY)
+        _ = "foo"
+        a = _.size
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("untyped"), context.type_env[:a]
+      end
+    end
+  end
+
+  def test_underscore_narrows
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var s: String?
+        s = nil
+        _ = s
+        if !_.nil?
+          a = _.size
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer?"), context.type_env[:a]
+      end
+    end
+  end
+
+  # A block parameter `_` is untyped, as before — and BOUND, so the `_`
+  # outside does not show through it.
+  def test_underscore_block_parameter_shadows
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        _ = 1
+        [:x].each do |_|
+          a = _
+        end
+        b = _
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        block = source.node.children[1]
+        lvasgn = block.children[2]
+        assert_equal parse_type("untyped"), typing.type_of(node: lvasgn)
+        assert_equal parse_type("::Integer"), context.type_env[:b]
+      end
+    end
+  end
+
+  def test_underscore_method_parameter_stays_untyped
+    with_checker(<<~RBS, underscore_casts: false) do |checker|
+      class UnderscoreParam
+        def foo: (Integer) -> untyped
+      end
+    RBS
+      source = parse_ruby(<<~RUBY)
+        class UnderscoreParam
+          def foo(_)
+            _.anything
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_any_is_still_a_cast
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var x: String
+        x = (__any__ = 3)
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
         assert_no_error typing
       end
     end

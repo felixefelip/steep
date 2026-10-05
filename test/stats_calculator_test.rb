@@ -34,7 +34,7 @@ class StatsCalculatorTest < Minitest::Test
       service.update(changes: {
         Pathname("lib/hello.rb") => [ContentChange.string(<<~RUBY)]
           1 + 2
-          (_ = 1) + 2
+          (__any__ = 1) + 2
           1 + ""
         RUBY
       })

@@ -634,7 +634,7 @@ module Steep
           loader.add(path: absolute) if absolute.file?
         end
 
-        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
+        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts)
         status = signature_service.status
         # Two values, like the happy-path return below: `run` destructures this,
         # and a bare `[]` gave it `nil, nil` — which took the whole inference pass

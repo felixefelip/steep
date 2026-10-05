@@ -40,7 +40,7 @@ module Steep
           loader.add(path: absolute) if absolute.file?
         end
 
-        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
+        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts)
         status = signature_service.status
         return nil unless status.is_a?(Services::SignatureService::LoadedStatus)
 

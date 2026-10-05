@@ -183,7 +183,7 @@ module Steep
         stdout.puts
 
         loader = Project::Target.construct_env_loader(options: target.options, project: project)
-        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
+        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts)
         subtyping = signature_service.current_subtyping or raise "Failed to build subtyping"
 
         lsp_formatter = Diagnostic::LSPFormatter.new(target.code_diagnostics_config)

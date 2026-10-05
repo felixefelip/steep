@@ -24,7 +24,9 @@ class TypeCheckTest < Minitest::Test
   # @rbs callbacks: Steep::Callbacks::Store
   # @rbs &block: ? (Hash[String, Steep::Typing]) -> void
   # @rbs return: void
-  def run_type_check_test(signatures: {}, code: {}, inline_code: {}, expectations: nil, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, &block)
+  # `underscore_casts:` on, as in `with_checker`: these tests set their scene up
+  # with upstream's `(_ = nil)` casts.
+  def run_type_check_test(signatures: {}, code: {}, inline_code: {}, expectations: nil, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, underscore_casts: true, &block)
     typings = {}
 
     delegation_registry = build_test_delegation_registry(code.merge(inline_code))
@@ -34,7 +36,7 @@ class TypeCheckTest < Minitest::Test
     end
 
     with_factory(signatures, inline_code, nostdlib: false) do |factory|
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: underscore_casts)
       subtyping = Subtyping::Check.new(builder: builder)
 
       code.merge(inline_code).each do |path, content|
