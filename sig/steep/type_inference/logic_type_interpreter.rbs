@@ -46,6 +46,8 @@ module Steep
 
       def initialize: (subtyping: Subtyping::Check, typing: Typing, config: Interface::Builder::Config, ?postconditions: Postconditions::Store, ?self_type: AST::Types::t?) -> void
 
+      def cast_lvar?: (Symbol name) -> bool
+
       def eval: (env: TypeEnv, node: Parser::AST::Node) -> [Result, Result]
 
       def evaluate_node: (env: TypeEnv, node: Parser::AST::Node, ?type: AST::Types::t) -> [Result, Result]

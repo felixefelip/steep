@@ -10,7 +10,7 @@ class Steep::Server::LSPFormatterTest < Minitest::Test
 
   def type_check(content)
     source = Source.parse(content, path: Pathname("a.rb"), factory: factory)
-    builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+    builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
     subtyping = Subtyping::Check.new(builder: builder)
     resolver = RBS::Resolver::ConstantResolver.new(builder: subtyping.factory.definition_builder)
     Services::TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: nil, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, specializations: Steep::Specializations::Store.empty, literal_method_registry: Steep::Project::LiteralMethodRegistry.new, delegation_registry: Steep::Project::DelegationRegistry.new, constructor_bindings: Steep::Project::ConstructorBindingRegistry.new, return_forwarding: Steep::Project::ReturnForwardingRegistry.new, return_alias: Steep::Project::ReturnAliasRegistry.new)

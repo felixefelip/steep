@@ -140,6 +140,7 @@ module Steep
         attr_reader :unreferenced
         attr_reader :groups
         attr_reader :implicitly_returns_nil
+        attr_reader :underscore_casts
 
         def initialize(name, project:)
           @name = name
@@ -149,6 +150,7 @@ module Steep
           @collection_config_path = collection_config_path
           @unreferenced = false
           @implicitly_returns_nil = false
+          @underscore_casts = false
           @groups = []
         end
 
@@ -167,6 +169,7 @@ module Steep
           @collection_config_path = other.collection_config_path
           @unreferenced = other.unreferenced
           @implicitly_returns_nil = other.implicitly_returns_nil
+          @underscore_casts = other.underscore_casts
           @groups = other.groups.dup
         end
 
@@ -176,6 +179,17 @@ module Steep
 
         def implicitly_returns_nil!(value = true)
           @implicitly_returns_nil = value
+        end
+
+        # `_ = expr` as a cast, the way upstream Steep reads it: the assignment
+        # is `untyped`, and so is every read of `_`. Off by default in this
+        # fork. A cast is an annotation by another name, and in plain Ruby `_`
+        # is an ordinary local — ActiveSupport's `delegate` writes
+        # `_ = #{receiver}` to evaluate the receiver once, not to silence a
+        # checker it does not know. A codebase written against upstream's
+        # convention (Steep's own `lib/`) turns it back on here.
+        def underscore_casts!(value = true)
+          @underscore_casts = value
         end
 
         def configure_code_diagnostics(hash = nil)
@@ -274,7 +288,8 @@ module Steep
           code_diagnostics_config: dsl.code_diagnostics_config,
           project: project,
           unreferenced: dsl.unreferenced,
-          implicitly_returns_nil: dsl.implicitly_returns_nil
+          implicitly_returns_nil: dsl.implicitly_returns_nil,
+          underscore_casts: dsl.underscore_casts
         )
 
         dsl.groups.each do

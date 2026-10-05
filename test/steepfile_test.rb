@@ -305,6 +305,28 @@ YAML
     end
   end
 
+  def test_target_underscore_casts
+    in_tmpdir do
+      current_dir.join('rbs_collection.yaml').write('')
+      project = Project.new(steepfile_path: current_dir + "Steepfile")
+
+      Project::DSL.parse(project, <<~RUBY)
+        target :app do
+          check "app"
+        end
+
+        target :lib do
+          underscore_casts!
+
+          check "lib"
+        end
+      RUBY
+
+      refute_predicate project.targets.find { _1.name == :app }, :underscore_casts
+      assert_predicate project.targets.find { _1.name == :lib }, :underscore_casts
+    end
+  end
+
   def test_group
     in_tmpdir do
       project = Project.new(steepfile_path: current_dir + "Steepfile")

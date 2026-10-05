@@ -24,7 +24,7 @@ class InterfaceBuilderTest < Minitest::Test
           def hello: () -> [::Integer, T, self]
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::_Foo[::String]"), config).tap do |shape|
         assert_equal parse_type("::_Foo[::String]"), shape.type
@@ -49,7 +49,7 @@ class InterfaceBuilderTest < Minitest::Test
           def self.hello: () -> [::Integer, self, instance, class]
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("singleton(::Foo)"), config).tap do |shape|
         assert_equal parse_type("singleton(::Foo)"), shape.type
@@ -79,7 +79,7 @@ class InterfaceBuilderTest < Minitest::Test
           def hello: () -> [::Integer, A, B, C, self, instance, class]
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::Foo[::Object, ::String, ::Integer]"), config).tap do |shape|
         assert_equal parse_type("::Foo[::Object, ::String, ::Integer]"), shape.type
@@ -106,7 +106,7 @@ class InterfaceBuilderTest < Minitest::Test
 
         type bar[T] = T
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::bar[::_Foo]"), config).tap do |shape|
         assert_equal parse_type("::bar[::_Foo]"), shape.type
@@ -135,7 +135,7 @@ class InterfaceBuilderTest < Minitest::Test
           def itself: () -> self
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::_Foo | ::_Bar"), config).tap do |shape|
         assert_equal parse_type("::_Foo | ::_Bar"), shape.type
@@ -158,7 +158,7 @@ class InterfaceBuilderTest < Minitest::Test
 
   def test_shape__bool
     with_factory() do
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("bool"), config).tap do |shape|
         assert_equal parse_type("bool"), shape.type
@@ -174,7 +174,7 @@ class InterfaceBuilderTest < Minitest::Test
 
   def test_shape__literal
     with_factory() do
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("1"), config).tap do |shape|
         assert_equal parse_type("1"), shape.type
@@ -202,7 +202,7 @@ interface _Bar
   def h: () -> void
 end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       # A value of an intersection type satisfies every member, so every member's
       # overloads are on it — first member first, since resolution is first-match.
@@ -259,7 +259,7 @@ end
           def creator: () -> ::String
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       # Overloads that accept the same arguments cannot both be selected, so they fold
       # into one whose return type is the intersection of theirs. `Kernel#class` is
@@ -288,7 +288,7 @@ end
           def special_types: () -> [self, class, instance]
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("^(::String) { (::Integer) -> void } -> ::String"), config).tap do |shape|
         assert_equal parse_type("^(::String) { (::Integer) -> void } -> ::String"), shape.type
@@ -338,7 +338,7 @@ end
 
   def test_shape__tuple
     with_factory() do
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("[::Integer, top]"), config).tap do |shape|
         assert_equal parse_type("[::Integer, top]"), shape.type
@@ -392,7 +392,7 @@ end
         end
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("{ id: ::Integer, name: ::String }"), config).tap do |shape|
         shape or raise
@@ -460,7 +460,7 @@ class Symbol
 end
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::Integer | ::String"), config).tap do |shape|
         assert_equal(
@@ -502,7 +502,7 @@ end
         end
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("A", variables: [:A]), config(variable_bounds: { A: parse_type("::_Foo[::String]") })).tap do |shape|
         assert_equal parse_type("A", variables: [:A]), shape.type
@@ -529,7 +529,7 @@ end
         type names = #{names.join(" | ")}
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::names"), config).tap do |shape|
         assert_equal parse_type("::names"), shape.type
@@ -555,7 +555,7 @@ end
         #{members.map {|name| "class #{name} < Base\n  def foo: (::Integer) -> void | ...\nend\n" }.join("\n")}
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
         assert_equal [parse_method_type("(::Integer) -> void")], shape.methods[:foo].method_types
@@ -587,7 +587,7 @@ end
         #{members.map {|name| "class #{name} < Base\n  def foo: () -> ::Base | ...\nend\n" }.join("\n")}
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
         assert_equal [parse_method_type("() -> ::Base")], shape.methods[:foo].method_types
@@ -613,7 +613,7 @@ end
         #{members.map {|name| "class #{name}\n  def where: () -> #{name}\n            | (*untyped) -> ::Array[#{name}]\nend\n" }.join("\n")}
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
         assert_equal(
@@ -636,7 +636,7 @@ class Foo
 end
       RUBY
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("singleton(::Foo)"), config).tap do |shape|
         assert_equal parse_type("singleton(::Foo)"), shape.type

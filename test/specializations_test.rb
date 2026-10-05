@@ -692,7 +692,7 @@ class SpecializationsTest < Minitest::Test
       loader.add(path: absolute) if absolute.file?
     end
 
-    status = Steep::Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil).status
+    status = Steep::Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts).status
     source = Steep::Source.parse(path.read, path: path, factory: status.subtyping.factory)
     typing = Steep::Services::TypeCheckService.type_check(
       source: source,

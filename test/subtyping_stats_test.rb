@@ -15,7 +15,7 @@ class SubtypingStatsTest < Minitest::Test
 class Foo
 end
     EOS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
       yield Subtyping::Check.new(builder: builder)
     end
   end

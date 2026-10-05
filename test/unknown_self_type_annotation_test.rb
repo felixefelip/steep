@@ -45,7 +45,7 @@ class UnknownSelfTypeAnnotationTest < Minitest::Test
         absolute = project.absolute_path(path)
         loader.add(path: absolute) if absolute.file?
       end
-      status = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil).status
+      status = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts).status
 
       absolute = project.absolute_path(Pathname("app/body.rb"))
       source = Steep::Source.parse(absolute.read, path: absolute, factory: status.subtyping.factory)

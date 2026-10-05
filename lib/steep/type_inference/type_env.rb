@@ -451,7 +451,9 @@ module Steep
         # If name start with `@`, it is instance variable or class instance variable.
         # If name start with `$`, it is global variable.
         return false if name.start_with?(/[\p{Uppercase_Letter}\p{Titlecase_Letter}@$]/)
-        return false if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+        # `_` is a local even where it is a cast: nothing then assigns it, so
+        # nothing is stored under it.
+        return false if name == :__any__ || name == :__skip__
 
         true
       end

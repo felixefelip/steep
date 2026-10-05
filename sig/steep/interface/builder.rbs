@@ -63,7 +63,9 @@ module Steep
 
       attr_reader implicitly_returns_nil: bool
 
-      def initialize: (AST::Types::Factory, implicitly_returns_nil: bool) -> void
+      attr_reader underscore_casts: bool
+
+      def initialize: (AST::Types::Factory, implicitly_returns_nil: bool, underscore_casts: bool) -> void
 
       # Returns a shape of given type with respect to Config
       #
