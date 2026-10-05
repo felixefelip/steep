@@ -25,9 +25,9 @@ class ContractsInferrerTest < Minitest::Test
     end
   RBS
 
-  def infer_for(ruby)
+  def infer_for(ruby, underscore_casts: true)
     contracts = nil
-    with_checker(RBS_FIXTURE) do |checker|
+    with_checker(RBS_FIXTURE, underscore_casts: underscore_casts) do |checker|
       source = parse_ruby(ruby)
       with_standard_construction(checker, source) do |construction, typing|
         construction.synthesize(source.node)
@@ -120,11 +120,13 @@ class ContractsInferrerTest < Minitest::Test
     assert_empty contracts
   end
 
+  # A local whose value is not a self path. (One that IS — `arg = name` — is
+  # rooted at `self.name`: `test_infers_through_a_local_that_is_a_self_path`.)
   def test_ignores_non_self_receivers
     contracts = infer_for(<<~RUBY)
       class Foo
         def helper
-          arg = name
+          arg = Bar.new.value
           arg.size
         end
       end
@@ -247,5 +249,67 @@ class ContractsInferrerTest < Minitest::Test
 
     assert_equal 1, contracts.size
     assert_equal 1, contracts.first.requires.size
+  end
+
+  # A local that IS a self path roots the deref through it — `_ = name` is
+  # `self.name`, as ActiveSupport's `delegate` writes it.
+  def test_infers_through_a_local_that_is_a_self_path
+    contracts = infer_for(<<~RUBY, underscore_casts: false)
+      class Foo
+        def helper
+          _ = name
+          _.size
+        end
+
+        def chain_helper
+          bar = maybe
+          bar.value.size
+        end
+      end
+    RUBY
+
+    helper = contracts.find { |c| c.method_name == :helper }
+    assert_equal [[:name, []]], helper.requires.map { |r| [r.expr.method, r.expr.chain] }
+
+    chain = contracts.find { |c| c.method_name == :chain_helper }
+    sigs = chain.requires.map { |r| [r.expr.method, r.expr.chain] }
+    assert_includes sigs, [:maybe, []]
+    assert_includes sigs, [:maybe, [:value]], "the hop past the local is rooted too"
+  end
+
+  # Where the local is not that path wherever it is read, nothing is rooted.
+  def test_does_not_infer_through_a_local_that_is_not_always_the_path
+    contracts = infer_for(<<~RUBY, underscore_casts: false)
+      class Foo
+        def helper
+          n = name
+          n = nil if inner
+          n.size
+        end
+
+        def chain_helper
+          n = name
+          [1].each { |n| n.size }
+          n.size
+        end
+
+        def safe_helper
+          n = name
+          @name = nil
+          n.size
+        end
+
+        def explicit_self_helper
+          n = name
+          self.name = nil
+          n.size
+        end
+      end
+    RUBY
+
+    assert_nil contracts.find { |c| c.method_name == :helper }, "two writes"
+    chain = contracts.find { |c| c.method_name == :chain_helper }
+    assert_nil chain, "a block parameter of the same name"
+    assert_nil contracts.find { |c| c.method_name == :explicit_self_helper }, "the reader is written"
   end
 end

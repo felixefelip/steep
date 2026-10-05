@@ -1091,4 +1091,82 @@ class ContractsEnforcementTest < Minitest::Test
                    "unenforced → `post.user.name` still errors"
     end
   end
+
+  # A local that IS a self path (`_ = user`) roots the deref through it at
+  # `self.user` — the shape ActiveSupport's `delegate` writes. Enforced by a
+  # caller holding a validated record, and the body narrows.
+  LOCAL_ALIAS_RBS = <<~RBS
+    class User
+      def full_name: () -> String
+    end
+
+    class Notification
+      def user: () -> User?
+      def user_full_name: () -> String
+      def self.last!: () -> (Notification & Notification::Validated)
+      def self.call_user_full_name: () -> String
+    end
+
+    class Notification::Validated
+      def user: () -> User
+    end
+  RBS
+
+  LOCAL_ALIAS_APP = <<~RUBY
+    class Notification
+      def user_full_name
+        _ = user
+        _.full_name
+      end
+    end
+  RUBY
+
+  def test_closes_deref_through_a_local_that_is_a_self_path
+    in_tmpdir do
+      write("sig/notification.rbs", LOCAL_ALIAS_RBS)
+      write("app/notification.rb", LOCAL_ALIAS_APP + <<~RUBY)
+        class Notification
+          def self.call_user_full_name
+            notification = last!
+            notification.user_full_name
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: STEEPFILE)
+
+      contracts = Contracts::Runner.run(project)
+      contract = contracts.find { |c| c.key == "Notification#user_full_name" }
+      refute_nil contract, "`_ = user; _.full_name` roots the deref at `self.user`"
+      assert_equal [[:not_nil, [:send, [:self], :user, []]]],
+                   contract.requires.grep(Contracts::Predicate::NotNil).map { |r| [:not_nil, expr_sig(r.expr)] }
+      assert contract.enforced, "the only caller holds a validated notification"
+
+      typing = type_check_file(project, "app/notification.rb", store_of(contracts))
+      assert_empty typing.errors.grep(Diagnostic::Ruby::NoMethod),
+                   "the body's `_.full_name` narrows: `_` holds the narrowed `user`"
+    end
+  end
+
+  def test_does_not_close_a_local_self_path_for_an_unvalidated_caller
+    in_tmpdir do
+      write("sig/notification.rbs", LOCAL_ALIAS_RBS + <<~RBS)
+        class Client
+          def run: (Notification) -> String
+        end
+      RBS
+      write("app/notification.rb", LOCAL_ALIAS_APP + <<~RUBY)
+        class Client
+          def run(notification)
+            notification.user_full_name
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: STEEPFILE)
+
+      contracts = Contracts::Runner.run(project)
+      contract = contracts.find { |c| c.key == "Notification#user_full_name" }
+      refute_nil contract
+      refute contract.enforced, "a caller whose `user` may be nil does not establish it"
+    end
+  end
 end
