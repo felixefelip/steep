@@ -88,6 +88,9 @@ module Steep
         # through a local aliased to a self path (`record.post` <- `self.owner`,
         # directly or via `record = build`) is rooted at `self`.
         aliases = Contracts::AliasResolver.local_attr_aliases(body, class_name: class_name, return_aliases: @return_aliases)
+        # …and a local that IS a self path (`_ = user`), so `_.full_name` is
+        # rooted at `self.user`.
+        locals = Contracts::AliasResolver.local_aliases(body)
         parents = chain_parents(body)
         obligations = []
 
@@ -96,7 +99,7 @@ module Steep
           next unless call_node && call_node.is_a?(Parser::AST::Node)
 
           # The failing call's receiver must be non-nil (`post` for `post.user`).
-          if (expr = self_path_to_expr(call_node.children[0], aliases))
+          if (expr = self_path_to_expr(call_node.children[0], aliases, locals))
             obligations << Predicate::NotNil.new(expr)
           end
 
@@ -110,7 +113,7 @@ module Steep
           # so nothing extra is emitted and single-hop cases are unchanged.
           node = call_node
           while (parent = parents[node])
-            if (expr = self_path_to_expr(node, aliases))
+            if (expr = self_path_to_expr(node, aliases, locals))
               obligations << Predicate::NotNil.new(expr)
             end
             node = parent
@@ -179,8 +182,12 @@ module Steep
         loc.begin_pos..loc.end_pos
       end
 
-      def self_path_to_expr(node, aliases = {})
+      def self_path_to_expr(node, aliases = {}, locals = {})
         return nil unless node.is_a?(Parser::AST::Node)
+
+        if (path = Contracts::AliasResolver.local_path(node, locals))
+          return Expr::Send.new(receiver: Expr::SelfRef.instance, method: path.first, chain: path.drop(1))
+        end
         return nil unless node.type == :send
 
         methods = []
@@ -200,6 +207,11 @@ module Steep
 
           methods.unshift(mname)
           current = recv
+        end
+
+        if (path = Contracts::AliasResolver.local_path(current, locals))
+          full = path + methods
+          return Expr::Send.new(receiver: Expr::SelfRef.instance, method: full.first, chain: full.drop(1))
         end
 
         unless current.nil? || (current.is_a?(Parser::AST::Node) && current.type == :self)

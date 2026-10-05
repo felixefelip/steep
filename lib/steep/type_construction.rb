@@ -8149,10 +8149,11 @@ module Steep
     # contract expression (`self.owner.user`). (felixefelip/steep#62)
     def alias_substituted_variants(expr)
       aliases = current_method_aliases
-      return [] if aliases.empty?
+      locals = current_method_local_aliases
+      return [] if aliases.empty? && locals.empty?
 
       full = [expr.method] + expr.chain
-      aliases.filter_map do |(local, attr), path|
+      attr_variants = aliases.filter_map do |(local, attr), path|
         next unless path.size <= full.size && full[0, path.size] == path
         node = ::Parser::AST::Node.new(:send, [::Parser::AST::Node.new(:lvar, [local]), attr])
         full[path.size..].each do |seg|
@@ -8160,6 +8161,19 @@ module Steep
         end
         node
       end
+
+      # A local that IS a strict prefix of the path (`_ = post` for
+      # `self.post.user`): the body wrote `_.user`. The local itself needs no
+      # variant — it holds what the narrowed reader returned.
+      local_variants = locals.filter_map do |local, entry|
+        path = entry.fetch(:path)
+        next unless path.size < full.size && full[0, path.size] == path
+        full[path.size..].inject(::Parser::AST::Node.new(:lvar, [local])) do |node, seg|
+          ::Parser::AST::Node.new(:send, [node, seg])
+        end
+      end
+
+      attr_variants + local_variants
     end
 
     # The `{ [local, attr] => [path_syms] }` aliases of the method currently
@@ -8182,6 +8196,23 @@ module Steep
       body = find_method_def_body(bare, mc.name)
       aliases = body ? Contracts::AliasResolver.local_attr_aliases(body, class_name: bare, return_aliases: return_alias.to_h) : {}
       @method_aliases_cache[key] = aliases
+    end
+
+    # The locals of the current method that are a self path (`_ = user`), per
+    # `Contracts::AliasResolver.local_aliases`. Memoized like the attr aliases.
+    def current_method_local_aliases
+      mc = method_context
+      return {} unless mc&.name
+      class_name = module_context&.class_name
+      return {} unless class_name
+      bare = class_name.to_s.sub(/\A::/, "")
+      key = "#{bare}##{mc.name}"
+
+      @method_local_aliases_cache ||= {}
+      return @method_local_aliases_cache[key] if @method_local_aliases_cache.key?(key)
+
+      body = find_method_def_body(bare, mc.name)
+      @method_local_aliases_cache[key] = body ? Contracts::AliasResolver.local_aliases(body) : {}
     end
 
     # Locate the body node of `class_name#method_name` in the current source.
@@ -8462,12 +8493,12 @@ module Steep
     def alias_translated_requirement(expr, base_receiver)
       return nil unless expr.is_a?(Contracts::Expr::Send)
       aliases = current_method_aliases
-      return nil if aliases.empty?
+      return nil if aliases.empty? && current_method_local_aliases.empty?
 
       node = ::Parser::AST::Node.new(:send, [base_receiver, expr.method])
       expr.chain.each { |seg| node = ::Parser::AST::Node.new(:send, [node, seg]) }
 
-      path = Contracts::AliasResolver.resolve_self_path(node, aliases)
+      path = Contracts::AliasResolver.resolve_self_path(node, aliases, current_method_local_aliases)
       return nil unless path && !path.empty?
 
       Contracts::Expr::Send.new(
