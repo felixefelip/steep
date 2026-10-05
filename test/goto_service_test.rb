@@ -284,7 +284,7 @@ Customer.new.foo()
 Customer.bar()
 
 Customer.no_method_error()
-(_ = Customer).bar()
+(__any__ = Customer).bar()
 RUBY
     end
 
@@ -310,7 +310,7 @@ RUBY
       assert_empty qs
     end
 
-    service.query_at(path: dir + "lib/main.rb", line: 5, column: 18).tap do |qs|
+    service.query_at(path: dir + "lib/main.rb", line: 5, column: 24).tap do |qs|
       assert_empty qs
     end
   end

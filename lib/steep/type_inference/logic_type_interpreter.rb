@@ -31,6 +31,10 @@ module Steep
         @self_type = self_type
       end
 
+      def cast_lvar?(name)
+        TypeConstruction.cast_lvar?(name, underscore_casts: subtyping.builder.underscore_casts)
+      end
+
       def factory
         subtyping.factory
       end
@@ -151,7 +155,7 @@ module Steep
 
         when :lvasgn
           name, rhs = node.children
-          if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          if cast_lvar?(name)
             return [
               Result.new(type: type, env: env, unreachable: false),
               Result.new(type: type, env: env, unreachable: false)
@@ -309,7 +313,7 @@ module Steep
         case assignment_node.type
         when :lvasgn
           name, _ = assignment_node.children
-          if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          if cast_lvar?(name)
             env
           else
             env.refine_types(local_variable_types: { name => rhs_type })
@@ -346,7 +350,7 @@ module Steep
         when :lvar
           name = node.children[0]
 
-          if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          if cast_lvar?(name)
             [env, env]
           else
             [
@@ -360,7 +364,7 @@ module Steep
 
           truthy_env, falsy_env = refine_node_type(env: env, node: rhs, truthy_type: truthy_type, falsy_type: falsy_type)
 
-          if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          if cast_lvar?(name)
             [truthy_env, falsy_env]
           else
             [

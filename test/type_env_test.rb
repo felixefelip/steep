@@ -45,7 +45,8 @@ class TypeEnvTest < Minitest::Test
       assert_equal true, env.local_variable_name?(:_abc)
       assert_equal false, env.local_variable_name?(:@abc)
       assert_equal false, env.local_variable_name?(:$abc)
-      assert_equal false, env.local_variable_name?(:_)
+      # A local even where it is a cast: then nothing assigns it.
+      assert_equal true, env.local_variable_name?(:_)
       assert_equal false, env.local_variable_name?(:__skip__)
       assert_equal false, env.local_variable_name?(:__any__)
       assert_equal true, env.local_variable_name?(:ǳ) # Lowercase_Letter

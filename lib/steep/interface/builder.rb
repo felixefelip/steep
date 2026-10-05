@@ -54,9 +54,9 @@ module Steep
         end
       end
 
-      attr_reader :factory, :object_shape_cache, :union_shape_cache, :singleton_shape_cache, :closed_shape_cache, :implicitly_returns_nil
+      attr_reader :factory, :object_shape_cache, :union_shape_cache, :singleton_shape_cache, :closed_shape_cache, :implicitly_returns_nil, :underscore_casts
 
-      def initialize(factory, implicitly_returns_nil:)
+      def initialize(factory, implicitly_returns_nil:, underscore_casts:)
         @factory = factory
         @object_shape_cache = {}
         @union_shape_cache = {}
@@ -67,6 +67,7 @@ module Steep
         @method_entry_cache = {}
         @method_entry_index = {}
         @implicitly_returns_nil = implicitly_returns_nil
+        @underscore_casts = underscore_casts
       end
 
       def shape(type, config)

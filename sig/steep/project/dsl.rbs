@@ -87,6 +87,8 @@ module Steep
 
         attr_reader implicitly_returns_nil: bool
 
+        attr_reader underscore_casts: bool
+
         include LibraryOptions
 
         include WithPattern
@@ -106,6 +108,8 @@ module Steep
         # Mark the target implicitly returns nil
         #
         def implicitly_returns_nil!: (?bool) -> void
+
+        def underscore_casts!: (?bool) -> void
 
         # Configuration of Ruby code diagnostics
         #

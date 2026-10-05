@@ -63,7 +63,7 @@ class SendDispatchTest < Minitest::Test
         absolute = project.absolute_path(path)
         loader.add(path: absolute) if absolute.file?
       end
-      status = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil).status
+      status = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts).status
 
       absolute = project.absolute_path(Pathname("app/body.rb"))
       source = Steep::Source.parse(absolute.read, path: absolute, factory: status.subtyping.factory)
@@ -239,7 +239,7 @@ class SendDispatchTest < Minitest::Test
   # what keeps this off code Steep knows nothing about, rather than a special case.
   def test_an_untyped_receiver_stays_untyped
     assert_empty errors_in(<<~RUBY)
-      (_ = nil).send(:no_such_method_anywhere)
+      (__any__ = nil).send(:no_such_method_anywhere)
     RUBY
   end
 

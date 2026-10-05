@@ -471,7 +471,9 @@ end
     @checker or raise "#checker should be used within from #with_checker"
   end
 
-  def with_checker(*files, with_stdlib: false, &block)
+  # `underscore_casts:` is on here: upstream's tests set their scene up with
+  # `x = (_ = …)` casts. A test of this fork's default asks for it off.
+  def with_checker(*files, with_stdlib: false, underscore_casts: true, &block)
     paths = {}
 
     files.each.with_index do |content, index|
@@ -487,7 +489,7 @@ end
     end
 
     with_factory(paths, nostdlib: !with_stdlib) do |factory|
-      builder = Steep::Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Steep::Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: underscore_casts)
       @checker = Steep::Subtyping::Check.new(builder: builder)
       yield @checker
     ensure
