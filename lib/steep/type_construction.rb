@@ -3458,9 +3458,11 @@ module Steep
           send_type, constr =
             type_send(node, send_node: node, block_params: nil, block_body: nil, unwrap: true, tapp: tapp, hint: hint).to_ary
 
+          type = constr.csend_receiver_may_be_nil?(node.children[0]) ? union_type(send_type, AST::Builtin.nil_type) : send_type
+
           constr
             .update_type_env { csend_env_join(pre: context.type_env, post: constr.context.type_env, receiver: node.children[0]) }
-            .add_typing(node, type: union_type(send_type, AST::Builtin.nil_type))
+            .add_typing(node, type: type)
         end
       when :block
         yield_self do
@@ -3508,6 +3510,26 @@ module Steep
       else
         raise "Unexpected node is given to `#synthesize_sendish` (#{node.type}, #{node.location.first_line})"
       end
+    end
+
+    # Whether `x&.m` can end without calling `m`: `&.` skips the call when `x`
+    # is nil, so the result is nilable exactly when `x` may be nil. `nil`
+    # added for any receiver typed `Person&.name` as `"Ana"?` — a value no run
+    # can produce.
+    #
+    # Asked of subtyping, not of the receiver's spelling: `top` and `untyped`
+    # hold nil without writing it. (`Object` does not, to this checker: it
+    # rejects `nil` assigned to an `Object`.) A type variable may be
+    # instantiated with nil, and a receiver with no type recorded is not known
+    # to exclude it; both keep the nil.
+    def csend_receiver_may_be_nil?(receiver)
+      return true unless receiver && typing.has_type?(receiver)
+
+      receiver_type = checker.factory.deep_expand_alias(typing.type_of(node: receiver)) || typing.type_of(node: receiver)
+      members = receiver_type.is_a?(AST::Types::Union) ? receiver_type.types : [receiver_type]
+      return true if members.any? { |member| member.is_a?(AST::Types::Var) }
+
+      check_relation(sub_type: AST::Builtin.nil_type, super_type: receiver_type).success?
     end
 
     # The env after `x&.m`. The join is the whole point — the CALL may not have
@@ -4437,7 +4459,8 @@ module Steep
             end
           end
 
-          if node.type == :csend || ((node.type == :block || node.type == :numblock || node.type == :itblock) && node.children[0].type == :csend)
+          if (node.type == :csend || ((node.type == :block || node.type == :numblock || node.type == :itblock) && node.children[0].type == :csend)) &&
+             constr.csend_receiver_may_be_nil?(receiver)
             optional_type = AST::Types::Union.build(types: [call.return_type, AST::Builtin.nil_type])
             call = call.with_return_type(optional_type)
           end

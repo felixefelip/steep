@@ -11944,7 +11944,8 @@ z = [1].map { _1.to_s } #$ Object
         assert_no_error typing
 
         assert_equal parse_type("::Array[::Integer | ::Numeric]"), context.type_env[:x]
-        assert_equal parse_type("::Array[::Integer | ::Object]?"), context.type_env[:y]
+        # `[1]` is never nil, so `&.` never skips the call.
+        assert_equal parse_type("::Array[::Integer | ::Object]"), context.type_env[:y]
         assert_equal parse_type("::Array[::Object]"), context.type_env[:z]
       end
     end
@@ -12738,6 +12739,94 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
         construction.synthesize(source.node)
 
         assert_no_error typing
+      end
+    end
+  end
+
+  # `&.` skips the call only when the receiver is nil, so the result is
+  # nilable exactly when the receiver may be nil.
+  CSEND_RBS = <<~RBS
+    class CsendPerson
+      def name: () -> "Ana"
+      def names: () -> Array[String]
+    end
+
+    class CsendHost
+      def person: () -> CsendPerson
+      def maybe: () -> CsendPerson?
+      def object: () -> Object
+      def aliased: () -> csend_maybe
+    end
+
+    type csend_maybe = CsendPerson?
+
+    class CsendGeneric
+      def generic: [T < Object] (T) -> T
+    end
+  RBS
+
+  def test_csend_on_a_receiver_that_cannot_be_nil
+    with_checker(CSEND_RBS) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var host: CsendHost
+        host = _ = nil
+        a = host.person&.name
+        b = host.person&.names&.map { |n| n.size }
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"Ana"'), context.type_env[:a]
+        assert_equal parse_type("::Array[::Integer]"), context.type_env[:b]
+      end
+    end
+  end
+
+  def test_csend_on_a_receiver_that_may_be_nil
+    with_checker(CSEND_RBS) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var host: CsendHost
+        host = _ = nil
+        a = host.maybe&.name
+        b = host.maybe&.names&.map { |n| n.size }
+        c = host.aliased&.name
+        d = (_ = 1)&.anything
+        e = host.object&.itself
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"Ana"?'), context.type_env[:a]
+        assert_equal parse_type("::Array[::Integer]?"), context.type_env[:b]
+        assert_equal parse_type('"Ana"?'), context.type_env[:c], "an alias holds the nil its expansion writes"
+        assert_equal parse_type("untyped"), context.type_env[:d]
+        assert_equal parse_type("::Object"), context.type_env[:e], "an `Object` is never nil to this checker"
+      end
+    end
+  end
+
+  # A type variable may be instantiated with nil: `x&.itself` stays `T?`,
+  # which a declared `-> T` does not accept.
+  def test_csend_on_a_type_variable_receiver
+    with_checker(CSEND_RBS) do |checker|
+      source = parse_ruby(<<~RUBY)
+        class CsendGeneric
+          def generic(x)
+            x&.itself
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) { assert_instance_of Diagnostic::Ruby::MethodBodyTypeMismatch, _1 }
+        end
       end
     end
   end
