@@ -820,6 +820,18 @@ module Steep
       end
     end
 
+    # The env a condition leaves on one side, joined from the operands that can
+    # reach it. In `!x.nil? || nil.respond_to?(:name)` the right operand is
+    # `false`, so the `||` is true only where the left one is, and the left
+    # one's narrowing is the whole answer. Joining the side that cannot happen
+    # put back what it narrowed away.
+    def join_reachable(*results)
+      reachable = results.reject(&:unreachable)
+      reachable = results if reachable.empty?
+
+      context.type_env.join(*reachable.map(&:env))
+    end
+
     def jumps_out?(node)
       return false unless node.is_a?(::Parser::AST::Node)
       return true if Accumulators::JUMPS.include?(node.type)
@@ -2613,7 +2625,7 @@ module Steep
             if condition
               type = AST::Types::Logic::Env.new(
                 truthy: right_truthy.env,
-                falsy: context.type_env.join(left_falsy.env, right_falsy.env),
+                falsy: join_reachable(left_falsy, right_falsy),
                 type: type
               )
             end
@@ -2670,7 +2682,7 @@ module Steep
 
             if condition
               type = AST::Types::Logic::Env.new(
-                truthy: context.type_env.join(left_truthy.env, right_truthy.env),
+                truthy: join_reachable(left_truthy, right_truthy),
                 falsy: right_falsy.env,
                 type: type
               )

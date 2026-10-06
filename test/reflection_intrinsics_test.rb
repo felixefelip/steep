@@ -168,13 +168,14 @@ class ReflectionIntrinsicsTest < Minitest::Test
 
   def test_watched_keys_and_dispatched_names
     assert_equal(
-      ["::Kernel#method", "::Kernel#singleton_class", "::Method#parameters",
+      ["::Kernel#method", "::Kernel#respond_to?", "::Kernel#singleton_class", "::Method#parameters",
        "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::UnboundMethod#parameters"],
       Steep::ReflectionIntrinsics.watched_keys.to_a.sort
     )
     assert_equal ["::Method#parameters"], Steep::ReflectionIntrinsics.method_keys_for("Method")
     assert_equal(
-      [:instance_method, :method, :name, :parameters, :public_instance_method, :singleton_class],
+      [:instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
+       :singleton_class],
       Steep::ReflectionIntrinsics.dispatched_names.to_a.sort
     )
   end
@@ -189,7 +190,7 @@ class ReflectionIntrinsicsTest < Minitest::Test
     entry = Steep::ReflectionIntrinsics::ENTRIES.fetch("::Kernel#singleton_class")
     # `stub` CALLS a callable value, so what it is given is a lambda returning
     # the handler rather than the handler itself.
-    handler = ->(*) { ->(_receiver, _arguments, _factory) { raise RuntimeError, "boom" } }
+    handler = ->(*) { ->(_receiver, _arguments, _factory, _registry) { raise RuntimeError, "boom" } }
 
     with_probe_factory do |factory|
       result = entry.stub(:handler, handler) do
@@ -203,5 +204,110 @@ class ReflectionIntrinsicsTest < Minitest::Test
 
     assert_includes warnings.join("\n"), "unexpected failure for ::Kernel#singleton_class: RuntimeError: boom"
     assert_includes debug_messages.join("\n"), "boom"
+  end
+
+  RESPONDING = {
+    "responding.rbs" => <<~RBS
+      class Shape
+        def area: () -> Integer
+        private def secret: () -> void
+      end
+      class Square < Shape
+        def side: () -> Integer
+      end
+      class Ghost
+        private def respond_to_missing?: (Symbol | String, bool) -> bool
+      end
+      class Card
+        def self.build: () -> Card
+      end
+    RBS
+  }
+
+  def responds(receiver_type, name, registry: Registry.new)
+    with_factory(RESPONDING, nostdlib: false) do |factory|
+      fold("::Kernel#respond_to?", receiver_type, registry, factory,
+           argument_types: [Steep::AST::Types::Literal.new(value: name)])
+    end
+  end
+
+  def instance(name)
+    Steep::AST::Types::Name::Instance.new(name: RBS::TypeName.parse(name), args: [])
+  end
+
+  def literal(value)
+    Steep::AST::Types::Literal.new(value: value)
+  end
+
+  # `ActiveSupport::Delegation`'s `allow_nil: true`: NilClass has no such
+  # method, so the condition it writes is decided.
+  def test_nil_does_not_respond_to_a_method_nothing_gives_it
+    assert_equal literal(false), responds(Steep::AST::Builtin.nil_type, :area)
+    assert_equal literal(true), responds(Steep::AST::Builtin.nil_type, :to_a)
+  end
+
+  # A `Shape` may be a `Square`, so a method only the subclass has is not one
+  # this can answer for; one the class has is every subclass's too.
+  def test_an_instance_answers_for_every_subclass_it_may_be
+    assert_equal literal(true), responds(instance("::Shape"), :area)
+    assert_nil responds(instance("::Shape"), :side)
+    assert_equal literal(true), responds(instance("::Square"), :side)
+    assert_equal literal(false), responds(instance("::Square"), :radius)
+  end
+
+  # `respond_to?` reports public methods; a private one is not.
+  def test_a_private_method_is_not_responded_to
+    assert_equal literal(false), responds(instance("::Shape"), :secret)
+  end
+
+  def test_a_class_object_answers_for_its_class_methods
+    assert_equal literal(true), responds(singleton("::Card"), :build)
+    assert_equal literal(false), responds(singleton("::Card"), :area)
+  end
+
+  def test_a_union_answers_where_every_member_agrees
+    union = Steep::AST::Types::Union.build(types: [instance("::Square"), Steep::AST::Builtin.nil_type])
+
+    assert_equal literal(false), responds(union, :radius)
+    assert_nil responds(union, :side)
+  end
+
+  # Ruby asks `respond_to_missing?` for a method it does not find, so a class
+  # whose `respond_to_missing?` is not Kernel's has no "no" this can give —
+  # declared in the signatures or written in the project.
+  def test_a_respond_to_missing_other_than_the_core_one_declines_a_false_answer
+    assert_nil responds(instance("::Ghost"), :anything)
+
+    registry = registry_for(<<~RUBY)
+      class Card
+        def respond_to_missing?(name, include_private = false) = true
+      end
+    RUBY
+    assert_nil responds(instance("::Card"), :anything, registry: registry)
+    assert_equal literal(false), responds(instance("::Square"), :anything, registry: registry)
+  end
+
+  def test_a_respond_to_the_project_writes_declines_the_fold
+    registry = registry_for(<<~RUBY)
+      class Shape
+        def respond_to?(name, include_all = false) = false
+      end
+    RUBY
+
+    assert_nil responds(instance("::Square"), :area, registry: registry)
+    assert_equal literal(true), responds(instance("::Card"), :to_s, registry: registry)
+  end
+
+  # A module is no class a value is an instance of: whatever includes it may
+  # be, and nothing lists those.
+  def test_a_module_instance_declines
+    assert_nil responds(instance("::Kernel"), :anything)
+  end
+
+  def test_include_all_declines
+    with_factory(RESPONDING, nostdlib: false) do |factory|
+      assert_nil fold("::Kernel#respond_to?", instance("::Shape"), Registry.new, factory,
+                      argument_types: [literal(:secret), literal(true)])
+    end
   end
 end
