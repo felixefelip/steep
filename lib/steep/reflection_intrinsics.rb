@@ -53,6 +53,9 @@ module Steep
     # program's definitions on.
     MAX_DESCENDANTS = 128
 
+    KERNEL = RBS::TypeName.parse("::Kernel")
+    NIL_CLASS = RBS::TypeName.parse("::NilClass")
+
     class << self
       def fold(call:, receiver_type:, argument_types:, factory:, override_registry:)
         key = MethodIdentity.key(call) or return nil
@@ -62,7 +65,7 @@ module Steep
         source_location = entry.method.source_location
         return nil if source_location && !source_location.first.start_with?("<internal:")
 
-        entry.handler.call(receiver_type, argument_types, factory)
+        entry.handler.call(receiver_type, argument_types, factory, override_registry)
       rescue StandardError => exn
         # Reflection is optional, so a bug here must not take down type
         # checking — but it must be visible.
@@ -129,7 +132,7 @@ module Steep
       # shadows a reflection is the receiver's, and the receiver is any class the
       # project has.
       def dispatched_names
-        @dispatched_names ||= Set.new(ENTRIES.each_value.map { |entry| entry.method.name })
+        @dispatched_names ||= Set.new(ENTRIES.each_value.map { |entry| entry.method.name }) + CONSULTED_NAMES
       end
 
       private
@@ -148,7 +151,20 @@ module Steep
         # against every receiver.
         return true if override_registry.name_blocked?(entry.method.name)
 
+        # A value of a union is a value of one of its members, and Ruby looks
+        # the method up on whichever it turns out to be.
+        if receiver_type.is_a?(AST::Types::Union)
+          return receiver_type.types.any? { |type| shadowed?(type, key, entry, factory, override_registry) }
+        end
+
         chain = dispatch_chain(receiver_type, entry.method.name, factory) or return true
+        overridden_before?(chain, key, override_registry)
+      end
+
+      # Whether the project redefines the method somewhere on `chain` before
+      # Ruby reaches `key`, the core declaration. A chain that never reaches
+      # it is one whose implementation is not the core's.
+      def overridden_before?(chain, key, override_registry)
         index = chain.index(key) or return true
 
         chain.take(index).any? { |candidate| override_registry.blocked?(candidate) }
@@ -166,6 +182,9 @@ module Steep
             builder.singleton_ancestors(receiver_type.name)
           when AST::Types::MetaClass, AST::Types::MethodObject
             builder.instance_ancestors(receiver_type.back_type.name)
+          else
+            name = instance_class_name(receiver_type, factory)
+            builder.instance_ancestors(name) if name
           end
         return nil unless ancestors
 
@@ -217,6 +236,119 @@ module Steep
         when AST::Types::MetaClass then [receiver.name, true]
         when AST::Types::Name::Singleton then [receiver.name, false]
         end
+      end
+
+      # The class a value of `type` is an instance of, where the type names one
+      # class rather than one of several: `nil` is a `NilClass`, `:a` a
+      # `Symbol`, `::Post` a `Post` — or an instance of a subclass of it, which
+      # is the caller's to ask about. A module is not a class a value is an
+      # instance of, so its name is not one.
+      def instance_class_name(type, factory)
+        name =
+          case type
+          when AST::Types::Name::Instance then type.name
+          when AST::Types::Nil then NIL_CLASS
+          when AST::Types::Literal
+            case type.value
+            when true then RBS::BuiltinNames::TrueClass.name
+            when false then RBS::BuiltinNames::FalseClass.name
+            when ::Symbol then RBS::BuiltinNames::Symbol.name
+            when ::String then RBS::BuiltinNames::String.name
+            when ::Integer then RBS::BuiltinNames::Integer.name
+            end
+          end
+        return nil unless name
+
+        name if factory.env.class_decls[name].is_a?(RBS::Environment::ClassEntry)
+      end
+
+      # `Kernel#respond_to?(name)`: whether every class the receiver may be
+      # an instance of — or, for `singleton(::C)`, every class object it may be
+      # — gives the same answer, and which.
+      #
+      # `true` where each of them declares the method publicly. `false` where
+      # none of them has it at all, nor reaches a `respond_to_missing?` other
+      # than the core's — the one that answers false — since a method missing
+      # from the signatures is one Ruby still finds there. A `respond_to?` the
+      # project writes for itself answers whatever it says, so it declines the
+      # whole question. Anything between declines too: a receiver one subclass
+      # of which declares the method and another does not has no answer this
+      # can give.
+      #
+      # This is how `ActiveSupport::Delegation` writes `allow_nil: true`:
+      #
+      #   _ = owner
+      #   if !_.nil? || nil.respond_to?(:full_name)
+      #     _.full_name(...)
+      #   end
+      #
+      # NilClass has no `full_name`, so the condition is `!_.nil?` and `_` is
+      # narrowed in the body the way any other guard narrows it.
+      def responds_to(receiver, argument_types, factory, override_registry)
+        method_name = literal_method_name(argument_types) or return nil
+        subjects = respondents(receiver, factory) or return nil
+
+        answers = subjects.map { |subject| responds?(subject, method_name, factory, override_registry) }
+        return nil if answers.include?(nil) || answers.uniq.size != 1
+
+        AST::Types::Literal.new(value: answers.first)
+      end
+
+      # Every class (as `[name, singleton]`) a value of `type` may be an
+      # instance — or the class object — of, subclasses included. nil where
+      # that is not a finite list of classes.
+      def respondents(type, factory)
+        case type
+        when AST::Types::Union
+          members = type.types.map { |member| respondents(member, factory) }
+          members.all? ? members.flatten(1).uniq : nil
+        when AST::Types::Boolean
+          respondents(AST::Types::Union.build(types: [AST::Types::Literal.new(value: true), AST::Types::Literal.new(value: false)]), factory)
+        when AST::Types::Name::Singleton
+          with_descendants(type.name, true, factory)
+        else
+          name = instance_class_name(type, factory) or return nil
+          with_descendants(name, false, factory)
+        end
+      end
+
+      def with_descendants(name, singleton, factory)
+        descendants = factory.descendant_index.descendants(name, limit: MAX_DESCENDANTS) or return nil
+
+        [name, *descendants].map { |descendant| [descendant, singleton] }
+      end
+
+      # One class's answer, or nil where it is not the core's to give.
+      def responds?(subject, method_name, factory, override_registry)
+        type_name, singleton = subject
+        builder = factory.definition_builder
+        definition = singleton ? builder.build_singleton(type_name) : builder.build_instance(type_name)
+        ancestors =
+          singleton ? builder.ancestor_builder.singleton_ancestors(type_name) : builder.ancestor_builder.instance_ancestors(type_name)
+
+        return nil unless core?(definition, ancestors, :respond_to?, override_registry)
+
+        method = definition.methods[method_name]
+        return true if method&.public?
+        return false if core?(definition, ancestors, :respond_to_missing?, override_registry)
+
+        nil
+      rescue RBS::BaseError
+        nil
+      end
+
+      # Whether `method_name` is, for this class, Kernel's: declared there and
+      # not redefined in Ruby anywhere before it on the lookup chain.
+      def core?(definition, ancestors, method_name, override_registry)
+        method = definition.methods[method_name] or return false
+        return false unless method.defined_in == KERNEL
+        return false if override_registry.name_blocked?(method_name)
+
+        chain = ancestors.ancestors.map do |ancestor|
+          separator = ancestor.is_a?(RBS::Definition::Ancestor::Singleton) ? "." : "#"
+          "::#{ancestor.name.to_s.delete_prefix("::")}#{separator}#{method_name}"
+        end
+        !overridden_before?(chain, "::Kernel##{method_name}", override_registry)
       end
 
       def literal_method_name(argument_types)
@@ -374,22 +506,22 @@ module Steep
       end
     end
 
-    SINGLETON_CLASS = lambda do |receiver, argument_types, _factory|
+    SINGLETON_CLASS = lambda do |receiver, argument_types, _factory, _override_registry|
       next nil unless argument_types.empty?
       next nil unless receiver.is_a?(AST::Types::Name::Singleton)
 
       AST::Types::MetaClass.new(name: receiver.name)
     end
-    INSTANCE_METHOD = lambda do |receiver, argument_types, factory|
+    INSTANCE_METHOD = lambda do |receiver, argument_types, factory, _override_registry|
       unbound_method_object(receiver, argument_types, factory, public_only: false)
     end
-    PUBLIC_INSTANCE_METHOD = lambda do |receiver, argument_types, factory|
+    PUBLIC_INSTANCE_METHOD = lambda do |receiver, argument_types, factory, _override_registry|
       unbound_method_object(receiver, argument_types, factory, public_only: true)
     end
-    METHOD = lambda do |receiver, argument_types, factory|
+    METHOD = lambda do |receiver, argument_types, factory, _override_registry|
       bound_method_object(receiver, argument_types, factory)
     end
-    PARAMETERS = lambda do |receiver, argument_types, factory|
+    PARAMETERS = lambda do |receiver, argument_types, factory, _override_registry|
       parameters(receiver, argument_types, factory)
     end
     # The name a module named exactly is reached by: `Store.name` is
@@ -397,12 +529,21 @@ module Steep
     # method delegated `to:` a module — `"::#{to.name}"`. A `def self.name`
     # the project writes anywhere on the receiver's chain shadows it, as for
     # every entry here.
-    NAME = lambda do |receiver, argument_types, _factory|
+    NAME = lambda do |receiver, argument_types, _factory, _override_registry|
       next nil unless argument_types.empty?
       next nil unless receiver.is_a?(AST::Types::Name::Singleton)
 
       AST::Types::Literal.new(value: receiver.name.to_s.delete_prefix("::"))
     end
+
+    RESPOND_TO = lambda do |receiver, argument_types, factory, override_registry|
+      responds_to(receiver, argument_types, factory, override_registry)
+    end
+
+    # Names a reflection does not dispatch under but CONSULTS, so that a
+    # redefinition of one changes its answer: `respond_to?` asks
+    # `respond_to_missing?` for a method it does not find.
+    CONSULTED_NAMES = %i[respond_to_missing?].freeze
 
     # The reflections that raise `NameError` for a missing method, with whether
     # a private one counts as missing.
@@ -434,6 +575,9 @@ module Steep
       ),
       "::Module#name" => Entry.new(
         method: ::Module.instance_method(:name), handler: NAME
+      ),
+      "::Kernel#respond_to?" => Entry.new(
+        method: ::Kernel.instance_method(:respond_to?), handler: RESPOND_TO
       )
     }.freeze
   end

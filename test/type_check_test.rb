@@ -4400,6 +4400,58 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  # `ActiveSupport::Delegation`'s `allow_nil: true` body. NilClass has no
+  # `full_name`, so the right operand is `false`, the `||` holds only where
+  # `!_.nil?` does, and `_` is narrowed in the body the way that guard alone
+  # narrows it — the side that cannot happen joins nothing back.
+  def test_type_narrowing__or_with_a_decided_respond_to
+    # `_` is an ordinary local in this fork's projects (felixefelip/steep#202).
+    run_type_check_test(
+      underscore_casts: false,
+      signatures: {
+        "a.rbs" => <<~RBS
+          class User
+            def full_name: () -> String
+          end
+
+          class Card
+            def owner: () -> User?
+            def author: () -> User
+            def owner_full_name: () -> String?
+            def author_full_name: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Card
+            def owner = (User.new if rand > 0.5)
+            def author = User.new
+
+            def owner_full_name
+              _ = owner
+              if !_.nil? || nil.respond_to?(:full_name)
+                _.full_name
+              end
+            end
+
+            def author_full_name
+              _ = author
+              if !_.nil? || nil.respond_to?(:full_name)
+                _.full_name
+              end
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_type_narrowing__union_send
     run_type_check_test(
       signatures: {

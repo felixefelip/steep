@@ -1114,7 +1114,7 @@ class StringEvalsTest < Minitest::Test
         end
 
         class Article < Base
-          has_rich_text :content, enabled: Article.respond_to?(:x)
+          has_rich_text :content, enabled: rand > 0.5
         end
       RUBY
 
