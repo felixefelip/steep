@@ -1826,9 +1826,11 @@ class TypeCheckTest < Minitest::Test
           class Rescued
             def self.two(a, b) = a
 
+            # ActiveSupport's shape: the receiver read from a local.
             def reflected
+              klass = Rescued.singleton_class
               begin
-                Rescued.singleton_class.public_instance_method(:two)
+                klass.public_instance_method(:two)
               rescue NameError
                 nil
               end
@@ -1859,6 +1861,143 @@ class TypeCheckTest < Minitest::Test
       assert_equal "unbound_method(::Rescued.two)", actual.fetch("reflected")
       assert_equal "nil", actual.fetch("missing")
       assert_equal '("A" | nil)', actual.fetch("ordinary")
+    end
+  end
+
+  # A receiver that is itself a call can raise — a `NoMethodError` is a
+  # `NameError` — so the rescue still runs for a resolved reflection on it.
+  def test_a_rescue_around_a_reflection_on_a_call_still_runs
+    run_type_check_test(
+      signatures: {
+        "rescued.rbs" => <<~RBS
+          class Rescued
+            def self.two: (String a, String b) -> String
+
+            def on_a_call: () -> UnboundMethod?
+          end
+        RBS
+      },
+      code: {
+        "rescued.rb" => <<~'RUBY'
+          class Rescued
+            def self.two(a, b) = a
+
+            def on_a_call
+              begin
+                Rescued.singleton_class.public_instance_method(:two)
+              rescue NameError
+                nil
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rescued.rb"))
+
+      assert_equal "(unbound_method(::Rescued.two) | nil)", actual.fetch("on_a_call")
+    end
+  end
+
+  # Which clause catches the `NameError` a missing method raises is asked of
+  # the classes the checker resolved, not of how they are spelled.
+  def test_a_rescue_catches_name_error_by_the_class_it_resolves_to
+    run_type_check_test(
+      signatures: {
+        "rescued.rbs" => <<~RBS
+          class Rescued
+            NAME_ERROR: singleton(NameError)
+            ERRORS: [singleton(NameError)]
+
+            def aliased: () -> UnboundMethod?
+            def splatted: () -> UnboundMethod?
+            def above: () -> UnboundMethod?
+            def unrelated: () -> UnboundMethod?
+            def own: () -> UnboundMethod?
+          end
+
+          module Mine
+            class NameError < StandardError
+            end
+
+            def bare: () -> UnboundMethod?
+          end
+        RBS
+      },
+      code: {
+        "rescued.rb" => <<~'RUBY'
+          class Rescued
+            NAME_ERROR = NameError
+            ERRORS = [NameError]
+
+            def aliased
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue NAME_ERROR
+                nil
+              end
+            end
+
+            def splatted
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue *ERRORS
+                nil
+              end
+            end
+
+            def above
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue Exception
+                nil
+              end
+            end
+
+            def unrelated
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue ScriptError
+                nil
+              end
+            end
+
+            def own
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue Mine::NameError
+                nil
+              end
+            end
+          end
+
+          module Mine
+            # `NameError` here is Mine's own, whatever its spelling.
+            def bare
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue NameError
+                nil
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rescued.rb"))
+
+      assert_equal "nil", actual.fetch("aliased"), "an alias of NameError"
+      assert_equal "nil", actual.fetch("splatted"), "a list holding NameError"
+      assert_equal "nil", actual.fetch("above"), "a class NameError descends from"
+      refute_equal "nil", actual.fetch("unrelated"), "ScriptError is not above NameError"
+      refute_equal "nil", actual.fetch("own"), "a NameError of another module"
+      refute_equal "nil", actual.fetch("bare"), "a bare NameError that resolves to another module's"
     end
   end
 

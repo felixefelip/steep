@@ -828,9 +828,21 @@ module Steep
     end
 
     # A single reflection call the checker answered with the method it found.
+    #
+    # Only where nothing else in the call can raise: its receiver and
+    # arguments are read, not called. `foo.bar.public_instance_method(:x)`
+    # can raise from `foo.bar` — a `NoMethodError` is a `NameError` — and the
+    # rescue would run for it.
     def resolved_reflection?(node, type)
-      node.type == :send && type.is_a?(AST::Types::MethodObject)
+      return false unless node.type == :send && type.is_a?(AST::Types::MethodObject)
+
+      receiver, _method_name, *arguments = node.children
+      [receiver, *arguments].all? { |operand| operand.nil? || READ_OPERANDS.include?(operand.type) }
     end
+
+    # Operands evaluated by reading: a variable, a constant the checker
+    # resolved, `self`, a literal.
+    READ_OPERANDS = %i[lvar ivar cvar gvar const self sym str int float nil true false].freeze
 
     # A single reflection call on a method the module does not have.
     def raising_reflection?(node)
@@ -857,17 +869,61 @@ module Steep
       false
     end
 
-    # Whether one of these clauses catches a `NameError`: a bare `rescue`, or
-    # one naming `NameError` or a class above it.
+    # Whether one of these clauses catches a `NameError`: a bare `rescue`
+    # (`StandardError`), or one listing a class `::NameError` descends from.
+    #
+    # Asked of the types the checker gave the listed classes, which the
+    # `:rescue` above synthesized: `NameError` written inside a module that
+    # defines its own is that module's, an alias of `NameError` is
+    # `NameError`, and `rescue *ERRORS` lists what `ERRORS` holds. A class it
+    # could not resolve does not count — the rescue is then typed as any
+    # other.
     def rescues_name_error?(resbodies)
+      name_error_name = RBS::TypeName.parse("::NameError")
+      # An environment that does not declare it cannot say what descends from it.
+      return false unless checker.factory.env.class_decls.key?(name_error_name)
+
+      name_error = AST::Types::Name::Instance.new(name: name_error_name, args: [])
+
       resbodies.any? do |resbody|
         classes = resbody.children[0]
         next true unless classes
 
         classes.children.any? do |klass|
-          klass.type == :const && %w[NameError StandardError Exception].include?(klass.children[1].to_s) &&
-            (klass.children[0].nil? || klass.children[0].type == :cbase)
+          rescued_classes(klass).any? do |rescued|
+            check_relation(sub_type: name_error, super_type: to_instance_type(rescued)).success?
+          end
         end
+      end
+    end
+
+    # The class objects one entry of a rescue list names, as typed.
+    def rescued_classes(node)
+      return [] unless typing.has_type?(node) || node.type == :splat
+
+      type =
+        if node.type == :splat
+          inner = node.children[0] or return []
+          return [] unless typing.has_type?(inner)
+
+          element_types(expand_alias(typing.type_of(node: inner)))
+        else
+          [expand_alias(typing.type_of(node: node))]
+        end
+
+      type.flat_map { |t| t.is_a?(AST::Types::Union) ? t.types : [t] }
+          .select { |t| t.is_a?(AST::Types::Name::Singleton) }
+    end
+
+    # What a splatted list holds: a tuple's members, an array's element.
+    def element_types(type)
+      case type
+      when AST::Types::Tuple
+        type.types.map { |t| expand_alias(t) }
+      when AST::Types::Name::Instance
+        type.name.to_s == "::Array" && type.args.size == 1 ? [expand_alias(type.args[0])] : []
+      else
+        []
       end
     end
 
@@ -2951,7 +3007,7 @@ module Steep
             # …and the other half: a reflection on a method the module does not
             # have raises, so only the rescue runs. `Delegation.generate`'s
             # fallback to `"..."`, for a target that has no such method.
-            raises = body_pair && rescues_name_error?(resbodies) && raising_reflection?(node.children[0])
+            raises = body_pair && raising_reflection?(node.children[0]) && rescues_name_error?(resbodies)
 
             resbody_types = resbody_pairs.map(&:type)
             resbody_envs = resbody_pairs.map {|pair| pair.context.type_env }
