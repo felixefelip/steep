@@ -225,4 +225,45 @@ class ContractsRunnerTest < Minitest::Test
              "the chain stays unenforced so body errors surface"
     end
   end
+
+  # A recursive reader: `decode_tag` reads `decode` through a local, so it
+  # requires `not_nil self.decode`, and `decode` calls `decode_tag`, so the
+  # requirement climbs onto `decode` itself. Checking it at a call site
+  # synthesizes `self.decode`, whose own precondition is that same read — the
+  # check has to terminate (Fizzy's CborDecoder overflowed the stack).
+  def test_runner_terminates_on_a_precondition_that_names_its_own_method
+    in_tmpdir do
+      write("sig/d.rbs", <<~RBS)
+        class Decoder
+          def self.run: () -> untyped
+          def decode: () -> String?
+          def decode_tag: () -> Array[Integer]
+        end
+      RBS
+      write("app/d.rb", <<~RUBY)
+        class Decoder
+          def self.run
+            new.decode
+          end
+
+          def decode
+            decode_tag
+            nil
+          end
+
+          def decode_tag
+            value = decode
+            value.bytes
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_key = Contracts::Runner.run(project).each_with_object({}) { |c, h| h[c.key] = c }
+      # Unproved, not assumed: the requirement stays, and nothing enforces it.
+      assert_equal :decode, by_key["Decoder#decode"].requires.first.expr.method
+      refute by_key["Decoder#decode"].enforced
+      refute by_key["Decoder#decode_tag"].enforced
+    end
+  end
 end
