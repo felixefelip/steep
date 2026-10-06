@@ -33,7 +33,17 @@ module Steep
     # redefines one of those makes the value computed in this process disagree
     # with the value the program computes, and the entry's own key says nothing
     # about it — so the entry declares them and they are checked alongside it.
-    Entry = _ = Struct.new(:method, :arity, :preflight, :depends_on, keyword_init: true)
+    #
+    # `native` answers in place of calling `method`, for a core method that is
+    # Ruby in some versions and C in others. The provenance check below refuses
+    # a method written in Ruby, because this process cannot claim to model it —
+    # and `Set` is `set.rb` until Ruby 3.5, so on 3.4 `Set#include?` never
+    # folded and `RESERVED_METHOD_NAMES.include?(receiver)` in
+    # `ActiveSupport::Delegation.generate` was never decided. What the method
+    # IS does not change between the two: membership by `hash`/`eql?`, which
+    # `native` computes with `Hash#key?` on the same elements, under the same
+    # preflight and the same `depends_on`.
+    Entry = _ = Struct.new(:method, :arity, :preflight, :depends_on, :native, keyword_init: true)
 
     # The element classes a dispatching fold is allowed to see. Not a
     # convenience: `depends_on` has to be a FINITE list, and it can only be
@@ -70,7 +80,7 @@ module Steep
         return nil if override_registry.blocked?(key)
         return nil if entry.depends_on&.any? { |dependency| override_registry.blocked?(dependency) }
         source_location = entry.method.source_location
-        return nil if source_location && !source_location.first.start_with?("<internal:")
+        return nil if source_location && !source_location.first.start_with?("<internal:") && !entry.native
         return nil unless entry.arity === argument_types.size
 
         receiver = operand_value(receiver_type)
@@ -78,9 +88,13 @@ module Steep
         return nil unless within_input_budget?(receiver, arguments)
         return nil unless entry.preflight.call(receiver, arguments)
 
-        value = entry.method.bind(receiver).call(*arguments)
+        value = entry.native ? entry.native.call(receiver, arguments) : entry.method.bind(receiver).call(*arguments)
         type = folded_type(value) or return nil
-        return nil if type.to_s.bytesize > result_budget(receiver, arguments)
+        # Measured the way the operands are. The type's printed form is not that
+        # measure: `Set{…}` spells three bytes its elements do not, so a set
+        # reassembled from a long enough array came out over the budget its own
+        # elements set — `RESERVED_METHOD_NAMES`'s `to_set` declined.
+        return nil if operand_width(value) > result_budget(receiver, arguments)
 
         type
       rescue ArgumentError, EncodingError, RangeError, ZeroDivisionError, Regexp::TimeoutError => exn
@@ -246,6 +260,9 @@ module Steep
     SET_INCLUDE = lambda do |receiver, arguments|
       arguments.size == 1 && COMPARABLE[arguments.first] && receiver.all?(&COMPARABLE)
     end
+    SET_MEMBER = lambda do |receiver, arguments|
+      receiver.to_a.to_h { |element| [element, true] }.key?(arguments.first)
+    end
     FREEZE = ->(_receiver, arguments) { arguments.empty? }
     ARRAY_INCLUDE = lambda do |receiver, arguments|
       arguments.size == 1 && COMPARABLE[arguments.first] && receiver.all?(&COMPARABLE)
@@ -293,6 +310,10 @@ module Steep
       "::String#*" => Entry.new(method: String.instance_method(:*), arity: 1, preflight: STRING_REPEAT),
       "::String#length" => Entry.new(method: String.instance_method(:length), arity: 0, preflight: ALWAYS),
       "::String#to_sym" => Entry.new(method: String.instance_method(:to_sym), arity: 0, preflight: ALWAYS),
+      # A String literal is a `String` itself, never a subclass, so `to_s` is
+      # the receiver unchanged. `Delegation.generate` writes it once the name
+      # is already a string — `method_name.to_s` under `prefix:`.
+      "::String#to_s" => Entry.new(method: String.instance_method(:to_s), arity: 0, preflight: ALWAYS),
       "::Integer#+" => Entry.new(method: Integer.instance_method(:+), arity: 1, preflight: INTEGER_BINARY),
       "::Integer#-" => Entry.new(method: Integer.instance_method(:-), arity: 1, preflight: INTEGER_BINARY),
       "::Integer#*" => Entry.new(method: Integer.instance_method(:*), arity: 1, preflight: INTEGER_BINARY),
@@ -349,7 +370,7 @@ module Steep
       "::Kernel#freeze" => Entry.new(method: ::Kernel.instance_method(:freeze), arity: 0, preflight: FREEZE),
       "::Set#include?" => Entry.new(
         method: ::Set.instance_method(:include?), arity: 1, preflight: SET_INCLUDE,
-        depends_on: EQUALITY_METHODS + HASH_METHODS
+        depends_on: EQUALITY_METHODS + HASH_METHODS, native: SET_MEMBER
       )
     }.freeze
   end

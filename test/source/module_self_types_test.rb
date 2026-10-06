@@ -161,6 +161,32 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
 
   # The annotation is spliced in just above the module's own `end`, so every
   # line of the body — everything a diagnostic can point at — keeps its number.
+  # A reopen of the same module is the same module: its instance `self` is the
+  # host's as much as the first declaration's. `StringEvalMacroExpander` places
+  # what a `class_eval` string writes in a reopen like this one, and the method
+  # it places — `delegate`'s, here — calls the host's class methods.
+  def test_inject_reaches_every_reopen_of_the_same_module
+    source = <<~RUBY
+      module Example60::Labels
+        extend ActiveSupport::Concern
+      end
+
+      module Other::Labels
+      end
+
+      module Example60::Labels
+        def human_name(...);  (self.class).human_name(...);end
+      end
+    RUBY
+
+    result = M.inject(source, annotations: ["# @type instance: Example60 & Example60::Labels"], anchor: "Labels")
+    declarations = result.split(/^(?=module )/)
+
+    assert_includes declarations[0], "@type instance:"
+    refute_includes declarations[1], "@type instance:", "another module that shares the last segment is not this one"
+    assert_includes declarations[2], "@type instance:"
+  end
+
   def test_inject_preserves_the_line_numbers_of_the_body
     source = <<~RUBY
       module Post::Notifiable

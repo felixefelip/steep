@@ -21,8 +21,30 @@ module Steep
   #
   # `choices` holds the `if`s such a value is chosen by, so the checker records
   # which arm it kept (`TypeConstruction#record_arm`).
+  #
+  # `decided` — the assignments of `true` or `false` to a local the method
+  # reads only as a condition:
+  #
+  #     nilable = false # self.class can't possibly be nil
+  #     …
+  #     if nilable == false
+  #
+  # A bare `false` is typed `bool`, so that `x = true; x = false` is not an
+  # error. A local read only as a condition hands its value to nothing that
+  # could hold the literal type: what a condition passes on is which branch
+  # runs. Several assignments are fine where the checker's flow follows each
+  # of them — a straight line and the arms of an `if`. Not in a block or a
+  # loop, whose body the checker enters with the local pinned to its type
+  # there: `false` assigned to a local pinned at `true` is the same wrong
+  # answer as above, so one such write takes the local out.
   module LocalAssignments
-    Analysis = Struct.new(:interpolated, :choices, keyword_init: true)
+    Analysis = Struct.new(:interpolated, :choices, :decided, keyword_init: true)
+
+    # Bodies the checker enters with the method's locals pinned.
+    PINNING = %i[block numblock lambda while until while_post until_post for].freeze
+
+    # Calls whose operands are read as a condition, and pass on only a boolean.
+    COMPARISONS = %i[== != !].freeze
 
     class << self
       def analyze(node)
@@ -30,15 +52,17 @@ module Steep
         # assignment written in two methods is two assignments.
         interpolated = {}.compare_by_identity #: Hash[untyped, bool]
         choices = {}.compare_by_identity #: Hash[untyped, bool]
+        decided = {}.compare_by_identity #: Hash[untyped, bool]
 
         each_body(node) do |def_node, body|
           each_interpolated(def_node, body) do |assignment|
             interpolated[assignment] = true
             each_choice(assignment.children[1]) { |choice| choices[choice] = true }
           end
+          each_decided(body) { |assignment| decided[assignment] = true }
         end
 
-        Analysis.new(interpolated: interpolated, choices: choices)
+        Analysis.new(interpolated: interpolated, choices: choices, decided: decided)
       end
 
       private
@@ -92,6 +116,57 @@ module Steep
 
           yield assignment
         end
+      end
+
+      # The `true`/`false` assignments, none in a pinning body, to each local
+      # the body reads only as a condition.
+      def each_decided(body)
+        assignments = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[[untyped, bool]]]
+        reads = Hash.new(0) #: Hash[Symbol, Integer]
+        conditions = Hash.new(0) #: Hash[Symbol, Integer]
+
+        walk(body, nil, false) do |node, parent, pinned|
+          case node.type
+          when :lvasgn
+            assignments[node.children[0]] << [node, pinned]
+          when :lvar
+            name = node.children[0]
+            reads[name] += 1
+            conditions[name] += 1 if condition?(node, parent)
+          end
+        end
+
+        assignments.each do |name, writes|
+          next if writes.any? { |_, pinned| pinned }
+          next if reads[name].zero? || reads[name] != conditions[name]
+          next unless writes.all? { |assignment, _| %i[true false].include?(assignment.children[1]&.type) }
+
+          writes.each { |assignment, _| yield assignment }
+        end
+      end
+
+      def condition?(node, parent)
+        return false unless parent
+
+        case parent.type
+        when :if, :while, :until
+          parent.children[0].equal?(node)
+        when :send
+          COMPARISONS.include?(parent.children[1])
+        else
+          false
+        end
+      end
+
+      # Every node of one body with its parent, and whether a pinning body
+      # encloses it. Stops at a body of its own.
+      def walk(node, parent, pinned, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        return if Accumulators::SCOPES.include?(node.type)
+
+        yield node, parent, pinned
+        inner = pinned || PINNING.include?(node.type)
+        node.children.each { |child| walk(child, node, inner, &block) }
       end
 
       # The `if`s that choose which of a value's ends it evaluates to: the
