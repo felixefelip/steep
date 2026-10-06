@@ -8873,13 +8873,27 @@ module Steep
       !forwarding_readers_for(inner, method).nil?
     end
 
+    #
+    # Synthesizing the read checks the read's own preconditions, and one of
+    # those can be this same read: a recursive `decode` whose callee requires
+    # `not_nil self.decode` inherits that requirement itself. A read already
+    # being proved further up is not proved by assuming it — it stays unproved.
     def contract_send_type_non_nil?(send_node)
+      stack = (Thread.current[:steep_contract_send_stack] ||= [])
+      key = [self_type, send_node]
+      return false if stack.include?(key)
+
+      stack.push(key)
       non_nil = false
-      typing.new_child do |child|
-        pair = with_new_typing(child).synthesize(send_node, hint: nil)
-        if pair.constr.typing.errors.empty? && (type = pair.type)
-          non_nil = !contract_nullable_type?(type)
+      begin
+        typing.new_child do |child|
+          pair = with_new_typing(child).synthesize(send_node, hint: nil)
+          if pair.constr.typing.errors.empty? && (type = pair.type)
+            non_nil = !contract_nullable_type?(type)
+          end
         end
+      ensure
+        stack.pop
       end
       non_nil
     rescue StandardError => exn
