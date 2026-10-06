@@ -4460,7 +4460,7 @@ class TypeCheckTest < Minitest::Test
                 line: 3
                 character: 28
             severity: ERROR
-            message: Type `(::Integer | nil)` does not have method `foo`
+            message: Type `::Integer` does not have method `foo`
             code: Ruby::NoMethod
       YAML
     )
