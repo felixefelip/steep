@@ -498,6 +498,116 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # felixefelip/steep#205, stage 1: the literal reaches the writer inside an
+  # object, as `has_many` hands `define_accessors` a reflection. `Reflection`'s
+  # `@name` is fixed by `initialize` and written nowhere else, so the object
+  # each call builds is known by what it holds, and the writer is read once per
+  # object.
+  def test_a_literal_stored_in_an_object_handed_to_the_writer_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Reflection
+          attr_reader name: Symbol
+          def initialize: (Symbol name) -> void
+        end
+        module Writer
+          def self.define_stored: (untyped model, Reflection reflection) -> void
+        end
+        class Base
+          def self.has_stored: (Symbol name) -> untyped
+        end
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Reflection
+          attr_reader :name
+
+          def initialize(name)
+            @name = name
+          end
+        end
+
+        module Writer
+          def self.define_stored(model, reflection)
+            model.module_eval "def \#{reflection.name}; end"
+          end
+        end
+
+        class Base
+          def self.has_stored(name)
+            Writer.define_stored(self, Reflection.new(name))
+          end
+        end
+
+        class Article < Base
+          has_stored :posts
+          has_stored :comments
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:22:2" => ["def posts; end"], "app/base.rb:23:2" => ["def comments; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  # The same object, with an ivar a method can change: what it holds at the
+  # writer is not what `new` was handed, so nothing is claimed.
+  def test_a_stored_literal_a_method_can_change_is_a_hole
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Reflection
+          attr_reader name: Symbol
+          def initialize: (Symbol name) -> void
+          def rename: (Symbol to) -> Symbol
+        end
+        module Writer
+          def self.define_stored: (untyped model, Reflection reflection) -> void
+        end
+        class Base
+          def self.has_stored: (Symbol name) -> untyped
+        end
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Reflection
+          attr_reader :name
+
+          def initialize(name)
+            @name = name
+          end
+
+          def rename(to) = @name = to
+        end
+
+        module Writer
+          def self.define_stored(model, reflection)
+            model.module_eval "def \#{reflection.name}; end"
+          end
+        end
+
+        class Base
+          def self.has_stored(name)
+            Writer.define_stored(self, Reflection.new(name))
+          end
+        end
+
+        class Article < Base
+          has_stored :posts
+          has_stored :comments
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:24:2" => [nil], "app/base.rb:25:2" => [nil] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
   # A gem namespaces its writer and calls it by the relative name, the way
   # `Module#delegate` calls `ActiveSupport::Delegation.generate` from inside
   # `class Module`. The constant is spelled `Writer` and names

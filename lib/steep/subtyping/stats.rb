@@ -169,6 +169,7 @@ module Steep
         when AST::Types::Intersection then "Intersection"
         when AST::Types::Tuple then "Tuple"
         when AST::Types::FiniteSet then "FiniteSet"
+        when AST::Types::ObjectState then "ObjectState"
         when AST::Types::MetaClass then "MetaClass"
         when AST::Types::MethodObject then "MethodObject"
         when AST::Types::RegexpLiteral then "RegexpLiteral"

@@ -129,7 +129,8 @@ module Steep
         case type
         when AST::Types::Name::Instance, AST::Types::Name::Singleton, AST::Types::Literal, AST::Types::Nil,
              AST::Types::Boolean, AST::Types::Logic::Base, AST::Types::Proc, AST::Types::Tuple, AST::Types::Record,
-             AST::Types::FiniteSet, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral
+             AST::Types::FiniteSet, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral,
+             AST::Types::ObjectState
           true
         when AST::Types::Union, AST::Types::Intersection
           type.types.all? {|ty| config_free_shape?(ty) }
@@ -224,6 +225,15 @@ module Steep
           object_shape(set.name).subst(
             class_subst(set).update(self_type: type).merge(app_subst(set))
           )
+        when AST::Types::ObjectState
+          # The class's own shape. What the object holds is answered at the
+          # reader's call (`TypeConstruction#object_state_reader_call`), against
+          # the method the call resolved to.
+          instance = type.back_type
+          object_shape(instance.name).subst(
+            class_subst(instance).update(self_type: type).merge(app_subst(instance)),
+            type: type
+          )
         when AST::Types::Record
           record_shape(type) do |hash|
             object_shape(hash.name).subst(
@@ -266,6 +276,12 @@ module Steep
               class_subst(type).update(self_type: nil).merge(app_subst(type)),
               type: type
             )
+        when AST::Types::ObjectState
+          instance = type.back_type
+          object_shape(instance.name).subst(
+            class_subst(instance).update(self_type: nil).merge(app_subst(instance)),
+            type: type
+          )
         when AST::Types::Name::Interface
           object_shape(type.name).subst(app_subst(type), type: type)
         when AST::Types::Literal, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral
