@@ -344,14 +344,21 @@ module Steep
           .map {|env| Set.new(env.pure_method_calls.each_key) }
           .inject {|s1, s2| s1.intersection(s2) } || Set[]
 
-        pure_call_updates = common_pure_nodes.each_with_object({}) do |node, hash| #$ Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t]]
+        pure_call_updates = common_pure_nodes.each_with_object({}) do |node, hash| #$ Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]]
           pairs = envs.map {|env| env.pure_method_calls.fetch(node) }
-          refined_type = AST::Types::Union.build(types: pairs.map {|call, type| type || call.return_type })
 
           # Any *pure_method_call* can be used because it's *pure*
           (call, _ = envs.fetch(0).pure_method_calls[node]) or raise
 
-          hash[node] = [call, refined_type]
+          # An entry a branch invalidated stays invalidated. Its call was made
+          # before the write that invalidated it, and a folded return is the
+          # value the receiver held then: `name.to_s` is `"x"` from a `name`
+          # that has since become `:y`.
+          if pairs.any? {|_, type| type.nil? }
+            hash[node] = [call, nil]
+          else
+            hash[node] = [call, AST::Types::Union.build(types: pairs.map {|_, type| type })]
+          end
         end
 
         result = assign_local_variables(assignments).merge(pure_method_calls: pure_call_updates)

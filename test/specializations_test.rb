@@ -425,6 +425,42 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # Each pass rebinds the parameter to the next element, which invalidates the
+  # calls cached on it — and a conditional in the body joined them back to the
+  # first element's answer. ActiveSupport's `generate` has that shape, and
+  # `delegate :a, :b` defined `a` twice.
+  def test_runner_binds_each_pass_to_its_own_element_across_a_join
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: () -> String
+          def names: (bool) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def greet
+            names(true)
+          end
+
+          def names(flag)
+            parts = []
+            [:x, :y].each do |name|
+              suffix = flag ? "!" : "?"
+              name = name.to_s
+              parts << "\#{name}\#{suffix}"
+            end
+            parts.join(";")
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(true)" => '"x!;y!"' }, methods.fetch("Bar#names"))
+    end
+  end
+
   # felixefelip/rbs_infer#345 stage S5. `relay` has no literal in its own body —
   # it hands its parameter on — so its return is only specializable once `label`
   # already is, which is a second generation.

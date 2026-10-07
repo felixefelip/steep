@@ -876,6 +876,7 @@ class StringEvalsTest < Minitest::Test
           delegate :name, to: :user, allow_nil: true
           delegate :name, to: :@owner
           delegate :fetch, to: Store
+          delegate :email, :name, to: :@owner
         end
       RUBY
 
@@ -894,7 +895,12 @@ class StringEvalsTest < Minitest::Test
           "app/post.rb:7:2" => [["def user_email(...);  _ = user;  _.email(...)" + raises.("user_email", "email", "user"), "::Post"]],
           "app/post.rb:8:2" => [["def name(...);  _ = user;  if !_.nil? || nil.respond_to?(:name);    _.name(...);  end;end", "::Post"]],
           "app/post.rb:9:2" => [["def name(...);  _ = @owner;  _.name(...)" + raises.("name", "name", "@owner"), "::Post"]],
-          "app/post.rb:10:2" => [["def fetch(key, &);  _ = ::Store;  _.fetch(key, &)" + raises.("fetch", "fetch", "::Store"), "::Post"]]
+          "app/post.rb:10:2" => [["def fetch(key, &);  _ = ::Store;  _.fetch(key, &)" + raises.("fetch", "fetch", "::Store"), "::Post"]],
+          "app/post.rb:11:2" => [[
+            "def email(...);  _ = @owner;  _.email(...)" + raises.("email", "email", "@owner") + ";" \
+            "def name(...);  _ = @owner;  _.name(...)" + raises.("name", "name", "@owner"),
+            "::Post"
+          ]]
         },
         chunks
       )
