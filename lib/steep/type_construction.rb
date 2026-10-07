@@ -4792,6 +4792,15 @@ module Steep
         private = dispatch.reaches_private?
       end
 
+      # felixefelip/steep#207. A call that may change a String in place makes
+      # the literal it was typed by a lie: dispatched against `::String`, so a
+      # `self` return (`sub!`) is not the old value either, and the variable it
+      # was read from widens from here on (`refine_mutated_receiver`).
+      if receiver && (widened = mutated_string_receiver_type(receiver_type, method_name, private: private, block: block_params || block_body))
+        receiver_type = widened
+        constr = constr.refine_mutated_receiver(receiver, widened)
+      end
+
       # Delegation chain narrowing (felixefelip/steep#32). If the
       # called method's source body is a forward delegate
       # (`def m; receiver.x; end`), substitute the call site with the
@@ -4890,6 +4899,48 @@ module Steep
         end
 
       Pair.new(type: type, constr: constr)
+    end
+
+    # `receiver_type` with its String literals widened, where the call may
+    # change the value they name; nil where it leaves the value as it was, or
+    # there is no literal to widen.
+    def mutated_string_receiver_type(receiver_type, method_name, private:, block:)
+      widened = StringMutation.widen(receiver_type)
+      return if widened.equal?(receiver_type)
+
+      keys = string_method_keys(method_name, private: private)
+      return if StringMutation.preserves?(keys, block: block, override_registry: literal_method_registry)
+
+      widened
+    end
+
+    # The methods a call by `method_name` on a String resolves to, keyed as the
+    # intrinsic tables are. Empty for one String does not have: nothing vouches
+    # for it.
+    def string_method_keys(method_name, private:)
+      interface = calculate_interface(AST::Builtin::String.instance_type, private: private) or return []
+      method = interface.methods[method_name] or return []
+
+      method.overloads
+        .flat_map { |overload| overload.method_decls(method_name) }
+        .map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }
+        .uniq
+    end
+
+    # The variable `receiver` reads, typed `type` from here on. Only a local
+    # and an ivar name the value itself; any other receiver is a value this
+    # call is the last to see.
+    def refine_mutated_receiver(receiver, type)
+      case receiver.type
+      when :lvar
+        name = receiver.children[0] #: Symbol
+        update_type_env { |env| env.refine_types(local_variable_types: { name => type }) }
+      when :ivar
+        name = receiver.children[0] #: Symbol
+        update_type_env { |env| env.refine_types(instance_variable_types: { name => type }) }
+      else
+        self
+      end
     end
 
     def builder_config

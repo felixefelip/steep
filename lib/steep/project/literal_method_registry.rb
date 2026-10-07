@@ -31,9 +31,9 @@ module Steep
       # once per type check.
       Scan = Struct.new(:blocked, :blocked_names, :modules, :opaque_modules, :mixins, :module_methods)
 
-      # Both folds are keyed the same way and blocked the same way, so one
-      # registry watches both tables.
-      TABLES = [LiteralIntrinsics, ReflectionIntrinsics, IterationIntrinsics].freeze
+      # Every table is keyed the same way and blocked the same way, so one
+      # registry watches them all.
+      TABLES = [LiteralIntrinsics, ReflectionIntrinsics, IterationIntrinsics, StringMutation].freeze
       # Only `prepend` shadows every entry by LOOKUP. A module inserted by
       # `include` sits below the class in the chain, so a method the core class
       # defines itself always wins:
