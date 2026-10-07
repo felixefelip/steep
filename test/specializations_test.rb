@@ -608,6 +608,75 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # felixefelip/steep#207. `dup` answers `self`, so the copy starts out as the
+  # literal it was made from — and `sub!` changes it in place. The body hands
+  # back a value no literal it was called with names, so it records nothing.
+  def test_runner_records_nothing_for_a_literal_mutated_in_place
+    in_tmpdir do
+      write("sig/mutation.rbs", <<~RBS)
+        class Mutation
+          def self.chop_bang: (String word) -> String
+        end
+        class MutationUse
+          def self.a: () -> String
+          def self.b: () -> String
+        end
+      RBS
+      write("app/mutation.rb", <<~'RUBY')
+        class Mutation
+          def self.chop_bang(word)
+            result = word.dup
+            result.sub!(/s\z/, "")
+            result
+          end
+        end
+
+        class MutationUse
+          def self.a = Mutation.chop_bang("posts")
+          def self.b = Mutation.chop_bang("comments")
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      refute_includes methods.keys, "Mutation.chop_bang"
+    end
+  end
+
+  # The shape `ActiveSupport::Inflector.apply_inflections` has: the `sub!` is
+  # inside the block, `break` included.
+  def test_runner_records_nothing_for_a_literal_mutated_inside_a_block
+    in_tmpdir do
+      write("sig/mutation.rbs", <<~RBS)
+        class Mutation
+          def self.apply: (String word) -> String
+        end
+        class MutationUse
+          def self.a: () -> String
+          def self.b: () -> String
+        end
+      RBS
+      write("app/mutation.rb", <<~'RUBY')
+        class Mutation
+          def self.apply(word)
+            result = word.dup
+            [[/s\z/, ""]].each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+            result
+          end
+        end
+
+        class MutationUse
+          def self.a = Mutation.apply("posts")
+          def self.b = Mutation.apply("comments")
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      refute_includes methods.keys, "Mutation.apply"
+    end
+  end
+
   def test_runner_writes_and_deletes_the_sidecar
     in_tmpdir do
       write("sig/foo.rbs", FIXTURE_RBS)

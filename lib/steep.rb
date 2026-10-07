@@ -67,6 +67,7 @@ require "steep/method_identity"
 require "steep/literal_intrinsics"
 require "steep/reflection_intrinsics"
 require "steep/iteration_intrinsics"
+require "steep/string_mutation"
 
 require "steep/range_extension"
 

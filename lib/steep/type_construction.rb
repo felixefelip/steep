@@ -3111,6 +3111,7 @@ module Steep
 
             if var_type
               if body
+                constr = StringMutation.widen_mutated_in(constr, body)
                 body_constr = constr.update_type_env do |type_env|
                   type_env = type_env.assign_local_variables({ var_name => var_type })
                   pins = type_env.pin_local_variables(nil)
@@ -3143,7 +3144,10 @@ module Steep
         when :while, :until
           yield_self do
             cond, body = node.children
-            _, constr = synthesize(cond, condition: true).to_ary
+            # A loop runs its condition and body any number of times, so a
+            # mutation anywhere in it is seen from the first pass after
+            # (felixefelip/steep#207) — as for a block.
+            _, constr = StringMutation.widen_mutated_in(self, node).synthesize(cond, condition: true).to_ary
 
             interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions, self_type: self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
@@ -3186,7 +3190,7 @@ module Steep
           yield_self do
             cond, body = node.children
 
-            _, cond_constr, = synthesize(cond)
+            _, cond_constr, = StringMutation.widen_mutated_in(self, node).synthesize(cond)
 
             if body
               for_loop =
@@ -4790,6 +4794,18 @@ module Steep
         method_name = dispatch.method_name
         arguments = dispatch.arguments
         private = dispatch.reaches_private?
+      end
+
+      # felixefelip/steep#207. A call that may change a String in place — this
+      # one, or one inside its block on a variable from out here — widens the
+      # String literal that variable was typed by.
+      if block_body
+        constr = StringMutation.widen_mutated_in(constr, block_body, shadowed: StringMutation.block_parameter_names(block_params))
+      end
+      if receiver
+        receiver_type, constr = StringMutation.widen_receiver(
+          constr, receiver, receiver_type, method_name, private: private, block: block_params || block_body
+        )
       end
 
       # Delegation chain narrowing (felixefelip/steep#32). If the
