@@ -26,8 +26,10 @@ class StringMutationTest < Minitest::Test
     check(<<~'RUBY') do |pair, _typing, _source|
       # @type var word: "posts"
       word = _ = "posts"
+      # @type var pattern: Regexp
+      pattern = _ = /s\z/
       result = word.dup
-      stripped = result.sub!(/s\z/, "")
+      stripped = result.sub!(pattern, "")
       copy = result
     RUBY
       assert_equal parse_type('"posts"'), pair.context.type_env[:word]

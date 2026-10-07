@@ -609,9 +609,10 @@ class SpecializationsTest < Minitest::Test
   end
 
   # felixefelip/steep#207. `dup` answers `self`, so the copy starts out as the
-  # literal it was made from — and `sub!` changes it in place. The body hands
-  # back a value no literal it was called with names, so it records nothing.
-  def test_runner_records_nothing_for_a_literal_mutated_in_place
+  # literal it was made from — and `sub!` changes it in place. What the body
+  # records is the value it leaves (felixefelip/steep#209), never the one it
+  # was called with.
+  def test_runner_records_the_value_a_literal_mutated_in_place_leaves
     in_tmpdir do
       write("sig/mutation.rbs", <<~RBS)
         class Mutation
@@ -639,7 +640,10 @@ class SpecializationsTest < Minitest::Test
 
       methods = Specializations::Runner.run(setup_project)
 
-      refute_includes methods.keys, "Mutation.chop_bang"
+      assert_equal(
+        { '("posts")' => '"post"', '("comments")' => '"comment"' },
+        methods.fetch("Mutation.chop_bang")
+      )
     end
   end
 
@@ -674,6 +678,44 @@ class SpecializationsTest < Minitest::Test
       methods = Specializations::Runner.run(setup_project)
 
       refute_includes methods.keys, "Mutation.apply"
+    end
+  end
+
+  # felixefelip/steep#209, item 2: the stateless controls. `sub!` applied to
+  # a copy is pinned by the felixefelip/steep#207 test above.
+  def test_runner_folds_the_core_calls_an_inflector_rule_is_applied_with
+    in_tmpdir do
+      write("sig/inflector.rbs", <<~RBS)
+        module P3Inflector
+          def self.singularize_regexp: (String word) -> String
+          def self.singularize_suffix: (String word) -> String
+        end
+        class P3Use
+          def self.regexp_posts: () -> String
+          def self.suffix_posts: () -> String
+          def self.regexp_comments: () -> String
+          def self.suffix_comments: () -> String
+        end
+      RBS
+      write("app/inflector.rb", <<~'RUBY')
+        module P3Inflector
+          def self.singularize_regexp(word) = word.sub(/s\z/, "")
+          def self.singularize_suffix(word) = word.delete_suffix("s")
+        end
+
+        class P3Use
+          def self.regexp_posts = P3Inflector.singularize_regexp("posts")
+          def self.suffix_posts = P3Inflector.singularize_suffix("posts")
+          def self.regexp_comments = P3Inflector.singularize_regexp("comments")
+          def self.suffix_comments = P3Inflector.singularize_suffix("comments")
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      expected = { '("posts")' => '"post"', '("comments")' => '"comment"' }
+      assert_equal expected, methods.fetch("P3Inflector.singularize_regexp")
+      assert_equal expected, methods.fetch("P3Inflector.singularize_suffix")
     end
   end
 

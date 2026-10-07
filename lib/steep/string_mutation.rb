@@ -37,6 +37,12 @@ module Steep
       %w[! != equal? __id__].map { |name| "::BasicObject##{name}" }
     ).to_h { |key| [key, true] }.freeze
 
+    # In-place methods `LiteralIntrinsics` answers on a copy of the receiver
+    # (felixefelip/steep#209). What the call returns is what the receiver holds
+    # after it — the changed string — or nil where it changed nothing, and then
+    # it holds what it held. One question, asked of the method itself.
+    IN_PLACE = Set["::String#sub!"].freeze
+
     class << self
       # A call on `receiver`, typed `receiver_type`: the type to dispatch it
       # against, and `constr` with the variable `receiver` reads typed that way
@@ -109,6 +115,36 @@ module Steep
         return false if block || keys.empty?
 
         keys.all? { |key| ENTRIES.key?(key) && !override_registry.blocked?(key) }
+      end
+
+      # After an in-place call on a single String literal: the value it leaves,
+      # where every operand is a literal — the variable typed by it, and the
+      # call answering what the method does. `receiver_type` is the receiver's
+      # type BEFORE `widen_receiver`, which always widens for these methods, so
+      # `type` is the call's return over `::String`. Both unchanged where the
+      # value cannot be computed, leaving that widening in place.
+      def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
+        return [type, constr] unless receiver_type.is_a?(AST::Types::Literal) && receiver_type.value.is_a?(::String)
+
+        keys = string_method_keys(constr, method_name, private: private)
+        return [type, constr] unless keys.size == 1 && IN_PLACE.include?(keys.first)
+
+        argument_types = arguments.map do |argument|
+          return [type, constr] unless constr.typing.has_type?(argument)
+
+          constr.literal_operand_type(argument, constr.typing.type_of(node: argument))
+        end
+
+        returned = LiteralIntrinsics.fold_key(
+          key: keys.first, receiver_type: receiver_type, argument_types: argument_types,
+          override_registry: constr.literal_method_registry
+        ) or return [type, constr]
+        return [type, constr] unless constr.check_relation(sub_type: returned, super_type: type).success?
+
+        value = returned.is_a?(AST::Types::Nil) ? receiver_type : returned
+
+        constr = refine(constr, receiver, value)
+        [returned, constr.add_typing(node, type: returned).constr]
       end
 
       def watched_keys
