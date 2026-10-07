@@ -4906,7 +4906,7 @@ module Steep
           end
         end
 
-      if receiver && unwidened_receiver_type && !receiver_type.equal?(unwidened_receiver_type) && !(block_params || block_body)
+      if receiver && !(block_params || block_body)
         type, constr = StringMutation.fold_in_place(
           constr, node, receiver, unwidened_receiver_type, method_name, arguments, type: type, private: private
         )

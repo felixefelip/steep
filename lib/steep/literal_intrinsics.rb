@@ -77,9 +77,9 @@ module Steep
         fold_key(key: key, receiver_type: receiver_type, argument_types: argument_types, override_registry: override_registry)
       end
 
-      # `fold` for a method already known by its key — the pure counterpart an
-      # in-place method is computed through (`StringMutation::IN_PLACE`), which
-      # is not the method the call resolved to.
+      # `fold` for a method already known by its key: an in-place one
+      # (`StringMutation::IN_PLACE`), whose call was dispatched against the
+      # widened receiver and so never reached `fold` with its literal.
       def fold_key(key:, receiver_type:, argument_types:, override_registry:)
         return nil unless operand?(receiver_type)
         return nil unless argument_types.all? { |type| operand?(type) }
@@ -234,14 +234,18 @@ module Steep
       amount.is_a?(Integer) && amount >= 0 && amount <= MAX_LITERAL_WIDTH &&
         receiver.bytesize * amount <= MAX_LITERAL_WIDTH
     end
-    # A pattern read without a call — a regexp, or a string, which is quoted —
-    # and a replacement STRING. A hash replacement is looked up with `[]`, and
-    # a block is not a value; neither is folded. `\1` in the replacement is
-    # read by `sub` itself.
+    # A pattern read without a call — a regexp, or a string, which `sub` takes
+    # literally (`"abc".sub(".", "")` is "abc") — and a replacement STRING. A
+    # hash replacement is looked up with `[]`, and a block is not a value;
+    # neither is folded. `\1` in the replacement is read by `sub` itself.
     STRING_SUB = lambda do |_receiver, arguments|
       pattern, replacement = arguments
       (pattern.is_a?(::Regexp) || pattern.is_a?(String)) && replacement.is_a?(String)
     end
+    # On a copy: the operand is the literal type's own value. What it answers
+    # is what the program's call does — the changed string, or nil where
+    # nothing was substituted — with no second question to disagree with it.
+    STRING_SUB_BANG = ->(receiver, arguments) { receiver.dup.sub!(*arguments) }
     STRING_AFFIX = ->(_receiver, arguments) { arguments.first.is_a?(String) }
     INTEGER_BINARY = ->(_receiver, arguments) { arguments.first.is_a?(Integer) }
     INTEGER_DIVISION = lambda do |_receiver, arguments|
@@ -298,8 +302,9 @@ module Steep
       SUBJECT[subject] && (arguments.size == 1 || position.is_a?(Integer))
     end
     REGEXP_TILDE = ->(_receiver, arguments) { SUBJECT[arguments.first] }
-    # The same question asked from the other side. A string pattern is quoted,
-    # not compiled, and that too happens without a call.
+    # The same question asked from the other side. A string pattern is
+    # COMPILED, not quoted — `"abc".match?(".")` is true — and that too happens
+    # without a call.
     SUBJECT_MATCH = lambda do |_receiver, arguments|
       pattern, position = arguments
       (pattern.is_a?(::Regexp) || pattern.is_a?(String)) && (arguments.size == 1 || position.is_a?(Integer))
@@ -327,9 +332,13 @@ module Steep
       "::String#*" => Entry.new(method: String.instance_method(:*), arity: 1, preflight: STRING_REPEAT),
       "::String#length" => Entry.new(method: String.instance_method(:length), arity: 0, preflight: ALWAYS),
       "::String#to_sym" => Entry.new(method: String.instance_method(:to_sym), arity: 0, preflight: ALWAYS),
-      # What an inflector rule is applied with (felixefelip/steep#209). `sub!`
-      # folds through `sub`: see `StringMutation::IN_PLACE`.
+      # What an inflector rule is applied with (felixefelip/steep#209). What
+      # `sub!` answers is also what its receiver holds after it, unless nil:
+      # see `StringMutation::IN_PLACE`.
       "::String#sub" => Entry.new(method: String.instance_method(:sub), arity: 2, preflight: STRING_SUB),
+      "::String#sub!" => Entry.new(
+        method: String.instance_method(:sub!), arity: 2, preflight: STRING_SUB, native: STRING_SUB_BANG
+      ),
       "::String#delete_suffix" => Entry.new(method: String.instance_method(:delete_suffix), arity: 1, preflight: STRING_AFFIX),
       # A String literal is a `String` itself, never a subclass, so `to_s` is
       # the receiver unchanged. `Delegation.generate` writes it once the name

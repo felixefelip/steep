@@ -33,13 +33,26 @@ class StringFoldTest < Minitest::Test
     end
   end
 
-  def test_sub_with_a_string_pattern_and_a_backreference_folds
+  def test_sub_with_a_backreference_folds
     check(<<~'RUBY') do |pair|
       # @type var word: "people"
       word = _ = "people"
       x = word.sub(/(p)eople$/i, '\1erson')
     RUBY
       assert_equal parse_type('"person"'), pair.context.type_env[:x]
+    end
+  end
+
+  # `sub` takes a string pattern literally, where `match?` would compile it.
+  def test_sub_with_a_string_pattern_takes_it_literally
+    check(<<~'RUBY') do |pair|
+      # @type var word: "abc"
+      word = _ = "abc"
+      x = word.sub(".", "")
+      y = word.sub("b", "")
+    RUBY
+      assert_equal parse_type('"abc"'), pair.context.type_env[:x]
+      assert_equal parse_type('"ac"'), pair.context.type_env[:y]
     end
   end
 
@@ -90,6 +103,49 @@ class StringFoldTest < Minitest::Test
     RUBY
       assert_equal parse_type('"post"'), pair.context.type_env[:copy]
       assert_equal parse_type("nil"), pair.context.type_env[:returned]
+    end
+  end
+
+  # The review case on felixefelip/steep#215: there is no literal "." in
+  # "abc", so `sub!` changes nothing and answers nil — `match?(".")`, which
+  # compiles the pattern, would have said it matched.
+  def test_sub_bang_with_a_string_pattern_that_does_not_occur_answers_nil
+    check(<<~'RUBY') do |pair|
+      # @type var word: "abc"
+      word = _ = "abc"
+      result = word.dup
+      returned = result.sub!(".", "")
+      copy = result
+    RUBY
+      assert_equal parse_type("nil"), pair.context.type_env[:returned]
+      assert_equal parse_type('"abc"'), pair.context.type_env[:copy]
+    end
+  end
+
+  def test_sub_bang_with_a_string_pattern_that_occurs_sets_the_variable
+    check(<<~'RUBY') do |pair|
+      # @type var word: "posts"
+      word = _ = "posts"
+      result = word.dup
+      returned = result.sub!("s", "")
+      copy = result
+    RUBY
+      assert_equal parse_type('"pots"'), pair.context.type_env[:returned]
+      assert_equal parse_type('"pots"'), pair.context.type_env[:copy]
+    end
+  end
+
+  # Not a valid regexp, which matters only to a reader that compiles it.
+  def test_sub_bang_with_a_regexp_metacharacter_as_a_string_pattern
+    check(<<~'RUBY') do |pair|
+      # @type var word: "abc"
+      word = _ = "abc"
+      result = word.dup
+      returned = result.sub!("(", "")
+      copy = result
+    RUBY
+      assert_equal parse_type("nil"), pair.context.type_env[:returned]
+      assert_equal parse_type('"abc"'), pair.context.type_env[:copy]
     end
   end
 
