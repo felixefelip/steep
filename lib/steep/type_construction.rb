@@ -4803,6 +4803,7 @@ module Steep
         constr = StringMutation.widen_mutated_in(constr, block_body, shadowed: StringMutation.block_parameter_names(block_params))
       end
       if receiver
+        unwidened_receiver_type = receiver_type
         receiver_type, constr = StringMutation.widen_receiver(
           constr, receiver, receiver_type, method_name, private: private, block: block_params || block_body
         )
@@ -4904,6 +4905,12 @@ module Steep
             )
           end
         end
+
+      if receiver && unwidened_receiver_type && !receiver_type.equal?(unwidened_receiver_type) && !(block_params || block_body)
+        type, constr = StringMutation.fold_in_place(
+          constr, node, receiver, unwidened_receiver_type, method_name, arguments, type: type, private: private
+        )
+      end
 
       Pair.new(type: type, constr: constr)
     end

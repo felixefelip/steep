@@ -37,6 +37,14 @@ module Steep
       %w[! != equal? __id__].map { |name| "::BasicObject##{name}" }
     ).to_h { |key| [key, true] }.freeze
 
+    # An in-place method whose effect is computable (felixefelip/steep#209): the
+    # value it leaves is what its pure counterpart in `LiteralIntrinsics`
+    # answers, and it answers that value where the pattern matched and nil
+    # where it did not. Watched like `ENTRIES`, so a project's own `sub!` is
+    # not computed through Ruby's `sub`.
+    IN_PLACE = { "::String#sub!" => "::String#sub" }.freeze
+    MATCH = "::String#match?"
+
     class << self
       # A call on `receiver`, typed `receiver_type`: the type to dispatch it
       # against, and `constr` with the variable `receiver` reads typed that way
@@ -111,8 +119,39 @@ module Steep
         keys.all? { |key| ENTRIES.key?(key) && !override_registry.blocked?(key) }
       end
 
+      # After an in-place call on a single String literal that was dispatched
+      # against `::String`: the value it leaves, where every operand is a
+      # literal — the variable typed by it, and the call answering it or nil.
+      # `type` and `constr` unchanged where that cannot be computed, which
+      # leaves the widening `widen_receiver` already made.
+      def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
+        return [type, constr] unless receiver_type.is_a?(AST::Types::Literal) && receiver_type.value.is_a?(::String)
+
+        keys = string_method_keys(constr, method_name, private: private)
+        return [type, constr] unless keys.size == 1 && (pure = IN_PLACE[keys.first])
+
+        registry = constr.literal_method_registry
+        return [type, constr] if registry.blocked?(keys.first)
+
+        argument_types = arguments.map do |argument|
+          return [type, constr] unless constr.typing.has_type?(argument)
+
+          constr.literal_operand_type(argument, constr.typing.type_of(node: argument))
+        end
+
+        value = LiteralIntrinsics.fold_key(key: pure, receiver_type: receiver_type, argument_types: argument_types, override_registry: registry)
+        matched = LiteralIntrinsics.fold_key(key: MATCH, receiver_type: receiver_type, argument_types: argument_types.take(1), override_registry: registry)
+        return [type, constr] unless value && matched.is_a?(AST::Types::Literal)
+
+        returned = matched.value ? value : AST::Builtin.nil_type
+        return [type, constr] unless constr.check_relation(sub_type: returned, super_type: type).success?
+
+        constr = refine(constr, receiver, value)
+        [returned, constr.add_typing(node, type: returned).constr]
+      end
+
       def watched_keys
-        @watched_keys ||= Set.new(ENTRIES.keys)
+        @watched_keys ||= Set.new(ENTRIES.keys + IN_PLACE.keys)
       end
 
       def method_keys_for(class_name)
