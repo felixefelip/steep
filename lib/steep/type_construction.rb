@@ -3111,6 +3111,7 @@ module Steep
 
             if var_type
               if body
+                constr = constr.widen_strings_mutated_in(body, shadowed: Set[])
                 body_constr = constr.update_type_env do |type_env|
                   type_env = type_env.assign_local_variables({ var_name => var_type })
                   pins = type_env.pin_local_variables(nil)
@@ -3143,7 +3144,10 @@ module Steep
         when :while, :until
           yield_self do
             cond, body = node.children
-            _, constr = synthesize(cond, condition: true).to_ary
+            # A loop runs its condition and body any number of times, so a
+            # mutation anywhere in it is seen from the first pass after
+            # (felixefelip/steep#207) — as for a block.
+            _, constr = widen_strings_mutated_in(node, shadowed: Set[]).synthesize(cond, condition: true).to_ary
 
             interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions, self_type: self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
@@ -3186,7 +3190,7 @@ module Steep
           yield_self do
             cond, body = node.children
 
-            _, cond_constr, = synthesize(cond)
+            _, cond_constr, = widen_strings_mutated_in(node, shadowed: Set[]).synthesize(cond)
 
             if body
               for_loop =
@@ -4796,6 +4800,13 @@ module Steep
       # the literal it was typed by a lie: dispatched against `::String`, so a
       # `self` return (`sub!`) is not the old value either, and the variable it
       # was read from widens from here on (`refine_mutated_receiver`).
+      # The same question for a call made INSIDE the block, on a variable from
+      # out here. A block's body is checked with the outer locals pinned, so
+      # nothing it narrows comes back out — and it may run any number of times,
+      # so the body sees the mutated value too from its second pass on. The
+      # variable is widened before the block is entered.
+      constr = constr.widen_strings_mutated_in(block_body, shadowed: block_parameter_names(block_params)) if block_body
+
       if receiver && (widened = mutated_string_receiver_type(receiver_type, method_name, private: private, block: block_params || block_body))
         receiver_type = widened
         constr = constr.refine_mutated_receiver(receiver, widened)
@@ -4925,6 +4936,78 @@ module Steep
         .flat_map { |overload| overload.method_decls(method_name) }
         .map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }
         .uniq
+    end
+
+    # `self` with every String-literal variable that a call inside `node` may
+    # change widened to `::String`. `shadowed` are the names a block parameter
+    # rebinds there, which are not the outer variable.
+    def widen_strings_mutated_in(node, shadowed:)
+      constr = self
+
+      each_variable_call(node, shadowed) do |receiver, method_name, block|
+        type = constr.context.type_env[receiver.children[0]] or next
+        widened = constr.mutated_string_receiver_type(type, method_name, private: false, block: block) or next
+
+        constr = constr.refine_mutated_receiver(receiver, widened)
+      end
+
+      constr
+    end
+
+    # Each call in `node` made on a local or an ivar, with whether it passes a
+    # block. A nested block rebinds its own parameters; a `def`, a class or a
+    # module opens a scope the outer locals do not reach.
+    def each_variable_call(node, shadowed, &block)
+      return unless node.is_a?(Parser::AST::Node)
+
+      case node.type
+      when :def, :defs, :class, :module, :sclass
+        return
+      when :block, :numblock, :itblock
+        send_node, params, body = node.children
+        yield_variable_call(send_node, shadowed, block: true, &block)
+        send_node.children.each { |child| each_variable_call(child, shadowed, &block) }
+        each_variable_call(body, shadowed + block_parameter_names(params), &block)
+        return
+      when :send, :csend
+        yield_variable_call(node, shadowed, block: false, &block)
+      end
+
+      node.children.each { |child| each_variable_call(child, shadowed, &block) }
+    end
+
+    def yield_variable_call(node, shadowed, block:)
+      return unless node.type == :send || node.type == :csend
+
+      receiver, method_name = node.children
+      return unless receiver.is_a?(Parser::AST::Node)
+
+      case receiver.type
+      when :lvar
+        yield receiver, method_name, block unless shadowed.include?(receiver.children[0])
+      when :ivar
+        yield receiver, method_name, block
+      end
+    end
+
+    # The names a block's parameter list binds, block-local ones (`|x; y|`)
+    # included. A numbered or `it` block binds none an outer local could share.
+    def block_parameter_names(params)
+      return Set[] unless params.is_a?(Parser::AST::Node)
+
+      params.children.each_with_object(Set[]) do |child, names|
+        case child
+        when Symbol
+          names << child
+        when Parser::AST::Node
+          case child.type
+          when :arg, :optarg, :restarg, :kwarg, :kwoptarg, :kwrestarg, :blockarg, :shadowarg
+            names << child.children[0] if child.children[0]
+          else
+            names.merge(block_parameter_names(child))
+          end
+        end
+      end
     end
 
     # The variable `receiver` reads, typed `type` from here on. Only a local

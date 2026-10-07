@@ -643,6 +643,40 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # The shape `ActiveSupport::Inflector.apply_inflections` has: the `sub!` is
+  # inside the block, `break` included.
+  def test_runner_records_nothing_for_a_literal_mutated_inside_a_block
+    in_tmpdir do
+      write("sig/mutation.rbs", <<~RBS)
+        class Mutation
+          def self.apply: (String word) -> String
+        end
+        class MutationUse
+          def self.a: () -> String
+          def self.b: () -> String
+        end
+      RBS
+      write("app/mutation.rb", <<~'RUBY')
+        class Mutation
+          def self.apply(word)
+            result = word.dup
+            [[/s\z/, ""]].each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+            result
+          end
+        end
+
+        class MutationUse
+          def self.a = Mutation.apply("posts")
+          def self.b = Mutation.apply("comments")
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      refute_includes methods.keys, "Mutation.apply"
+    end
+  end
+
   def test_runner_writes_and_deletes_the_sidecar
     in_tmpdir do
       write("sig/foo.rbs", FIXTURE_RBS)
