@@ -38,6 +38,54 @@ module Steep
     ).to_h { |key| [key, true] }.freeze
 
     class << self
+      # A call on `receiver`, typed `receiver_type`: the type to dispatch it
+      # against, and `constr` with the variable `receiver` reads typed that way
+      # from here on. Dispatched against `::String` where the call may change
+      # the value, so a `self` return (`sub!`) is not the old value either.
+      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block:)
+        widened = mutated_type(constr, receiver_type, method_name, private: private, block: block)
+        return [receiver_type, constr] unless widened
+
+        [widened, refine(constr, receiver, widened)]
+      end
+
+      # `constr` with every String-literal variable that a call inside `node`
+      # may change widened to `::String` — for a block or a loop body, entered
+      # with the outer locals pinned, so nothing narrowed there comes back out.
+      # It may run any number of times, so the body itself sees the changed
+      # value from its second pass on. `shadowed` are the names a block
+      # parameter rebinds, which are not the outer variable.
+      def widen_mutated_in(constr, node, shadowed: Set[])
+        each_variable_call(node, shadowed) do |receiver, method_name, block|
+          type = constr.context.type_env[receiver.children[0]] or next
+          widened = mutated_type(constr, type, method_name, private: false, block: block) or next
+
+          constr = refine(constr, receiver, widened)
+        end
+
+        constr
+      end
+
+      # The names a block's parameter list binds, block-local ones (`|x; y|`)
+      # included. A numbered or `it` block binds none an outer local could share.
+      def block_parameter_names(params)
+        return Set[] unless params.is_a?(Parser::AST::Node)
+
+        params.children.each_with_object(Set[]) do |child, names|
+          case child
+          when Symbol
+            names << child
+          when Parser::AST::Node
+            case child.type
+            when :arg, :optarg, :restarg, :kwarg, :kwoptarg, :kwrestarg, :blockarg, :shadowarg
+              names << child.children[0] if child.children[0]
+            else
+              names.merge(block_parameter_names(child))
+            end
+          end
+        end
+      end
+
       # The type `type` is once the value it names may have changed: each
       # String literal in it as `::String`. The same object where there is none.
       def widen(type)
@@ -70,6 +118,84 @@ module Steep
       def method_keys_for(class_name)
         prefix = "::#{class_name}#"
         watched_keys.select { |key| key.start_with?(prefix) }
+      end
+
+      private
+
+      # `type` widened, where the call may change the value it names; nil where
+      # it leaves the value as it was, or there is no literal to widen.
+      def mutated_type(constr, type, method_name, private:, block:)
+        widened = widen(type)
+        return if widened.equal?(type)
+
+        keys = string_method_keys(constr, method_name, private: private)
+        return if preserves?(keys, block: block, override_registry: constr.literal_method_registry)
+
+        widened
+      end
+
+      # The methods a call by `method_name` on a String resolves to, keyed as the
+      # intrinsic tables are. Empty for one String does not have: nothing vouches
+      # for it.
+      def string_method_keys(constr, method_name, private:)
+        interface = constr.calculate_interface(AST::Builtin::String.instance_type, private: private) or return []
+        method = interface.methods[method_name] or return []
+
+        method.overloads
+          .flat_map { |overload| overload.method_decls(method_name) }
+          .map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }
+          .uniq
+      end
+
+      # Only a local and an ivar name the value itself; any other receiver is a
+      # value this call is the last to see.
+      def refine(constr, receiver, type)
+        case receiver.type
+        when :lvar
+          name = receiver.children[0] #: Symbol
+          constr.update_type_env { |env| env.refine_types(local_variable_types: { name => type }) }
+        when :ivar
+          name = receiver.children[0] #: Symbol
+          constr.update_type_env { |env| env.refine_types(instance_variable_types: { name => type }) }
+        else
+          constr
+        end
+      end
+
+      # Each call in `node` made on a local or an ivar, with whether it passes a
+      # block. A nested block rebinds its own parameters; a `def`, a class or a
+      # module opens a scope the outer locals do not reach.
+      def each_variable_call(node, shadowed, &block)
+        return unless node.is_a?(Parser::AST::Node)
+
+        case node.type
+        when :def, :defs, :class, :module, :sclass
+          return
+        when :block, :numblock, :itblock
+          send_node, params, body = node.children
+          yield_variable_call(send_node, shadowed, block: true, &block)
+          send_node.children.each { |child| each_variable_call(child, shadowed, &block) }
+          each_variable_call(body, shadowed + block_parameter_names(params), &block)
+          return
+        when :send, :csend
+          yield_variable_call(node, shadowed, block: false, &block)
+        end
+
+        node.children.each { |child| each_variable_call(child, shadowed, &block) }
+      end
+
+      def yield_variable_call(node, shadowed, block:)
+        return unless node.type == :send || node.type == :csend
+
+        receiver, method_name = node.children
+        return unless receiver.is_a?(Parser::AST::Node)
+
+        case receiver.type
+        when :lvar
+          yield receiver, method_name, block unless shadowed.include?(receiver.children[0])
+        when :ivar
+          yield receiver, method_name, block
+        end
       end
     end
   end
