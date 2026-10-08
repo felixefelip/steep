@@ -559,6 +559,8 @@ module Steep
             AST::Types::FiniteSet.new(
               types: type.types.map {|type| normalize_type(type) }
             )
+          when AST::Types::ObjectState
+            type.map_type {|type| normalize_type(type) }
           when AST::Types::Proc
             type.map_type {|type| normalize_type(type) }
           when AST::Types::Name::Alias

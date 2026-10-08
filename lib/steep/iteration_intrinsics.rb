@@ -98,7 +98,7 @@ module Steep
         case type
         when AST::Types::Nil then :falsy
         when AST::Types::Literal then type.value == false ? :falsy : :truthy
-        when AST::Types::Tuple, AST::Types::FiniteSet, AST::Types::RegexpLiteral then :truthy
+        when AST::Types::Tuple, AST::Types::FiniteSet, AST::Types::RegexpLiteral, AST::Types::ObjectState then :truthy
         end
       end
     end

@@ -4390,6 +4390,10 @@ module Steep
                 arguments: arguments,
                 declared_return_type: declared_return_type
               )
+              # felixefelip/steep#205: what an object built with known values
+              # holds, and what its readers answer.
+              call = ObjectStates.built(constr, call, arguments: arguments)
+              call = ObjectStates.read(constr, call, receiver_type: receiver_type, arguments: arguments)
             end
             record_built_value(node, call, declared_return_type) unless call.equal?(nominal)
 

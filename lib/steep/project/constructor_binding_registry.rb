@@ -17,6 +17,7 @@ module Steep
 
       def initialize
         @entries = {} #: Hash[String, Hash[Symbol, Integer]]
+        @initializers = {} #: Hash[String, Array[Hash[Symbol, Integer]?]]
       end
 
       # @return self
@@ -31,6 +32,7 @@ module Steep
           end
         end
         @entries.freeze
+        @initializers.freeze
         self
       end
 
@@ -49,12 +51,39 @@ module Steep
         @entries[class_name.to_s.sub(/\A::/, "")]
       end
 
+      # The ivars `class_name`'s `initialize` binds straight from a positional
+      # argument, by that argument's position (felixefelip/steep#205):
+      # `{ :@name => 0 }` says `Reflection.new(:posts)` leaves `:posts` in
+      # `@name`. Empty unless the project defines exactly one `initialize` for
+      # the class. Whether anything writes the ivar afterwards is not this
+      # index's question: `ObjectStates` asks the postconditions' `may_write`.
+      def ivar_bindings_for(class_name)
+        initializers = @initializers[class_name.to_s.delete_prefix("::")] or return {}
+        return {} unless initializers.size == 1
+
+        initializers.first || {}
+      end
+
       def empty?
         @entries.empty?
       end
 
       def to_h
         @entries
+      end
+
+      def ingest_source(content, path_name:)
+        node = parse(content, path_name)
+        return unless node
+        scan = TypeInference::ConstructorBindingAnalyzer.scan(node)
+        scan.readers.each do |class_name, readers|
+          (@entries[class_name] ||= {}).merge!(readers)
+        end
+        scan.initializers.each do |class_name, initializers|
+          (@initializers[class_name] ||= []).concat(initializers)
+        end
+      rescue StandardError, ::Parser::SyntaxError => e
+        Steep.logger.warn { "[constructor_binding_registry] failed to ingest #{path_name}: #{e.message}" }
       end
 
       private
@@ -65,15 +94,7 @@ module Steep
       end
 
       def ingest(absolute_path)
-        content = absolute_path.read
-        node = parse(content, absolute_path.to_s)
-        return unless node
-        bindings = TypeInference::ConstructorBindingAnalyzer.analyze(node)
-        bindings.each do |class_name, readers|
-          (@entries[class_name] ||= {}).merge!(readers)
-        end
-      rescue StandardError, ::Parser::SyntaxError => e
-        Steep.logger.warn { "[constructor_binding_registry] failed to ingest #{absolute_path}: #{e.message}" }
+        ingest_source(absolute_path.read, path_name: absolute_path.to_s)
       end
 
       def parse(content, path_name)

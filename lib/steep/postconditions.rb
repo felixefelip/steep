@@ -188,6 +188,16 @@ module Steep
         @entries[[type_name.to_s.sub(/\A::/, ""), method_name.to_sym]]
       end
 
+      # Whether a method of `class_name` other than `except` may write `ivar`
+      # (`effects.may_write`, closed over self-calls). felixefelip/steep#205.
+      def may_write?(class_name, ivar, except: nil)
+        @may_write_index ||= @entries.each_with_object({}) do |((klass, method), entry), index| #$ Hash[String, Hash[Symbol, Set[Symbol]]]
+          entry.may_write_ivars.each { |name| ((index[klass] ||= {})[name] ||= Set[]) << method }
+        end
+        methods = @may_write_index.dig(class_name.to_s.delete_prefix("::"), ivar) or return false
+        methods.any? { |method| method != except }
+      end
+
       # felixefelip/steep#68 item 4: facts holding at `class_name#method_name`'s
       # entry, or nil.
       def lookup_method_entry_facts(class_name, method_name)

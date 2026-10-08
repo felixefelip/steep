@@ -177,6 +177,8 @@ module Steep
           AST::Types::FiniteSet.new(
             types: type.types.map {|ty| eliminate_variable(ty, to: AST::Builtin.any_type) }
           )
+        when AST::Types::ObjectState
+          type.map_type {|ty| eliminate_variable(ty, to: AST::Builtin.any_type) }
         when AST::Types::Record
           type.map_type { eliminate_variable(_1, to: AST::Builtin.any_type) }
         when AST::Types::Proc

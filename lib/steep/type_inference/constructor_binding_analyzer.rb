@@ -22,19 +22,34 @@ module Steep
     # `initialize` exactly from a plain positional parameter (`arg`/`optarg`).
     # Anything else (computed reader, splat/kwarg params, conditional
     # assignment) is skipped — the translation is only sound for a direct bind.
+    #
+    # The same `@ivar => param_index` bindings are also kept per `initialize`
+    # (`Scan#initializers`): `Klass.new(:posts)` holds `:posts` in `@name`
+    # wherever `initialize` binds it (felixefelip/steep#205). Whether anything
+    # writes the ivar afterwards is the postconditions' `may_write`, not this.
     class ConstructorBindingAnalyzer
+      # `readers` as above. `initializers` lists, per class, the bindings of
+      # every `initialize` this source defines for it, or nil for one that
+      # binds nothing this can read: two, across sources or within one, and
+      # which runs is a question of load order.
+      Scan = Struct.new(:readers, :initializers, keyword_init: true)
+
       def self.analyze(node)
-        new.analyze(node)
+        scan(node).readers
+      end
+
+      def self.scan(node)
+        new.scan(node)
       end
 
       def initialize
         @result = {} #: Hash[String, Hash[Symbol, Integer]]
+        @initializers = {} #: Hash[String, Array[Hash[Symbol, Integer]?]]
       end
 
-      def analyze(node)
-        return @result unless node.is_a?(::Parser::AST::Node)
-        walk(node, nesting: [])
-        @result
+      def scan(node)
+        walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
+        Scan.new(readers: @result, initializers: @initializers)
       end
 
       private
@@ -45,7 +60,10 @@ module Steep
           const_node, _super, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
-          register_class(body, nesting: new_nesting) if body && name
+          if body && name
+            register_class(body, nesting: new_nesting)
+            register_initializers(body, names: defined_names(const_node, nesting))
+          end
           walk(body, nesting: new_nesting) if body
         when :module
           const_node, body = node.children
@@ -85,29 +103,100 @@ module Steep
         (@result[key] ||= {}).merge!(entries)
       end
 
-      # `@x = param` bindings in `initialize`, keyed by ivar, valued by the
-      # positional index of `param` in the constructor's parameter list.
-      def ivar_param_bindings(args_node, body)
-        return {} unless args_node.is_a?(::Parser::AST::Node)
-
-        param_index = {} #: Hash[Symbol, Integer]
-        args_node.children.each_with_index do |arg, i|
-          next unless arg.is_a?(::Parser::AST::Node)
-          # Only plain positional params keep a stable index the call site can
-          # match against; a splat/kwarg/block shifts or breaks positionality.
-          param_index[arg.children[0]] = i if arg.type == :arg || arg.type == :optarg
+      # Every `def initialize` in this class body, under each class the
+      # constant may name. Where it may name two, which class it builds is not
+      # known, and it binds nothing.
+      def register_initializers(body, names:)
+        each_initialize(body) do |args, mbody|
+          bindings = names.size == 1 ? ivar_param_bindings(args, mbody) : nil
+          names.each { |name| (@initializers[name] ||= []) << bindings }
         end
+      end
+
+      def each_initialize(node, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        case node.type
+        when :def
+          yield node.children[1], node.children[2] if node.children[0] == :initialize
+        when :class, :module, :sclass, :defs
+          nil
+        else
+          node.children.each { |child| each_initialize(child, &block) }
+        end
+      end
+
+      # `@x = param` statements at the top of `initialize`, keyed by ivar,
+      # valued by the positional index of `param` at the call. Only for a
+      # `param` the body never reassigns, an ivar the body writes once, and an
+      # `initialize` that cannot `return` before reaching it: anything else
+      # leaves a value that depends on the flow, which this does not read.
+      def ivar_param_bindings(args_node, body)
+        return {} if contains?(body, :return)
+
+        reassigned = Set[] #: Set[Symbol]
+        each_node(body) { |node| reassigned << node.children[0] if node.type == :lvasgn }
+        param_index = call_positions(args_node).reject { |name, _| reassigned.include?(name) }
         return {} if param_index.empty?
+
+        writes = Hash.new(0) #: Hash[Symbol, Integer]
+        each_node(body) { |node| writes[node.children[0]] += 1 if node.type == :ivasgn }
 
         result = {} #: Hash[Symbol, Integer]
         each_stmt(body) do |stmt|
           next unless stmt.type == :ivasgn
           ivar, rhs = stmt.children
-          next unless rhs.is_a?(::Parser::AST::Node) && rhs.type == :lvar
+          next unless rhs.is_a?(::Parser::AST::Node) && rhs.type == :lvar && writes[ivar] == 1
           idx = param_index[rhs.children[0]]
           result[ivar] = idx if idx
         end
         result
+      end
+
+      # The parameters whose slot in the list is the argument's position at
+      # every call: a required one with no optional before it, an optional one
+      # with no required after it, and nothing past a rest. A splat, kwarg or
+      # block shifts or breaks positionality.
+      #
+      #   def initialize(a, b = 1, c)   # only `a`: `P.new(:x, :y)` puts :y in `c`
+      def call_positions(args_node)
+        params = args_node.is_a?(::Parser::AST::Node) ? args_node.children.grep(::Parser::AST::Node) : []
+        positions = {} #: Hash[Symbol, Integer]
+        params.each_with_index do |param, index|
+          break if param.type == :restarg
+
+          stable =
+            case param.type
+            when :arg then params.take(index).none? { |other| other.type == :optarg }
+            when :optarg then params.drop(index + 1).none? { |other| %i[arg mlhs].include?(other.type) }
+            end
+          positions[param.children[0]] = index if stable
+        end
+        positions
+      end
+
+      def contains?(node, type)
+        each_node(node) { |child| return true if child.type == type }
+        false
+      end
+
+      def each_node(node, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        yield node
+        node.children.each { |child| each_node(child, &block) }
+      end
+
+      # The classes `class Foo` defines or reopens: unscoped, the one in the
+      # current nesting; `class Ex::Foo` inside `module Wrap` names `Foo` in
+      # whichever `Ex` resolves from there, `Wrap::Ex` or `::Ex`.
+      def defined_names(const_node, nesting)
+        name = const_to_name(const_node) or return []
+        scope = const_node.children[0]
+        return [name] if scope&.type == :cbase || nesting.empty?
+        return [[*nesting, name].join("::")] unless scope
+
+        nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
       end
 
       # A reader whose body is exactly `@ivar` (normal or endless def) →
