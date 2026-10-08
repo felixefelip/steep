@@ -353,6 +353,8 @@ module Steep
 
     class Branch
       attr_reader :self_type_string, :via_receivers, :ivar_type_strings, :drops_type_strings, :returns_establishes, :const_establishes_type_strings
+      # felixefelip/steep#228: `{ index => { attr => type string } }`.
+      attr_reader :param_establishes_type_strings
 
       def self.parse(raw, source:)
         return nil unless raw.is_a?(Hash)
@@ -362,15 +364,38 @@ module Steep
         drops = parse_drops(raw["drops"], source: source)
         returns_establishes = parse_returns_establishes(raw["returns"], source: source)
         const_establishes = parse_const_establishes(raw["establishes_consts"], source: source)
+        param_establishes = parse_param_establishes(raw["params"], source: source)
         has_content = (self_str.is_a?(String) && !self_str.empty?) ||
                       via_receivers.any? ||
                       ivars.any? ||
                       drops.any? ||
                       returns_establishes.any? ||
-                      const_establishes.any?
+                      const_establishes.any? ||
+                      param_establishes.any?
         return nil unless has_content
 
-        new(self_type_string: self_str, via_receivers: via_receivers, ivar_type_strings: ivars, drops_type_strings: drops, returns_establishes: returns_establishes, const_establishes_type_strings: const_establishes)
+        new(self_type_string: self_str, via_receivers: via_receivers, ivar_type_strings: ivars, drops_type_strings: drops, returns_establishes: returns_establishes, const_establishes_type_strings: const_establishes, param_establishes_type_strings: param_establishes)
+      end
+
+      # Parses the `params:` payload (felixefelip/steep#228): what the method
+      # always leaves in the object passed at each position, as reader name to
+      # type, e.g. `{ 0 => { "value" => ":published" } }`. The parameter
+      # sibling of `returns.establishes`, carrying the value's type as well.
+      def self.parse_param_establishes(raw, source:)
+        return {} unless raw.is_a?(Hash)
+
+        raw.each_with_object({}) do |(index, attrs), result|
+          unless index.is_a?(Integer) && index >= 0 && attrs.is_a?(Hash)
+            Steep.logger.warn { "[postconditions] params: expected a parameter position mapping readers to types, got #{index.inspect} (#{source})" }
+            next
+          end
+          strings = attrs.each_with_object({}) do |(attr, type_str), acc|
+            next unless attr.is_a?(String) && !attr.empty? && type_str.is_a?(String) && !type_str.empty?
+
+            acc[attr.to_sym] = type_str
+          end
+          result[index] = strings unless strings.empty?
+        end
       end
 
       # Parses the `establishes_consts:` payload — a hash mapping sibling
@@ -477,13 +502,27 @@ module Steep
         result
       end
 
-      def initialize(self_type_string:, via_receivers: [], ivar_type_strings: {}, drops_type_strings: [], returns_establishes: [], const_establishes_type_strings: {})
+      def initialize(self_type_string:, via_receivers: [], ivar_type_strings: {}, drops_type_strings: [], returns_establishes: [], const_establishes_type_strings: {}, param_establishes_type_strings: {})
+        @param_establishes_type_strings = param_establishes_type_strings
         @self_type_string = self_type_string
         @via_receivers = via_receivers
         @ivar_type_strings = ivar_type_strings
         @drops_type_strings = drops_type_strings
         @returns_establishes = returns_establishes
         @const_establishes_type_strings = const_establishes_type_strings
+      end
+
+      # Lazy-parsed `{ index => { attr => RBS::Types::t } }` for the `params:`
+      # slot. Entries that fail to parse are dropped with a warning.
+      def param_establishes_rbs_types
+        return @param_establishes_rbs_types if defined?(@param_establishes_rbs_types)
+        @param_establishes_rbs_types = param_establishes_type_strings.transform_values do |attrs|
+          attrs.each_with_object({}) do |(attr, type_str), hash|
+            hash[attr] = RBS::Parser.parse_type(type_str)
+          rescue RBS::ParsingError => e
+            Steep.logger.warn { "[postconditions] failed to parse params type #{type_str.inspect} for #{attr}: #{e.message}" }
+          end
+        end
       end
 
       # Lazy-parsed `Hash[Symbol, RBS::Types::t]` for the `establishes_consts:`

@@ -58,6 +58,7 @@ module Steep
           block_disjunction = collect_block_disjunction(def_node)
           block_call_establishments = collect_block_call_establishments(def_node)
           param_call_deps = collect_param_call_deps(def_node)
+          param_establishments = collect_param_establishments(def_node)
           self_arg_calls = collect_self_arg_calls(def_node)
           returns_ivar = collect_returns_ivar(def_node, class_name, singleton: singleton)
           conditional_returns = collect_conditional_returns(def_node, class_name, singleton: singleton)
@@ -84,7 +85,8 @@ module Steep
              conditional_returns.empty? && conditional_const_returns.empty? &&
              establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance &&
              !when_true_block_truthy && block_forward_deps.empty? && block_disjunction.empty? &&
-             block_call_establishments.empty? && param_call_deps.empty? && self_arg_calls.empty?
+             block_call_establishments.empty? && param_call_deps.empty? && self_arg_calls.empty? &&
+             param_establishments.empty?
             next
           end
 
@@ -115,6 +117,7 @@ module Steep
             block_disjunction: block_disjunction,
             block_call_establishments: block_call_establishments,
             param_call_deps: param_call_deps,
+            param_establishments: param_establishments,
             self_arg_calls: self_arg_calls,
             returns_ivar: returns_ivar,
             conditional_returns: conditional_returns,
@@ -654,6 +657,122 @@ module Steep
           (result[index] ||= []) << keys.to_set
         end
         result
+      end
+
+      # felixefelip/steep#228, the callee half. What this method leaves in the
+      # objects it was handed:
+      #
+      #   def self.publish(box)        # => { 0 => { value: :published } }
+      #     box.value = :published
+      #   end
+      #
+      # The parameter sibling of `returns.establishes` (#56), carrying the type
+      # the checker gave the written value. A write counts only if it runs on
+      # every exit and nothing after it can undo it: a `return` or a halt gate
+      # may skip it, a write inside a branch or a block may not run, and any
+      # later use of the parameter other than a reader may write it again.
+      def collect_param_establishments(def_node)
+        body = def_node.children[2]
+        return {} unless body
+        return {} if method_halt_gate(body)
+        return {} if any_node?(body) { |node| node.type == :return }
+
+        names = leading_positional_param_names(def_node)
+        return {} if names.empty?
+
+        writes = {} #: Hash[Symbol, Hash[Symbol, Parser::AST::Node]]
+        each_statement(body) do |stmt|
+          write = param_attr_write(stmt, names)
+          # A write runs its value first, and that value may disturb too.
+          before = write ? write.fetch(:value) : stmt
+          names.each { |name| writes.delete(name) if disturbs_param?(before, name) }
+          next unless write
+
+          (writes[write.fetch(:param)] ||= {})[write.fetch(:attr)] = write.fetch(:node)
+        end
+
+        writes.each_with_object({}) do |(name, attrs), result|
+          established = attrs.each_with_object({}) do |(attr, write_node), acc|
+            type = type_of(write_node.children[2]) or next
+            next if type.is_a?(AST::Types::Any)
+            declared = declared_reader_type(write_node.children[0], attr) or next
+            acc[attr] = type if strict_subtype?(type, declared)
+          end
+          result[names.index(name)] = established unless established.empty?
+        end
+      end
+
+      # The positional parameters before the first splat, whose index at the
+      # definition is their index at every call site that reaches them.
+      def leading_positional_param_names(def_node)
+        args = def_node.children[1]
+        return [] unless args.is_a?(Parser::AST::Node)
+
+        args.children
+          .take_while { |arg| arg.is_a?(Parser::AST::Node) && [:arg, :optarg].include?(arg.type) }
+          .map { |arg| arg.children[0] }
+      end
+
+      # `param.attr = value` written as a statement of its own.
+      def param_attr_write(stmt, names)
+        return nil unless stmt.type == :send
+
+        receiver, method_name, *args = stmt.children
+        return nil unless receiver.is_a?(Parser::AST::Node) && receiver.type == :lvar
+        return nil unless names.include?(receiver.children[0]) && args.size == 1
+
+        setter = method_name.to_s
+        return nil unless setter.match?(/\A\w+=\z/)
+
+        { param: receiver.children[0], attr: setter.delete_suffix("=").to_sym, value: args[0], node: stmt }
+      end
+
+      # Whether running `node` may change what the local `name` holds: it
+      # assigns the local, or uses it other than as the receiver of a reader.
+      def disturbs_param?(node, name)
+        any_node?(node) do |descendant|
+          case descendant.type
+          when :lvasgn
+            descendant.children[0] == name
+          when :lvar
+            descendant.children[0] == name && !read_by_attr_reader?(node, descendant)
+          else
+            false
+          end
+        end
+      end
+
+      # Whether `lvar` is, somewhere in `root`, the receiver of a call that
+      # resolves to `attr_reader`/`attr_accessor` readers only.
+      def read_by_attr_reader?(root, lvar)
+        any_node?(root) do |node|
+          next false unless node.type == :send && node.children.size == 2 && node.children[0].equal?(lvar)
+
+          call = @typing.call_of(node: node) rescue nil
+          next false unless call.respond_to?(:method_decls) && !call.method_decls.empty?
+
+          call.method_decls.all? do |decl|
+            member = decl.method_def&.member
+            member.is_a?(RBS::AST::Members::AttrReader) || member.is_a?(RBS::AST::Members::AttrAccessor)
+          end
+        end
+      end
+
+      # The declared return of the reader `attr` on the type of `receiver`.
+      def declared_reader_type(receiver, attr)
+        type = type_of(receiver)
+        return nil unless type.is_a?(AST::Types::Name::Instance)
+
+        definition = @definition_builder.build_instance(type.name)
+        method_type = definition.methods[attr]&.method_types&.first or return nil
+        @factory.type(method_type.type.return_type)
+      rescue RBS::BaseError
+        nil
+      end
+
+      def any_node?(node)
+        walk_nodes(node) { |descendant| return true if yield(descendant) }
+        false
       end
 
       # felixefelip/steep#126, the caller half. Unconditional calls that pass
@@ -2067,8 +2186,11 @@ module Steep
       # Runner proved this method sets on its own `self` by handing itself to
       # such a callee — the halt neither side could see alone.
       attr_reader :param_call_deps, :self_arg_calls, :halts_via_param
+      # felixefelip/steep#228: `{ index => { attr => type } }`, what this method
+      # always leaves in the object it was handed at that position.
+      attr_reader :param_establishments
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_methods: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_deps: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_methods: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_deps: {}, param_establishments: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -2090,6 +2212,7 @@ module Steep
         @conditional_block_truthy = conditional_block_truthy
         @block_call_establishments = block_call_establishments
         @param_call_deps = param_call_deps
+        @param_establishments = param_establishments
         @self_arg_calls = self_arg_calls
         @halts_via_param = halts_via_param
         @returns_ivar = returns_ivar
@@ -2115,8 +2238,8 @@ module Steep
           when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
           block_disjunction: block_disjunction, conditional_block_truthy: conditional_block_truthy,
           block_call_establishments: block_call_establishments,
-          param_call_deps: param_call_deps, self_arg_calls: self_arg_calls,
-          halts_via_param: halts_via_param,
+          param_call_deps: param_call_deps, param_establishments: param_establishments,
+          self_arg_calls: self_arg_calls, halts_via_param: halts_via_param,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: establishes_consts, const_establishments: const_establishments,
@@ -2140,8 +2263,8 @@ module Steep
           when_true_block_truthy: when_true_block_truthy, block_forward_deps: block_forward_deps,
           block_disjunction: block_disjunction, conditional_block_truthy: conditional_block_truthy,
           block_call_establishments: block_call_establishments,
-          param_call_deps: param_call_deps, self_arg_calls: self_arg_calls,
-          halts_via_param: halts_via_param,
+          param_call_deps: param_call_deps, param_establishments: param_establishments,
+          self_arg_calls: self_arg_calls, halts_via_param: halts_via_param,
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: consts, const_establishments: const_establishments,
@@ -2156,7 +2279,7 @@ module Steep
       # does NOT keep an entry alive, but a surviving `establishes_consts` does.
       def empty?
         ivars.empty? && when_true_ivars.empty? && when_true_methods.empty? && when_true_consts.empty? &&
-          returns_establishes.empty? &&
+          returns_establishes.empty? && param_establishments.empty? &&
           may_write_ivars.empty? && returns_ivar.nil? && conditional_returns.empty? &&
           conditional_const_returns.empty? && establishes_consts.empty? &&
           const_establishments.empty? && !when_true_block_truthy && conditional_block_truthy.nil?

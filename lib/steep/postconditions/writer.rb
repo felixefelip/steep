@@ -125,6 +125,13 @@ module Steep
             "establishes" => entry.returns_establishes.map(&:to_s).sort
           }
         end
+        # felixefelip/steep#228: what the method leaves in the objects it was
+        # handed, by parameter position — the `returns` slot's sibling.
+        unless entry.param_establishments.empty?
+          unconditional["params"] = entry.param_establishments.sort.to_h do |index, attrs|
+            [index, attrs.sort_by { |attr, _| attr.to_s }.to_h { |attr, type| [attr.to_s, type.to_s] }]
+          end
+        end
         # felixefelip/rbs_infer#71 (piece 1): sibling const attributes this setter
         # proves non-nil at a `Const.attr =` write site. The Runner has already
         # gated these on a delegating singleton, so serialize whatever survives.

@@ -1076,6 +1076,7 @@ module Steep
               conditional_block_truthy: existing.conditional_block_truthy || entry.conditional_block_truthy,
               block_call_establishments: existing.block_call_establishments + entry.block_call_establishments,
               param_call_deps: existing.param_call_deps.merge(entry.param_call_deps),
+              param_establishments: existing.param_establishments.merge(entry.param_establishments) { |_, a, b| a.merge(b) },
               self_arg_calls: existing.self_arg_calls.merge(entry.self_arg_calls),
               halts_via_param: existing.halts_via_param || entry.halts_via_param,
               returns_ivar: existing.returns_ivar || entry.returns_ivar,

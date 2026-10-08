@@ -4502,6 +4502,10 @@ module Steep
               receiver: receiver
             )
 
+            # felixefelip/steep#228: what the callee always leaves in the
+            # objects it was handed.
+            constr = constr.apply_param_establishments(call: call, arguments: arguments)
+
             # felixefelip/steep#68 (item 1): the callee may WRITE ivars this
             # frame has narrowed — directly, or through anything it calls on
             # `self`. Drop those narrowings, or the caller keeps believing a
@@ -8471,7 +8475,59 @@ module Steep
       return self unless last_arg && typing.has_type?(last_arg)
       rhs_type = typing.type_of(node: last_arg)
 
-      read_node = ::Parser::AST::Node.new(:send, [receiver, attr.to_sym], location: node.location)
+      cache_attribute_read(receiver, attr.to_sym, rhs_type, location: node.location) || self
+    end
+
+    # felixefelip/steep#228, the caller half. A method that always leaves a
+    # value in the object it was handed (`unconditional.params`) leaves it in
+    # the argument: after `publish(box)`, `box.value` is what `publish` wrote,
+    # exactly as if `box.value = :published` had been written here.
+    #
+    # Positional arguments only, up to the first one whose position is not
+    # its parameter's (a splat, keywords, a block pass). The value must fit
+    # the reader the argument actually has: the entry is found by name, and
+    # a name says nothing about which object it was inferred for.
+    def apply_param_establishments(call:, arguments:)
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self if postconditions.empty?
+
+      entry = lookup_param_establishments_entry(call) or return self
+      constr = self
+      entry.unconditional.param_establishes_rbs_types.each do |index, attrs|
+        prefix = arguments.first(index + 1)
+        next unless prefix.size == index + 1
+        next if prefix.any? { |arg| %i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(arg.type) }
+
+        argument = prefix.last
+        next if argument.type == :self || !constr.narrowable_pure_receiver?(argument)
+
+        attrs.each do |attr, rbs_type|
+          type = checker.factory.type(rbs_type) rescue next
+          constr = constr.cache_attribute_read(argument, attr, type, location: argument.location, fits_reader: true) || constr
+        end
+      end
+      constr
+    end
+
+    # The entry declaring `unconditional.params` for the method `call`
+    # resolved to, instance or singleton, the way `ReturnEstablishmentApplier`
+    # finds a `returns` one.
+    def lookup_param_establishments_entry(call)
+      call.method_decls.each do |decl|
+        name = decl.method_name
+        next unless name.is_a?(InstanceMethodName) || name.is_a?(SingletonMethodName)
+
+        entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
+        return entry if entry&.unconditional && !entry.unconditional.param_establishes_type_strings.empty?
+      end
+      nil
+    end
+
+    # Caches `receiver.attr` as a pure read of type `type`, when the read
+    # resolves to a pure attr reader. With `fits_reader`, only when `type`
+    # is a subtype of what the reader declares. Nil when nothing is cached.
+    def cache_attribute_read(receiver, attr, type, location:, fits_reader: false)
+      read_node = ::Parser::AST::Node.new(:send, [receiver, attr], location: location)
 
       getter_call = nil #: TypeInference::MethodCall::Typed?
       begin
@@ -8489,13 +8545,14 @@ module Steep
           end
         end
       rescue StandardError => exn
-        Steep.logger.warn { "[contracts] attr-write narrowing failed for #{name}: #{exn.message}" }
-        return self
+        Steep.logger.warn { "[contracts] attr-write narrowing failed for #{attr}=: #{exn.message}" }
+        return nil
       end
-      return self unless getter_call
+      return nil unless getter_call
+      return nil if fits_reader && !check_relation(sub_type: type, super_type: getter_call.return_type).success?
 
       update_type_env do |env|
-        env.add_pure_call(read_node, getter_call, rhs_type)
+        env.add_pure_call(read_node, getter_call, type)
       end
     end
 
