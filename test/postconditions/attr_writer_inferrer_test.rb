@@ -1,4 +1,4 @@
-require_relative "test_helper"
+require_relative "../test_helper"
 
 # felixefelip/steep#219: an attr writer has no `def name=` for the inferrer
 # to walk, so `AttrWriterInferrer` reads the write it makes from the RBS.

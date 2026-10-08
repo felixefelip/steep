@@ -1,4 +1,4 @@
-require_relative "test_helper"
+require_relative "../test_helper"
 
 # felixefelip/rbs_infer#71 (piece 2 — the write-site wiring). A singleton setter
 # `Const.user = <non-nil>` whose `unconditional.establishes_consts` postcondition

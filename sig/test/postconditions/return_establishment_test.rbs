@@ -1,4 +1,4 @@
-# Generated from test/postconditions_return_establishment_test.rb with RBS::Inline
+# Generated from test/postconditions/return_establishment_test.rb with RBS::Inline
 
 # End-to-end application of the return-value establishment postcondition
 # (felixefelip/steep#56): at `x = build`, when `build` declares

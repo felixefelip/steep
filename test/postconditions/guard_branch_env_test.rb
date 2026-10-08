@@ -1,4 +1,4 @@
-require_relative "test_helper"
+require_relative "../test_helper"
 
 # felixefelip/steep#105 follow-up: the guard collector reads what the checker
 # concluded about a condition (`typing.branch_envs`) instead of re-deriving it

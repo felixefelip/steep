@@ -1,4 +1,4 @@
-require_relative "test_helper"
+require_relative "../test_helper"
 
 class PostconditionsWriterTest < Minitest::Test
   Postconditions = Steep::Postconditions

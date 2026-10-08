@@ -1,4 +1,4 @@
-require_relative "test_helper"
+require_relative "../test_helper"
 
 # Unit tests for the `Postconditions::MarkerNaming` convention. Both
 # Steep's `Postconditions::Inferrer` and rbs_infer's marker-class
