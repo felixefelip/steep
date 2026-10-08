@@ -1,0 +1,36 @@
+# Generated from test/postconditions_marker_naming_test.rb with RBS::Inline
+
+# Unit tests for the `Postconditions::MarkerNaming` convention. Both
+# Steep's `Postconditions::Inferrer` and rbs_infer's marker-class
+# generator follow this convention verbatim; if they ever drift, the
+# postcondition references a class that doesn't exist in RBS and the
+# refinement silently no-ops at apply time. These tests pin the rules.
+class PostconditionsMarkerNamingTest < Minitest::Test
+  MarkerNaming: untyped
+
+  def test_marker_name_for_basic_snake_case: () -> untyped
+
+  def test_marker_name_for_nested_class: () -> untyped
+
+  def test_marker_name_for_accepts_string_method_name: () -> untyped
+
+  def test_marker_name_strips_predicate_suffix: () -> untyped
+
+  def test_marker_name_strips_bang_suffix: () -> untyped
+
+  def test_marker_name_strips_setter_suffix: () -> untyped
+
+  def test_marker_name_normalizes_leading_double_colon: () -> untyped
+
+  def test_marker_name_handles_single_word_method: () -> untyped
+
+  def test_narrowed_self_type_for_composes_intersection: () -> untyped
+
+  def test_narrowed_self_type_for_nested_class: () -> untyped
+
+  def test_valid_method_name_true_for_normal_methods: () -> untyped
+
+  def test_valid_method_name_false_for_operator_only_methods: () -> untyped
+
+  def test_pascal_case_preserves_acronyms_one_capital_per_segment: () -> untyped
+end

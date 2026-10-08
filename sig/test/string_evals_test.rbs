@@ -1,0 +1,218 @@
+# Generated from test/string_evals_test.rb with RBS::Inline
+
+class StringEvalsTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  Specializations: untyped
+
+  Project: untyped
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: (?steepfile: untyped) -> untyped
+
+  STEEPFILE: ::String
+
+  MACRO_RBS: ::String
+
+  DELEGATION_RBS: ::String
+
+  # The SOURCES each call site writes. Most of this file is about what the
+  # checker can read, not about where it lands, so the target stays out of the
+  # way unless a test asks for it with `chunks_of`.
+  def evals_of: (untyped project) -> untyped
+
+  # The round before: `steep check` writes the postconditions sidecar the
+  # next one reads.
+  def write_postconditions: (untyped project) -> untyped
+
+  def chunks_of: (untyped project) -> untyped
+
+  def test_records_the_source_one_call_site_writes: () -> untyped
+
+  def test_each_call_site_gets_its_own_source: () -> untyped
+
+  # The heredoc is what the idiom is actually written with, and it is one `dstr`
+  # like any other once the parameter carries the call site's literal.
+  def test_records_a_heredoc_with_several_interpolations: () -> untyped
+
+  # The branch the call site does not take defines nothing there, and a checker
+  # that narrows the condition is what says which one that is.
+  def test_a_branch_the_call_site_does_not_take_is_not_recorded: () -> untyped
+
+  # A call that omits an optional keyword still fixes it: the body runs with the
+  # default, so the branch the default selects is the one this call site defines.
+  def test_an_omitted_keyword_is_fixed_to_its_default: () -> untyped
+
+  def test_a_case_is_decided_the_same_way: () -> untyped
+
+  # A value the call site does not fix is reported as a hole rather than left
+  # out: a consumer rendering these has to know it was handed part of a macro.
+  def test_an_eval_whose_value_is_not_fixed_is_recorded_as_nil: () -> untyped
+
+  # A computed argument is as much an eval as an interpolation is. `class_eval`
+  # handed an argument at all is the string form — the block form takes none —
+  # so a `join` that does not fold has written code this call site does not
+  # decide: a hole, not nothing. `ActiveSupport::Delegation` hands
+  # `module_eval` a `join`.
+  def test_a_computed_argument_that_does_not_fold_records_a_hole: () -> untyped
+
+  # The block form, forwarded: `&block` and `*args` say nothing about which
+  # form runs, and the block one writes no string at all.
+  def test_a_forwarded_block_or_splat_is_not_read: () -> untyped
+
+  def test_module_eval_is_read_the_same_way: () -> untyped
+
+  # `X.class_eval` and `class_eval do … end` are plain Ruby a reader already
+  # sees; only the string form has nothing to read until a call site supplies it.
+  def test_an_explicit_self_receiver_is_the_same_call: () -> untyped
+
+  def test_a_block_is_not_read: () -> untyped
+
+  # A receiver that NAMES a class says where its methods go, which is something
+  # the consumer cannot work out on its own: it places what it is handed in the
+  # class whose body holds the macro call, and this eval lands somewhere else
+  # entirely (felixefelip/steep#175).
+  def test_a_receiver_that_names_a_class_carries_it: () -> untyped
+
+  # A local holding the constant is the same question with an assignment in
+  # front of it — what decides is the receiver's TYPE, not the shape of the
+  # expression that produced it.
+  def test_a_local_that_holds_a_class_carries_it_too: () -> untyped
+
+  # `singleton_class` is the shape that names NOTHING: the checker knows the
+  # object and RBS has no spelling for "the singleton class of Photo" as a
+  # value, so it infers `::Class`. An eval this cannot place is one it must not
+  # read (S2 of felixefelip/steep#171).
+  def test_a_receiver_whose_type_names_no_class_is_not_read: () -> untyped
+
+  # The frame in between is what the answer belongs to: `generate` evals on an
+  # object it was handed, so its own call site is the wrong place to attribute
+  # anything to, while `has_rich_text`'s call sites are written in the classes
+  # that actually get the methods.
+  def test_a_receiver_handed_this_method_s_own_self_is_read: () -> untyped
+
+  # felixefelip/steep#205, stage 1: the literal reaches the writer inside an
+  # object, as `has_many` hands `define_accessors` a reflection. `Reflection`'s
+  # `@name` is fixed by `initialize` and written nowhere else, so the object
+  # each call builds is known by what it holds, and the writer is read once per
+  # object.
+  def test_a_literal_stored_in_an_object_handed_to_the_writer_is_read: () -> untyped
+
+  # The same object, with an ivar a method can change: what it holds at the
+  # writer is not what `new` was handed, so nothing is claimed.
+  def test_a_stored_literal_a_method_can_change_is_a_hole: () -> untyped
+
+  # A gem namespaces its writer and calls it by the relative name, the way
+  # `Module#delegate` calls `ActiveSupport::Delegation.generate` from inside
+  # `class Module`. The constant is spelled `Writer` and names
+  # `Gem::Writer`; the callee is known by the second, so the spelling cannot
+  # be what finds it.
+  def test_a_writer_called_by_a_relative_constant_is_read: () -> untyped
+
+  # The same spelling naming ANOTHER method: inside `Gem`, `Writer` is
+  # `Gem::Writer`, which writes nothing, and the `::Writer` that does is never
+  # called. What a constant names is the checker's answer, not a suffix match.
+  def test_a_relative_constant_naming_another_class_is_not_read: () -> untyped
+
+  HANDED_SELF_RBS: ::String
+
+  HANDED_SELF_WRITER: ::String
+
+  def handed_self_chunks: (untyped call_sites) -> untyped
+
+  # The handed `self` is the CALLER's: typed as written it is `self`, which the
+  # callee would bind to `Writer`. And which class the caller is depends on the
+  # call site, not on where the macro is defined — `Rind` runs the inherited
+  # macro with `self` being `Rind`, and only `Rind` has `nick`.
+  def test_a_handed_self_is_the_class_whose_call_site_ran_the_macro: () -> untyped
+
+  # A receiver names the class the body runs in, wherever the call is written:
+  # `Rind.banana_delegate` inside `Other` writes on `Rind`, not on `Other` and
+  # not on `Peel`, where the macro is defined.
+  def test_an_explicit_receiver_is_the_class_the_macro_runs_in: () -> untyped
+
+  # `Module#delegate`'s shape: the macro takes its names as a rest parameter and
+  # hands the array to a writer, which loops over it and evals one `join`. The
+  # writer's parameter arrives holding what the call site wrote, so each call
+  # site writes its own methods — one pass per name, the branch decided by its
+  # keyword.
+  def test_a_rest_parameter_handed_to_a_writer_is_looped_over: () -> untyped
+
+  # `Delegation.generate`'s reflection branch, for `to: :class`: the parameter
+  # list is read off the target's declaration, and built the way ActiveSupport
+  # builds it — a `filter_map` over `parameters`, a `<<`, a `join` — inside the
+  # loop and the arms it sits in.
+  def test_a_delegation_to_the_class_reads_the_parameter_list: () -> untyped
+
+  # `delegate` as ActiveSupport 8.0.4 writes it, transcribed verbatim, with the
+  # signatures rbs_infer infers for it. Each call site folds to the source the
+  # gem evals — compared byte for byte with what Ruby itself passes to
+  # `module_eval` for the same six lines.
+  def test_active_support_delegation_as_installed_writes_every_shape: () -> untyped
+
+  # A concern is annotated `singleton(Host) & singleton(Concern)` so its body
+  # types against the host — but a macro its body calls RUNS on the module, so
+  # the module is the `self` the writer is checked with, and what it evals lands
+  # there.
+  def test_a_macro_in_an_annotated_module_body_runs_on_the_module: () -> untyped
+
+  # The same arguments from two classes are two bodies: what the macro writes is
+  # written on the class it runs in, and reading both call sites under one check
+  # would write both on the same one.
+  def test_the_same_arguments_from_two_classes_run_the_macro_twice: () -> untyped
+
+  def test_a_frame_that_does_not_pass_its_own_self_is_not_read: () -> untyped
+
+  # One frame, deliberately: two would need the argument threaded through a
+  # chain, and nothing asks for it yet.
+  def test_a_second_frame_is_not_followed: () -> untyped
+
+  def test_a_delegation_in_a_branch_the_call_site_kills_is_not_read: () -> untyped
+
+  def test_a_delegation_the_call_site_does_not_decide_records_a_hole: () -> untyped
+
+  def test_an_eval_and_a_delegation_are_kept_in_source_order: () -> untyped
+
+  def test_the_inner_body_is_read_with_only_the_parameter_it_was_handed: () -> untyped
+
+  def test_the_inner_frame_gets_its_own_defaults: () -> untyped
+
+  def test_a_call_whose_argument_is_not_fixed_records_a_hole: () -> untyped
+
+  # The failure the whole idea has to avoid: with the condition still open both
+  # branches fold, and a consumer handed both writes a class two methods where
+  # runtime has one. Neither is claimed.
+  def test_a_condition_the_call_site_does_not_decide_records_holes: () -> untyped
+
+  # A `case` branch runs only when every other one is dead. Two live branches
+  # decide nothing, however many of the rest the checker ruled out.
+  def test_a_case_with_two_live_branches_records_holes: () -> untyped
+
+  # A lambda the macro returns writes nothing until something calls it, and
+  # nothing here knows whether anything does.
+  def test_a_body_the_call_does_not_run_is_not_read: () -> untyped
+
+  # A macro taking no arguments fixes everything it has, so there is nothing for
+  # the literal gate on RETURN specialization to say about it.
+  def test_a_call_with_no_arguments_is_read: () -> untyped
+
+  # And a call that passes nothing still takes its defaults, which is enough to
+  # decide a branch on its own.
+  def test_a_default_alone_decides_a_branch: () -> untyped
+
+  # `class_methods do … end` puts the def lexically in the concern and the
+  # methods on its `ClassMethods`. `@implements`, injected from the module
+  # self-type sidecar, is what says so — without reading it the def is keyed
+  # under a name no call site ever resolves to, and the body is never
+  # specialized.
+  def test_a_def_inside_an_implementing_block_is_keyed_by_that_module: () -> untyped
+
+  def test_write_drops_a_stale_sidecar: () -> untyped
+
+  def test_write_emits_the_sidecar: () -> untyped
+end

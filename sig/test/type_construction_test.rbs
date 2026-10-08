@@ -33,7 +33,7 @@ class TypeConstructionTest < Minitest::Test
 
   DEFAULT_SIGS: ::String
 
-  def with_checker: (*untyped files, ?no_default: untyped) ?{ (?) -> untyped } -> untyped
+  def with_checker: (*untyped files, ?no_default: untyped, ?underscore_casts: untyped) ?{ (?) -> untyped } -> untyped
 
   def test_lvar_with_annotation: () -> untyped
 
@@ -107,6 +107,12 @@ class TypeConstructionTest < Minitest::Test
 
   def test_overloaded_method2: () -> untyped
 
+  def test_overload_untyped_arg_does_not_select_value_keyed_overload: () -> untyped
+
+  def test_overload_nil_arg_selects_value_keyed_overload: () -> untyped
+
+  def test_overload_untyped_arg_keeps_first_when_every_overload_is_value_keyed: () -> untyped
+
   def test_ivar_types: () -> untyped
 
   def test_poly_method_arg: () -> untyped
@@ -174,6 +180,50 @@ class TypeConstructionTest < Minitest::Test
   def test_intersection_send: () -> untyped
 
   def test_union_send: () -> untyped
+
+  def test_intersection_attr_write_drops_invariant_component: () -> untyped
+
+  def test_intersection_attr_write_keeps_all_components_when_all_accept: () -> untyped
+
+  def test_intersection_attr_write_drops_valid_marker_via_narrowed_getter: () -> untyped
+
+  def test_intersection_attr_write_narrows_pure_send_receiver: () -> untyped
+
+  def test_intersection_attr_write_narrows_ivar_receiver: () -> untyped
+
+  def test_ivar_union_assign_narrows_to_branch: () -> untyped
+
+  def test_ivar_union_assign_keeps_declared_when_rhs_matches_full_union: () -> untyped
+
+  def test_ivar_union_assign_errors_on_incompatible_rhs: () -> untyped
+
+  def test_ivar_nullable_narrows_on_non_nil_assign: () -> untyped
+
+  def test_ivar_non_union_declared_keeps_declared_type_on_assign: () -> untyped
+
+  def test_ivar_union_reassignment_updates_narrow: () -> untyped
+
+  def test_ivar_union_branch_join_unions_narrows: () -> untyped
+
+  def test_ivar_attr_accessor_write_narrows_backing_ivar: () -> untyped
+
+  def test_ivar_attr_writer_separate_from_reader_narrows: () -> untyped
+
+  def test_ivar_attr_accessor_non_union_declared_no_narrow: () -> untyped
+
+  def test_ivar_attr_accessor_non_self_receiver_no_narrow: () -> untyped
+
+  def test_ivar_attr_accessor_reader_returns_narrowed_after_setter: () -> untyped
+
+  def test_ivar_attr_reader_returns_narrowed_after_direct_ivar_write: () -> untyped
+
+  def test_ivar_attr_reader_non_union_no_transparency: () -> untyped
+
+  def test_ivar_attr_accessor_with_implicit_self_receiver: () -> untyped
+
+  def test_optimistic_pure_caches_plain_def_calls: () -> untyped
+
+  def test_optimistic_pure_explicit_impure_annotation_opts_out: () -> untyped
 
   def test_masgn_array_error: () -> untyped
 
@@ -301,6 +351,16 @@ class TypeConstructionTest < Minitest::Test
 
   def test_type_case_case_when_no_body: () -> untyped
 
+  def test_dstr_folds_when_every_part_is_literal: () -> untyped
+
+  def test_dstr_stays_a_string_when_a_part_is_not_literal: () -> untyped
+
+  def test_literal_bool_argument_keeps_its_literal: () -> untyped
+
+  def test_bool_without_a_hint_stays_bool: () -> untyped
+
+  def test_str_argument_keeps_its_literal: () -> untyped
+
   def test_type_case_array1: () -> untyped
 
   def test_type_case_array2: () -> untyped
@@ -332,6 +392,13 @@ class TypeConstructionTest < Minitest::Test
   def test_and_assign: () -> untyped
 
   def test_csend_unwrap: () -> untyped
+
+  # The `:csend` env join exists because the CALL may not have happened. The
+  # RECEIVER always ran, so its pure-call registration holds on both paths —
+  # dropping it is what left `holder.latest&.label && holder.latest.stamp` unable
+  # to narrow while the same guard through a local narrowed fine
+  # (felixefelip/rbs_infer#338).
+  def test_csend_keeps_the_receivers_pure_call_across_the_join: () -> untyped
 
   def test_while: () -> untyped
 
@@ -384,6 +451,35 @@ class TypeConstructionTest < Minitest::Test
   def test_super: () -> untyped
 
   def test_super_no_decl: () -> untyped
+
+  # A mixin's own ancestors end at the mixin, so a method it defines has no super
+  # there — but at runtime it runs on an instance of the host and `super` walks the
+  # HOST's chain from the mixin's position. The self type names that host, and it
+  # is what `super` has to read: an ordinary send in the same body already resolves
+  # against `Host & Mod`, while `super` resolved against `Mod` alone and fell back
+  # to `untyped` (`def creator_id; super || false; end` over a typed column
+  # accessor). Not specific to ActiveSupport::Concern — any mixin overriding a
+  # method the host gets elsewhere.
+  def test_super_in_module_resolves_through_self_type: () -> untyped
+
+  # Taking `build_instance(host).methods[name].super_method` directly is off by one
+  # when the host overrides the method too: the top entry is then the host's and its
+  # super is this module's own, so `super` would be typed as the method being checked.
+  def test_super_in_module_skips_the_host_own_override: () -> untyped
+
+  # The host chain is a FALLBACK. What sits behind a module in the host's ancestors
+  # is whatever that module itself includes, and nothing the host mixes in can be
+  # inserted between them — so the module's own answer stays, and stays first.
+  def test_super_in_module_prefers_its_own_ancestors: () -> untyped
+
+  # Two hosts mean two chains, and one `RBS::Definition::Method` cannot say
+  # "whichever of these self is". Answering with one host's super would type the
+  # other host's `super` as a method it does not have, so a disagreement keeps the
+  # pre-existing behaviour.
+  def test_super_in_module_declines_when_hosts_disagree: () -> untyped
+
+  # Without a self type there is no host to read, so the diagnostic stays.
+  def test_super_in_module_without_a_self_type: () -> untyped
 
   def test_super_missing_required_block: () -> untyped
 
@@ -629,6 +725,13 @@ class TypeConstructionTest < Minitest::Test
 
   def test_block_without_hint: () -> untyped
 
+  # A hint that says nothing about the method's type variable must not pin it.
+  # `untyped` (and any supertype of the return, like `Object`) makes the
+  # return/hint relation succeed without constraining the variable, and solving
+  # an unconstrained variable answers `untyped` — so the block's own return type
+  # is what has to determine it.
+  def test_block_generic_with_uninformative_hint: () -> untyped
+
   def test_bool_typing: () -> untyped
 
   def test_typing_record: () -> untyped
@@ -704,6 +807,71 @@ class TypeConstructionTest < Minitest::Test
   def test_issue_269_2: () -> untyped
 
   def test_block_implements: () -> untyped
+
+  # `X.class_eval do ... end` reopens `X`: the block's default definee is the
+  # receiver, so a `def` inside defines `X`'s instance method. Both halves already
+  # existed and were only ever connected by hand — the block's `self` is bound to the
+  # receiver by `class_eval`'s own signature, and `for_block` already enters a module
+  # context when `@implements` says to. Without deriving it the defs landed in
+  # whatever context the block was written in (at top level, `::Object`), and `super`
+  # inside one had nothing to resolve against.
+  def test_block_implicit_implements_from_class_eval: () -> untyped
+
+  # A block kept in one place and replayed onto two classes defines its methods
+  # on BOTH, so `@implements` names both and the body is checked once per
+  # definee — which is what running it twice means (felixefelip/steep#149).
+  def test_block_implements_several_modules: () -> untyped
+
+  # The second definee is genuinely CHECKED, not merely tolerated: a body valid
+  # for the first and not the second is reported, and names the one it fails on.
+  def test_block_implements_several_modules_reports_the_second: () -> untyped
+
+  # One diagnostic per definee, not the same one twice: a `def` declared by
+  # neither class is two complaints because there are two classes, while
+  # anything the body says wrong regardless of definee is said once.
+  def test_block_implements_several_modules_reports_each_definee_once: () -> untyped
+
+  # A block replayed with `Target.singleton_class.class_eval` defines
+  # `Target.age`, so the definee is the singleton and the annotation says which
+  # of the two tables it means (felixefelip/steep#152).
+  def test_block_implements_singleton: () -> untyped
+
+  # The same block, the same class, the other table: `age` is declared on the
+  # class object and not on its instances, so naming the instance side is what
+  # the flag has to keep apart from naming the singleton.
+  def test_block_implements_instance_does_not_take_the_singleton: () -> untyped
+
+  # `self` inside the block is the singleton class OBJECT — what
+  # `Target.singleton_class` evaluates to — so a class method of the host is
+  # reached with an implicit receiver from a def in there, exactly as it is
+  # inside `class << self`.
+  def test_block_implements_singleton_resolves_sibling_class_methods: () -> untyped
+
+  # `module_eval` is an alias, so a fix that keyed on one name would miss it.
+  def test_block_implicit_implements_from_module_eval: () -> untyped
+
+  # `instance_eval` binds the block's self the same way but its default definee is the
+  # receiver's SINGLETON class, so the same treatment would attribute the def to the
+  # instance side — the wrong half. It keeps the pre-existing behaviour.
+  def test_block_no_implicit_implements_from_instance_eval: () -> untyped
+
+  # The class can arrive as a VALUE rather than as a spelling, which is exactly how
+  # Ruby's own `included` hook hands it over. `base` is typed `singleton(Includer)` as
+  # soon as anything calls the hook, so the TYPE says what the constant node cannot.
+  def test_block_implicit_implements_from_a_singleton_typed_receiver: () -> untyped
+
+  # `obj.class_eval` reopens whatever class `obj` happens to be — not decidable from
+  # the shape, so it is left alone.
+  def test_block_no_implicit_implements_from_value_receiver: () -> untyped
+
+  # Entering a generic class needs its type parameters bound, which `for_class` sets
+  # up and a block does not: `TestGenericEval` where `TestGenericEval[Elem]` is
+  # required. Declining leaves the ordinary call typing.
+  def test_block_no_implicit_implements_for_a_generic_class: () -> untyped
+
+  # An explicit annotation is the author overriding what the call shape says, which is
+  # the point of writing it, so it wins.
+  def test_block_explicit_implements_wins_over_the_call_shape: () -> untyped
 
   def test_block_implements_singleton: () -> untyped
 
@@ -871,6 +1039,8 @@ class TypeConstructionTest < Minitest::Test
 
   def test_self_type_binding_block: () -> untyped
 
+  def test_self_type_binding_block_untyped_self: () -> untyped
+
   def test_self_type_binding_type_parameter: () -> untyped
 
   def test_self_type_binding_generic: () -> untyped
@@ -938,4 +1108,32 @@ class TypeConstructionTest < Minitest::Test
   def test_type_hint__proc_union_proc_instance: () -> untyped
 
   def test_rational_and_complex_literal: () -> untyped
+
+  def test_underscore_is_an_ordinary_local: () -> untyped
+
+  def test_underscore_is_not_a_cast: () -> untyped
+
+  def test_underscore_cast_on_request: () -> untyped
+
+  def test_underscore_narrows: () -> untyped
+
+  # A block parameter `_` is untyped, as before — and BOUND, so the `_`
+  # outside does not show through it.
+  def test_underscore_block_parameter_shadows: () -> untyped
+
+  def test_underscore_method_parameter_stays_untyped: () -> untyped
+
+  def test_any_is_still_a_cast: () -> untyped
+
+  # `&.` skips the call only when the receiver is nil, so the result is
+  # nilable exactly when the receiver may be nil.
+  CSEND_RBS: ::String
+
+  def test_csend_on_a_receiver_that_cannot_be_nil: () -> untyped
+
+  def test_csend_on_a_receiver_that_may_be_nil: () -> untyped
+
+  # A type variable may be instantiated with nil: `x&.itself` stays `T?`,
+  # which a declared `-> T` does not accept.
+  def test_csend_on_a_type_variable_receiver: () -> untyped
 end

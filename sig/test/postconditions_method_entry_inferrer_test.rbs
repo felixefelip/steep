@@ -1,0 +1,51 @@
+# Generated from test/postconditions_method_entry_inferrer_test.rb with RBS::Inline
+
+class PostconditionsMethodEntryInferrerTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  Postconditions: untyped
+
+  RBS_FIXTURE: ::String
+
+  def sequences_for: (untyped ruby) -> untyped
+
+  def test_extracts_handler_and_action_calls_in_order: () -> untyped
+
+  def test_defined_method_keys_includes_self_method_annotation: () -> untyped
+
+  def test_defined_method_keys_omits_self_method_when_absent: () -> untyped
+
+  # felixefelip/steep#96. The counterpart of the test above: the annotation makes the body
+  # DEFINE the method, and it must also make the body BE that method's flow. Otherwise the
+  # template's calls are invisible and facts holding at its entry stop there instead of
+  # reaching what it renders.
+  def test_self_method_body_is_a_flow_owned_by_the_annotated_method: () -> untyped
+
+  def test_top_level_body_without_the_annotation_is_not_a_flow: () -> untyped
+
+  def test_self_method_flow_does_not_swallow_nested_defs: () -> untyped
+
+  def test_halt_check_makes_a_flow_regardless_of_method_name: () -> untyped
+
+  def test_call_only_method_is_a_sequence_for_transitive_seeding: () -> untyped
+
+  def test_full_if_else_walks_both_branches: () -> untyped
+
+  def test_case_when_walks_every_branch: () -> untyped
+
+  def test_truly_empty_body_is_not_a_sequence: () -> untyped
+
+  def test_plain_flow_const_write_then_cross_object_call: () -> untyped
+
+  def test_ivar_write_records_its_rhs_calls_before_the_write: () -> untyped
+
+  def test_const_write_records_its_rhs_calls_before_the_write: () -> untyped
+
+  def test_nilable_const_write_is_not_nonnil: () -> untyped
+end

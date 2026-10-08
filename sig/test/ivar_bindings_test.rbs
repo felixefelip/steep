@@ -1,0 +1,34 @@
+# Generated from test/ivar_bindings_test.rb with RBS::Inline
+
+# Which ivars `Klass.new(…)` leaves holding one of its arguments
+# (felixefelip/steep#205, stage 1), over every source the project has.
+# Whether anything writes them afterwards is `ObjectStates`' question.
+class IvarBindingsTest < Minitest::Test
+  Registry: untyped
+
+  def registry: (*untyped sources) -> untyped
+
+  REFLECTION: ::String
+
+  def test_an_ivar_bound_in_initialize: () -> untyped
+
+  def test_by_position_and_from_an_optional: () -> untyped
+
+  def test_written_twice_in_initialize_or_from_something_else: () -> untyped
+
+  # The slot in the parameter list is the argument's position at the call only
+  # up to the first parameter whose position depends on how many are passed.
+  def test_a_parameter_whose_position_depends_on_the_call: () -> untyped
+
+  def test_a_parameter_reassigned_before_the_bind: () -> untyped
+
+  # `return` before the bind leaves the ivar nil.
+  def test_an_initialize_that_may_return_before_the_bind: () -> untyped
+
+  # Which one runs is a question of load order.
+  def test_two_initializers_answer_nothing: () -> untyped
+
+  # `class Ex::Reflection` inside `module Wrap` reopens whichever `Ex` resolves
+  # to from there, so which class its `initialize` builds is not known.
+  def test_an_initialize_in_a_reopen_that_may_name_two_classes: () -> untyped
+end

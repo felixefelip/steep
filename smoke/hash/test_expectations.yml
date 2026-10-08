@@ -10,8 +10,8 @@
         character: 14
     severity: ERROR
     message: |-
-      Cannot assign a value of type `::Hash[::Symbol, ::Integer]` to a variable of type `::Hash[::Symbol, (::String | nil)]`
-        ::Hash[::Symbol, ::Integer] <: ::Hash[::Symbol, (::String | nil)]
+      Cannot assign a value of type `::Hash[:foo, ::Integer]` to a variable of type `::Hash[::Symbol, (::String | nil)]`
+        ::Hash[:foo, ::Integer] <: ::Hash[::Symbol, (::String | nil)]
           ::Integer <: (::String | nil)
             ::Integer <: ::String
               ::Numeric <: ::String
@@ -61,8 +61,8 @@
         character: 60
     severity: ERROR
     message: |-
-      Cannot assign a value of type `{ ?:email => ::String, :id => ::Integer, :name => ::String }` to a variable of type `{ :id => ::Integer, :name => ::String }`
-        { ?:email => ::String, :id => ::Integer, :name => ::String } <: { :id => ::Integer, :name => ::String }
+      Cannot assign a value of type `{ ?:email => ::String, :id => 30, :name => "Matz" }` to a variable of type `{ :id => ::Integer, :name => ::String }`
+        { ?:email => ::String, :id => 30, :name => "Matz" } <: { :id => ::Integer, :name => ::String }
     code: Ruby::IncompatibleAssignment
   - range:
       start:

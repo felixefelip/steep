@@ -40,6 +40,8 @@ class RubyHoverTest < Minitest::Test
 
   def test_hover_on_pure_calls: () -> untyped
 
+  def test_hover_on_attr_reader_with_union_narrowed_ivar: () -> untyped
+
   def test_rescue: () -> untyped
 
   def test_type_assertion: () -> untyped

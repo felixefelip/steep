@@ -96,7 +96,7 @@
         line: 2
         character: 10
     severity: ERROR
-    message: Type `::Set[::String]` does not have method `ffffffff`
+    message: Type `::Set[(::String | "2" | "3")]` does not have method `ffffffff`
     code: Ruby::NoMethod
   - range:
       start:

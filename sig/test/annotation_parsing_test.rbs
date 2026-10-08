@@ -29,6 +29,10 @@ class AnnotationParsingTest < Minitest::Test
 
   def test_self_type: () -> untyped
 
+  def test_self_method: () -> untyped
+
+  def test_self_method_namespaced: () -> untyped
+
   def test_const_type: () -> untyped
 
   def test_const_type2: () -> untyped
@@ -42,6 +46,27 @@ class AnnotationParsingTest < Minitest::Test
   def test_implements: () -> untyped
 
   def test_implement2: () -> untyped
+
+  # A block replayed onto two classes defines its methods on both, and the
+  # annotation has one line to say so (felixefelip/steep#149).
+  def test_implements_several_modules: () -> untyped
+
+  # The commas are at two levels and only the outer ones separate modules, so
+  # the list is scanned for whole names rather than split on `,`.
+  def test_implements_several_modules_with_type_params: () -> untyped
+
+  # `singleton(::Foo)` names the class object's method table, which is where a
+  # block reopening a singleton defines its methods (felixefelip/steep#152).
+  def test_implements_singleton: () -> untyped
+
+  # The parentheses travel with the name, so a list mixing the two forms is
+  # taken apart at the right commas.
+  def test_implements_singleton_in_a_list: () -> untyped
+
+  # A singleton class is one type however its instances are parameterised, so
+  # arguments inside `singleton(...)` say nothing and are refused rather than
+  # dropped.
+  def test_implements_singleton_rejects_type_args: () -> untyped
 
   def test_ivar_type: () -> untyped
 

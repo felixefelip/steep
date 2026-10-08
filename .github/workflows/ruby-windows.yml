@@ -1,10 +1,9 @@
 name: Run test on Windows
 
+# Manual only: `herb`, which the fork depends on for ERB, does not build on
+# Windows (`sys/mman.h`), so the job cannot get past `bundle install`.
 on:
-  push:
-    branches:
-      - master
-  pull_request: {}
+  workflow_dispatch: {}
 
 jobs:
   windows:

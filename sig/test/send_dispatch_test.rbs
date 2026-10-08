@@ -1,0 +1,87 @@
+# Generated from test/send_dispatch_test.rb with RBS::Inline
+
+# felixefelip/steep#137. `send` with a literal name IS a call to that method: the
+# receiver's type is known and the name is right there, so the only thing the spelling
+# adds over `recv.name(...)` is that it ignores visibility. Everything inside it used to
+# be unchecked, because `send` returns `untyped`.
+#
+# Checked against the REAL core RBS rather than the stub environment the unit harness
+# builds, because the feature turns on which core types declare these: `__send__` on
+# `BasicObject`, `send` as `Kernel`'s alias of it, `public_send` on `Kernel`. A stub
+# would let a wrong owner set pass.
+class SendDispatchTest < Minitest::Test
+  include Steep
+
+  include TestHelper
+
+  include ShellHelper
+
+  def dirs: () -> untyped
+
+  STEEPFILE: ::String
+
+  RBS: ::String
+
+  def type_check_source: (untyped ruby) -> untyped
+
+  def errors_in: (untyped ruby) -> untyped
+
+  # The return type comes from the method the literal names, so a wrong call on the result
+  # is reported against THAT method's return type — which is the whole difference from
+  # `untyped`.
+  def test_resolves_the_method_the_literal_names: () -> untyped
+
+  # `send`/`__send__` ignore visibility — that is what they are for, and what MRI relies on
+  # when `rb_funcall` invokes `append_features`/`included`, both private on `Module`.
+  def test_reaches_a_private_method: () -> untyped
+
+  # `public_send` respects visibility, so this is a `NoMethodError` at runtime even though
+  # the name resolves. A different situation from "no such method", and a different message.
+  def test_public_send_does_not_reach_a_private_method: () -> untyped
+
+  def test_reports_a_name_that_resolves_nowhere: () -> untyped
+
+  # The diagnostic points at the literal, not at the `send` selector: the name is what has
+  # to change.
+  def test_points_at_the_name: () -> untyped
+
+  # Arguments go through the ordinary dispatch path, so they are checked by the same
+  # machinery every other call uses — nothing send-specific decides this.
+  def test_checks_the_arguments_of_the_resolved_method: () -> untyped
+
+  def test_checks_the_arity_of_the_resolved_method: () -> untyped
+
+  def test_checks_the_block_of_the_resolved_method: () -> untyped
+
+  # The limit case, and the reason this keys on the literal: the name is a value, so no
+  # static analysis decides which method it is. A fix that types this one has guessed.
+  def test_a_computed_name_stays_untyped: () -> untyped
+
+  # `:"a#{b}"` is a symbol node too, but not a literal one.
+  def test_an_interpolated_name_stays_untyped: () -> untyped
+
+  # One dispatch, four spellings. `__send__` is the one a defensive library uses precisely
+  # because `send` can be overridden, and a string names a method just as well as a symbol.
+  def test_the_other_spellings_resolve_too: () -> untyped
+
+  # A `send` the receiver declares itself is an ordinary method that happens to share the
+  # name. Reading its first argument as a method name would invent a call that is not there.
+  def test_a_receivers_own_send_is_not_a_dispatch: () -> untyped
+
+  # And it is still checked as the method it is.
+  def test_a_receivers_own_send_is_checked_as_itself: () -> untyped
+
+  # An untyped receiver has no shape to ask, so there is no dispatch to read — and that is
+  # what keeps this off code Steep knows nothing about, rather than a special case.
+  def test_an_untyped_receiver_stays_untyped: () -> untyped
+
+  # The boundary from the issue, measured rather than asserted: a splat of unknown length
+  # says nothing about how many arguments arrive. The `send` spelling reports exactly what
+  # the direct spelling reports — Steep's own judgment about splats against a fixed arity,
+  # unchanged. Resolving `send` adds no arity judgment of its own.
+  def test_a_splat_says_what_the_direct_call_says: () -> untyped
+
+  # The severity templates are built from `ALL`, so the new class is picked up
+  # automatically — that is what lets a project ramp it in the Steepfile.
+  def test_the_diagnostic_is_configurable: () -> untyped
+end

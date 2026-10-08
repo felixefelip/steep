@@ -289,7 +289,7 @@
         line: 91
         character: 13
     severity: ERROR
-    message: Type `bool` does not have method `foo`
+    message: Type `true` does not have method `foo`
     code: Ruby::NoMethod
   - range:
       start:
@@ -299,7 +299,7 @@
         line: 94
         character: 13
     severity: ERROR
-    message: Type `bool` does not have method `foo`
+    message: Type `true` does not have method `foo`
     code: Ruby::NoMethod
   - range:
       start:

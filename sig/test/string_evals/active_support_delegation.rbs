@@ -1,0 +1,22 @@
+# Generated from test/string_evals/active_support_delegation.rb with RBS::Inline
+
+class Module
+  # @rbs_infer |...
+  def delegate: (*untyped methods, ?to: untyped, ?prefix: untyped, ?allow_nil: untyped, ?private: untyped) -> untyped
+
+  # @rbs_infer |...
+  def delegate_missing_to: (untyped target, ?allow_nil: untyped) -> untyped
+end
+
+module ActiveSupport
+  module Delegation
+    # :nodoc:
+    RUBY_RESERVED_KEYWORDS: ::Array[::String]
+
+    RESERVED_METHOD_NAMES: untyped
+
+    def self.generate: (untyped owner, untyped methods, ?location: untyped, ?to: untyped, ?prefix: untyped, ?allow_nil: untyped, ?nilable: untyped, ?private: untyped, ?as: untyped, ?signature: untyped) -> untyped
+
+    def self.generate_method_missing: (untyped owner, untyped target, ?allow_nil: untyped) -> untyped
+  end
+end

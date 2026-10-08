@@ -89,11 +89,13 @@
         character: 23
     severity: ERROR
     message: |-
-      Cannot assign a value of type `::Array[::String]` to a variable of type `::Array[::Float]`
-        ::Array[::String] <: ::Array[::Float]
-          ::String <: ::Float
-            ::Object <: ::Float
-              ::BasicObject <: ::Float
+      Cannot assign a value of type `["1", "2", "3"]` to a variable of type `::Array[::Float]`
+        ["1", "2", "3"] <: ::Array[::Float]
+          ("1" | "2" | "3") <: ::Float
+            "1" <: ::Float
+              ::String <: ::Float
+                ::Object <: ::Float
+                  ::BasicObject <: ::Float
     code: Ruby::IncompatibleAssignment
   - range:
       start:
@@ -104,8 +106,8 @@
         character: 28
     severity: ERROR
     message: |-
-      Cannot pass a value of type `::Proc` as a block-pass-argument of type `^(::Integer) -> T(3)`
-        ::Proc <: ^(::Integer) -> T(3)
+      Cannot pass a value of type `::Proc` as a block-pass-argument of type `^(::Integer) -> T(36)`
+        ::Proc <: ^(::Integer) -> T(36)
     code: Ruby::BlockTypeMismatch
   - range:
       start:
@@ -116,8 +118,8 @@
         character: 20
     severity: ERROR
     message: |-
-      Cannot pass a value of type `::Proc` as a block-pass-argument of type `^(::Integer) -> T(4)`
-        ::Proc <: ^(::Integer) -> T(4)
+      Cannot pass a value of type `::Proc` as a block-pass-argument of type `^(::Integer) -> T(37)`
+        ::Proc <: ^(::Integer) -> T(37)
     code: Ruby::BlockTypeMismatch
 - file: e.rb
   diagnostics:

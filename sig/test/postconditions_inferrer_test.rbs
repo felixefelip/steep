@@ -1,0 +1,368 @@
+# Generated from test/postconditions_inferrer_test.rb with RBS::Inline
+
+class PostconditionsInferrerTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  Postconditions: untyped
+
+  RBS_FIXTURE: ::String
+
+  def infer_for: (untyped ruby) -> untyped
+
+  def test_infers_unconditional_ivar_postcondition_for_narrowing_assign: () -> untyped
+
+  def test_does_not_infer_when_rhs_equals_declared: () -> untyped
+
+  def test_does_not_infer_when_rhs_is_not_strict_subtype: () -> untyped
+
+  def test_handles_method_with_no_ivar_assignment: () -> untyped
+
+  def test_multiple_ivar_assignments_take_last_write: () -> untyped
+
+  def test_infers_narrowing_when_rhs_is_string_literal_against_nilable_ivar: () -> untyped
+
+  def test_infers_narrowing_when_rhs_is_nil_literal_against_nilable_ivar: () -> untyped
+
+  def test_ignores_top_level_defs_without_class: () -> untyped
+
+  PREDICATE_RBS_FIXTURE: ::String
+
+  def infer_predicate_for: (untyped ruby) -> untyped
+
+  def test_infers_when_true_for_negated_nil_check: () -> untyped
+
+  def test_infers_when_true_for_conjunction_of_nil_checks: () -> untyped
+
+  def test_skips_when_declared_type_already_non_nil: () -> untyped
+
+  def test_bare_ivar_body_is_a_transparent_getter: () -> untyped
+
+  def test_infers_when_true_for_multi_statement_body: () -> untyped
+
+  METHOD_PREDICATE_RBS_FIXTURE: ::String
+
+  def infer_method_predicate_for: (untyped ruby) -> untyped
+
+  def test_infers_when_true_method_for_negated_nil_check: () -> untyped
+
+  def test_infers_when_true_method_for_present_check: () -> untyped
+
+  # The class declaring no ivar is the whole point: `build_env_for_class` used to
+  # turn it away before the interpreter was asked.
+  def test_infers_when_true_method_on_a_module: () -> untyped
+
+  # A predicate whose subject is not nilable narrows nothing, so there is no
+  # marker to mint.
+  def test_no_when_true_method_when_nothing_narrows: () -> untyped
+
+  # A method taking arguments is not a slot: the narrowing would hold for the
+  # one argument seen and be claimed for every other.
+  def test_ignores_a_predicate_over_a_method_with_arguments: () -> untyped
+
+  # Both readings compose: `@cache` still comes back alongside `cache`.
+  def test_collects_ivar_and_method_slots_together: () -> untyped
+
+  RETURNS_RBS_FIXTURE: ::String
+
+  def infer_returns_for: (untyped ruby) -> untyped
+
+  def test_infers_return_establishment_for_factory_shape: () -> untyped
+
+  def test_infers_return_establishment_for_singleton_factory: () -> untyped
+
+  def test_no_return_establishment_when_returned_local_differs_from_written: () -> untyped
+
+  def test_no_return_establishment_without_attr_write: () -> untyped
+
+  # felixefelip/steep#68 item 2 — the guard-clause proof.
+  CR_RBS_FIXTURE: ::String
+
+  def infer_cr_for: (untyped ruby) -> untyped
+
+  def test_infers_conditional_return_from_guard_clause: () -> untyped
+
+  def test_conditional_return_gate_via_self_method: () -> untyped
+
+  # felixefelip/steep#105 gap 3. The halt sits inside a block, so the clause calls
+  # TWO self-methods: the block-taking one and the halting one. Neither position is
+  # reliably the halt — `respond_to { redirect_to }` puts it last, `redirect_to
+  # root_path` puts it first — so the inferrer offers both, in source order, and
+  # the Runner keeps whichever actually writes an ivar.
+  def test_gate_candidates_include_a_block_nested_halt: () -> untyped
+
+  # A direct ivar write still wins outright: it names the gate with no resolution
+  # needed, so no candidate list is offered.
+  def test_a_direct_ivar_write_is_the_gate_without_candidates: () -> untyped
+
+  # felixefelip/steep#105 gap 2. No explicit `return`: the guard IS the method's
+  # last statement, so falling off the end is exactly a return.
+  def test_a_guard_that_is_the_final_statement_needs_no_explicit_return: () -> untyped
+
+  def test_a_final_guard_without_a_return_proves_a_constant_too: () -> untyped
+
+  # THE BOUNDARY. Identical clause, but something follows it, so taking the clause
+  # does NOT end the method — execution continues past the `if`, and the code after
+  # runs on both branches. Proving `current_user` present here would be a fact
+  # about a path that keeps going: the one shape in this feature where being too
+  # permissive is unsound rather than merely incomplete.
+  def test_a_halting_clause_that_is_not_last_proves_nothing: () -> untyped
+
+  # ... and an explicit `return` still rescues exactly that case, because then the
+  # clause does end the method wherever it sits.
+  def test_a_non_final_clause_with_an_explicit_return_still_proves: () -> untyped
+
+  # The whole shape a real authorization callback has, in one method: a conjunction
+  # of const-rooted tests, one through `&.`, halting inside a block, with no
+  # `return` because the guard is the method's last statement.
+  def test_the_composite_authorization_guard_shape: () -> untyped
+
+  def test_infers_conditional_const_return_from_guarded_write: () -> untyped
+
+  # felixefelip/steep#105 gap 1. The guard TESTS the constant instead of writing
+  # it — no assignment anywhere, the proof is the condition itself. This is the
+  # commoner shape by far: a guard normally asserts what someone else already
+  # populated, which is exactly what an authorization callback does.
+  def test_infers_conditional_const_return_from_a_guard_that_tests_the_constant: () -> untyped
+
+  # Keyed by identity, like every other const fact (#106).
+  def test_a_tested_constant_is_keyed_by_its_resolved_name: () -> untyped
+
+  # A self-method condition still proves what it always proved, and proves
+  # nothing about any constant.
+  def test_a_self_method_guard_still_proves_only_the_self_method: () -> untyped
+
+  # Nothing to prove: `Current.instance` is declared non-nil already, so the
+  # guard adds no information and must not emit a fact.
+  def test_no_const_return_when_the_tested_attribute_is_not_nilable: () -> untyped
+
+  # The receiver has to be a CONSTANT. A guard on a local's attribute names no
+  # slot the caller could look up, so it proves nothing here.
+  def test_no_const_return_when_the_tested_receiver_is_not_a_constant: () -> untyped
+
+  # A write past the guard is more specific than the test before it (it carries
+  # the written value's type), so it stays the one that reports.
+  def test_a_guarded_write_wins_over_the_test_of_the_same_path: () -> untyped
+
+  # felixefelip/steep#105 gap 1b. `x&.foo` evaluates to nil whenever `x` is nil, so a
+  # TRUTHY `x&.foo` proves `x` non-nil — exactly, with no knowledge of what `foo`
+  # returns or whether it is nilable itself. The fact is about the RECEIVER; the send
+  # through it is only the reason we are looking.
+  def test_infers_conditional_const_return_from_a_safe_navigation_test: () -> untyped
+
+  def test_infers_conditional_return_from_a_safe_navigation_test_on_a_self_method: () -> untyped
+
+  # The whole chain is truthy only if every link was non-nil, so the innermost
+  # nameable slot is proven. Only that one is keyed — `Current.user.maybe_name` is
+  # not a slot a caller could look up.
+  def test_a_safe_navigation_chain_proves_its_innermost_slot: () -> untyped
+
+  # Arguments to the safe-navigated call are irrelevant: whatever `named?` does with
+  # them, it ran at all only because the receiver was non-nil. (Contrast the DIRECT
+  # test, where a send with arguments names no slot and is rejected.)
+  def test_a_safe_navigation_test_ignores_the_arguments_of_the_call: () -> untyped
+
+  # The receiver still has to be a nameable slot. A local proves nothing.
+  def test_no_fact_when_the_safe_navigated_receiver_is_a_local: () -> untyped
+
+  # felixefelip/steep#105 gap 1c. `A && B` is truthy only if BOTH are, so a
+  # conjunction proves everything its conjuncts do.
+  def test_a_conjunction_proves_both_of_its_conjuncts: () -> untyped
+
+  def test_a_conjunction_mixes_self_method_and_constant_facts: () -> untyped
+
+  def test_a_conjunction_composes_with_safe_navigation: () -> untyped
+
+  def test_a_conjunction_nests: () -> untyped
+
+  # A DISJUNCTION distributes to nothing: `A || B` truthy says only that at least
+  # one of them was, and there is no way to tell which. Distributing it the way
+  # `&&` distributes would be plainly unsound.
+  def test_a_disjunction_proves_nothing: () -> untyped
+
+  # An un-decodable conjunct is SKIPPED, not fatal — it says nothing, which is no
+  # reason to discard what its neighbour says.
+  def test_an_undecodable_conjunct_does_not_sink_the_condition: () -> untyped
+
+  # A NEGATED conjunct proves its operand FALSY, which is the opposite of present.
+  # The `!` unwrap that turns `if !x` into "x is truthy here" is a property of the
+  # whole condition, and re-applying it per conjunct would invert the fact — the
+  # one shape in this feature that could silently produce a wrong proof.
+  def test_a_negated_conjunct_proves_nothing_about_its_operand: () -> untyped
+
+  # ... while the whole condition being negated still distributes: `!(A && B)`
+  # is falsy exactly when `A && B` is truthy, so the unhalted exit has both.
+  def test_a_negated_conjunction_still_distributes: () -> untyped
+
+  # felixefelip/steep#100. A handler with no halt at all writes the constant on EVERY
+  # exit, so the establishment is unconditional — there is no gate to key it on, which is
+  # exactly why it used to be dropped.
+  def test_infers_unconditional_const_establishment_from_plain_handler: () -> untyped
+
+  # A constant written by its SHORT name from inside the namespace that encloses
+  # it. `Registry` in `Outer::Host` is `Outer::Registry`, and that is the name the
+  # read side resolves (`TypeConstruction#resolved_const_name_string`) and the name
+  # every other sidecar key uses. Keyed by the source spelling, the fact is written
+  # under `Registry.user`, looked up under `Outer::Registry.user`, and never applies
+  # — the guard proves nothing, silently.
+  #
+  # Invisible in the dummy for a long time because `Current` is top-level, where the
+  # two spellings coincide. An engine's `MyEngine::Current` is where it bites.
+  def test_conditional_const_return_is_keyed_by_the_resolved_name: () -> untyped
+
+  def test_const_establishment_is_keyed_by_the_resolved_name: () -> untyped
+
+  # The fallback still has to hold: an unresolvable receiver (no singleton type in
+  # the typing) keeps its lexical spelling rather than dropping the fact.
+  def test_const_establishment_keeps_the_lexical_name_for_a_top_level_constant: () -> untyped
+
+  def test_no_unconditional_const_establishment_when_the_method_halts: () -> untyped
+
+  def test_no_unconditional_const_establishment_for_a_nilable_write: () -> untyped
+
+  # felixefelip/steep#102. The param is an INTERSECTION carrying a refinement marker, and
+  # the attribute it reads is nilable on the base but proven on the marker — which is the
+  # whole reason the marker exists. Answering from the first member alone (`::Marked`, so
+  # `name: () -> String?`) refused the establishment as nilable and dropped the narrowing.
+  def test_establishes_through_an_intersection_receiver: () -> untyped
+
+  # The `&.` shape has no narrowing at the node (`value&.name` is `String?` however non-nil
+  # `name` is), so it goes through the manual resolution — which must reach the marker too.
+  def test_establishes_through_an_intersection_receiver_via_safe_navigation: () -> untyped
+
+  # felixefelip/steep#117. The sibling write reads the attribute BEING SET rather
+  # than the param — `self.identity = session.identity` inside `def session=`,
+  # which is how a `CurrentAttributes` override is ordinarily written. The read is
+  # the param, because `super(v)` just stored it; the reader's own declared type is
+  # `untyped` and must not be consulted.
+  def test_establishes_from_a_read_of_the_attribute_being_set: () -> untyped
+
+  def test_establishes_from_an_explicit_self_read_of_the_attribute_being_set: () -> untyped
+
+  def test_establishes_from_a_backing_ivar_read_of_the_attribute_being_set: () -> untyped
+
+  def test_no_establishes_from_own_attribute_read_without_writing_the_backing: () -> untyped
+
+  # felixefelip/rbs_infer#144. A two-clause `if` where one side establishes and
+  # the other halts. Leaving without having halted means the establishing clause
+  # ran, so the fact keys the halt-gated slot — the same one a guard clause uses.
+  def test_collects_a_const_return_from_a_halting_alternative: () -> untyped
+
+  def test_collects_a_const_return_when_the_halting_clause_comes_first: () -> untyped
+
+  def test_no_const_return_from_a_halting_alternative_writing_a_nilable_value: () -> untyped
+
+  def test_no_const_return_from_a_one_armed_if_that_never_halts: () -> untyped
+
+  # felixefelip/steep#117 gap 3b. A one-armed `if` as the last statement: a truthy
+  # return can only have come from the clause, since every other way out is the
+  # implicit `nil`.
+  def test_collects_a_when_true_const_write: () -> untyped
+
+  def test_collects_a_when_true_const_write_from_an_unless: () -> untyped
+
+  def test_no_when_true_const_for_an_indexed_write: () -> untyped
+
+  def test_collects_a_when_true_call_dep: () -> untyped
+
+  def test_no_when_true_const_when_the_if_has_an_else: () -> untyped
+
+  def test_no_when_true_const_when_the_method_can_return_early: () -> untyped
+
+  def test_no_when_true_const_when_the_if_is_not_the_last_statement: () -> untyped
+
+  # felixefelip/steep#117 gap 3a. The every-exit call edges the Runner follows to
+  # lift a callee's establishment into its caller. Distinct from `self_call_deps`
+  # on both axes: top-level statements only, and any receiver.
+  def test_collects_an_unconditional_call_dep: () -> untyped
+
+  def test_collects_an_unconditional_call_dep_from_an_assignment: () -> untyped
+
+  def test_no_unconditional_call_dep_for_a_conditional_call: () -> untyped
+
+  def test_no_unconditional_call_dep_for_a_safe_navigated_call: () -> untyped
+
+  def test_no_unconditional_call_deps_when_the_method_can_halt: () -> untyped
+
+  def test_infers_establishes_consts_from_instance_setter_override: () -> untyped
+
+  def test_infers_own_attribute_establish_from_super: () -> untyped
+
+  def test_infers_own_attribute_establish_for_singleton_ivar_write: () -> untyped
+
+  def test_no_establishes_consts_for_nilable_derived_write: () -> untyped
+
+  def test_no_conditional_const_return_for_nilable_write: () -> untyped
+
+  # Was `test_no_conditional_return_without_return_in_guard`, asserting that a
+  # guard with no `return` proved nothing "because the method falls through either
+  # way". felixefelip/steep#105 gap 2 is precisely that falling through is not a
+  # third possibility when the guard is LAST: there is nothing to fall through to,
+  # so both branches end the method and the gate is exact.
+  #
+  # The old rationale survives, narrowed to the case it actually describes — a
+  # clause with code after it — which `test_a_halting_clause_that_is_not_last_
+  # proves_nothing` pins.
+  #
+  # Here the clause writes the gate ivar directly, so this is also the implicit
+  # return composed with the `gate_ivar` path rather than `gate_via`.
+  def test_a_final_guard_writing_its_gate_directly_needs_no_return: () -> untyped
+
+  def block_entry: (untyped ruby, untyped method) -> untyped
+
+  # An entry can exist for reasons of its own (a self-call edge, an ivar write),
+  # so what these assert is the FACT, never the entry's existence.
+  def block_facts: (untyped ruby, untyped method) -> untyped
+
+  def test_the_methods_value_being_the_blocks_call_proves_it: () -> untyped
+
+  def test_a_yield_in_value_position_proves_it_too: () -> untyped
+
+  # `unless token.empty?` only adds a FALSY way out, which cannot weaken a fact
+  # about a truthy return. This is the shape Rails' own `Token.authenticate` has.
+  def test_a_one_armed_guard_around_the_call_does_not_break_it: () -> untyped
+
+  # The forwarder states nothing on its own: it records the edge, and the Runner
+  # walks it. Both halves matter — a premature `true` here would be a claim about
+  # a callee nobody looked at.
+  def test_forwarding_the_block_records_an_edge_rather_than_a_fact: () -> untyped
+
+  def test_a_block_that_is_not_the_methods_value_proves_nothing: () -> untyped
+
+  # A `return` elsewhere means the last statement is no longer what a truthy exit
+  # returned — the same disqualification `when_true_consts` makes.
+  def test_an_early_return_disqualifies_the_method: () -> untyped
+
+  # felixefelip/rbs_infer#144 stage 3, the collection half: what the block
+  # establishes on its truthy exit, and which callee it was handed to. Whether
+  # that callee's answer IS its block's is the Runner's lookup.
+  def test_it_reads_what_a_block_establishes_at_a_call_site: () -> untyped
+
+  # The dummy writes it with a NESTED registry referenced by its short name,
+  # which is what an app actually looks like — and what the flat fixture above
+  # does not exercise.
+  def test_it_reads_a_call_site_whose_registry_is_a_nested_constant: () -> untyped
+
+  # felixefelip/rbs_infer#144, the shape an app actually writes — two
+  # conditionals deep, with the inner alternative being the 401. Unwrapping one
+  # one-armed `if` was enough for the fixtures and is not enough for Fizzy.
+  #
+  # The `else` is why this needs a gate at all: with one, a truthy return could
+  # be the alternative's — unless the alternative halts, which is a fact about
+  # `refuse` and therefore the Runner's to prove. So the calls are recorded as
+  # candidates and nothing is claimed here.
+  def test_it_reads_a_call_site_two_conditionals_deep_with_a_halting_else: () -> untyped
+
+  # `if guard then halt else block end` is the same proof written the other way
+  # round — and `unless` spells it exactly like that.
+  def test_either_arm_may_be_the_one_carrying_the_block: () -> untyped
+
+  # An alternative that calls nothing cannot halt, so there is no candidate to
+  # offer and the site is refused here rather than left for the Runner.
+  def test_a_two_armed_if_whose_alternative_calls_nothing_proves_nothing: () -> untyped
+end

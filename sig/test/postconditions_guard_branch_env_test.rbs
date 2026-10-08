@@ -1,0 +1,55 @@
+# Generated from test/postconditions_guard_branch_env_test.rb with RBS::Inline
+
+# felixefelip/steep#105 follow-up: the guard collector reads what the checker
+# concluded about a condition (`typing.branch_envs`) instead of re-deriving it
+# from the AST.
+#
+# Two things this buys, both of which the syntactic reading got wrong:
+#
+#   * ANY predicate the RBS describes, not a hardcoded shape list.
+#     `LogicTypeInterpreter#evaluate_union_method_call` already partitions a
+#     union receiver by each component's declared return type, so
+#     `account.present?` (`NilClass#present?: () -> false`) and
+#     `account.blank?` (`NilClass#blank?: () -> true`) both narrow, in opposite
+#     branches, with no knowledge of ActiveSupport anywhere in Steep.
+#   * POLARITY. `redirect_to :x if account` halts when the account is PRESENT,
+#     so the surviving exit is the one where it is nil — and must prove nothing.
+class PostconditionsGuardBranchEnvTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  Postconditions: untyped
+
+  # `Object#present?: () -> bool` / `NilClass#present?: () -> false` is exactly
+  # the shape activesupport's own RBS ships.
+  RBS_FIXTURE: ::String
+
+  def infer_for: (untyped ruby, record_branch_envs: untyped) -> untyped
+
+  SOURCE: ::String
+
+  def const_returns: (untyped entries) -> untyped
+
+  def self_returns: (untyped entries) -> untyped
+
+  def test_reads_branch_envs: () -> untyped
+
+  # The same reading, for a fact the guard names as a SELF METHOD rather than a
+  # constant path — the `conditional_returns` half of the collector. Both halves
+  # consume `guard_facts`, so this pins that the env-derived fact reaches the one
+  # keyed by method name too.
+  def test_reads_branch_envs_for_self_methods: () -> untyped
+
+  # Without the recorded envs the syntactic fallback still handles the shapes it
+  # always did, and — the fix — no longer inverts the polarity of `if X; halt; end`.
+  def test_syntactic_fallback: () -> untyped
+
+  # The cost claim: the envs are retained only for the pass that asks for them,
+  # so the check driver and the LSP keep paying nothing.
+  def test_records_only_when_asked: () -> untyped
+end

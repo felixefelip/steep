@@ -10,8 +10,8 @@
         character: 7
     severity: ERROR
     message: |-
-      Cannot assign a value of type `(::Integer | ::Array[::String] | nil | ::String)` to a variable of type `::Integer`
-        (::Integer | ::Array[::String] | nil | ::String) <: ::Integer
+      Cannot assign a value of type `(1 | ::Array[::String] | nil | ::String)` to a variable of type `::Integer`
+        (1 | ::Array[::String] | nil | ::String) <: ::Integer
           ::Array[::String] <: ::Integer
             ::Object <: ::Integer
               ::BasicObject <: ::Integer
@@ -25,8 +25,8 @@
         character: 7
     severity: ERROR
     message: |-
-      Cannot assign a value of type `(::Integer | nil)` to a variable of type `::Integer`
-        (::Integer | nil) <: ::Integer
+      Cannot assign a value of type `(30 | nil)` to a variable of type `::Integer`
+        (30 | nil) <: ::Integer
           nil <: ::Integer
     code: Ruby::IncompatibleAssignment
   - range:

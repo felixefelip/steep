@@ -15,9 +15,43 @@ class LogicTypeInterpreterTest < Minitest::Test
 
   def config: () -> untyped
 
+  # Delegation inlining (felixefelip/steep#32) retypes `source.windowed?` as
+  # `source.window.present?` and mirrors the INLINED call's decls onto the
+  # original node, so `method_decls` names `present?` while `method_name` still
+  # says `windowed?`. The postcondition lookup has to read the name the source
+  # called, or the entry for the method actually written is never found.
+  def test_postcondition_lookup_uses_the_called_name_not_the_inlined_decls: () -> untyped
+
   def test_lvar_assignment: () -> untyped
 
+  # `if @x` has to narrow `@x` the way `if x` narrows a local. Before
+  # felixefelip/steep#146 an `:ivar` condition fell through `evaluate_node`'s
+  # `else` and both branches kept the declared `::String?`, so the one test that
+  # names the ivar taught the checker nothing about it.
+  def test_ivar: () -> untyped
+
+  # A non-nilable ivar has no falsy member, so the falsy branch is unreachable —
+  # the same answer `:lvar` gives, and what makes `else` dead code rather than a
+  # branch typed against a type that cannot occur.
+  def test_ivar_unreachable_falsy_branch: () -> untyped
+
   def test_masgn: () -> untyped
+
+  # `x&.m` answers nil whenever `x` does, so narrowing the chain's VALUE to
+  # something non-nil proves the receiver was not nil — and each link hands the
+  # next one a non-nil type, so a chain reaches its root. The comparison here is
+  # `== "opened"`, which Steep already types `Logic::ReceiverIsArg` and already
+  # partitions to the literal alone; what was missing was `refine_node_type`
+  # having anything to say about a `:csend` node.
+  def test_csend_chain_narrows_its_receiver_when_the_value_is_proven_non_nil: () -> untyped
+
+  # The same chain, but compared against something that is not a literal and with
+  # an `untyped` link in the middle — which is what Rails hands you in practice,
+  # and what the literal path cannot read: `literal_var_type_case_select` switches
+  # on the argument NODE's type and knows `:nil`, `:true`, `:false`, `:int`,
+  # `:str`, `:sym`, so a `:dstr` answers nothing. Nil-ness needs no literal: `a ==
+  # b` dispatches on `a`, and a nil `a` resolves `==` to identity.
+  def test_equality_against_a_non_literal_narrows_through_an_untyped_link: () -> untyped
 
   def test_pure_call: () -> untyped
 

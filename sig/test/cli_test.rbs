@@ -19,6 +19,8 @@ class CLITest < Minitest::Test
 
   def test_check_success: () -> untyped
 
+  def test_check_auto_infers_contracts_and_writes_sidecar: () -> untyped
+
   def test_check_failure: () -> untyped
 
   def test_erb_check_failure: () -> untyped
