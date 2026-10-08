@@ -43,7 +43,7 @@ test_dirs.each do |dir|
     puts "  Succeed! 👍"
   end
 
-  if @verbose
+  if @verbose || !status.success?
     puts "  Raw output:"
     output.split(/\n/).each do |line|
       puts "  > #{line.chomp}"
