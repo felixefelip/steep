@@ -69,6 +69,27 @@ class PostconditionsInferrerTest < Minitest::Test
       def ignores: () ?{ (String) -> untyped } -> untyped
       def fetch: () -> String
     end
+
+    class IUReflection
+      @name: Symbol?
+      @label: String?
+      attr_accessor name: Symbol?
+      attr_writer label: String?
+      attr_reader unwritten: Symbol?
+      def initialize: (Symbol) -> void
+      def reset: () -> nil
+    end
+
+    module IUWrap
+    end
+
+    module IUEx
+    end
+
+    class IUEx::Reflection
+      @name: Symbol?
+      def rename: () -> Symbol
+    end
   RBS
 
   def infer_for(ruby)
@@ -2128,5 +2149,77 @@ class PostconditionsInferrerTest < Minitest::Test
     RUBY
 
     assert_empty(entry&.block_call_establishments || [])
+  end
+
+  def may_write_of(entries)
+    entries.each_with_object({}) do |entry, acc|
+      next if entry.may_write_ivars.empty?
+      acc["#{entry.class_name}#{entry.singleton ? "." : "#"}#{entry.method_name}"] = entry.may_write_ivars
+    end
+  end
+
+  # felixefelip/steep#219: an `attr_writer`/`attr_accessor` has no `def name=`
+  # to walk, so its write is read off the RBS definition — which also covers
+  # the attrs rbs_infer generates.
+  def test_an_attr_writer_writes_its_ivar
+    entries = infer_for(<<~RUBY)
+      class IUReflection
+        attr_accessor :name
+        attr_writer :label
+        attr_reader :unwritten
+        def initialize(name) = @name = name
+      end
+    RUBY
+
+    assert_equal(
+      {
+        "IUReflection#initialize" => Set[:@name],
+        "IUReflection#name=" => Set[:@name],
+        "IUReflection#label=" => Set[:@label]
+      },
+      may_write_of(entries)
+    )
+  end
+
+  # `Ex` from inside `Wrap` is `::IUEx`, not `IUWrap::IUEx`: the owner is the
+  # constant the checker resolved, not the nesting's text.
+  def test_a_scoped_reopen_writes_on_the_class_the_constant_names
+    entries = infer_for(<<~RUBY)
+      module IUWrap
+        class IUEx::Reflection
+          def rename = @name = :x
+        end
+      end
+    RUBY
+
+    assert_equal({ "IUEx::Reflection#rename" => Set[:@name] }, may_write_of(entries))
+  end
+
+  def test_a_define_method_block_is_a_method_of_the_class
+    entries = infer_for(<<~RUBY)
+      class IUReflection
+        define_method(:reset) { @name = nil }
+      end
+    RUBY
+
+    assert_equal Set[:@name], may_write_of(entries)["IUReflection#reset"]
+  end
+
+  def test_a_class_eval_block_defines_on_its_receiver
+    entries = infer_for(<<~RUBY)
+      IUEx::Reflection.class_eval do
+        def rename = @name = :x
+      end
+
+      module IUWrap
+        IUReflection.class_eval do
+          define_method(:reset) { @name = nil }
+        end
+      end
+    RUBY
+
+    writes = may_write_of(entries)
+    assert_equal Set[:@name], writes["IUEx::Reflection#rename"]
+    assert_equal Set[:@name], writes["IUReflection#reset"]
   end
 end

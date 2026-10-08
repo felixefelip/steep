@@ -69,8 +69,7 @@ module Steep
       # fixed; and `may_write` only records ivars the RBS declares, so an
       # undeclared one is not either.
       #
-      # Writes `may_write` does not see yet: felixefelip/steep#219 (an
-      # `attr_writer`, a scoped reopen, `define_method`) and #220 (writes from
+      # Writes `may_write` does not see yet: felixefelip/steep#220 (writes from
       # outside the class).
       def never_rewritten?(constr, instance, ivar)
         postconditions = constr.postconditions

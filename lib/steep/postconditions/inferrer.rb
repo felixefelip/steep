@@ -45,7 +45,8 @@ module Steep
         return [] unless @source.node
 
         results = []
-        walk_classes(@source.node, nesting: []) do |def_node, class_name, singleton|
+        @owners = Set.new #: Set[String]
+        walk_classes(@source.node) do |def_node, class_name, singleton|
           ivars = collect_ivar_refinements(def_node, class_name, singleton: singleton)
           when_true_ivars, when_true_methods = collect_when_true_nonnil_refinements(def_node, class_name, singleton: singleton)
           returns_establishes = @return_establishment_inferrer.establishments(def_node)
@@ -124,7 +125,7 @@ module Steep
             delegates_to_instance: delegates_to_instance
           )
         end
-        results
+        results.concat(attr_writer_entries)
       end
 
       private
@@ -145,63 +146,200 @@ module Steep
       end
 
       # Walks the AST yielding (def_node, class_name, singleton?) for each
-      # method definition found inside a class/module. Skips top-level
+      # method the source defines on a class or module. Skips top-level
       # `def`s (no class to attach a postcondition to).
-      def walk_classes(node, nesting:, &block)
+      #
+      # `scope` is the lexical nesting, one entry per enclosing `class`/`module`;
+      # `owners` is where a `def` lands. They differ inside a `class_eval`
+      # block, which moves the second and not the first. Each is a list of
+      # names rather than one: a constant the checker could not resolve may be
+      # any of the places Ruby would look for it, and a write is recorded on
+      # every one of them (felixefelip/steep#219).
+      def walk_classes(node, scope: [], owners: [], &block)
         return unless node.is_a?(Parser::AST::Node)
 
         case node.type
-        when :class
-          const_node, _super, body = node.children
-          name = extract_const_name(const_node)
-          new_nesting = name ? nesting + [name] : nesting
-          walk_classes(body, nesting: new_nesting, &block) if body
-        when :module
-          const_node, body = node.children
-          name = extract_const_name(const_node)
-          new_nesting = name ? nesting + [name] : nesting
-          walk_classes(body, nesting: new_nesting, &block) if body
+        when :class, :module
+          names = module_names(node.children[0], scope)
+          @owners.merge(names)
+          body = node.children.last
+          walk_classes(body, scope: scope + [names], owners: names, &block) if body
         when :def
-          yield node, nesting.join("::"), false unless nesting.empty?
+          owners.each { |owner| yield node, owner, false }
         when :defs
           receiver, _name, _args, _body = node.children
-          if receiver&.type == :self && !nesting.empty?
+          if receiver&.type == :self
             # Reshape `(:defs (self) name args body)` as `(:def name args body)`
             # so downstream code can read children[0] uniformly.
             shaped = node.updated(:def, node.children.drop(1))
-            yield shaped, nesting.join("::"), true
+            owners.each { |owner| yield shaped, owner, true }
           end
         when :begin, :kwbegin
-          node.children.each { |child| walk_classes(child, nesting: nesting, &block) }
+          node.children.each { |child| walk_classes(child, scope: scope, owners: owners, &block) }
         when :sclass
           # `class << self`: the body's `def x` is a singleton method on
           # the surrounding constant. Recurse with a flag.
           body = node.children[1]
-          walk_singleton_body(body, nesting: nesting, &block) if body
+          walk_singleton_body(body, owners: owners, &block) if body
+        when :block, :numblock, :itblock
+          if (shaped = defined_method(node, :define_method))
+            owners.each { |owner| yield shaped, owner, false }
+          elsif (shaped = defined_method(node, :define_singleton_method))
+            owners.each { |owner| yield shaped, owner, true }
+          elsif (receivers = class_eval_receivers(node, scope, owners))
+            @owners.merge(receivers)
+            walk_classes(node.children[2], scope: scope, owners: receivers, &block)
+          else
+            node.children.each { |child| walk_classes(child, scope: scope, owners: owners, &block) }
+          end
         else
           node.children.each do |child|
-            walk_classes(child, nesting: nesting, &block) if child.is_a?(Parser::AST::Node)
+            walk_classes(child, scope: scope, owners: owners, &block) if child.is_a?(Parser::AST::Node)
           end
         end
       end
 
-      def walk_singleton_body(node, nesting:, &block)
+      def walk_singleton_body(node, owners:, &block)
         return unless node.is_a?(Parser::AST::Node)
         case node.type
         when :def
-          yield node, nesting.join("::"), true unless nesting.empty?
+          owners.each { |owner| yield node, owner, true }
         when :begin, :kwbegin
-          node.children.each { |child| walk_singleton_body(child, nesting: nesting, &block) }
+          node.children.each { |child| walk_singleton_body(child, owners: owners, &block) }
+        when :block, :numblock, :itblock
+          if (shaped = defined_method(node, :define_method))
+            owners.each { |owner| yield shaped, owner, true }
+          end
         end
       end
 
-      def extract_const_name(node)
-        return nil unless node.is_a?(Parser::AST::Node)
-        case node.type
-        when :const
-          parent, name = node.children
-          parent_name = parent ? extract_const_name(parent) : nil
-          parent_name ? "#{parent_name}::#{name}" : name.to_s
+      # `define_method(:reset) { @name = nil }` on self, reshaped as the
+      # `(:def reset args body)` it amounts to. Nil for any other block, and
+      # for a name only known at run time.
+      def defined_method(block_node, definer)
+        send_node, args, body = block_node.children
+        return nil unless send_node.type == :send
+
+        receiver, method_name, *arguments = send_node.children
+        return nil unless method_name == definer && (receiver.nil? || receiver.type == :self)
+        return nil unless arguments.size == 1 && %i[sym str].include?(arguments[0].type)
+
+        args = Parser::AST::Node.new(:args, [], location: block_node.location) unless args.is_a?(Parser::AST::Node)
+        block_node.updated(:def, [arguments[0].children[0].to_sym, args, body])
+      end
+
+      # The class a `X.class_eval do … end` block defines on: `owners` for a
+      # receiverless or `self.` one, the class `X` names for a constant, nil
+      # for anything else (a local holding a class names one only at run time).
+      def class_eval_receivers(block_node, scope, owners)
+        send_node = block_node.children[0]
+        return nil unless send_node.type == :send
+
+        receiver, method_name, *arguments = send_node.children
+        return nil unless %i[class_eval module_eval class_exec module_exec].include?(method_name) && arguments.empty?
+
+        case receiver&.type
+        when nil, :self then owners
+        when :const, :cbase then constant_names(receiver, scope)
+        end
+      end
+
+      # The class or module a `class`/`module` keyword opens. Ruby defines a
+      # bare name in the innermost scope and looks up the first segment of a
+      # path lexically, then at the top level; the checker already did that
+      # lookup, so its answer is taken where it has one.
+      def module_names(const_node, scope)
+        if (name = resolved_module_name(const_node))
+          return [name]
+        end
+
+        path = const_path(const_node) or return []
+        return [path[:name]] if path[:absolute]
+
+        if path[:segments] == 1
+          (scope.last || [""]).map { |outer| join_const(outer, path[:name]) }
+        else
+          lexical_candidates(path[:name], scope)
+        end
+      end
+
+      # A constant used as a value — a `class_eval` receiver — resolves
+      # lexically, then at the top level, whatever its length.
+      def constant_names(const_node, scope)
+        if (name = resolved_module_name(const_node))
+          return [name]
+        end
+
+        path = const_path(const_node) or return []
+        path[:absolute] ? [path[:name]] : lexical_candidates(path[:name], scope)
+      end
+
+      def lexical_candidates(name, scope)
+        candidates = scope.reverse.flat_map { |level| level.map { |outer| join_const(outer, name) } }
+        (candidates + [name]).uniq
+      end
+
+      def join_const(outer, name)
+        outer.empty? ? name : "#{outer}::#{name}"
+      end
+
+      def resolved_module_name(const_node)
+        return nil unless @typing.has_type?(const_node)
+
+        type = @typing.type_of(node: const_node)
+        type.name.to_s.delete_prefix("::") if type.is_a?(AST::Types::Name::Singleton)
+      end
+
+      # `{ name: "A::B", segments: 2, absolute: false }` for `A::B`; nil for a
+      # path with a dynamic part (`foo::Bar`).
+      def const_path(node)
+        segments = [] #: Array[Symbol]
+        absolute = false
+        current = node
+        while current
+          case current.type
+          when :const
+            segments.unshift(current.children[1])
+            current = current.children[0]
+          when :cbase
+            absolute = true
+            current = nil
+          else
+            return nil
+          end
+        end
+        { name: segments.join("::"), segments: segments.size, absolute: absolute }
+      end
+
+      # felixefelip/steep#219: an `attr_writer`/`attr_accessor` writes its ivar
+      # with no `def name=` in the source to walk, so its `may_write` is read
+      # off the RBS definition of every class the source opens — which also
+      # covers the attrs rbs_infer generates for one.
+      def attr_writer_entries
+        @owners.flat_map do |class_name|
+          [false, true].filter_map do |singleton|
+            declared = declared_ivar_types(class_name, singleton: singleton)
+            next if declared.empty?
+
+            definition = definition_of(class_name, singleton: singleton) or next
+            definition.methods.filter_map do |method_name, method|
+              next unless method_name.end_with?("=")
+
+              ivars = method.defs.filter_map do |defn|
+                next unless defn.defined_in == definition.type_name
+
+                member = defn.member
+                next unless member.is_a?(RBS::AST::Members::AttrWriter) || member.is_a?(RBS::AST::Members::AttrAccessor)
+                next if member.ivar_name == false
+
+                ivar = member.ivar_name || :"@#{member.name}"
+                ivar if declared.key?(ivar)
+              end
+              next if ivars.empty?
+
+              InferredEntry.new(class_name: class_name, method_name: method_name, singleton: singleton, may_write_ivars: Set.new(ivars))
+            end
+          end.flatten
         end
       end
 
@@ -1988,17 +2126,20 @@ module Steep
       end
 
       def declared_ivar_types(class_name, singleton:)
-        return {} if class_name.empty?
-        type_name = RBS::TypeName.parse("::#{class_name}").absolute!
-        definition =
-          if singleton
-            @definition_builder.build_singleton(type_name) rescue nil
-          else
-            @definition_builder.build_instance(type_name) rescue nil
-          end
+        definition = definition_of(class_name, singleton: singleton)
         return {} unless definition
         definition.instance_variables.transform_values do |ivar|
           @factory.type(ivar.type)
+        end
+      end
+
+      def definition_of(class_name, singleton:)
+        return nil if class_name.empty?
+        type_name = RBS::TypeName.parse("::#{class_name}").absolute!
+        if singleton
+          @definition_builder.build_singleton(type_name) rescue nil
+        else
+          @definition_builder.build_instance(type_name) rescue nil
         end
       end
 

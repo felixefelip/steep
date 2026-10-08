@@ -43,6 +43,33 @@ class ObjectStateTest < Minitest::Test
       def name: () -> Symbol
       def initialize: (Symbol name) -> void
     end
+    class Renamed
+      @name: Symbol
+      attr_accessor name: Symbol
+      def initialize: (Symbol name) -> void
+    end
+    module Wrap
+    end
+    module Ex
+    end
+    class Ex::Scoped
+      @name: Symbol
+      attr_reader name: Symbol
+      def initialize: (Symbol name) -> void
+      def rename: () -> Symbol
+    end
+    class Defined
+      @name: Symbol?
+      attr_reader name: Symbol?
+      def initialize: (Symbol name) -> void
+      def reset: () -> nil
+    end
+    class Evaled
+      @name: Symbol
+      attr_reader name: Symbol
+      def initialize: (Symbol name) -> void
+      def rename: () -> Symbol
+    end
   RBS
 
   RUBY = <<~RUBY
@@ -83,6 +110,37 @@ class ObjectStateTest < Minitest::Test
         @name = name
       end
     end
+    class Renamed
+      attr_accessor :name
+      def initialize(name)
+        @name = name
+      end
+    end
+    module Wrap
+      class Ex::Scoped
+        attr_reader :name
+        def initialize(name)
+          @name = name
+        end
+        def rename = @name = :x
+      end
+    end
+    class Defined
+      attr_reader :name
+      def initialize(name)
+        @name = name
+      end
+      define_method(:reset) { @name = nil }
+    end
+    class Evaled
+      attr_reader :name
+      def initialize(name)
+        @name = name
+      end
+    end
+    Evaled.class_eval do
+      def rename = @name = :x
+    end
   RUBY
 
   # The sidecar `steep check` writes for RUBY: each `initialize` writes the ivar
@@ -102,14 +160,27 @@ class ObjectStateTest < Minitest::Test
     )
   end
 
+  # The sidecar `sidecar: :inferred` stands for: what the postconditions
+  # inferrer reads off RUBY, rather than rows written down here.
+  def inferred_postconditions(checker)
+    source = parse_ruby(RUBY)
+    entries = nil
+    with_standard_construction(checker, source) do |construction, typing|
+      construction.synthesize(source.node)
+      entries = Steep::Postconditions::Inferrer.infer(source, typing, checker)
+    end
+    Steep::Postconditions::Store.from_hash(YAML.safe_load(Steep::Postconditions::Writer.dump(entries)), source: "test")
+  end
+
   def check(source_text, sidecar: SIDECAR)
     registry = Steep::Project::ConstructorBindingRegistry.new
     registry.ingest_source(RUBY, path_name: "app.rb")
 
     with_checker({ "app.rbs" => RBS }, with_stdlib: true) do |checker|
       source = parse_ruby(source_text)
+      store = sidecar == :inferred ? inferred_postconditions(checker) : postconditions(sidecar)
 
-      with_standard_construction(checker, source, constructor_bindings: registry, postconditions: postconditions(sidecar)) do |construction, typing|
+      with_standard_construction(checker, source, constructor_bindings: registry, postconditions: store) do |construction, typing|
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
@@ -252,6 +323,25 @@ class ObjectStateTest < Minitest::Test
       RUBY
         assert_equal parse_type("::Sub"), pair.context.type_env[:r], writer.join("#")
       end
+    end
+  end
+
+  # felixefelip/steep#219: writes the class makes without a plain `def` — an
+  # `attr_accessor`, a `def` in a reopen named by a scoped constant, a
+  # `define_method` block, a `class_eval` block — mean the ivar is not fixed.
+  def test_writes_without_a_plain_def_do_not_make_a_state
+    check(<<~'RUBY', sidecar: :inferred) do |pair|
+      fixed = Reflection.new(:posts)
+      renamed = Renamed.new(:posts)
+      scoped = Ex::Scoped.new(:posts)
+      defined = Defined.new(:posts)
+      evaled = Evaled.new(:posts)
+    RUBY
+      assert_equal state("::Reflection", :@name => ":posts"), pair.context.type_env[:fixed]
+      assert_equal parse_type("::Renamed"), pair.context.type_env[:renamed]
+      assert_equal parse_type("::Ex::Scoped"), pair.context.type_env[:scoped]
+      assert_equal parse_type("::Defined"), pair.context.type_env[:defined]
+      assert_equal parse_type("::Evaled"), pair.context.type_env[:evaled]
     end
   end
 end
