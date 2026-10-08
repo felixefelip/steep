@@ -8,9 +8,9 @@ module Steep
       #
       # A class type says what an object can do; this also says what it holds.
       # It is only ever built where the holding cannot change — an ivar that
-      # `initialize` binds from an argument and nothing else in the project
-      # writes (`Project::ConstructorBindingRegistry#immutable_ivar_bindings_for`),
-      # set to a value that cannot change either — so a second name for the same
+      # `initialize` binds from an argument (`Project::ConstructorBindingRegistry#ivar_bindings_for`)
+      # and no other method writes (`ObjectStates`, through `may_write`), set to
+      # a value that cannot change either — so a second name for the same
       # object, or a method it is handed to, sees the same value.
       #
       # RBS cannot spell it, and it leaves as the class wherever it is written

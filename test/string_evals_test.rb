@@ -64,6 +64,13 @@ class StringEvalsTest < Minitest::Test
     chunks_of(project).transform_values { |chunks| chunks.map { |chunk| chunk&.source } }
   end
 
+  # The round before: `steep check` writes the postconditions sidecar the
+  # next one reads.
+  def write_postconditions(project)
+    runner = Steep::Postconditions::Runner.new(project)
+    runner.write(runner.run)
+  end
+
   def chunks_of(project)
     runner = Specializations::Runner.new(project)
     runner.run
@@ -546,6 +553,11 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
+      # Until a round has written what no method other than `initialize`
+      # writes, the object is only its class.
+      assert_equal({ "app/base.rb:22:2" => [nil], "app/base.rb:23:2" => [nil] }, evals_of(setup_project))
+
+      write_postconditions(setup_project)
       assert_equal(
         { "app/base.rb:22:2" => ["def posts; end"], "app/base.rb:23:2" => ["def comments; end"] },
         evals_of(setup_project)
@@ -601,6 +613,7 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
+      write_postconditions(setup_project)
       assert_equal(
         { "app/base.rb:24:2" => [nil], "app/base.rb:25:2" => [nil] },
         evals_of(setup_project)

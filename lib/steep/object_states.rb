@@ -19,7 +19,8 @@ module Steep
         instance = call.return_type
         return call unless instance.is_a?(AST::Types::Name::Instance)
 
-        bindings = constr.constructor_bindings.immutable_ivar_bindings_for(instance.name.to_s)
+        bindings = constr.constructor_bindings.ivar_bindings_for(instance.name.to_s)
+        bindings = bindings.select { |ivar, _| never_rewritten?(constr, instance, ivar) }
         return call if bindings.empty?
 
         ivars = bindings.filter_map do |ivar, index|
@@ -62,6 +63,30 @@ module Steep
         !%i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(argument.type)
       end
 
+      # Nothing but the `initialize` that binds `ivar` writes it: no method of
+      # the class or of any ancestor has it in `may_write`. That answer comes
+      # from the postconditions sidecar, so with none loaded yet nothing is
+      # fixed; and `may_write` only records ivars the RBS declares, so an
+      # undeclared one is not either.
+      #
+      # Writes `may_write` does not see yet: felixefelip/steep#219 (an
+      # `attr_writer`, a scoped reopen, `define_method`) and #220 (writes from
+      # outside the class).
+      def never_rewritten?(constr, instance, ivar)
+        postconditions = constr.postconditions
+        return false if postconditions.empty?
+
+        definition = constr.checker.factory.definition_builder.build_instance(instance.name)
+        return false unless definition.instance_variables.key?(ivar)
+
+        definition.ancestors.ancestors.none? do |ancestor|
+          except = ancestor.name == instance.name ? :initialize : nil
+          postconditions.may_write?(ancestor.name.to_s, ivar, except: except)
+        end
+      rescue RBS::BaseError
+        false
+      end
+
       # A value nothing can change afterwards, or one of several. A String
       # literal names a value that can (felixefelip/steep#216), and so does an
       # array.
@@ -81,7 +106,7 @@ module Steep
         class_name = receiver_type.back_type.name.to_s
         index = constr.constructor_bindings.lookup(class_name, method_name) or return nil
 
-        bindings = constr.constructor_bindings.immutable_ivar_bindings_for(class_name)
+        bindings = constr.constructor_bindings.ivar_bindings_for(class_name)
         matching = bindings.select { |_, bound| bound == index }.keys
         matching.first if matching.size == 1
       end

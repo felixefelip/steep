@@ -11,21 +11,36 @@ class ObjectStateTest < Minitest::Test
 
   RBS = <<~RBS
     class Reflection
+      @name: Symbol
       attr_reader name: Symbol
       def initialize: (Symbol name) -> void
       def label: () -> Symbol
     end
     class Pair
+      @left: untyped
       def left: () -> untyped
       def initialize: (*untyped) -> void
     end
     class Box
+      @value: untyped
       attr_reader value: untyped
       def initialize: (untyped value) -> void
     end
     class Made
+      @name: Symbol
       attr_reader name: Symbol
       def self.new: (Symbol name) -> Made
+      def initialize: (Symbol name) -> void
+    end
+    class Base
+      @name: Symbol
+      attr_reader name: Symbol
+    end
+    class Sub < Base
+      def initialize: (Symbol name) -> void
+    end
+    class Undeclared
+      def name: () -> Symbol
       def initialize: (Symbol name) -> void
     end
   RBS
@@ -57,16 +72,44 @@ class ObjectStateTest < Minitest::Test
         @name = name
       end
     end
+    class Sub < Base
+      def initialize(name)
+        @name = name
+      end
+    end
+    class Undeclared
+      def name = @name
+      def initialize(name)
+        @name = name
+      end
+    end
   RUBY
 
-  def check(source_text, project_sources: [RUBY])
+  # The sidecar `steep check` writes for RUBY: each `initialize` writes the ivar
+  # it binds, and nothing else does.
+  SIDECAR = [
+    ["Reflection", "initialize", "@name"],
+    ["Pair", "initialize", "@left"],
+    ["Box", "initialize", "@value"],
+    ["Made", "initialize", "@name"],
+    ["Sub", "initialize", "@name"]
+  ].freeze
+
+  def postconditions(rows)
+    Steep::Postconditions::Store.from_hash(
+      { "postconditions" => rows.map { |klass, method, ivar| { "class" => klass, "method" => method, "effects" => { "may_write" => [ivar] } } } },
+      source: "test"
+    )
+  end
+
+  def check(source_text, sidecar: SIDECAR)
     registry = Steep::Project::ConstructorBindingRegistry.new
-    project_sources.each_with_index { |source, index| registry.ingest_source(source, path_name: "app#{index}.rb") }
+    registry.ingest_source(RUBY, path_name: "app.rb")
 
     with_checker({ "app.rbs" => RBS }, with_stdlib: true) do |checker|
       source = parse_ruby(source_text)
 
-      with_standard_construction(checker, source, constructor_bindings: registry) do |construction, typing|
+      with_standard_construction(checker, source, constructor_bindings: registry, postconditions: postconditions(sidecar)) do |construction, typing|
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
@@ -166,13 +209,49 @@ class ObjectStateTest < Minitest::Test
     end
   end
 
-  def test_an_ivar_written_elsewhere_does_not_make_a_state
-    rename = "class Reflection; def rename(to) = @name = to; end"
-
-    check(<<~'RUBY', project_sources: [RUBY, rename]) do |pair|
+  def test_an_ivar_another_method_writes_does_not_make_a_state
+    check(<<~'RUBY', sidecar: [*SIDECAR, ["Reflection", "rename", "@name"]]) do |pair|
       r = Reflection.new(:posts)
     RUBY
       assert_equal parse_type("::Reflection"), pair.context.type_env[:r]
+    end
+  end
+
+  # Until `steep check` has written a sidecar, nothing says no other method
+  # writes the ivar.
+  def test_no_postconditions_yet
+    check(<<~'RUBY', sidecar: []) do |pair|
+      r = Reflection.new(:posts)
+    RUBY
+      assert_equal parse_type("::Reflection"), pair.context.type_env[:r]
+    end
+  end
+
+  # `may_write` only records ivars the RBS declares.
+  def test_an_undeclared_ivar_does_not_make_a_state
+    check(<<~'RUBY') do |pair|
+      r = Undeclared.new(:posts)
+    RUBY
+      assert_equal parse_type("::Undeclared"), pair.context.type_env[:r]
+    end
+  end
+
+  # A superclass's methods run on the object too.
+  def test_an_ancestor_that_writes_the_ivar
+    check(<<~'RUBY') do |pair|
+      r = Sub.new(:posts)
+    RUBY
+      assert_equal state("::Sub", :@name => ":posts"), pair.context.type_env[:r]
+    end
+
+    # Only the class's own `initialize` is the bind: a superclass's may run
+    # through `super` and write something else.
+    [["Base", "reset", "@name"], ["Base", "initialize", "@name"]].each do |writer|
+      check(<<~'RUBY', sidecar: [*SIDECAR, writer]) do |pair|
+        r = Sub.new(:posts)
+      RUBY
+        assert_equal parse_type("::Sub"), pair.context.type_env[:r], writer.join("#")
+      end
     end
   end
 end
