@@ -43,6 +43,11 @@ class ObjectStateTest < Minitest::Test
       def name: () -> Symbol
       def initialize: (Symbol name) -> void
     end
+    class Renamable
+      @name: Symbol
+      attr_accessor name: Symbol
+      def initialize: (Symbol name) -> void
+    end
   RBS
 
   RUBY = <<~RUBY
@@ -83,6 +88,12 @@ class ObjectStateTest < Minitest::Test
         @name = name
       end
     end
+    class Renamable
+      attr_accessor :name
+      def initialize(name)
+        @name = name
+      end
+    end
   RUBY
 
   # The sidecar `steep check` writes for RUBY: each `initialize` writes the ivar
@@ -102,14 +113,27 @@ class ObjectStateTest < Minitest::Test
     )
   end
 
-  def check(source_text, sidecar: SIDECAR)
+  # The sidecar `steep check` writes for `source_text`: the inferrer's entries,
+  # through the same YAML the Runner writes and the Store reads.
+  def inferred_postconditions(source_text)
+    with_checker({ "app.rbs" => RBS }, with_stdlib: true) do |checker|
+      source = parse_ruby(source_text)
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        entries = Steep::Postconditions::Inferrer.infer(source, typing, checker)
+        return Steep::Postconditions::Store.from_hash(YAML.safe_load(Steep::Postconditions::Writer.dump(entries)), source: "test")
+      end
+    end
+  end
+
+  def check(source_text, sidecar: SIDECAR, postconditions: postconditions(sidecar))
     registry = Steep::Project::ConstructorBindingRegistry.new
     registry.ingest_source(RUBY, path_name: "app.rb")
 
     with_checker({ "app.rbs" => RBS }, with_stdlib: true) do |checker|
       source = parse_ruby(source_text)
 
-      with_standard_construction(checker, source, constructor_bindings: registry, postconditions: postconditions(sidecar)) do |construction, typing|
+      with_standard_construction(checker, source, constructor_bindings: registry, postconditions: postconditions) do |construction, typing|
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
@@ -252,6 +276,23 @@ class ObjectStateTest < Minitest::Test
       RUBY
         assert_equal parse_type("::Sub"), pair.context.type_env[:r], writer.join("#")
       end
+    end
+  end
+
+  # An `attr_accessor` writes the ivar with no `def name=` in the source, so it
+  # is read from the RBS (felixefelip/steep#219).
+  def test_an_attr_writer_writes_the_ivar
+    check(<<~'RUBY', postconditions: inferred_postconditions(RUBY)) do |pair|
+      r = Renamable.new(:posts)
+    RUBY
+      assert_equal parse_type("::Renamable"), pair.context.type_env[:r]
+    end
+
+    # Its `initialize` alone would make it fixed.
+    check(<<~'RUBY', sidecar: [["Renamable", "initialize", "@name"]]) do |pair|
+      r = Renamable.new(:posts)
+    RUBY
+      assert_equal state("::Renamable", :@name => ":posts"), pair.context.type_env[:r]
     end
   end
 end
