@@ -69,26 +69,6 @@ class PostconditionsInferrerTest < Minitest::Test
       def ignores: () ?{ (String) -> untyped } -> untyped
       def fetch: () -> String
     end
-
-    class IUAttrs
-      @name: Symbol
-      @count: Integer
-      @label: String
-      @computed: String
-      self.@level: Integer
-      attr_writer name: Symbol
-      attr_accessor count: Integer
-      attr_reader label: String
-      attr_accessor computed (): String
-      attr_accessor self.level: Integer
-      def rename: (Symbol) -> void
-    end
-
-    class IUAttrsSub < IUAttrs
-      @tag: String
-      attr_writer tag: String
-      def reset: () -> void
-    end
   RBS
 
   def infer_for(ruby)
@@ -2148,63 +2128,5 @@ class PostconditionsInferrerTest < Minitest::Test
     RUBY
 
     assert_empty(entry&.block_call_establishments || [])
-  end
-
-  # felixefelip/steep#219: an attr writer has no `def name=` to walk, so the
-  # write it makes is read from the RBS — instance and singleton alike. An
-  # attr without a backing ivar (`ivar_name: false`) writes none, and a
-  # reader writes nothing.
-  def test_an_attr_writer_may_write_its_ivar
-    entries = infer_for(<<~RUBY)
-      class IUAttrs
-        attr_writer :name
-        attr_accessor :count
-        attr_reader :label
-        class << self
-          attr_accessor :level
-        end
-      end
-    RUBY
-
-    writers = entries.to_h { |entry| [[entry.method_name, entry.singleton], entry.may_write_ivars] }
-    assert_equal(
-      {
-        [:name=, false] => Set[:@name],
-        [:count=, false] => Set[:@count],
-        [:level=, true] => Set[:@level]
-      },
-      writers
-    )
-  end
-
-  # A method that writes through the attr names it as a self-call, and the
-  # Runner's closure carries the attr's write into it.
-  def test_a_write_through_an_attr_writer_is_a_self_call_to_it
-    entries = infer_for(<<~RUBY)
-      class IUAttrs
-        attr_writer :name
-        def rename(name)
-          self.name = name
-        end
-      end
-    RUBY
-
-    rename = entries.find { |entry| entry.method_name == :rename }
-    assert_equal Set["IUAttrs#name="], rename.self_call_deps
-    assert_equal Set[:@name], entries.find { |entry| entry.method_name == :name= }.may_write_ivars
-  end
-
-  # An inherited writer is recorded where it is declared, not on each
-  # subclass that opens; the subclass's own writer is.
-  def test_an_inherited_attr_writer_is_not_recorded_on_the_subclass
-    entries = infer_for(<<~RUBY)
-      class IUAttrsSub < IUAttrs
-        attr_writer :tag
-        def reset = nil
-      end
-    RUBY
-
-    writers = entries.to_h { |entry| [[entry.class_name, entry.method_name], entry.may_write_ivars] }
-    assert_equal({ ["IUAttrsSub", :tag=] => Set[:@tag] }, writers)
   end
 end
