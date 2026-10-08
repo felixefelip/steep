@@ -49,7 +49,6 @@ target :test do
   underscore_casts!
 
   check "test"
-  ignore "test/string_evals"
   signature "sig/test"
 
   configure_code_diagnostics(D::Ruby.lenient)

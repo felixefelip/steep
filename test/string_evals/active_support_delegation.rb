@@ -1,3 +1,4 @@
+# rbs_inline: disabled
 # ActiveSupport 8.0.4: `Module#delegate`, `Module#delegate_missing_to`
 # (`core_ext/module/delegation.rb`) and `ActiveSupport::Delegation`
 # (`delegation.rb`), verbatim, as rbs_infer transcribes them

@@ -437,20 +437,12 @@ namespace :gem do
   end
 end
 namespace :rbs do
-  # Ruby the tests read as data, not test code. A signature generated from it
-  # declares what the fixture declares (`ActiveSupport::Delegation`,
-  # `Module#delegate`) for every project that loads this gem's `sig/`.
-  rbs_inline_fixtures = "test/string_evals/"
-
   task :watch do
     require "listen"
     listener = Listen.to('test') do |modified, added, removed|
       paths = (modified + added).map do
         Pathname(_1).relative_path_from(Pathname.pwd)
       end
-      paths.reject! { _1.to_s.start_with?(rbs_inline_fixtures) }
-      next if paths.empty?
-
       Bundler.with_unbundled_env do
         sh "bin/rbs-inline", "--opt-out", "--output=sig", *paths.map(&:to_s)
       end
@@ -465,8 +457,7 @@ namespace :rbs do
 
   task :generate do
     Bundler.with_unbundled_env do
-      tests = Dir["test/**/*.rb"].reject { _1.start_with?(rbs_inline_fixtures) }
-      sh "bin/rbs-inline", "--opt-out", "--output=sig", *tests
+      sh "bin/rbs-inline --opt-out --output=sig test"
       sh "bin/rbs-inline --opt-out --output=tmp/rbs-inline bin/generate-diagnostics-docs.rb"
     end
   end
