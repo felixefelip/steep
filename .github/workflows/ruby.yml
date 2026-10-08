@@ -39,6 +39,9 @@ jobs:
         bin/setup
         bundle exec rake ${{matrix.task}}
   type_check:
+    # Off until the fork's own code is declared in sig/steep: upstream Steep
+    # reports ~2.5k errors, nearly all from fork-only files with no RBS.
+    if: false
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7

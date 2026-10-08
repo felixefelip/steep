@@ -29,7 +29,6 @@ target :app do
   library "objspace"
 
   implicitly_returns_nil!
-  underscore_casts!
 
   configure_code_diagnostics(D::Ruby.strict) do |hash|
   end
@@ -46,7 +45,6 @@ target :test do
 
   unreferenced!
   implicitly_returns_nil!
-  underscore_casts!
 
   check "test"
   signature "sig/test"
@@ -61,7 +59,6 @@ end
 target :bin do
   unreferenced!
   implicitly_returns_nil!
-  underscore_casts!
 
   collection_config "rbs_collection.steep.yaml"
 
