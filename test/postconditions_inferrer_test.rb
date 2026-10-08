@@ -85,6 +85,8 @@ class PostconditionsInferrerTest < Minitest::Test
     end
 
     class IUAttrsSub < IUAttrs
+      @tag: String
+      attr_writer tag: String
       def reset: () -> void
     end
   RBS
@@ -2193,14 +2195,16 @@ class PostconditionsInferrerTest < Minitest::Test
   end
 
   # An inherited writer is recorded where it is declared, not on each
-  # subclass that opens.
+  # subclass that opens; the subclass's own writer is.
   def test_an_inherited_attr_writer_is_not_recorded_on_the_subclass
     entries = infer_for(<<~RUBY)
       class IUAttrsSub < IUAttrs
+        attr_writer :tag
         def reset = nil
       end
     RUBY
 
-    assert_empty entries
+    writers = entries.to_h { |entry| [[entry.class_name, entry.method_name], entry.may_write_ivars] }
+    assert_equal({ ["IUAttrsSub", :tag=] => Set[:@tag] }, writers)
   end
 end
