@@ -1,4 +1,4 @@
-require_relative "test_helper"
+require_relative "../test_helper"
 
 # End-to-end application of the return-value establishment postcondition
 # (felixefelip/steep#56): at `x = build`, when `build` declares

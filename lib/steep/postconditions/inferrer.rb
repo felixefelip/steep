@@ -124,6 +124,7 @@ module Steep
             delegates_to_instance: delegates_to_instance
           )
         end
+        results.concat(AttrWriterInferrer.new(@definition_builder).entries(@source.node))
         results
       end
 

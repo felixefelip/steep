@@ -1,4 +1,4 @@
-# Generated from test/postconditions_marker_naming_test.rb with RBS::Inline
+# Generated from test/postconditions/marker_naming_test.rb with RBS::Inline
 
 # Unit tests for the `Postconditions::MarkerNaming` convention. Both
 # Steep's `Postconditions::Inferrer` and rbs_infer's marker-class
