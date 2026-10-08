@@ -688,6 +688,9 @@ module Steep
           names.each { |name| writes.delete(name) if disturbs_param?(before, name) }
           next unless write
 
+          # Two parameters may be one object (`two(box, box)`), so a write
+          # through one is the last word on that reader for all of them.
+          writes.each_value { |attrs| attrs.delete(write.fetch(:attr)) }
           (writes[write.fetch(:param)] ||= {})[write.fetch(:attr)] = write.fetch(:node)
         end
 
@@ -704,13 +707,19 @@ module Steep
 
       # The positional parameters before the first splat, whose index at the
       # definition is their index at every call site that reaches them.
+      # Ruby fills required parameters first, so an optional one followed by
+      # a required one (`def f(a = 1, b)`) shifts with the argument count:
+      # the list stops at the first optional parameter in that case.
       def leading_positional_param_names(def_node)
         args = def_node.children[1]
         return [] unless args.is_a?(Parser::AST::Node)
 
-        args.children
-          .take_while { |arg| arg.is_a?(Parser::AST::Node) && [:arg, :optarg].include?(arg.type) }
-          .map { |arg| arg.children[0] }
+        leading = args.children.take_while { |arg| arg.is_a?(Parser::AST::Node) && [:arg, :optarg].include?(arg.type) }
+        first_optional = leading.index { |arg| arg.type == :optarg }
+        if first_optional && leading.drop(first_optional).any? { |arg| arg.type == :arg }
+          leading = leading.take(first_optional)
+        end
+        leading.map { |arg| arg.children[0] }
       end
 
       # `param.attr = value` written as a statement of its own.

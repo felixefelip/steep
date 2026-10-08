@@ -20,13 +20,23 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
 
     class PEPublisher
       def publish: (PEBox box) -> void
-      def self.publish: (PEBox box) -> void
       def log: (PEBox box) -> void
       def publish_last: (*PEBox others, PEBox box) -> void
       def publish_first: (PEBox box, *PEBox others) -> void
+      def publish_both: (PEBox first, PEBox second) -> void
+      def publish_after_default: (?PEBox fallback, PEBox box) -> void
       def ready?: () -> bool
       def maybe: () -> PEPublisher?
       def run: () -> untyped
+    end
+
+    class PEStamper
+      def self.publish: (PEBox box) -> void
+    end
+
+    class PEBothSides
+      def publish: (PEBox box) -> void
+      def self.publish: (PEBox box) -> void
     end
   RBS
 
@@ -61,7 +71,7 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
 
   def test_infers_it_for_a_singleton_method
     entries = infer_for(<<~RUBY)
-      class PEPublisher
+      class PEStamper
         def self.publish(box)
           box.value = :published
         end
@@ -179,6 +189,33 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
     assert_equal({ 0 => { value: ":published" } }, establishments_of(entries, :publish_first))
   end
 
+  def test_a_later_write_through_another_parameter_takes_the_reader
+    entries = infer_for(<<~RUBY)
+      class PEPublisher
+        def publish_both(first, second)
+          first.value = :published
+          second.value = :draft
+        end
+      end
+    RUBY
+
+    # `publish_both(box, box)` leaves `:draft`: only the last write survives.
+    assert_equal({ 1 => { value: ":draft" } }, establishments_of(entries, :publish_both))
+  end
+
+  def test_an_optional_parameter_before_a_required_one_ends_the_positions
+    entries = infer_for(<<~RUBY)
+      class PEPublisher
+        def publish_after_default(fallback = PEBox.new(:draft), box)
+          fallback.value = :published
+        end
+      end
+    RUBY
+
+    # `publish_after_default(box)` binds `box`, not `fallback`, to position 0.
+    assert_empty establishments_of(entries, :publish_after_default)
+  end
+
   def test_a_value_as_wide_as_the_reader_establishes_nothing
     entries = infer_for(<<~RUBY)
       class PEPublisher
@@ -204,12 +241,12 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
     assert_equal ":published", branch.param_establishes_rbs_types.dig(0, :value).to_s
   end
 
-  def publish_postcondition(type: ":published", attr: "value")
+  def publish_postcondition(type: ":published", attr: "value", klass: "PEPublisher")
     Postconditions::Store.from_hash(
       {
         "version" => 1,
         "postconditions" => [
-          { "class" => "PEPublisher", "method" => "publish", "unconditional" => { "params" => { 0 => { attr => type } } } }
+          { "class" => klass, "method" => "publish", "unconditional" => { "params" => { 0 => { attr => type } } } }
         ]
       },
       source: "<test>"
@@ -243,11 +280,41 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
   end
 
   def test_a_singleton_call_site_reads_it_too
-    type = value_type_after(<<~RUBY, postconditions: publish_postcondition)
+    type = value_type_after(<<~RUBY, postconditions: publish_postcondition(klass: "PEStamper"))
       # @type self: ::PEPublisher
       def run
         box = PEBox.new(:draft)
-        PEPublisher.publish(box)
+        PEStamper.publish(box)
+        box.value
+      end
+    RUBY
+
+    assert_equal ":published", type.to_s
+  end
+
+  def test_a_name_on_both_sides_establishes_nothing
+    # The entry cannot say whether `publish` or `self.publish` wrote it.
+    [["publish(box)", "instance"], ["PEBothSides.publish(box)", "singleton"]].each do |call, side|
+      type = value_type_after(<<~RUBY, postconditions: publish_postcondition(klass: "PEBothSides"))
+        # @type self: ::PEBothSides
+        def run
+          box = PEBox.new(:draft)
+          #{call}
+          box.value
+        end
+      RUBY
+
+      assert_equal "(:draft | :published)", type.to_s, side
+    end
+  end
+
+  def test_the_call_replaces_a_narrowing_made_before_it
+    type = value_type_after(<<~RUBY, postconditions: publish_postcondition(klass: "PEStamper"))
+      # @type self: ::PEPublisher
+      def run
+        box = PEBox.new(:draft)
+        box.value = :draft
+        PEStamper.publish(box)
         box.value
       end
     RUBY

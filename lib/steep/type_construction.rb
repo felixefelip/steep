@@ -8512,15 +8512,31 @@ module Steep
     # The entry declaring `unconditional.params` for the method `call`
     # resolved to, instance or singleton, the way `ReturnEstablishmentApplier`
     # finds a `returns` one.
+    #
+    # Entries are keyed by class and method name alone, so when the class
+    # defines both `publish` and `self.publish` an entry may belong to the
+    # other one: such a name establishes nothing.
     def lookup_param_establishments_entry(call)
       call.method_decls.each do |decl|
         name = decl.method_name
         next unless name.is_a?(InstanceMethodName) || name.is_a?(SingletonMethodName)
+        next if defined_on_both_sides?(name.type_name, name.method_name)
 
         entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
         return entry if entry&.unconditional && !entry.unconditional.param_establishes_type_strings.empty?
       end
       nil
+    end
+
+    # Whether `type_name` itself implements `method_name` both as an instance
+    # method and as a singleton method.
+    def defined_on_both_sides?(type_name, method_name)
+      builder = checker.factory.definition_builder
+      [builder.build_instance(type_name), builder.build_singleton(type_name)].all? do |definition|
+        definition.methods[method_name]&.defs&.any? { |defn| defn.implemented_in == type_name }
+      end
+    rescue RBS::BaseError
+      true
     end
 
     # Caches `receiver.attr` as a pure read of type `type`, when the read
@@ -8549,7 +8565,10 @@ module Steep
         return nil
       end
       return nil unless getter_call
-      return nil if fits_reader && !check_relation(sub_type: type, super_type: getter_call.return_type).success?
+      # Against what the reader declares, not `return_type`: a read narrowed
+      # earlier in this frame returns the narrowed type, and the value a call
+      # leaves behind replaces that narrowing rather than refining it.
+      return nil if fits_reader && !check_relation(sub_type: type, super_type: getter_call.actual_method_type.type.return_type).success?
 
       update_type_env do |env|
         env.add_pure_call(read_node, getter_call, type)
