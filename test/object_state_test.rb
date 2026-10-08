@@ -17,11 +17,16 @@ class ObjectStateTest < Minitest::Test
     end
     class Pair
       def left: () -> untyped
-      def initialize: (untyped left) -> void
+      def initialize: (*untyped) -> void
     end
     class Box
       attr_reader value: untyped
       def initialize: (untyped value) -> void
+    end
+    class Made
+      attr_reader name: Symbol
+      def self.new: (Symbol name) -> Made
+      def initialize: (Symbol name) -> void
     end
   RBS
 
@@ -43,6 +48,13 @@ class ObjectStateTest < Minitest::Test
       attr_reader :value
       def initialize(value)
         @value = value
+      end
+    end
+    class Made
+      attr_reader :name
+      def self.new(name) = super(:other)
+      def initialize(name)
+        @name = name
       end
     end
   RUBY
@@ -127,6 +139,30 @@ class ObjectStateTest < Minitest::Test
       assert_equal parse_type("::Box"), pair.context.type_env[:a]
       assert_equal parse_type("::Box"), pair.context.type_env[:b]
       assert_equal parse_type("::Reflection"), pair.context.type_env[:c]
+    end
+  end
+
+  def test_one_of_several_fixed_values
+    check(<<~'RUBY') do |pair|
+      # @type var flag: bool
+      flag = _ = true
+      r = Reflection.new(flag ? :posts : :comments)
+    RUBY
+      assert_equal state("::Reflection", :@name => ":posts | :comments"), pair.context.type_env[:r]
+    end
+  end
+
+  # A `def self.new` answers whatever it likes, and a splat moves what lands
+  # where.
+  def test_a_new_that_is_not_initialize_or_a_splat
+    check(<<~'RUBY') do |pair|
+      made = Made.new(:posts)
+      # @type var names: Array[Symbol]
+      names = [:posts]
+      splat = Pair.new(*names)
+    RUBY
+      assert_equal parse_type("::Made"), pair.context.type_env[:made]
+      assert_equal parse_type("::Pair"), pair.context.type_env[:splat]
     end
   end
 

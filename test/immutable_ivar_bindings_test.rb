@@ -185,6 +185,159 @@ class ImmutableIvarBindingsTest < Minitest::Test
     assert_equal({}, bindings)
   end
 
+  # The slot in the parameter list is the argument's position at the call only
+  # up to the first parameter whose position depends on how many are passed.
+  def test_a_parameter_whose_position_depends_on_the_call
+    bindings = registry(<<~RUBY).immutable_ivar_bindings_for("P")
+      class P
+        def initialize(a, b = 1, c)
+          @a = a
+          @b = b
+          @c = c
+        end
+      end
+    RUBY
+    assert_equal({ :@a => 0 }, bindings)
+
+    bindings = registry(<<~RUBY).immutable_ivar_bindings_for("S")
+      class S
+        def initialize(a, *rest, d)
+          @a = a
+          @d = d
+        end
+      end
+    RUBY
+    assert_equal({ :@a => 0 }, bindings)
+
+    bindings = registry(<<~RUBY).immutable_ivar_bindings_for("Q")
+      class Q
+        def initialize(a, b = 1, *rest)
+          @a = a
+          @b = b
+        end
+      end
+    RUBY
+    assert_equal({ :@a => 0, :@b => 1 }, bindings)
+  end
+
+  def test_a_parameter_reassigned_before_the_bind
+    %w[name\ =\ :other name\ ||=\ :other name\ +=\ 1 name,\ x\ =\ :a,\ :b].each do |reassign|
+      bindings = registry(<<~RUBY).immutable_ivar_bindings_for("R")
+        class R
+          def initialize(name)
+            #{reassign}
+            @name = name
+          end
+        end
+      RUBY
+
+      assert_equal({}, bindings, reassign)
+    end
+  end
+
+  # `return` before the bind leaves the ivar nil.
+  def test_an_initialize_that_may_return_before_the_bind
+    bindings = registry(<<~RUBY).immutable_ivar_bindings_for("R")
+      class R
+        def initialize(name, skip)
+          return if skip
+          @name = name
+        end
+      end
+    RUBY
+
+    assert_equal({}, bindings)
+  end
+
+  def test_written_on_another_object_inside_initialize
+    [
+      "other.instance_variable_set(:@name, :x)",
+      "other.instance_eval { @name = :x }",
+      "other.extend(Renames)"
+    ].each do |writer|
+      bindings = registry(<<~RUBY).immutable_ivar_bindings_for("R")
+        module Renames
+          def rename(to) = @name = to
+        end
+        class R
+          def initialize(name, other)
+            @name = name
+            #{writer}
+          end
+        end
+      RUBY
+
+      assert_equal({}, bindings, writer)
+    end
+  end
+
+  def test_written_through_a_safe_navigation_call
+    bindings = registry(REFLECTION, "def poke(r) = r&.instance_variable_set(:@name, :x)")
+                 .immutable_ivar_bindings_for("Example83::Reflection")
+
+    assert_equal({}, bindings)
+  end
+
+  # A singleton method of one object writes that object's ivars.
+  def test_written_by_a_singleton_method_of_an_object
+    [
+      "class Hack\n  def go(r)\n    class << r\n      def rename = @name = :x\n    end\n  end\nend",
+      "class Example83::Reflection\n  def go\n    class << self\n      def rename = @name = :x\n    end\n  end\nend",
+      "class Example83::Reflection\n  def go\n    def self.rename = @name = :x\n  end\nend",
+      "class Hack\n  def go(r) = r.define_singleton_method(:rename) { @name = :x }\nend"
+    ].each do |writer|
+      bindings = registry(REFLECTION, writer).immutable_ivar_bindings_for("Example83::Reflection")
+
+      assert_equal({}, bindings, writer)
+    end
+  end
+
+  # A block that runs as a class body or a method of some class this cannot
+  # name writes on instances of that class.
+  def test_written_in_a_block_on_a_receiver_this_cannot_name
+    [
+      "class Builder\n  def go(r) = r.class.class_eval { def rename(to) = @name = to }\nend",
+      "class Other\n  Example83::Reflection.define_method(:reset) { @name = nil }\nend",
+      "class Other\n  def go(klass) = klass.define_method(:reset) { @name = nil }\nend",
+      "class Other\n  M = Module.new { def reset = @name = nil }\nend"
+    ].each do |writer|
+      bindings = registry(REFLECTION, writer).immutable_ivar_bindings_for("Example83::Reflection")
+
+      assert_equal({}, bindings, writer)
+    end
+  end
+
+  # `singleton_class.include(M)` gives one object M's methods, as `extend` does.
+  def test_a_singleton_class_that_includes_a_module
+    [
+      "def adopt(r) = r.singleton_class.include(Renames)",
+      "def adopt(r) = r.singleton_class.prepend(Renames)",
+      "def adopt(r)\n  class << r\n    include Renames\n  end\nend"
+    ].each do |extender|
+      writer = "module Renames\n  def rename(to) = @name = to\nend\n#{extender}"
+
+      assert_equal({}, registry(REFLECTION, writer).immutable_ivar_bindings_for("Example83::Reflection"), extender)
+    end
+  end
+
+  # `class Ex::Reflection` inside `module Wrap` reopens whichever `Ex` resolves
+  # to from there: `Wrap::Ex` or `::Ex`.
+  def test_a_scoped_reopen_inside_a_module
+    reflection = "module Ex\n  class Reflection\n    def initialize(name) = @name = name\n  end\nend"
+    writer = "module Wrap\n  class Ex::Reflection\n    def rename = @name = :x\n  end\nend"
+
+    assert_equal({}, registry(reflection, writer).immutable_ivar_bindings_for("Ex::Reflection"))
+  end
+
+  # Which class an `initialize` belongs to must be certain for its bindings to
+  # count.
+  def test_an_initialize_in_a_reopen_that_may_name_two_classes
+    bindings = registry("module Wrap\n  class Ex::Reflection\n    def initialize(name) = @name = name\n  end\nend")
+
+    assert_equal({}, bindings.immutable_ivar_bindings_for("Ex::Reflection"))
+    assert_equal({}, bindings.immutable_ivar_bindings_for("Wrap::Ex::Reflection"))
+  end
+
   # A class ivar is not an instance's.
   def test_writes_on_the_class_itself_do_not_count
     bindings = registry(REFLECTION, <<~RUBY).immutable_ivar_bindings_for("Example83::Reflection")

@@ -62,12 +62,14 @@ module Steep
         !%i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(argument.type)
       end
 
-      # A value nothing can change afterwards. A String literal names a value
-      # that can (felixefelip/steep#216), and so does an array.
+      # A value nothing can change afterwards, or one of several. A String
+      # literal names a value that can (felixefelip/steep#216), and so does an
+      # array.
       def fixed?(type)
         case type
         when AST::Types::Literal then !type.value.is_a?(::String)
         when AST::Types::Nil, AST::Types::ObjectState then true
+        when AST::Types::Union then type.types.all? { |member| fixed?(member) }
         else false
         end
       end

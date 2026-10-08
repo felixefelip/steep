@@ -41,7 +41,12 @@ module Steep
 
       IVAR_WRITES = %i[ivasgn].freeze
       EVAL_BLOCKS = %i[class_eval class_exec module_eval module_exec].freeze
-      INSTANCE_EVAL_BLOCKS = %i[instance_eval instance_exec].freeze
+      # Blocks that run as the receiver's class body, or as one of its methods.
+      CLASS_BODY_BLOCKS = [*EVAL_BLOCKS, :define_method].freeze
+      # Blocks that run on the receiver itself.
+      OBJECT_BODY_BLOCKS = %i[instance_eval instance_exec define_singleton_method].freeze
+      ANONYMOUS_MODULES = %w[Class Module].freeze
+      MIXIN_METHODS = %i[include prepend extend].freeze
       IVAR_SETTERS = %i[instance_variable_set remove_instance_variable].freeze
       SEND_METHODS = %i[send public_send __send__].freeze
       # Classes every object is an instance of: a method written on one of them
@@ -59,6 +64,7 @@ module Steep
         @modules = Set[] #: Set[String]
         @module_writes = Set[] #: Set[Symbol]
         @extends_objects = false
+        @ambiguous = false
       end
 
       def analyze(node)
@@ -80,42 +86,56 @@ module Steep
         case node.type
         when :class
           const_node, superclass, body = node.children
-          name = qualified(const_node, nesting) or return walk_children(node, nesting: nesting, owner: nil, side: :top)
-          facts = facts_for(name)
-          facts.superclass = true if superclass
-          walk(body, nesting: name.split("::"), owner: name, side: :class) if body
+          names = defined_names(const_node, nesting)
+          return walk_children(node, nesting: nesting, owner: nil, side: :top) if names.empty?
+
+          names.each { |name| facts_for(name).superclass = true } if superclass
+          walk(superclass, nesting: nesting, owner: owner, side: side) if superclass
+          walk_reopen(body, names, side: :class) if body
         when :module
           const_node, body = node.children
-          name = qualified(const_node, nesting)
-          @modules << name if name
+          names = defined_names(const_node, nesting)
+          @modules.merge(names)
           # A module's instance methods run on whatever includes it, which this
           # does not follow: its writes are recorded under its own name, and the
           # class that mixes it in is marked by `mixins`.
-          walk(body, nesting: name ? name.split("::") : nesting, owner: name, side: :class) if body
+          if names.empty?
+            walk(body, nesting: nesting, owner: nil, side: :class) if body
+          elsif body
+            walk_reopen(body, names, side: :class)
+          end
         when :sclass
-          # `class << self` and `class << obj`: singleton methods, whose ivars are
-          # the class's or that object's own, not an instance's.
-          walk(node.children[1], nesting: nesting, owner: owner, side: :singleton) if node.children[1]
+          target, body = node.children
+          walk(target, nesting: nesting, owner: owner, side: side)
+          if target.type == :self && %i[class singleton].include?(side)
+            # `class << self` in a class body: the class's own methods, whose
+            # ivars are the class's, not an instance's.
+            walk(body, nesting: nesting, owner: owner, side: :singleton) if body
+          else
+            # `class << obj`, or `class << self` where self is an instance: the
+            # methods of one object this cannot name, which write its ivars.
+            walk_unknown_instance(body, nesting: nesting) if body
+          end
         when :def
           name, args, body = node.children
           if side == :class && name == :initialize && owner
-            record_initialize(owner, args, body)
+            record_initialize(owner, args, body, nesting: nesting)
           elsif body
             walk(body, nesting: nesting, owner: owner, side: side == :singleton ? :singleton : :instance)
           end
         when :defs
           receiver, _name, _args, body = node.children
-          if receiver.type == :self
+          walk(receiver, nesting: nesting, owner: owner, side: side)
+          if receiver.type == :self && side != :instance
             walk(body, nesting: nesting, owner: owner, side: :singleton) if body
           else
-            # `def obj.x`: a method on one object this cannot name, which writes
-            # that object's ivars.
-            each_ivar_write(body) { |name| @tainted << name }
-            walk(body, nesting: nesting, owner: nil, side: :top) if body
+            # `def obj.x`, or `def self.x` inside an instance method: a method
+            # on one object this cannot name, which writes that object's ivars.
+            walk_unknown_instance(body, nesting: nesting) if body
           end
         when :block, :numblock, :itblock
           walk_block(node, nesting: nesting, owner: owner, side: side)
-        when :send
+        when :send, :csend
           walk_send(node, nesting: nesting, owner: owner, side: side)
         when *IVAR_WRITES
           record_write(owner, side, node.children[0])
@@ -138,14 +158,36 @@ module Steep
         walk(send_node, nesting: nesting, owner: owner, side: side)
         return unless body
 
-        if EVAL_BLOCKS.include?(method_name) && receiver && !(named = candidates(receiver, nesting)).empty?
+        if CLASS_BODY_BLOCKS.include?(method_name)
           # `Reflection.class_eval { … }` is a reopen written as a block, and is
-          # read as one — under every class the constant may name.
-          named.each { |name| walk(body, nesting: name.split("::"), owner: name, side: :class) }
-        elsif INSTANCE_EVAL_BLOCKS.include?(method_name)
-          # Runs on whatever the receiver is, which may be one of ours.
-          each_ivar_write(body) { |name| @tainted << name }
-          walk(body, nesting: nesting, owner: nil, side: :top)
+          # read as one — under every class the constant may name. A
+          # `define_method` block is a method of that class.
+          block_side = EVAL_BLOCKS.include?(method_name) ? :class : :instance
+          if receiver.nil? || receiver.type == :self
+            if side == :class && owner
+              walk(body, nesting: nesting, owner: owner, side: block_side)
+            else
+              walk_unknown_instance(body, nesting: nesting)
+            end
+          elsif !(named = candidates(receiver, nesting)).empty?
+            walk_reopen(body, named, side: block_side)
+          else
+            # `r.class.class_eval`, `klass.define_method`: a class this cannot
+            # name.
+            walk_unknown_instance(body, nesting: nesting)
+          end
+        elsif OBJECT_BODY_BLOCKS.include?(method_name)
+          if (receiver.nil? || receiver.type == :self) && side == :class
+            # The class itself: its own ivars, not an instance's.
+            walk(body, nesting: nesting, owner: owner, side: :singleton)
+          else
+            # Runs on whatever the receiver is, which may be one of ours.
+            walk_unknown_instance(body, nesting: nesting)
+          end
+        elsif method_name == :new && receiver && ANONYMOUS_MODULES.include?(const_name(receiver))
+          # `Module.new { def x = @y = 1 }`: methods of a module or class with
+          # no name this can follow.
+          walk_unknown_instance(body, nesting: nesting)
         else
           # A block in a class body may run on an instance — `define_method`,
           # a callback, an `included do` — and one inside a method runs where
@@ -173,6 +215,18 @@ module Steep
           when :include, :prepend
             facts_for(owner).mixins = true
           end
+        elsif side == :instance && receiver.nil? && owner.nil?
+          # The body of a class or object this cannot name, which may be one of
+          # ours.
+          case method_name
+          when :attr_writer, :attr_accessor
+            arguments.each { |argument| (name = literal_name(argument)) && @tainted << :"@#{name}" }
+          when *MIXIN_METHODS
+            @extends_objects = true
+          end
+        elsif %i[include prepend].include?(method_name) && singleton_class_of_an_object?(receiver)
+          # `obj.singleton_class.include(M)` is `obj.extend(M)`.
+          @extends_objects = true
         elsif %i[include prepend].include?(method_name) && receiver && !(named = candidates(receiver, nesting)).empty?
           named.each { |name| facts_for(name).mixins = true }
         elsif method_name == :extend && extends_an_object?(receiver, nesting, side)
@@ -184,21 +238,33 @@ module Steep
         walk_children(node, nesting: nesting, owner: owner, side: side)
       end
 
-      def record_initialize(owner, args, body)
+      def record_initialize(owner, args, body, nesting:)
         facts = facts_for(owner)
         facts.initializers += 1
-        facts.bindings = initialize_bindings(args, body)
+        # An `initialize` in a reopen that may be either of two classes binds
+        # neither: which class it builds is not known.
+        facts.bindings = @ambiguous ? {} : initialize_bindings(args, body)
+
+        # Everything but the binds runs on the instance like any other method,
+        # and may write elsewhere too.
+        each_statement(body) do |statement|
+          next if statement.type == :ivasgn && facts.bindings.key?(statement.children[0])
+
+          walk(statement, nesting: nesting, owner: owner, side: :instance)
+        end
       end
 
       # `@x = param` statements at the top of `initialize`, by ivar, for a plain
-      # positional `param`. An ivar `initialize` writes in any other way, or more
-      # than once, is not bound to an argument: its value at exit depends on the
-      # flow, which this does not read.
+      # positional `param` the body never reassigns. An ivar `initialize` writes
+      # in any other way, or more than once, is not bound to an argument: its
+      # value at exit depends on the flow, which this does not read. Nor is one
+      # in an `initialize` that may `return` before reaching it.
       def initialize_bindings(args, body)
-        positions = {} #: Hash[Symbol, Integer]
-        args&.children&.each_with_index do |arg, index|
-          positions[arg.children[0]] = index if arg.is_a?(::Parser::AST::Node) && %i[arg optarg].include?(arg.type)
-        end
+        return {} if contains?(body, :return)
+
+        reassigned = Set[] #: Set[Symbol]
+        each_node(body) { |node| reassigned << node.children[0] if node.type == :lvasgn }
+        positions = call_positions(args).reject { |name, _| reassigned.include?(name) }
 
         writes = Hash.new(0) #: Hash[Symbol, Integer]
         each_ivar_write(body) { |name| writes[name] += 1 }
@@ -214,6 +280,27 @@ module Steep
           bindings[name] = index if index
         end
         bindings
+      end
+
+      # The parameters whose slot in the list is the argument's position at
+      # every call: a required one with no optional before it, an optional one
+      # with no required after it, and nothing past a rest.
+      #
+      #   def initialize(a, b = 1, c)   # only `a`: `P.new(:x, :y)` puts :y in `c`
+      def call_positions(args)
+        params = args ? args.children.grep(::Parser::AST::Node) : []
+        positions = {} #: Hash[Symbol, Integer]
+        params.each_with_index do |param, index|
+          break if param.type == :restarg
+
+          stable =
+            case param.type
+            when :arg then params.take(index).none? { |other| other.type == :optarg }
+            when :optarg then params.drop(index + 1).none? { |other| %i[arg mlhs].include?(other.type) }
+            end
+          positions[param.children[0]] = index if stable
+        end
+        positions
       end
 
       # `base.extend(M)` in an `included` hook, `extend M` inside an instance
@@ -238,6 +325,40 @@ module Steep
         else
           facts_for(owner).written << name
         end
+      end
+
+      # `class_eval`, `class << obj`, `def obj.x`: a body that runs on an
+      # instance of a class this cannot name, which may be one of ours.
+      # Everything it writes is written everywhere.
+      def walk_unknown_instance(body, nesting:)
+        walk(body, nesting: nesting, owner: nil, side: :instance)
+      end
+
+      # A class body under every name its constant may have. Where there is
+      # more than one, an `initialize` in it binds nothing.
+      def walk_reopen(body, names, side:)
+        ambiguous = @ambiguous
+        @ambiguous ||= names.size > 1
+        names.each { |name| walk(body, nesting: name.split("::"), owner: name, side: side) }
+      ensure
+        @ambiguous = ambiguous
+      end
+
+      def singleton_class_of_an_object?(receiver)
+        receiver.is_a?(::Parser::AST::Node) && %i[send csend].include?(receiver.type) &&
+          receiver.children[1] == :singleton_class
+      end
+
+      def contains?(node, type)
+        each_node(node) { |child| return true if child.type == type }
+        false
+      end
+
+      def each_node(node, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        yield node
+        node.children.each { |child| each_node(child, &block) }
       end
 
       def each_ivar_write(node, &block)
@@ -285,6 +406,18 @@ module Steep
         return [name] if const_node.children[0]&.type == :cbase
 
         nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+      end
+
+      # The classes `class Foo` defines or reopens. Unscoped, the one in the
+      # current nesting; `class Ex::Foo` names `Foo` in whichever `Ex` resolves
+      # from here.
+      def defined_names(const_node, nesting)
+        scope = const_node.children[0]
+        if scope && scope.type != :cbase
+          candidates(const_node, nesting)
+        else
+          [qualified(const_node, nesting)].compact
+        end
       end
 
       def qualified(const_node, nesting)
