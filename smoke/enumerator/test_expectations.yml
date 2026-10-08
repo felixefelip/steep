@@ -40,7 +40,7 @@
         character: 3
     severity: ERROR
     message: |-
-      Unsatisfiable constraint `::Array[untyped] <: U(23) <: ::String` is generated through (U(23)) { (::Integer, U(23)) -> untyped } -> U(23)
+      Unsatisfiable constraint `::Array[untyped] <: U(21) <: ::String` is generated through (U(21)) { (::Integer, U(21)) -> untyped } -> U(21)
         ::Array[untyped] <: ::String
           ::Object <: ::String
             ::BasicObject <: ::String
