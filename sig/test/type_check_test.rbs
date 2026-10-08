@@ -23,9 +23,162 @@ class TypeCheckTest < Minitest::Test
   # @rbs code: Hash[String, String]
   # @rbs inline_code: Hash[String, String]
   # @rbs expectations: String?
+  # @rbs postconditions: Steep::Postconditions::Store
+  # @rbs callbacks: Steep::Callbacks::Store
   # @rbs &block: ? (Hash[String, Steep::Typing]) -> void
   # @rbs return: void
-  def run_type_check_test: (?signatures: Hash[String, String], ?code: Hash[String, String], ?inline_code: Hash[String, String], ?expectations: String?) ?{ (Hash[String, Steep::Typing]) -> void } -> void
+  # `underscore_casts:` on, as in `with_checker`: these tests set their scene up
+  # with upstream's `(_ = nil)` casts.
+  def run_type_check_test: (?signatures: Hash[String, String], ?code: Hash[String, String], ?inline_code: Hash[String, String], ?expectations: String?, ?postconditions: Steep::Postconditions::Store, ?callbacks: Steep::Callbacks::Store, ?underscore_casts: untyped) ?{ (Hash[String, Steep::Typing]) -> void } -> void
+
+  def test_literal_intrinsics_fold_closed_core_operations: () -> untyped
+
+  def test_literal_intrinsics_fold_collection_operands: () -> untyped
+
+  # An array built by `<<` carries what was pushed into it — the contents come
+  # from reading the pushes, since an array's TYPE says what its elements are
+  # and never how many.
+  def test_an_array_built_by_push_carries_its_contents: () -> untyped
+
+  # An `each` over a collection whose length is written out runs its body once
+  # per element, NOW — so its pushes are counted the way a straight line's are,
+  # each pass checked with the parameter bound to its element.
+  def test_an_array_built_in_a_loop_carries_its_contents: () -> untyped
+
+  # A push under a conditional the check DECIDES counts as the arm it left
+  # reachable — the shape `ActiveSupport::Delegation.generate` builds its
+  # source in, where every push sits under `if nilable == false / elsif
+  # allow_nil / else` and each of those is fixed by the call site.
+  def test_a_push_under_a_decided_condition_counts_its_arm: () -> untyped
+
+  # The value a body ENDS on leaves it, and nothing in the body runs afterwards
+  # to be told a lie about it — so a local handed back carries what was pushed
+  # into it, where one handed MID-BODY to something this cannot read still does
+  # not.
+  def test_an_array_handed_back_carries_its_contents: () -> untyped
+
+  # A call is a body this walk may or may not have. Where it has one — a method
+  # of the same class, written in this file, that only appends to the parameter
+  # it is handed — what the call does to the array is as readable as a `<<`
+  # written here.
+  def test_a_call_whose_body_is_here_appends_to_the_array: () -> untyped
+
+  # Where the walk has to STOP. Each of these is a way to name one array and
+  # read another, and each is wrong in its own way: one reads an array that does
+  # not exist yet, one reads at a time other than the one it runs at, and one
+  # reads a different variable that shares a name.
+  def test_an_array_written_out_where_a_body_ends_is_its_tuple: () -> untyped
+
+  def test_the_walk_stops_at_time_and_at_scope: () -> untyped
+
+  # The answers that must not come out. Each of these hands the array to
+  # something that can push into it, pushes where the count is unknown, or
+  # writes the name over so the pushes counted so far were into a different
+  # array — and an implementation that answered anyway would be confidently
+  # wrong rather than vague, which is the worse failure of the two.
+  def test_an_array_that_can_be_reached_another_way_is_not_read: () -> untyped
+
+  # `join` renders a Symbol through `to_s`, after probing it for `to_str` and
+  # `to_ary` — and the probes go through `respond_to?`, `respond_to_missing?`
+  # and `method_missing` anywhere in Symbol's chain. Each of those is watched;
+  # replacing any one of them turns the fold off.
+  def test_join_over_symbols_folds_unless_the_project_replaces_what_it_calls: () -> untyped
+
+  def test_literal_intrinsics_decline_collections_that_fix_nothing: () -> untyped
+
+  def test_literal_intrinsics_decline_unsafe_or_unbounded_calls: () -> untyped
+
+  def test_literal_intrinsics_decline_project_core_overrides: () -> untyped
+
+  # `x = y if cond` with no `else`: the branch the condition rules out must not
+  # be joined back in. The truthy side has always been guarded this way; the
+  # falsy side was not, so a decided condition still produced a union of both.
+  def test_a_decided_condition_does_not_join_the_branch_that_cannot_run: () -> untyped
+
+  # A set written out in the source, and the one question a set is asked. The
+  # chain is `ActiveSupport::Delegation`'s, spelled exactly as it writes it.
+  def test_a_set_written_out_answers_what_is_in_it: () -> untyped
+
+  # A pattern written out in the source, and the question it is asked. The
+  # setter line is `ActiveSupport::Delegation.generate`'s, spelled exactly as
+  # it writes it, with `method` arriving as the literal a call site passes.
+  def test_a_regexp_written_out_answers_what_it_matches: () -> untyped
+
+  # A match the checker cannot run safely, or cannot run as the program would,
+  # stays `bool`.
+  def test_a_regexp_declines_a_match_it_cannot_run_as_written: () -> untyped
+
+  # A block run once per element of a collection the checker knows, and the
+  # values it hands back collected in order. The chains are
+  # `ActiveSupport::Delegation`'s reflection branch, spelled as it writes them.
+  def test_a_block_over_known_elements_answers_each_of_them: () -> untyped
+
+  # `Delegation.generate`'s reflection branch, as locals: a local born from a
+  # collection the checker computed is followed like one born from `[]`, in an
+  # arm as well as at the top of the method. A local read only inside `#{}`
+  # keeps the literal its decided arm spells.
+  def test_a_local_born_from_a_built_value_carries_its_contents: () -> untyped
+
+  def def_body_types: (untyped typing) -> untyped
+
+  # `ActiveSupport::Delegation`'s `RESERVED_METHOD_NAMES`, at its real length.
+  # A set reassembled from an array is as wide as its elements; it was measured
+  # by its printed form, `Set{…}`, which is three bytes wider, and a long
+  # enough set came out over its own budget.
+  def test_a_long_set_written_out_answers_what_is_in_it: () -> untyped
+
+  # `nilable = false … if nilable == false`, from `Delegation.generate`: a
+  # local read only as a condition keeps the `true`/`false` it is assigned.
+  # Read as anything else, or written in a block, it stays `bool`.
+  def test_a_local_read_only_as_a_condition_keeps_its_boolean: () -> untyped
+
+  # A reflection the checker resolved found its method, and a missing method
+  # is the one thing it raises for — so the `rescue NameError` around it in
+  # `Delegation.generate` does not run. One on a method nothing declares
+  # raises, so only the rescue does. An ordinary call keeps both.
+  def test_a_rescue_around_a_resolved_reflection_does_not_run: () -> untyped
+
+  # A receiver that is itself a call can raise — a `NoMethodError` is a
+  # `NameError` — so the rescue still runs for a resolved reflection on it.
+  def test_a_rescue_around_a_reflection_on_a_call_still_runs: () -> untyped
+
+  # Which clause catches the `NameError` a missing method raises is asked of
+  # the classes the checker resolved, not of how they are spelled.
+  def test_a_rescue_catches_name_error_by_the_class_it_resolves_to: () -> untyped
+
+  # `"::#{to.name}"`, for `delegate :fetch, to: Store`, and `"#{prefix}_"`
+  # after `method_name.to_s` under `prefix:`.
+  def test_a_module_knows_its_name_and_a_string_is_its_own_string: () -> untyped
+
+  # A project that replaces one of these methods runs its own, so the passes
+  # answer nothing for a call that reaches it — and only for those calls.
+  def test_a_block_over_known_elements_declines_a_method_the_project_replaces: () -> untyped
+
+  # Reflection answered out of the declaration the checker already has. The
+  # chain is `ActiveSupport::Delegation`'s, spelled exactly as it writes it —
+  # `owner.singleton_class.public_instance_method(method).parameters`.
+  def test_a_method_object_knows_which_method_it_is: () -> untyped
+
+  # `singleton(::Sub)` is a `singleton(::Base)`, so the class object a
+  # reflection ran on may be a subclass's — and what a method's parameter list
+  # IS does not survive an override the way its signature does. Every subclass
+  # is read, and the answer stands only where they all agree.
+  def test_a_reflection_reads_the_subclasses_before_it_answers: () -> untyped
+
+  # The class that shadows a reflection is the RECEIVER's, and a redefinition
+  # the project does not DECLARE is one dispatch never sees: `Shadowed.method`
+  # still resolves to `::Kernel#method`, and Ruby runs the one written here.
+  def test_a_reflection_declines_where_the_receiver_redefines_it: () -> untyped
+
+  # A constant is the one name Ruby means to be written once, so the value at a
+  # read is the value at the assignment — provided this file is where the name
+  # is decided and nothing here changes the object behind it.
+  def test_a_constant_written_once_carries_its_value: () -> untyped
+
+  # A fold that dispatches is only as trustworthy as the methods it dispatches
+  # TO. `==` is nobody's table entry, so nothing about `include?`'s own key says
+  # the answer has stopped being the program's — the entry has to name it.
+  def test_literal_intrinsics_decline_an_override_of_a_method_they_depend_on: () -> untyped
 
   def test_setter_type: () -> untyped
 
@@ -91,6 +244,24 @@ class TypeCheckTest < Minitest::Test
 
   def test_case_when__narrow_pure_call: () -> untyped
 
+  def test_ivar_pure_call_narrowing: () -> untyped
+
+  def test_ivar_pure_call_narrowing__invalidated_by_reassignment: () -> untyped
+
+  def test_ivar_pure_call_narrowing__non_pure_method_not_narrowed: () -> untyped
+
+  def test_ivar_union_assignment_narrows_to_validated_branch: () -> untyped
+
+  def test_ivar_union_assignment_narrows_does_not_apply_to_non_validated_branch: () -> untyped
+
+  def test_ivar_union_reassignment_resets_narrow_to_new_branch: () -> untyped
+
+  def test_ivar_attr_accessor_narrows_to_validated_branch: () -> untyped
+
+  def test_ivar_attr_accessor_narrow_does_not_apply_to_raw_branch: () -> untyped
+
+  def test_ivar_attr_reader_consumes_direct_ivar_narrow: () -> untyped
+
   def test_case_when__bool_value: () -> untyped
 
   def test_type_inference__nested_block: () -> untyped
@@ -99,14 +270,15 @@ class TypeCheckTest < Minitest::Test
 
   def test_type_narrowing__local_variable_safe_navigation_operator: () -> untyped
 
+  # `ActiveSupport::Delegation`'s `allow_nil: true` body. NilClass has no
+  # `full_name`, so the right operand is `false`, the `||` holds only where
+  # `!_.nil?` does, and `_` is narrowed in the body the way that guard alone
+  # narrows it — the side that cannot happen joins nothing back.
+  def test_type_narrowing__or_with_a_decided_respond_to: () -> untyped
+
   def test_type_narrowing__union_send: () -> untyped
 
   def test_type_narrowing__union_send2: () -> untyped
-
-  # Regression test for `==` narrowing against a literal whose superclass is the
-  # receiver type. `Symbol`/`Integer`/`String` include the corresponding literal
-  # values, so the truthy branch is reachable.
-  def test_type_narrowing__literal_equality_with_supertype: () -> untyped
 
   def test_argument_error__unexpected_unexpected_positional_argument: () -> untyped
 
@@ -135,8 +307,6 @@ class TypeCheckTest < Minitest::Test
   def test_underscore_opt_param: () -> untyped
 
   def test_rescue_assignment: () -> untyped
-
-  def test_ensure_annotation: () -> untyped
 
   def test_defined?: () -> untyped
 
@@ -292,9 +462,260 @@ class TypeCheckTest < Minitest::Test
 
   def test_inline_class_alias_type_name: () -> untyped
 
-  def test_tuple_type_with_if_branch: () -> untyped
+  def test_erb_convention_imports_ivars_from_self_type: () -> untyped
+
+  def test_self_method_applies_method_entry_facts_to_toplevel: () -> untyped
+
+  def test_type_instance_annotation_imports_ivars_from_annotated_type: () -> untyped
+
+  # felixefelip/steep#130. A module mixed into two classes has two possible
+  # selves — one at a time, which is a union. `for_new_method` raised
+  # `Unexpected self_type` on one, and the method came out untyped with no
+  # diagnostic to say why. An intersection cannot stand in: no object is both
+  # an `Admin` and a `Guest`.
+  def test_type_instance_annotation_accepts_a_union_of_hosts: () -> untyped
+
+  def test_type_instance_annotation_imports_ivars_from_intersection_type: () -> untyped
+
+  # A concern's method declared `-> self` and returning a `-> self` call
+  # inherited from the host: the composite self type must not collapse to the
+  # host, or the body types as `::Card` and fails `::Card <: self` against its
+  # own declaration.
+  def test_type_instance_annotation_keeps_self_through_an_intersection: () -> untyped
+
+  def test_type_instance_annotation_keeps_self_through_a_union: () -> untyped
+
+  def test_type_instance_annotation_imports_inherited_ivars: () -> untyped
+
+  def postconditions_store: (untyped entries) -> untyped
+
+  # Walks a parsed source's AST returning the first `:send` node
+  # whose method name matches. Used by delegation tests to grab the
+  # call site for direct `typing.call_of` assertions.
+  def find_send: (untyped node, method: untyped) -> untyped
+
+  # Builds an in-memory DelegationRegistry from the test's `code` hash
+  # (path => Ruby source string), without going through the file
+  # system. Used by `run_type_check_test` so that chain-narrowing
+  # tests (felixefelip/steep#32) can exercise the registry-driven
+  # inlining without a real project on disk.
+  def build_test_delegation_registry: (untyped code) -> untyped
+
+  def test_postconditions__predicate_refines_receiver: () -> untyped
+
+  def test_postconditions__predicate_refines_ivar_receiver: () -> untyped
+
+  def test_postconditions__update_refines_ivar_receiver: () -> untyped
+
+  def test_postconditions__may_write_invalidates_stale_narrowing: () -> untyped
+
+  def test_postconditions__conditional_return_narrows_past_halt_check: () -> untyped
+
+  def test_postconditions__conditional_const_return_narrows_past_halt_check: () -> untyped
+
+  def test_postconditions__method_entry_facts_narrow_inside_body: () -> untyped
+
+  def test_postconditions__argument_entry_facts_narrow_inside_matching_branch: () -> untyped
+
+  def test_postconditions__argument_entry_facts_narrow_in_if_equality_branch: () -> untyped
+
+  def test_postconditions__method_entry_facts_narrow_ivars_at_entry: () -> untyped
+
+  def test_postconditions__argument_entry_facts_narrow_ivars_in_branch: () -> untyped
+
+  def test_postconditions__argument_entry_facts_skip_reassigned_parameter: () -> untyped
+
+  def test_postconditions__argument_entry_facts_ignore_non_parameter_subject: () -> untyped
+
+  def test_postconditions__update_refines_receiver: () -> untyped
+
+  def test_postconditions__composition_via_and: () -> untyped
+
+  def test_postconditions__falsy_branch_not_refined_without_when_false: () -> untyped
+
+  def test_postconditions__return_unless_pattern: () -> untyped
+
+  def test_postconditions__via_receiver_poro_delegation: () -> untyped
+
+  def test_postconditions__via_receiver_does_not_match_other_method: () -> untyped
+
+  def test_postconditions__via_receiver_when_false_branch: () -> untyped
+
+  def test_postconditions__phase1_send_receiver_narrowing: () -> untyped
+
+  def test_postconditions__via_receiver_composes_with_self: () -> untyped
+
+  def test_postconditions__ivars_refined_after_self_call: () -> untyped
+
+  def test_postconditions__ivars_not_applied_for_non_self_receiver: () -> untyped
+
+  def test_postconditions__ivars_unconditional_fires_before_conditional_use: () -> untyped
+
+  def test_postconditions__predicate_from_included_module_matches_by_receiver_type: () -> untyped
+
+  def test_postconditions__via_receiver_matches_intersected_inner_type: () -> untyped
+
+  def test_postconditions__dropout_on_attribute_write: () -> untyped
+
+  def test_attribute_write_narrows_pure_reader: () -> untyped
+
+  def test_postconditions__negative_control_no_entry_no_refinement: () -> untyped
+
+  # #1 — Predicate inherited from a superclass.
+  # Sidecar is keyed on `Base#authenticated?`. The call site uses an `Admin`
+  # receiver, which inherits `authenticated?`. Lookup must fall back through
+  # `call.method_decls.type_name` (Base) to find the entry.
+  def test_postconditions__edge_01_inherited_predicate: () -> untyped
+
+  # #3 — Marker references a generic parameter. The sidecar declares
+  # `Container[T] & Container::WithValue[T]`. The free type variable `T` in
+  # the parsed RBS is not substituted by the factory; `build_instance` raises
+  # `Unknown name for build_instance: ::T` from RBS's definition builder.
+  # This is a real bug — generic markers are not supported and crash the type
+  # check. Skipped until fixed; remove the skip when the factory grows a
+  # substitution step for the receiver's generic args.
+  def test_postconditions__edge_03_generic_marker: () -> untyped
+
+  # #4 — Union receiver. `pet : (Cat | Dog)` calls `.hungry?`, sidecars on
+  # both Cat and Dog. Steep dispatches the call separately for each union
+  # member, so narrowing applies independently to each side and both
+  # accessors resolve through their respective markers. This passes — locks
+  # in the (surprisingly good) current behavior.
+  def test_postconditions__edge_04_union_receiver: () -> untyped
+
+  # #6 — Nested control flow. Two predicates on the same receiver compose
+  # into `Door & Locked & Open` inside the inner branch.
+  def test_postconditions__edge_06_nested_control_flow: () -> untyped
+
+  # #7 — Rebinding the local variable inside the truthy branch drops the
+  # narrowing. After `user = PCEdgeUser.new`, the previous refinement no
+  # longer applies, so `user.name` is back to `String?`.
+  def test_postconditions__edge_07_rebind_invalidates: () -> untyped
+
+  # #8 — `case` with predicate-based when clauses. Each branch narrows the
+  # receiver independently to that branch's marker.
+  def test_postconditions__edge_08_case_when_predicates: () -> untyped
+
+  # #12 — Sidecar marker references a class that does not exist in RBS.
+  # `Postconditions::Branch#rbs_type` parses the marker string optimistically
+  # and `factory.type` builds an `AST::Types::Name::Instance` pointing at the
+  # non-existent class. Later, when the type checker tries to resolve methods
+  # on the intersection, `RBS::DefinitionBuilder#build_instance` raises
+  # `Unknown name for build_instance: ::Host::DoesNotExist`. Same root cause
+  # as edge_03 — the failure surfaces as `Ruby::UnexpectedError`, not as a
+  # graceful "marker missing" diagnostic.
+  #
+  # Skipped until there is a fail-safe: either validate marker names at
+  # sidecar load (preferred — same fix as `rbs_definition_resolver`), or
+  # rescue the build error and degrade to no narrowing for this entry.
+  def test_postconditions__edge_12_missing_marker_class: () -> untyped
+
+  # #13 — `return unless` chain where the second guard contradicts the first
+  # narrowing. Both branches narrow the receiver to different markers; the
+  # code after both guards is unreachable in practice. Documents the
+  # composed-narrowing behavior past two guards (no false diagnostics on the
+  # third statement just because the intersection becomes unsatisfiable).
+  def test_postconditions__edge_13_contradiction_guards: () -> untyped
+
+  # #14 — Bang vs question mark. Conventionally `loaded!` is impure (mutates
+  # state) and `loaded?` is pure. The user's intent was that postconditions
+  # should *only* fire on pure calls, so `loaded!` would not narrow.
+  # Current behavior: `pure?` for an RBS-declared method is determined by
+  # the call site (no Ruby def body to inspect), and the `!` suffix is not
+  # treated as an impurity marker. Both calls narrow.
+  #
+  # This test locks in current behavior. If/when bang methods are classified
+  # impure-by-convention for postcondition lookup, flip the expectation:
+  # the `cache_a.data.size` line should then raise a NoMethod on (Hash | nil).
+  def test_postconditions__edge_14_bang_predicate_currently_narrows: () -> untyped
+
+  # #15 — Narrowing inside a block. `item.valid?` narrows `item` within the
+  # truthy branch of the if, but does not leak past the if (still inside the
+  # `each` block) nor across iterations.
+  def test_postconditions__edge_15_loop_block: () -> untyped
+
+  # #16 — Marker ordering in an intersection. When two predicates narrow
+  # overlapping accessors with different return types, `intersection_shape`
+  # follows last-wins: the last marker in the intersection determines which
+  # method definition wins for an overlapping name. This locks the current
+  # behavior so reordering the markers in the sidecar can't regress silently.
+  def test_postconditions__edge_16_marker_last_wins: () -> untyped
+
+  def test_postconditions__self_refines_implicit_self_call: () -> untyped
+
+  def test_postconditions__self_refines_explicit_self_call: () -> untyped
+
+  def test_postconditions__self_does_not_leak_to_falsy_branch: () -> untyped
+
+  def test_postconditions__refined_self_composes_with_and: () -> untyped
+
+  def test_postconditions__refined_self_cleared_on_method_entry: () -> untyped
+
+  def callbacks_store: (untyped entries) -> untyped
+
+  def test_callbacks__refines_ivar_at_method_entry: () -> untyped
+
+  def test_callbacks__applies_self_refines_self_at_method_entry: () -> untyped
+
+  def test_callbacks__applies_self_not_in_runs_before_keeps_nilable: () -> untyped
+
+  def test_callbacks__applies_constants_refines_constant_reads: () -> untyped
+
+  def test_callbacks__applies_constants_not_in_runs_before_keeps_declared: () -> untyped
+
+  def test_callbacks__applies_constants_at_erb_toplevel: () -> untyped
+
+  def test_callbacks__toplevel_flag_required_for_erb_narrowing: () -> untyped
+
+  def test_callbacks__methods_not_in_runs_before_stay_at_declared_type: () -> untyped
+
+  def test_callbacks__handler_without_unconditional_postcondition_is_ignored: () -> untyped
+
+  def test_callbacks__multiple_handlers_compose_via_last_wins: () -> untyped
+
+  def test_callbacks__empty_store_no_op: () -> untyped
+
+  def test_postconditions__drops_subtracts_marker_in_when_false: () -> untyped
+
+  def test_postconditions__drops_with_ivar_receiver: () -> untyped
+
+  def test_postconditions__drops_keeps_other_markers_in_intersection: () -> untyped
+
+  def test_postconditions__drops_without_self_still_refines: () -> untyped
+
+  def test_postconditions__drops_no_op_when_marker_not_present: () -> untyped
+
+  def test_postconditions__unconditional_self_refines_non_self_receiver: () -> untyped
+
+  def test_postconditions__unconditional_drops_subtracts_markers_from_non_self_receiver: () -> untyped
+
+  def test_postconditions__unconditional_self_refines_ivar_receiver: () -> untyped
+
+  def test_postconditions__unconditional_self_refines_self_receiver_via_refined_self: () -> untyped
+
+  def test_postconditions__unconditional_self_skips_when_marker_missing_in_rbs: () -> untyped
+
+  def test_postconditions__unconditional_ivars_still_only_fires_for_self_receiver: () -> untyped
+
+  def test_delegation__inline_propagates_when_true_self_refinement: () -> untyped
+
+  def test_delegation__inline_records_method_call_on_original_node: () -> untyped
+
+  def test_delegation__multi_hop_chain_inlines_recursively: () -> untyped
+
+  def test_delegation__polymorphism_uses_receiver_type: () -> untyped
+
+  def test_delegation__without_narrowing_resolves_as_normal: () -> untyped
+
+  def test_delegation__inline_miss_falls_back_without_crash_or_spurious_error: () -> untyped
+
+  def test_ensure_annotation: () -> untyped
 
   def test_or_asgn_send_chain: () -> untyped
+
+  def test_tuple_type_with_if_branch: () -> untyped
+
+  def test_type_narrowing__literal_equality_with_supertype: () -> untyped
 
   def test_block_pass_optional_block: () -> untyped
 

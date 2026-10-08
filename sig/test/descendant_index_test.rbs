@@ -1,0 +1,23 @@
+# Generated from test/descendant_index_test.rb with RBS::Inline
+
+class DescendantIndexTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  SIGNATURES: ::Hash[::String, ::String]
+
+  def index: () -> untyped
+
+  def names: (untyped list) -> untyped
+
+  def test_every_class_below_one_transitively: () -> untyped
+
+  # A class that includes a module is not one OF it: `Mixed.instance_method(:x)`
+  # reflects what Mixed itself writes, whatever includes it.
+  def test_a_module_has_none: () -> untyped
+
+  # A class with no superclass written is a subclass of `Object`, so the root of
+  # the world is where the bound is spent rather than the answer.
+  def test_past_the_limit_there_is_no_answer: () -> untyped
+end

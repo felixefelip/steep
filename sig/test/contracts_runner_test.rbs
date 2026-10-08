@@ -1,0 +1,54 @@
+# Generated from test/contracts_runner_test.rb with RBS::Inline
+
+class ContractsRunnerTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  Contracts: untyped
+
+  Project: untyped
+
+  def dirs: () -> untyped
+
+  def envs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: (steepfile: untyped) -> untyped
+
+  FIXTURE_STEEPFILE: ::String
+
+  FIXTURE_RBS: ::String
+
+  TRIGGERING_RUBY: ::String
+
+  SAFE_RUBY: ::String
+
+  def test_runner_infers_and_returns_contract: () -> untyped
+
+  def test_runner_write_creates_sidecar_with_inferred_content: () -> untyped
+
+  def test_runner_write_removes_sidecar_when_no_contracts: () -> untyped
+
+  def test_runner_is_idempotent: () -> untyped
+
+  def test_runner_uses_existing_sidecar_for_subsequent_runs: () -> untyped
+
+  TRANSITIVE_RBS: ::String
+
+  # `set_default_user_name`'s body needs `self.board`; `save` calls it via
+  # `self` without establishing board, so `save` inherits the requirement.
+  def transitive_ruby: (caller_sets_board: untyped) -> untyped
+
+  def test_runner_propagates_precondition_transitively_and_enforces: () -> untyped
+
+  def test_runner_transitive_contract_not_enforced_when_caller_omits_precondition: () -> untyped
+
+  # A recursive reader: `decode_tag` reads `decode` through a local, so it
+  # requires `not_nil self.decode`, and `decode` calls `decode_tag`, so the
+  # requirement climbs onto `decode` itself. Checking it at a call site
+  # synthesizes `self.decode`, whose own precondition is that same read — the
+  # check has to terminate (Fizzy's CborDecoder overflowed the stack).
+  def test_runner_terminates_on_a_precondition_that_names_its_own_method: () -> untyped
+end

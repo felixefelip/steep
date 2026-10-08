@@ -57,6 +57,15 @@ class SubtypingTest < Minitest::Test
 
   def test_interface8: () -> untyped
 
+  # `self` is a name for a shape, not a shape: expanding it has to happen before
+  # the other side of the relation is decomposed. When `self` stands for a UNION
+  # — which it does for a module mixed into more than one host — the super union
+  # used to be split first, so `self <: (A | B)` was answered by trying
+  # `self <: A` and `self <: B`, expanding `self` to `(A | B)` inside each, and
+  # neither holds. A type was failing to be a subtype of itself
+  # (felixefelip/rbs_infer#221).
+  def test_union_self_against_union: () -> untyped
+
   def test_interface_block_self: () -> untyped
 
   def test_literal: () -> untyped

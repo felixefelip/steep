@@ -31,5 +31,11 @@ class TypeEnvTest < Minitest::Test
 
   def test_join_calls_invalidate: () -> untyped
 
+  # Refining a pure call invalidates the calls DERIVED from it, the same rule a
+  # refined local or ivar already applied. `source.window` cached under the wide
+  # `source` is stale the moment `source` narrows — and a cached pure call is
+  # read in preference to re-synthesizing, so the stale one would win.
+  def test_refining_a_pure_call_invalidates_the_calls_derived_from_it: () -> untyped
+
   def test_refinements_branches_0: () -> untyped
 end

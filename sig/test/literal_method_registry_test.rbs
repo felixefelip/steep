@@ -1,0 +1,82 @@
+# Generated from test/literal_method_registry_test.rb with RBS::Inline
+
+class LiteralMethodRegistryTest < Minitest::Test
+  Registry: untyped
+
+  def registry_for: (untyped source) -> untyped
+
+  def test_records_direct_core_redefinitions: () -> untyped
+
+  # The table watches what its entries LEAN on, not only what they are. `==` is
+  # nobody's entry, and redefining it is how `Array#include?` starts answering
+  # something other than what the fold computes.
+  def test_records_a_method_an_entry_depends_on: () -> untyped
+
+  def test_records_a_reopened_array: () -> untyped
+
+  def test_a_mixin_hook_taints_what_it_is_mixed_into: () -> untyped
+
+  def test_a_module_this_index_has_not_read_taints: () -> untyped
+
+  def test_a_module_that_mixes_something_further_in_taints: () -> untyped
+
+  def test_every_module_of_a_mixin_site_is_checked: () -> untyped
+
+  def test_a_hook_built_by_alias_or_dynamically_counts_as_one: () -> untyped
+
+  def test_an_ambiguous_constant_is_not_resolved_by_ingestion_order: () -> untyped
+
+  def test_dup_has_an_independent_blocked_set: () -> untyped
+
+  def test_records_dynamic_reopenings_and_refinements: () -> untyped
+
+  def test_taints_opaque_eval_and_records_method_table_mutators: () -> untyped
+
+  def test_records_mutations_dispatched_through_literal_send: () -> untyped
+
+  def test_fails_closed_when_a_source_cannot_be_parsed: () -> untyped
+
+  def test_project_build_does_not_parse_erb_as_ruby: () -> untyped
+
+  def test_from_paths_does_not_parse_erb_as_ruby: () -> untyped
+
+  def test_taints_all_intrinsics_when_lookup_is_mutated: () -> untyped
+
+  def test_an_included_module_does_not_shadow_an_entry: () -> untyped
+
+  # `Array#filter_map` is `Enumerable`'s, and an included module sits ABOVE
+  # `Enumerable` in Array's chain: the module's own is the one that runs.
+  def test_an_included_module_shadows_an_inherited_entry: () -> untyped
+
+  def test_an_extended_module_does_not_shadow_an_inherited_entry: () -> untyped
+
+  def test_does_not_confuse_a_nested_constant_with_the_core_class: () -> untyped
+
+  # `def Foo.method(name)` belongs to Foo, not to whatever encloses it — and at
+  # the top level there is no enclosing class at all, which is where reading the
+  # receiver stops being optional.
+  def test_records_a_singleton_def_against_its_receiver: () -> untyped
+
+  # A receiver this cannot name leaves no class to record against, so the name
+  # stops folding anywhere rather than in a class it cannot point at.
+  def test_a_singleton_def_on_an_unreadable_receiver_blocks_the_name: () -> untyped
+
+  # The block form of an eval is READ, so what it writes is attributed to the
+  # class it was called on — an app's class as much as `Array`.
+  def test_a_class_eval_block_is_attributed_to_its_receiver: () -> untyped
+
+  # A macro evals a string into its OWN class, which is what example75 and
+  # example76 in rbs_infer's dummy are. Tainting the class that writes one would
+  # decline the reflection on exactly the classes the fold is for, over a method
+  # the eval does not write.
+  def test_a_string_eval_does_not_blind_the_class_that_writes_it: () -> untyped
+
+  # A core class is the other way round: its methods are the literal table's
+  # own, and a string is where one of them could be replaced unseen.
+  def test_a_string_eval_on_a_core_class_still_taints_it: () -> untyped
+
+  # A source ingested again, into the same registry or a copy of it, replays
+  # what its first scan found rather than parsing it again — and ends exactly
+  # where scanning it again would, deferred mixins included.
+  def test_ingesting_a_source_again_replays_its_scan: () -> untyped
+end

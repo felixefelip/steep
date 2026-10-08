@@ -1,0 +1,19 @@
+# Generated from test/contracts_writer_test.rb with RBS::Inline
+
+class ContractsWriterTest < Minitest::Test
+  Contracts: untyped
+
+  def build_store_with: (untyped raw) -> untyped
+
+  def test_dump_omits_enforced_when_true_and_emits_when_false: () -> untyped
+
+  def test_dump_round_trip_with_chain: () -> untyped
+
+  def test_dump_sorts_methods_for_deterministic_output: () -> untyped
+
+  def test_dump_omits_chain_when_empty: () -> untyped
+
+  def test_dump_singleton_separator: () -> untyped
+
+  def test_write_to_disk_creates_parent_directory: () -> untyped
+end

@@ -1,0 +1,104 @@
+# Generated from test/reflection_intrinsics_test.rb with RBS::Inline
+
+class ReflectionIntrinsicsTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  class MethodDecl < Struct[untyped]
+    attr_accessor method_name(): untyped
+
+    def self.new: (?untyped method_name) -> instance
+                | (?method_name: untyped) -> instance
+  end
+
+  class MethodCall < Struct[untyped]
+    attr_accessor method_decls(): untyped
+
+    def self.new: (?untyped method_decls) -> instance
+                | (?method_decls: untyped) -> instance
+  end
+
+  Registry: untyped
+
+  SIGNATURES: ::Hash[::String, ::String]
+
+  def with_probe_factory: () ?{ (?) -> untyped } -> untyped
+
+  def fold: (untyped key, untyped receiver_type, untyped registry, untyped factory, ?argument_types: untyped) -> untyped
+
+  def registry_for: (untyped source) -> untyped
+
+  def singleton: (untyped name) -> untyped
+
+  def test_a_singleton_class_names_the_module_it_is_of: () -> untyped
+
+  # The class that shadows a reflection is the RECEIVER's, so the chain walked
+  # is the receiver's own. `Foo.method(:x)` reaches `def self.method` before it
+  # reaches Kernel's, and a signature never mentions it.
+  def test_a_redefinition_on_the_receiver_declines_the_fold: () -> untyped
+
+  # An ancestor of the receiver is on the same chain — including a module the
+  # receiver EXTENDS, which is where a singleton method is written as an
+  # instance one.
+  def test_a_redefinition_on_an_ancestor_declines_the_fold: () -> untyped
+
+  # A core class on the chain, which is what `class Object; def singleton_class`
+  # is: Ruby runs it, and dispatch still resolves to Kernel's.
+  def test_a_redefinition_on_a_core_ancestor_declines_the_fold: () -> untyped
+
+  # Past the class the entry is declared on, nothing can shadow it — the lookup
+  # has already found it.
+  def test_a_redefinition_below_the_declaring_class_folds: () -> untyped
+
+  # And a class that is not on the chain is not a shadow at all: the check is
+  # receiver-aware rather than a name-wide kill switch, which matters for
+  # `parameters` — an app writing `def parameters` is ordinary.
+  def test_a_redefinition_off_the_chain_folds: () -> untyped
+
+  def test_a_reopen_of_the_declaring_class_declines_the_fold: () -> untyped
+
+  # An ordinary monkeypatch is not one of these, and paying for the watch has to
+  # stop somewhere: only a name one of the tables is keyed by is recorded.
+  def test_an_unrelated_reopen_blocks_nothing: () -> untyped
+
+  def test_watched_keys_and_dispatched_names: () -> untyped
+
+  def test_unexpected_fold_failure_is_logged_and_declined: () -> untyped
+
+  RESPONDING: ::Hash[::String, ::String]
+
+  def responds: (untyped receiver_type, untyped name, ?registry: untyped) -> untyped
+
+  def instance: (untyped name) -> untyped
+
+  def literal: (untyped value) -> untyped
+
+  # `ActiveSupport::Delegation`'s `allow_nil: true`: NilClass has no such
+  # method, so the condition it writes is decided.
+  def test_nil_does_not_respond_to_a_method_nothing_gives_it: () -> untyped
+
+  # A `Shape` may be a `Square`, so a method only the subclass has is not one
+  # this can answer for; one the class has is every subclass's too.
+  def test_an_instance_answers_for_every_subclass_it_may_be: () -> untyped
+
+  # `respond_to?` reports public methods; a private one is not.
+  def test_a_private_method_is_not_responded_to: () -> untyped
+
+  def test_a_class_object_answers_for_its_class_methods: () -> untyped
+
+  def test_a_union_answers_where_every_member_agrees: () -> untyped
+
+  # Ruby asks `respond_to_missing?` for a method it does not find, so a class
+  # whose `respond_to_missing?` is not Kernel's has no "no" this can give —
+  # declared in the signatures or written in the project.
+  def test_a_respond_to_missing_other_than_the_core_one_declines_a_false_answer: () -> untyped
+
+  def test_a_respond_to_the_project_writes_declines_the_fold: () -> untyped
+
+  # A module is no class a value is an instance of: whatever includes it may
+  # be, and nothing lists those.
+  def test_a_module_instance_declines: () -> untyped
+
+  def test_include_all_declines: () -> untyped
+end

@@ -1,0 +1,50 @@
+# Generated from test/contracts_inferrer_test.rb with RBS::Inline
+
+class ContractsInferrerTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  Contracts: untyped
+
+  RBS_FIXTURE: ::String
+
+  def infer_for: (untyped ruby, ?underscore_casts: untyped) -> untyped
+
+  # felixefelip/steep#64: `maybe.value.size` has two nilable hops (`maybe: Bar?`
+  # and `maybe.value: String?`). A single pass errors only on `.value` (maybe is
+  # nilable), masking `.size`; walking the chain emits both `not_nil self.maybe`
+  # and `not_nil self.maybe.value`.
+  def test_infers_every_nilable_hop_of_a_masked_chain: () -> untyped
+
+  def test_infers_not_nil_for_self_method_in_class_body: () -> untyped
+
+  def test_infers_chain_obligation: () -> untyped
+
+  def test_handles_explicit_self_receiver: () -> untyped
+
+  def test_emits_nothing_when_body_is_already_safe: () -> untyped
+
+  # A local whose value is not a self path. (One that IS — `arg = name` — is
+  # rooted at `self.name`: `test_infers_through_a_local_that_is_a_self_path`.)
+  def test_ignores_non_self_receivers: () -> untyped
+
+  def test_emits_fully_qualified_name_for_nested_class: () -> untyped
+
+  def test_handles_deeply_nested_modules_and_classes: () -> untyped
+
+  def test_handles_class_inside_class: () -> untyped
+
+  def test_dedupes_same_obligation_across_uses: () -> untyped
+
+  # A local that IS a self path roots the deref through it — `_ = name` is
+  # `self.name`, as ActiveSupport's `delegate` writes it.
+  def test_infers_through_a_local_that_is_a_self_path: () -> untyped
+
+  # Where the local is not that path wherever it is read, nothing is rooted.
+  def test_does_not_infer_through_a_local_that_is_not_always_the_path: () -> untyped
+end

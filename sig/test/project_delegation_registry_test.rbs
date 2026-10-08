@@ -1,0 +1,37 @@
+# Generated from test/project_delegation_registry_test.rb with RBS::Inline
+
+# Tests for the project-wide forward-delegation index used by
+# `TypeConstruction#type_send` for chain narrowing
+# (felixefelip/steep#32). Covers building, lookups, invalidation,
+# and graceful handling of files that fail to parse.
+class ProjectDelegationRegistryTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  Project: untyped
+
+  DelegationRegistry: untyped
+
+  def dirs: () -> untyped
+
+  def envs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: (steepfile: untyped) -> untyped
+
+  FIXTURE_STEEPFILE: ::String
+
+  def test_builds_registry_from_all_ruby_sources_in_target: () -> untyped
+
+  def test_lookup_normalizes_leading_double_colon: () -> untyped
+
+  def test_lookup_returns_nil_for_unknown_class: () -> untyped
+
+  def test_skips_files_with_syntax_errors: () -> untyped
+
+  def test_invalidation_rebuilds_from_disk: () -> untyped
+
+  def test_empty_project_yields_empty_registry: () -> untyped
+end

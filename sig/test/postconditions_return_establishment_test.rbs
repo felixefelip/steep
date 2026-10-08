@@ -1,0 +1,37 @@
+# Generated from test/postconditions_return_establishment_test.rb with RBS::Inline
+
+# End-to-end application of the return-value establishment postcondition
+# (felixefelip/steep#56): at `x = build`, when `build` declares
+# `unconditional.returns.establishes: [attr]`, the pure-node fact
+# `x.attr` becomes non-nil — so a later `x.<contracted>` whose contract
+# `requires self.attr` is satisfied, even though `attr` was written
+# inside `build`, not at the call site.
+class PostconditionsReturnEstablishmentTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  Contracts: untyped
+
+  Postconditions: untyped
+
+  Diagnostic: untyped
+
+  RBS: ::String
+
+  # `RERecord#use_thing` requires `self.thing` be non-nil.
+  def use_thing_contract: () -> untyped
+
+  # `REProxy#build` establishes `thing` on its returned record.
+  def build_postcondition: () -> untyped
+
+  def test_build_then_use_thing_satisfies_precondition: () -> untyped
+
+  def test_raw_new_then_use_thing_still_flags_precondition: () -> untyped
+
+  def test_no_postcondition_means_precondition_still_flagged: () -> untyped
+end

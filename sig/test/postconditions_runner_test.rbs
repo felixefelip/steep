@@ -1,0 +1,304 @@
+# Generated from test/postconditions_runner_test.rb with RBS::Inline
+
+class PostconditionsRunnerTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  Postconditions: untyped
+
+  Project: untyped
+
+  def dirs: () -> untyped
+
+  def envs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: (steepfile: untyped) -> untyped
+
+  FIXTURE_STEEPFILE: ::String
+
+  FIXTURE_RBS: ::String
+
+  NARROWING_RUBY: ::String
+
+  SAFE_RUBY: ::String
+
+  def test_runner_infers_unconditional_ivar_entry: () -> untyped
+
+  def test_runner_write_creates_sidecar_with_inferred_content: () -> untyped
+
+  def test_runner_write_removes_sidecar_when_no_entries: () -> untyped
+
+  MAY_WRITE_RBS: ::String
+
+  # felixefelip/steep#68 (item 1): the effect is closed over the self-call
+  # graph, so a method whose only "write" is a call to a writer still reports
+  # it — through any depth, and through a block.
+  MAY_WRITE_RUBY: ::String
+
+  CONST_LIFT_RBS: ::String
+
+  # felixefelip/steep#117 gap 3a: an establishment is lifted into the CALLER over
+  # every-exit call edges, so it no longer stops at the frame holding the write.
+  # `branch_hop` is the boundary — and the shape that motivated the gap, a
+  # `resume_session` whose establisher is called inside an `if` establishes on
+  # some exits only.
+  CONST_LIFT_RUBY: ::String
+
+  def test_runner_lifts_const_establishments_into_callers: () -> untyped
+
+  # felixefelip/steep#117 gap 3b, in the shape that motivated it: the clause holds
+  # a CALL, so the fact only appears once 3a's closure has given the callee its
+  # establishment. `always_hop` is the contrast — an unconditional call is an
+  # unconditional establishment, not a truthy-exit one.
+  WHEN_TRUE_RUBY: ::String
+
+  WHEN_TRUE_RBS: ::String
+
+  def test_runner_lifts_when_true_consts_from_a_truthy_only_clause: () -> untyped
+
+  DISJ_RBS: ::String
+
+  # felixefelip/steep#117 gap 3c. `a || b || c` where `c` always halts: an exit
+  # that did not halt means `a` or `b` answered, so what BOTH establish holds.
+  # `truthy_only` establishes on its truthy exit (3b), `or_halt` on its unhalted
+  # exit (the two-clause guard) — different routes, same conclusion.
+  DISJ_RUBY: ::String
+
+  def test_runner_proves_a_const_across_a_disjunction_whose_last_operand_halts: () -> untyped
+
+  def test_runner_drops_a_disjunction_fact_when_one_operand_establishes_nothing: () -> untyped
+
+  # A method defined in two places — a reopen, a concern and its host, a sidecar
+  # modelling app code — merges into one entry. The fields added by #119, #120
+  # and #122 were left out of that merge, which did not keep the first entry's:
+  # it reset them to empty, so the facts vanished exactly when a second
+  # definition existed.
+  def test_runner_keeps_the_new_fact_fields_when_a_method_is_defined_twice: () -> untyped
+
+  def test_runner_closes_may_write_over_self_call_graph: () -> untyped
+
+  def test_runner_serializes_may_write_effect: () -> untyped
+
+  CR_RBS: ::String
+
+  # felixefelip/steep#68 item 2: the guard halts through an INHERITED
+  # `redirect_to`, so the gate is recorded `via: redirect_to` and the Runner
+  # must resolve it — across the superclass boundary — to `@halted`.
+  CR_RUBY: ::String
+
+  CC_RBS: ::String
+
+  CC_RUBY: ::String
+
+  # felixefelip/steep#68 item 3: the constant-attribute fact round-trips and its
+  # gate resolves through the inherited `redirect_to`, like the self-method one.
+  def test_runner_serializes_conditional_const_return: () -> untyped
+
+  BG_RBS: ::String
+
+  BG_RUBY: ::String
+
+  # felixefelip/steep#105 gap 3. The halt is two frames in — inside a block, of a
+  # method that writes nothing itself. The clause's first self-send is therefore
+  # `with_format`, and keying the gate on it left nothing to resolve, so the whole
+  # spec was dropped and the guard proved nothing. With candidates, `with_format`
+  # resolves to no ivar, `redirect_to` resolves to `@halted`, and the fact lands.
+  #
+  # This is `respond_to { |f| f.html { redirect_to ... } }` with the framework
+  # names removed — the shape a real authorization callback halts with.
+  def test_runner_resolves_a_gate_whose_halt_is_nested_in_a_block: () -> untyped
+
+  def test_runner_resolves_conditional_return_gate_through_inheritance: () -> untyped
+
+  ME_RBS: ::String
+
+  ME_RUBY: ::String
+
+  # felixefelip/steep#68 item 4: the runner shows `log_it` runs after
+  # `authenticate_user`, so authenticate_user's proven facts (item 2 + 3) hold
+  # at log_it's entry.
+  def test_runner_infers_method_entry_facts_from_runner: () -> untyped
+
+  def test_runner_propagates_facts_transitively_to_the_second_hop: () -> untyped
+
+  # felixefelip/steep#96. The end-to-end shape the issue is about: a fact proven in a
+  # controller runner has to survive the hop THROUGH a template — a top-level body with no
+  # `def` at all — into the partial that template renders.
+  #
+  # Before #96 the chain stopped at `VWView#__rbs_infer__body`: the template contributed no
+  # flow, so `VWView#render` had no call site, no entry facts, and neither did the partial.
+  def test_runner_carries_facts_through_a_self_method_template_into_its_partial: () -> untyped
+
+  # felixefelip/steep#100, end to end: a `before_action` handler that populates global
+  # state proves it populated for everything the runner calls after it.
+  #
+  # `set_current_account` cannot halt, so it has no gate for `conditional_const_returns` to
+  # key on and used to prove nothing — the establishment died in its own body and reached
+  # neither the action nor the view the action renders.
+  #
+  # The write reads a method that is non-nil in its OWN right. Writing
+  # `Current.account = current_account` — non-nil only because the guard proved it — also
+  # works, but not in a single run: the Inferrer walks the body before any entry fact
+  # exists, so the RHS still looks nilable and nothing is established until a later run
+  # sees the fact. Fine for the sidecar (it is regenerated to a fixed point), wrong to hide
+  # inside a test that would then pass for the wrong reason.
+  def test_runner_carries_an_unconditional_const_establishment_to_later_calls: () -> untyped
+
+  # felixefelip/steep#103. `expand_transitive_const_returns` gave a HALTING guard the
+  # sibling attributes its setter override establishes; the ungated establishments (#100)
+  # had no such expansion. So the same `Current.user = <non-nil>` write proved
+  # `Current.name` too when it sat in a guard that redirects, and did not when it sat in a
+  # plain `before_action` — the shape every Rails app actually writes.
+  def test_runner_expands_an_ungated_establishment_through_the_setter_override: () -> untyped
+
+  TC_RBS: ::String
+
+  TC_RUBY: ::String
+
+  # felixefelip/steep#68 item 5: `Current.user = <non-nil>` also proves
+  # `Current.author_name`, because the (delegated) instance setter establishes it.
+  def test_runner_expands_transitive_const_returns: () -> untyped
+
+  def test_runner_is_idempotent: () -> untyped
+
+  ALIAS_RBS: ::String
+
+  ALIAS_RUBY: ::String
+
+  # felixefelip/steep#62: the postconditions pass must type-check with the
+  # project's real return-alias registry. `PCProxy#capture` establishes
+  # `@cached = record.post.user`, where `record = build` return-aliases
+  # `record.post` to `self.owner`; with `capture` enforced (via forwarding at
+  # `@post.assignments.capture`), that deref narrows to `::PCUser`, so `@cached`
+  # is refined from its declared `PCUser?`. If the runner type-checks with an
+  # empty registry the deref stays `(::PCUser | nil)` and no refinement is
+  # emitted — the bug this guards.
+  def test_runner_applies_return_alias_narrowing_to_ivar_refinement: () -> untyped
+
+  def test_runner_sidecar_consumable_by_consumer_on_next_run: () -> untyped
+
+  ARG_FACTS_RBS: ::String
+
+  ARG_FACTS_RUBY: ::String
+
+  def test_runner_partitions_entry_facts_by_literal_argument: () -> untyped
+
+  def test_runner_meets_argument_facts_across_call_sites_with_the_same_literal: () -> untyped
+
+  def test_runner_drops_argument_facts_when_a_call_site_passes_a_non_literal: () -> untyped
+
+  def test_runner_keeps_argument_facts_for_a_different_parameter: () -> untyped
+
+  def test_runner_establishes_ivars_from_a_setter_method_call: () -> untyped
+
+  def test_runner_does_not_establish_an_ivar_a_call_only_nils_out: () -> untyped
+
+  def test_runner_records_ivars_in_method_entry_facts: () -> untyped
+
+  def test_runner_carries_an_argument_fact_across_a_hop: () -> untyped
+
+  def test_runner_still_meets_away_a_partition_when_one_hop_establishes_nothing: () -> untyped
+
+  def test_runner_drops_argument_facts_after_a_splat: () -> untyped
+
+  IVAR_FACTS_RBS: ::String
+
+  def test_runner_partitions_ivar_facts_by_literal_argument: () -> untyped
+
+  def test_runner_drops_ivar_facts_across_a_cross_object_call: () -> untyped
+
+  def test_runner_drops_ivar_facts_written_by_an_intervening_call: () -> untyped
+
+  # felixefelip/rbs_infer#144 stage 2. "A truthy return means the block answered
+  # truthy" travels the delegation chain — Rails is three deep, and entries
+  # arrive in whatever order the files do, so the closure runs to a fixpoint.
+  # The chain below is written top-down on purpose: a single pass in definition
+  # order would prove nothing.
+  # felixefelip/steep#126. The halt lands on an ARGUMENT: `refuse` hands itself
+  # to a module function, which halts what it was handed. Neither frame proves
+  # it alone — `deny` writes nothing on its own `self`, and `refuse` writes
+  # nothing at all — which is the shape the framework itself has.
+  #
+  # `host` is TYPED here, and that is load-bearing: the callee half records the
+  # declarations `host.halt` dispatches to, so an `untyped` parameter resolves
+  # to nothing and the proof never starts. Rails is exactly that case, which is
+  # why the framework chain is still out of reach.
+  PH_RBS: ::String
+
+  PH_RUBY: ::String
+
+  BT_RBS: ::String
+
+  BT_RUBY: ::String
+
+  def test_runner_carries_block_truthiness_down_a_delegation_chain: () -> untyped
+
+  # Forwarding into a callee with nothing to say proves nothing: `unrelated`
+  # never calls the block, so a truthy `sideways` says nothing about it.
+  def test_runner_proves_nothing_by_forwarding_into_a_method_without_the_fact: () -> untyped
+
+  # felixefelip/rbs_infer#144 stage 2b. `middle(&login) || deny`, where `deny`
+  # halts: a truthy answer is `middle`'s unless `deny` answered, and `deny` never
+  # returns without halting. So on the UNHALTED exit the answer is the block's,
+  # and the fact is gated like every other fact about such an exit.
+  def test_runner_proves_block_truthiness_across_a_disjunction_that_ends_in_a_halt: () -> untyped
+
+  # `fetch` halts nothing, so the tail answering truthy is an exit where the
+  # block was never called — the fact would be a lie on exactly that path.
+  def test_runner_proves_nothing_when_the_disjunction_tail_does_not_halt: () -> untyped
+
+  # The chain does not say WHICH operand answered, so an operand that never
+  # received the block would make the fact a claim about somebody else's.
+  def test_runner_proves_nothing_when_an_operand_did_not_get_the_block: () -> untyped
+
+  # felixefelip/rbs_infer#144 stage 3, the call site — what all of it was for.
+  # The write happens INSIDE the block, and the caller learns it only because
+  # the callee's answer is known to be its block's.
+  #
+  # The callee's fact decides the shape: `or_halt` proves it only of the exit
+  # that did not halt, so the caller's fact carries the same gate.
+  def test_runner_turns_what_a_block_established_into_a_fact_about_the_caller: () -> untyped
+
+  # An UNGATED callee (`direct` simply calls the block) proves it of every
+  # truthy exit, so the caller's fact needs no halt check either.
+  def test_runner_needs_no_gate_when_the_callee_needs_none: () -> untyped
+
+  # `unrelated` never calls its block, so a truthy answer says nothing about it
+  # — and the block may not have run at all.
+  def test_runner_proves_nothing_from_a_block_the_callee_may_ignore: () -> untyped
+
+  # felixefelip/rbs_infer#144, the shape an app writes: the block call two
+  # conditionals deep, and the inner `else` is the 401. Both gates are the same
+  # ivar here — the callee's `||` tail and this method's own `else` halt the same
+  # way — so one check covers them.
+  def test_runner_reads_a_call_site_two_conditionals_deep_with_a_halting_else: () -> untyped
+
+  # `direct` needs no gate of its own, but the `else` still means a truthy
+  # return could be `deny`'s — so the site's own halt gates what the callee left
+  # ungated, and the fact lands in the conditional slot rather than the
+  # unconditional one.
+  def test_runner_gates_an_ungated_callee_on_the_sites_own_halt: () -> untyped
+
+  # The same proof written the other way round — the halt in the `if`, the block
+  # in the `else`.
+  def test_runner_reads_the_block_from_either_arm: () -> untyped
+
+  # `fetch` halts nothing, so the `else` is an ordinary way to return truthy
+  # having established nothing — exactly the path the fact would be a lie on.
+  # The Inferrer offered the candidate; refusing it is the Runner's call, since
+  # only it knows what `fetch` does.
+  def test_runner_proves_nothing_when_the_alternative_does_not_halt: () -> untyped
+
+  # felixefelip/steep#126. `refuse` hands `self` to `PHResponder.deny`, which
+  # halts what it was handed. Neither frame states it: `deny` writes nothing on
+  # its own `self`, and `refuse` writes nothing at all. Together they do, and
+  # the `||` above can then be gated.
+  def test_runner_proves_a_halt_that_lands_on_an_argument: () -> untyped
+
+  # `note` calls `record` on the host, and `record` halts nothing — passing
+  # yourself to somebody proves nothing on its own.
+  def test_runner_proves_nothing_when_the_callee_does_not_halt_what_it_was_handed: () -> untyped
+end

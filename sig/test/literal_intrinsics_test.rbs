@@ -1,0 +1,19 @@
+# Generated from test/literal_intrinsics_test.rb with RBS::Inline
+
+class LiteralIntrinsicsTest < Minitest::Test
+  class MethodDecl < Struct[untyped]
+    attr_accessor method_name(): untyped
+
+    def self.new: (?untyped method_name) -> instance
+                | (?method_name: untyped) -> instance
+  end
+
+  class MethodCall < Struct[untyped]
+    attr_accessor method_decls(): untyped
+
+    def self.new: (?untyped method_decls) -> instance
+                | (?method_decls: untyped) -> instance
+  end
+
+  def test_unexpected_fold_failure_is_logged_and_declined: () -> untyped
+end

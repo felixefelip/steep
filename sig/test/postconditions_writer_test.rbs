@@ -1,0 +1,44 @@
+# Generated from test/postconditions_writer_test.rb with RBS::Inline
+
+class PostconditionsWriterTest < Minitest::Test
+  Postconditions: untyped
+
+  Writer: untyped
+
+  InferredEntry: untyped
+
+  Store: untyped
+
+  def build_entry: (class_name: untyped, method_name: untyped, ivars: untyped, ?singleton: untyped, ?self_type_string: untyped) -> untyped
+
+  def test_dump_serializes_unconditional_ivars: () -> untyped
+
+  def test_dump_sorts_entries_for_deterministic_output: () -> untyped
+
+  def test_dump_serializes_unconditional_self_when_provided: () -> untyped
+
+  def test_dump_omits_self_slot_when_absent: () -> untyped
+
+  def test_dump_serializes_ivar_keys_in_alphabetical_order: () -> untyped
+
+  def test_dump_serializes_returns_establishes_without_ivars: () -> untyped
+
+  # felixefelip/rbs_infer#144 stage 2. The fact belongs to the truthy branch — it
+  # is only ever true of a truthy exit — and it is written although no consumer
+  # reads it back yet (that is stage 3), on the same grounds as the `consts` in
+  # that branch: a fact nobody can see is a fact nobody can check.
+  def test_dump_serializes_block_truthiness_on_the_truthy_branch: () -> untyped
+
+  # Stage 2b. Held only by the exit that did not halt, so it sits beside the
+  # other gated facts rather than in the truthy branch — the same split
+  # `conditional_const_returns` has from `when_true.consts`.
+  def test_dump_serializes_halt_gated_block_truthiness_separately: () -> untyped
+
+  # The method-slot sibling of `when_true.ivars`. `Branch` does not parse it
+  # back — the refinement a consumer applies is the `self:` intersection, and
+  # the marker module named there is where these types live — but a `self:`
+  # pointing at a marker says nothing about WHY on its own.
+  def test_dump_serializes_when_true_method_slots: () -> untyped
+
+  def test_dump_omits_block_truthiness_when_it_was_not_proven: () -> untyped
+end

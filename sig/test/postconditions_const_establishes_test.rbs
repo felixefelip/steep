@@ -1,0 +1,95 @@
+# Generated from test/postconditions_const_establishes_test.rb with RBS::Inline
+
+# felixefelip/rbs_infer#71 (piece 2 — the write-site wiring). A singleton setter
+# `Const.user = <non-nil>` whose `unconditional.establishes_consts` postcondition
+# names a sibling attribute proves `Const.<attr>` non-nil for the rest of the
+# frame — the memoized-singleton delegation (`Example3::Foo`: `Foo.user = user`
+# makes `Foo.name` non-nil because `def user=` writes `name`).
+#
+# This exercises ONLY the consumption side: the sidecar is hand-written here.
+# Inferring/serializing it (generalizing the `.instance` delegation recognition
+# to a memoized `foo_instance`) is the follow-up piece.
+class PostconditionsConstEstablishesTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  Postconditions: untyped
+
+  RBS: ::String
+
+  # `Foo.user=` establishes `Foo.name` non-nil.
+  def establishes_name_store: () -> untyped
+
+  # The `(send (const nil :Foo) :name)` read node — here the trailing statement.
+  def last_foo_name_type: (untyped source, untyped typing) -> untyped
+
+  # A NESTED constant: `Foo` written inside `module Bar` resolves to `::Bar::Foo`,
+  # but its literal source path is just `Foo`. The sidecar (like every
+  # `.steep_postconditions.yml`) is keyed by the full class name `Bar::Foo`, so
+  # the establishment must be looked up / seeded / read by the RESOLVED name, not
+  # the source spelling — the `resolved_const_name_string` path.
+  NESTED_RBS: ::String
+
+  # `Bar::Foo#user=` establishes `Bar::Foo.name` non-nil — keyed by the full name.
+  def nested_establishes_name_store: () -> untyped
+
+  # The first descendant matching `block`, depth-first.
+  def find_descendant: (untyped node) ?{ (?) -> untyped } -> untyped
+
+  # The `(send (const nil :Foo) :name)` read node nested inside `module Bar`.
+  def nested_foo_name_type: (untyped source, untyped typing) -> untyped
+
+  def test_nested_const_establishes_via_resolved_name: () -> untyped
+
+  def test_write_establishes_sibling_const_non_nil: () -> untyped
+
+  def test_no_sidecar_leaves_const_read_nilable: () -> untyped
+
+  # felixefelip/steep#76 (RC3). An establishment for `Const.attr` is not
+  # monotonic: a LATER `Const.attr = <nilable>` write to the same attribute
+  # invalidates the earlier non-nil fact, so a read after it is nilable again.
+  OWN_RBS: ::String
+
+  def own_name_establishes_store: () -> untyped
+
+  def test_nilable_write_invalidates_earlier_establishment: () -> untyped
+
+  def test_nil_write_does_not_establish: () -> untyped
+
+  # The memoized-singleton READ/WRITE path. A sibling attribute established
+  # non-nil at a `Foo.user = <non-nil>` write can be read back — and written —
+  # through the memoized accessor (`Foo.foo_instance.name`) as well as the
+  # constant path (`Foo.name`); `foo_instance` is a singleton accessor whose
+  # return type IS an instance of `Foo`, so both name the same slot. `name=`
+  # takes `String?` on both the singleton and instance so the nilable writes
+  # below type-check.
+  MEMOIZED_RBS: ::String
+
+  # The `(send (send (const nil :Foo) :foo_instance) :name)` read node.
+  def foo_instance_name_read_type: (untyped source, untyped typing) -> untyped
+
+  def test_read_narrows_sibling_through_memoized_accessor: () -> untyped
+
+  def test_nilable_write_through_accessor_invalidates: () -> untyped
+
+  def test_nilable_write_to_sibling_established_attr_invalidates: () -> untyped
+
+  # The pure-send cache gap. The established fact narrows `Foo.name`, but a READ
+  # of it also caches the narrowed (non-nil) type in Steep's structurally-keyed
+  # pure-send cache. A later nilable write must invalidate THAT cache too, not
+  # only the fact — otherwise the stale non-nil cached type wins at the next read
+  # (the fact is already gone) and masks the nil. The distinguishing ingredient
+  # over `test_nilable_write_to_sibling_established_attr_invalidates` is the
+  # intervening narrowed read that populates the cache.
+  def test_nilable_write_invalidates_pure_cache_from_intervening_read: () -> untyped
+
+  # Same gap, reached through the memoized accessor on both the read that
+  # populates the cache and the write that must invalidate it — the cached read
+  # node is `Foo.foo_instance.name`, keyed by the same-slot base.
+  def test_nilable_write_through_accessor_invalidates_pure_cache_from_intervening_read: () -> untyped
+end

@@ -1,0 +1,26 @@
+# Generated from test/project_constructor_binding_registry_test.rb with RBS::Inline
+
+# Tests for the project-wide constructor reader→parameter index consumed by
+# `TypeConstruction` at `.new` call sites (felixefelip/steep#60). Covers
+# building from source, lookups, and invalidation.
+class ProjectConstructorBindingRegistryTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  Project: untyped
+
+  ConstructorBindingRegistry: untyped
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: (steepfile: untyped) -> untyped
+
+  FIXTURE_STEEPFILE: ::String
+
+  def test_builds_and_looks_up_bindings_from_sources: () -> untyped
+
+  def test_rebuilt_after_invalidation: () -> untyped
+end
