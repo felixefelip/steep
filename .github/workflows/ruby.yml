@@ -19,6 +19,12 @@ jobs:
           - test
           - test:output
           - build
+        # The unit suite takes 9–13 minutes per Ruby; run it on 4.0 only.
+        exclude:
+          - ruby: '3.3'
+            task: test
+          - ruby: '3.4'
+            task: test
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
