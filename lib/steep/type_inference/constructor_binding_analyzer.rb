@@ -32,8 +32,8 @@ module Steep
       # `initialize` this source defines for it, or nil for one that binds
       # nothing this can read: two, across sources or within one, and which
       # runs is a question of load order. `methods` lists, per class or module,
-      # every instance method this source defines for it, valued by the ivar
-      # it returns when its body is exactly `@ivar`, nil otherwise.
+      # every instance method this source may define for it, valued by the
+      # ivar it returns when that is certain, nil otherwise.
       Scan = Struct.new(:readers, :initializers, :methods, keyword_init: true)
 
       # One `initialize`, as far as the object it leaves behind goes:
@@ -134,15 +134,66 @@ module Steep
         end
       end
 
-      # Every instance method this class body defines, with the ivar it
-      # returns when its body is exactly `@ivar`. Where the constant may name
-      # two classes, which one has the method is not known, so it reads none.
+      # Every instance method this class body may define, with the ivar it
+      # returns when that is certain. Where the constant may name two classes,
+      # which one has the method is not known, so it reads none.
       def register_methods(body, names:)
-        each_stmt(body) do |stmt|
-          next unless stmt.type == :def
-          mname, _args, mbody = stmt.children
-          ivar = names.size == 1 ? single_ivar_reader(mbody) : nil
+        each_method_definition(body, direct: true) do |mname, ivar|
+          ivar = nil unless names.size == 1
           names.each { |name| ((@methods[name] ||= {})[mname] ||= []) << ivar }
+        end
+      end
+
+      # Yields each method name `node` may define on the class whose body it
+      # is, with the ivar the method returns when the definition always runs
+      # and returns exactly that: `def x = @x` or `attr_reader :x`, as a
+      # statement of the body or under a modifier (`private def x = @x`).
+      #
+      # Anything else that may name a method counts, returning nothing this
+      # reads: an `alias`, `alias_method`, `define_method`, or a definition
+      # under a condition, inside a block (`class_eval do`) or inside another
+      # method. A nested class, module or singleton body defines elsewhere.
+      def each_method_definition(node, direct:, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        case node.type
+        when :class, :module, :sclass
+          nil
+        when :begin
+          node.children.each { |child| each_method_definition(child, direct: direct, &block) }
+        when :def
+          mname, _args, mbody = node.children
+          yield mname, (direct ? single_ivar_reader(mbody) : nil)
+          each_method_definition(mbody, direct: false, &block)
+        when :alias
+          new_name = node.children[0]
+          yield new_name.children[0], nil if new_name.type == :sym
+        when :send
+          receiver, mname, *args = node.children
+          if receiver.nil? && %i[private public protected module_function].include?(mname)
+            args.each { |arg| each_method_definition(arg, direct: direct, &block) }
+            return
+          end
+
+          if receiver.nil?
+            names = args.filter_map { |arg| arg.children[0].to_sym if %i[sym str].include?(arg.type) }
+            case mname
+            when :alias_method, :define_method
+              yield names.first, nil if names.first
+            when :attr_reader
+              names.each { |name| yield name, (direct ? :"@#{name}" : nil) }
+            when :attr_accessor
+              names.each do |name|
+                yield name, (direct ? :"@#{name}" : nil)
+                yield :"#{name}=", nil
+              end
+            when :attr_writer
+              names.each { |name| yield :"#{name}=", nil }
+            end
+          end
+          node.children.each { |child| each_method_definition(child, direct: false, &block) }
+        else
+          node.children.each { |child| each_method_definition(child, direct: false, &block) }
         end
       end
 

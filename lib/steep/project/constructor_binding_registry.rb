@@ -8,7 +8,7 @@ module Steep
     #
     # Built and invalidated exactly like `DelegationRegistry`: a full source
     # sweep on first access, rebuilt from scratch on any source change. RBS-only
-    # classes have no Ruby body to analyze and are simply absent — `lookup`
+    # classes have no Ruby body to analyze and are simply absent — `bindings_for`
     # returns nil and the caller falls through.
     class ConstructorBindingRegistry
       def self.build(project)
@@ -36,14 +36,6 @@ module Steep
         @initializers.freeze
         @methods.freeze
         self
-      end
-
-      # @param class_name [String, #to_s] absolute (`"::Proxy"`) or bare
-      # @param reader [Symbol, #to_sym]
-      # @return [Integer, nil] the constructor parameter index, or nil
-      def lookup(class_name, reader)
-        key = class_name.to_s.sub(/\A::/, "")
-        @entries.dig(key, reader.to_sym)
       end
 
       # @param class_name [String, #to_s]
@@ -81,7 +73,7 @@ module Steep
         bodies.first if bodies.size == 1
       end
 
-      # Whether the project defines `method_name` in `class_name` at all.
+      # Whether the project may define `method_name` in `class_name` at all.
       def defines?(class_name, method_name)
         methods_of(class_name).key?(method_name.to_sym)
       end

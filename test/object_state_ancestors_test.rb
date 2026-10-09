@@ -68,6 +68,10 @@ class ObjectStateAncestorsTest < Minitest::Test
     end
     class DefHidden < DefBase
     end
+    class DefWrapped < DefBase
+    end
+    class DefAliased < DefBase
+    end
     module DefNamed
       @name: Symbol
       def name: () -> Symbol
@@ -156,6 +160,13 @@ class ObjectStateAncestorsTest < Minitest::Test
     end
     class DefHidden < DefBase
       def name = :hidden
+    end
+    class DefWrapped < DefBase
+      public def name = :wrapped
+    end
+    class DefAliased < DefBase
+      def label = :aliased
+      alias_method :name, :label
     end
     module DefNamed
       def name = @name
@@ -285,5 +296,11 @@ class ObjectStateAncestorsTest < Minitest::Test
   # The RBS places `name` in `DefBase`, but the one Ruby runs is `DefHidden`'s.
   def test_a_def_the_rbs_does_not_place_reads_nothing
     assert_name "::Symbol", "DefHidden"
+  end
+
+  # The same, defined under a modifier or by `alias_method`.
+  def test_any_definition_the_rbs_does_not_place_reads_nothing
+    assert_name "::Symbol", "DefWrapped"
+    assert_name "::Symbol", "DefAliased"
   end
 end

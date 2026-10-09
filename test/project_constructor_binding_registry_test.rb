@@ -48,11 +48,9 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
       project = setup_project(steepfile: FIXTURE_STEEPFILE)
       registry = ConstructorBindingRegistry.build(project)
 
-      assert_equal 1, registry.lookup("Proxy", :owner)
-      assert_equal 1, registry.lookup("::Proxy", :owner), "leading `::` is stripped"
-      assert_nil registry.lookup("Proxy", :missing)
-      assert_nil registry.lookup("Nope", :owner)
       assert_equal({ owner: 1 }, registry.bindings_for("Proxy"))
+      assert_equal({ owner: 1 }, registry.bindings_for("::Proxy"), "leading `::` is stripped")
+      assert_nil registry.bindings_for("Nope")
     end
   end
 
@@ -67,7 +65,7 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
         end
       RUBY
       project = setup_project(steepfile: FIXTURE_STEEPFILE)
-      assert_equal 0, project.constructor_binding_registry.lookup("Proxy", :owner)
+      assert_equal 0, project.constructor_binding_registry.bindings_for("Proxy")&.dig(:owner)
 
       write("app/proxy.rb", <<~RUBY)
         class Proxy
@@ -78,7 +76,7 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
         end
       RUBY
       project.invalidate_constructor_binding_registry!
-      assert_equal 1, project.constructor_binding_registry.lookup("Proxy", :owner),
+      assert_equal 1, project.constructor_binding_registry.bindings_for("Proxy")&.dig(:owner),
                    "the index reflects the new constructor arity after invalidation"
     end
   end
