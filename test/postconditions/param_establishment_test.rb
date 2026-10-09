@@ -1,8 +1,5 @@
 require_relative "../test_helper"
 
-# felixefelip/steep#228: an attribute a method always writes on one of its
-# parameters reaches the call site. The parameter sibling of
-# `returns.establishes` (#56).
 class PostconditionsParamEstablishmentTest < Minitest::Test
   include TestHelper
   include FactoryHelper
@@ -14,12 +11,17 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
   RBS = <<~RBS
     class PEBox
       attr_accessor value: :draft | :published
+      attr_accessor owner: Object
+      attr_reader custom: :draft | :published
+      def custom=: (:draft | :published) -> void
       def initialize: (:draft | :published) -> void
       def stamp!: () -> void
     end
 
     class PEPublisher
+      @other: PEBox
       def publish: (PEBox box) -> void
+      def reset: () -> void
       def log: (PEBox box) -> void
       def publish_last: (*PEBox others, PEBox box) -> void
       def publish_first: (PEBox box, *PEBox others) -> void
@@ -216,6 +218,96 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
     assert_empty establishments_of(entries, :publish_after_default)
   end
 
+  def test_a_yield_after_the_write_drops_it
+    entries = infer_for(<<~RUBY)
+      class PEPublisher
+        def publish(box)
+          box.value = :published
+          yield
+        end
+      end
+    RUBY
+
+    assert_empty establishments_of(entries, :publish)
+  end
+
+  def test_a_write_through_an_ivar_after_the_write_drops_it
+    entries = infer_for(<<~RUBY)
+      class PEPublisher
+        def publish(box)
+          box.value = :published
+          @other.value = :draft
+        end
+      end
+    RUBY
+
+    assert_empty establishments_of(entries, :publish)
+  end
+
+  def test_a_call_on_self_after_the_write_drops_it
+    entries = infer_for(<<~RUBY)
+      class PEPublisher
+        def publish(box)
+          box.value = :published
+          reset
+        end
+      end
+    RUBY
+
+    assert_empty establishments_of(entries, :publish)
+  end
+
+  def test_a_write_through_the_parameter_after_reassigning_it_establishes_nothing
+    entries = infer_for(<<~RUBY)
+      class PEPublisher
+        def publish(box)
+          box = PEBox.new(:draft)
+          box.value = :published
+        end
+      end
+    RUBY
+
+    assert_empty establishments_of(entries, :publish)
+  end
+
+  def test_a_setter_that_is_not_an_attr_writer_establishes_nothing
+    entries = infer_for(<<~RUBY)
+      class PEPublisher
+        def publish(box)
+          box.custom = :published
+        end
+      end
+    RUBY
+
+    assert_empty establishments_of(entries, :publish)
+  end
+
+  def test_self_establishes_nothing
+    entries = infer_for(<<~RUBY)
+      class PEPublisher
+        def publish(box)
+          box.owner = self
+        end
+      end
+    RUBY
+
+    assert_empty establishments_of(entries, :publish)
+  end
+
+  def test_two_definitions_keep_only_what_both_write
+    published = Steep::AST::Types::Literal.new(value: :published)
+    draft = Steep::AST::Types::Literal.new(value: :draft)
+    entry = ->(attrs) {
+      Postconditions::InferredEntry.new(class_name: "PEPublisher", method_name: :publish, singleton: false, param_establishments: { 0 => attrs })
+    }
+    merged = Postconditions::Runner.allocate.send(:merge, [
+      entry.({ value: published, owner: published }),
+      entry.({ value: published, owner: draft })
+    ])
+
+    assert_equal [{ 0 => { value: published } }], merged.map(&:param_establishments)
+  end
+
   def test_a_value_as_wide_as_the_reader_establishes_nothing
     entries = infer_for(<<~RUBY)
       class PEPublisher
@@ -293,7 +385,6 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
   end
 
   def test_a_name_on_both_sides_establishes_nothing
-    # The entry cannot say whether `publish` or `self.publish` wrote it.
     [["publish(box)", "instance"], ["PEBothSides.publish(box)", "singleton"]].each do |call, side|
       type = value_type_after(<<~RUBY, postconditions: publish_postcondition(klass: "PEBothSides"))
         # @type self: ::PEBothSides

@@ -4502,8 +4502,6 @@ module Steep
               receiver: receiver
             )
 
-            # felixefelip/steep#228: what the callee always leaves in the
-            # objects it was handed.
             constr = constr.apply_param_establishments(call: call, arguments: arguments)
 
             # felixefelip/steep#68 (item 1): the callee may WRITE ivars this
@@ -8478,15 +8476,10 @@ module Steep
       cache_attribute_read(receiver, attr.to_sym, rhs_type, location: node.location) || self
     end
 
-    # felixefelip/steep#228, the caller half. A method that always leaves a
-    # value in the object it was handed (`unconditional.params`) leaves it in
-    # the argument: after `publish(box)`, `box.value` is what `publish` wrote,
-    # exactly as if `box.value = :published` had been written here.
-    #
-    # Positional arguments only, up to the first one whose position is not
-    # its parameter's (a splat, keywords, a block pass). The value must fit
-    # the reader the argument actually has: the entry is found by name, and
-    # a name says nothing about which object it was inferred for.
+    # After `publish(box)`, `box.value` is what `publish` always writes
+    # (`unconditional.params`), as if `box.value = :published` were written
+    # here. Positional arguments only, up to the first one whose position is
+    # not its parameter's.
     def apply_param_establishments(call:, arguments:)
       return self unless call.is_a?(TypeInference::MethodCall::Typed)
       return self if postconditions.empty?
@@ -8509,13 +8502,8 @@ module Steep
       constr
     end
 
-    # The entry declaring `unconditional.params` for the method `call`
-    # resolved to, instance or singleton, the way `ReturnEstablishmentApplier`
-    # finds a `returns` one.
-    #
-    # Entries are keyed by class and method name alone, so when the class
-    # defines both `publish` and `self.publish` an entry may belong to the
-    # other one: such a name establishes nothing.
+    # Entries are keyed by class and method name alone, so a name the class
+    # defines both as `publish` and `self.publish` establishes nothing.
     def lookup_param_establishments_entry(call)
       call.method_decls.each do |decl|
         name = decl.method_name
@@ -8528,8 +8516,6 @@ module Steep
       nil
     end
 
-    # Whether `type_name` itself implements `method_name` both as an instance
-    # method and as a singleton method.
     def defined_on_both_sides?(type_name, method_name)
       builder = checker.factory.definition_builder
       [builder.build_instance(type_name), builder.build_singleton(type_name)].all? do |definition|
@@ -8539,9 +8525,7 @@ module Steep
       true
     end
 
-    # Caches `receiver.attr` as a pure read of type `type`, when the read
-    # resolves to a pure attr reader. With `fits_reader`, only when `type`
-    # is a subtype of what the reader declares. Nil when nothing is cached.
+    # Nil when nothing is cached.
     def cache_attribute_read(receiver, attr, type, location:, fits_reader: false)
       read_node = ::Parser::AST::Node.new(:send, [receiver, attr], location: location)
 

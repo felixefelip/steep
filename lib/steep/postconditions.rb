@@ -353,7 +353,7 @@ module Steep
 
     class Branch
       attr_reader :self_type_string, :via_receivers, :ivar_type_strings, :drops_type_strings, :returns_establishes, :const_establishes_type_strings
-      # felixefelip/steep#228: `{ index => { attr => type string } }`.
+      # `{ index => { attr => type string } }`
       attr_reader :param_establishes_type_strings
 
       def self.parse(raw, source:)
@@ -377,10 +377,8 @@ module Steep
         new(self_type_string: self_str, via_receivers: via_receivers, ivar_type_strings: ivars, drops_type_strings: drops, returns_establishes: returns_establishes, const_establishes_type_strings: const_establishes, param_establishes_type_strings: param_establishes)
       end
 
-      # Parses the `params:` payload (felixefelip/steep#228): what the method
-      # always leaves in the object passed at each position, as reader name to
-      # type, e.g. `{ 0 => { "value" => ":published" } }`. The parameter
-      # sibling of `returns.establishes`, carrying the value's type as well.
+      # `params:`, what the method always leaves in the object passed at each
+      # position: `{ 0 => { "value" => ":published" } }`.
       def self.parse_param_establishes(raw, source:)
         return {} unless raw.is_a?(Hash)
 
@@ -512,8 +510,6 @@ module Steep
         @const_establishes_type_strings = const_establishes_type_strings
       end
 
-      # Lazy-parsed `{ index => { attr => RBS::Types::t } }` for the `params:`
-      # slot. Entries that fail to parse are dropped with a warning.
       def param_establishes_rbs_types
         return @param_establishes_rbs_types if defined?(@param_establishes_rbs_types)
         @param_establishes_rbs_types = param_establishes_type_strings.transform_values do |attrs|

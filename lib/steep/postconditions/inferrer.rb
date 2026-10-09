@@ -659,18 +659,11 @@ module Steep
         result
       end
 
-      # felixefelip/steep#228, the callee half. What this method leaves in the
-      # objects it was handed:
-      #
-      #   def self.publish(box)        # => { 0 => { value: :published } }
-      #     box.value = :published
-      #   end
-      #
-      # The parameter sibling of `returns.establishes` (#56), carrying the type
-      # the checker gave the written value. A write counts only if it runs on
-      # every exit and nothing after it can undo it: a `return` or a halt gate
-      # may skip it, a write inside a branch or a block may not run, and any
-      # later use of the parameter other than a reader may write it again.
+      # What this method always leaves in the objects it was handed, by
+      # parameter position: `{ 0 => { value: :published } }` for a `publish(box)`
+      # that writes `box.value = :published`. A write counts only if it
+      # runs on every exit and nothing after it can reach the object again:
+      # anything but literals, locals and attr reads may hold an alias to it.
       def collect_param_establishments(def_node)
         body = def_node.children[2]
         return {} unless body
@@ -680,16 +673,17 @@ module Steep
         names = leading_positional_param_names(def_node)
         return {} if names.empty?
 
+        live = names.dup
         writes = {} #: Hash[Symbol, Hash[Symbol, Parser::AST::Node]]
         each_statement(body) do |stmt|
-          write = param_attr_write(stmt, names)
-          # A write runs its value first, and that value may disturb too.
-          before = write ? write.fetch(:value) : stmt
-          names.each { |name| writes.delete(name) if disturbs_param?(before, name) }
+          write = param_attr_write(stmt, live)
+          evaluated = write ? write.fetch(:value) : stmt
+          writes.clear unless inert?(evaluated)
+          live.reject! { |name| any_node?(evaluated) { |node| node.type == :lvasgn && node.children[0] == name } }
+          writes.select! { |name, _| live.include?(name) }
           next unless write
 
-          # Two parameters may be one object (`two(box, box)`), so a write
-          # through one is the last word on that reader for all of them.
+          # Two parameters may be one object (`two(box, box)`).
           writes.each_value { |attrs| attrs.delete(write.fetch(:attr)) }
           (writes[write.fetch(:param)] ||= {})[write.fetch(:attr)] = write.fetch(:node)
         end
@@ -698,6 +692,8 @@ module Steep
           established = attrs.each_with_object({}) do |(attr, write_node), acc|
             type = type_of(write_node.children[2]) or next
             next if type.is_a?(AST::Types::Any)
+            # `self`, `instance`, `class` and type variables mean something else at the call site.
+            next unless type.free_variables.empty?
             declared = declared_reader_type(write_node.children[0], attr) or next
             acc[attr] = type if strict_subtype?(type, declared)
           end
@@ -705,11 +701,9 @@ module Steep
         end
       end
 
-      # The positional parameters before the first splat, whose index at the
-      # definition is their index at every call site that reaches them.
-      # Ruby fills required parameters first, so an optional one followed by
-      # a required one (`def f(a = 1, b)`) shifts with the argument count:
-      # the list stops at the first optional parameter in that case.
+      # The positional parameters whose index at the definition is their index
+      # at every call site: those before the first splat, and before an
+      # optional one that a required one follows (`def f(a = 1, b)`).
       def leading_positional_param_names(def_node)
         args = def_node.children[1]
         return [] unless args.is_a?(Parser::AST::Node)
@@ -722,7 +716,6 @@ module Steep
         leading.map { |arg| arg.children[0] }
       end
 
-      # `param.attr = value` written as a statement of its own.
       def param_attr_write(stmt, names)
         return nil unless stmt.type == :send
 
@@ -732,42 +725,34 @@ module Steep
 
         setter = method_name.to_s
         return nil unless setter.match?(/\A\w+=\z/)
+        return nil unless attr_call?(stmt, RBS::AST::Members::AttrWriter, RBS::AST::Members::AttrAccessor)
 
         { param: receiver.children[0], attr: setter.delete_suffix("=").to_sym, value: args[0], node: stmt }
       end
 
-      # Whether running `node` may change what the local `name` holds: it
-      # assigns the local, or uses it other than as the receiver of a reader.
-      def disturbs_param?(node, name)
-        any_node?(node) do |descendant|
-          case descendant.type
-          when :lvasgn
-            descendant.children[0] == name
-          when :lvar
-            descendant.children[0] == name && !read_by_attr_reader?(node, descendant)
-          else
-            false
-          end
+      INERT_NODE_TYPES = %i[int float rational complex str sym nil true false self lvar ivar const cbase begin array lvasgn ivasgn].freeze
+
+      # Whether evaluating `node` runs no code that could write an attribute:
+      # literals, variables and attr reads only.
+      def inert?(node)
+        return true unless node.is_a?(Parser::AST::Node)
+
+        inert_node = INERT_NODE_TYPES.include?(node.type) ||
+          (node.type == :send && node.children.size == 2 &&
+            attr_call?(node, RBS::AST::Members::AttrReader, RBS::AST::Members::AttrAccessor))
+        inert_node && node.children.all? { |child| inert?(child) }
+      end
+
+      def attr_call?(node, *members)
+        call = @typing.call_of(node: node) rescue nil
+        return false unless call.respond_to?(:method_decls) && !call.method_decls.empty?
+
+        call.method_decls.all? do |decl|
+          member = decl.method_def&.member
+          members.any? { |klass| member.is_a?(klass) }
         end
       end
 
-      # Whether `lvar` is, somewhere in `root`, the receiver of a call that
-      # resolves to `attr_reader`/`attr_accessor` readers only.
-      def read_by_attr_reader?(root, lvar)
-        any_node?(root) do |node|
-          next false unless node.type == :send && node.children.size == 2 && node.children[0].equal?(lvar)
-
-          call = @typing.call_of(node: node) rescue nil
-          next false unless call.respond_to?(:method_decls) && !call.method_decls.empty?
-
-          call.method_decls.all? do |decl|
-            member = decl.method_def&.member
-            member.is_a?(RBS::AST::Members::AttrReader) || member.is_a?(RBS::AST::Members::AttrAccessor)
-          end
-        end
-      end
-
-      # The declared return of the reader `attr` on the type of `receiver`.
       def declared_reader_type(receiver, attr)
         type = type_of(receiver)
         return nil unless type.is_a?(AST::Types::Name::Instance)
@@ -2195,8 +2180,8 @@ module Steep
       # Runner proved this method sets on its own `self` by handing itself to
       # such a callee — the halt neither side could see alone.
       attr_reader :param_call_deps, :self_arg_calls, :halts_via_param
-      # felixefelip/steep#228: `{ index => { attr => type } }`, what this method
-      # always leaves in the object it was handed at that position.
+      # `{ index => { attr => type } }`: what this method always leaves in the
+      # object it was handed at that position.
       attr_reader :param_establishments
 
       def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_methods: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_deps: {}, param_establishments: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
