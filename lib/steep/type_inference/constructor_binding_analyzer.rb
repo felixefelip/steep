@@ -172,28 +172,31 @@ module Steep
           receiver, mname, *args = node.children
           if receiver.nil? && %i[private public protected module_function].include?(mname)
             args.each { |arg| each_method_definition(arg, direct: direct, &block) }
-            return
+          else
+            macro_definitions(mname, args, direct: direct).each { |name, ivar| yield name, ivar } if receiver.nil?
+            node.children.each { |child| each_method_definition(child, direct: false, &block) }
           end
-
-          if receiver.nil?
-            names = args.filter_map { |arg| arg.children[0].to_sym if %i[sym str].include?(arg.type) }
-            case mname
-            when :alias_method, :define_method
-              yield names.first, nil if names.first
-            when :attr_reader
-              names.each { |name| yield name, (direct ? :"@#{name}" : nil) }
-            when :attr_accessor
-              names.each do |name|
-                yield name, (direct ? :"@#{name}" : nil)
-                yield :"#{name}=", nil
-              end
-            when :attr_writer
-              names.each { |name| yield :"#{name}=", nil }
-            end
-          end
-          node.children.each { |child| each_method_definition(child, direct: false, &block) }
         else
           node.children.each { |child| each_method_definition(child, direct: false, &block) }
+        end
+      end
+
+      # The methods a receiverless macro call defines, as `[name, ivar]`
+      # pairs: `attr_reader :x` returns `@x` when it always runs, the rest
+      # return nothing this reads.
+      def macro_definitions(mname, args, direct:)
+        names = args.filter_map { |arg| arg.children[0].to_sym if %i[sym str].include?(arg.type) }
+        case mname
+        when :alias_method, :define_method
+          names.take(1).map { |name| [name, nil] }
+        when :attr_reader
+          names.map { |name| [name, (direct ? :"@#{name}" : nil)] }
+        when :attr_accessor
+          names.flat_map { |name| [[name, (direct ? :"@#{name}" : nil)], [:"#{name}=", nil]] }
+        when :attr_writer
+          names.map { |name| [:"#{name}=", nil] }
+        else
+          []
         end
       end
 
