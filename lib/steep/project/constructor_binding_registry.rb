@@ -58,10 +58,17 @@ module Steep
       # the class. Whether anything writes the ivar afterwards is not this
       # index's question: `ObjectStates` asks the postconditions' `may_write`.
       def ivar_bindings_for(class_name)
-        initializers = @initializers[class_name.to_s.delete_prefix("::")] or return {}
+        initializers = initializers_for(class_name)
         return {} unless initializers.size == 1
 
-        initializers.first || {}
+        initializers.first&.bindings || {}
+      end
+
+      # Every `initialize` the project defines for `class_name` (a class or a
+      # module), as `TypeInference::ConstructorBindingAnalyzer::Initializer`,
+      # nil for one it cannot read. More than one: which runs is load order.
+      def initializers_for(class_name)
+        @initializers[class_name.to_s.delete_prefix("::")] || []
       end
 
       def empty?

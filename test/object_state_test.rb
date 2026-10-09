@@ -268,14 +268,19 @@ class ObjectStateTest < Minitest::Test
       assert_equal state("::Sub", :@name => ":posts"), pair.context.type_env[:r]
     end
 
-    # Only the class's own `initialize` is the bind: a superclass's may run
-    # through `super` and write something else.
-    [["Base", "reset", "@name"], ["Base", "initialize", "@name"]].each do |writer|
-      check(<<~'RUBY', sidecar: [*SIDECAR, writer]) do |pair|
-        r = Sub.new(:posts)
-      RUBY
-        assert_equal parse_type("::Sub"), pair.context.type_env[:r], writer.join("#")
-      end
+    # Any other method of a superclass may write it later.
+    check(<<~'RUBY', sidecar: [*SIDECAR, ["Base", "reset", "@name"]]) do |pair|
+      r = Sub.new(:posts)
+    RUBY
+      assert_equal parse_type("::Sub"), pair.context.type_env[:r]
+    end
+
+    # A superclass's `initialize` does not: `Sub`'s calls no `super`, so it
+    # never runs on a `Sub` (felixefelip/steep#230).
+    check(<<~'RUBY', sidecar: [*SIDECAR, ["Base", "initialize", "@name"]]) do |pair|
+      r = Sub.new(:posts)
+    RUBY
+      assert_equal state("::Sub", :@name => ":posts"), pair.context.type_env[:r]
     end
   end
 

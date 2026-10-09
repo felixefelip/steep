@@ -19,8 +19,8 @@ module Steep
         instance = call.return_type
         return call unless instance.is_a?(AST::Types::Name::Instance)
 
-        bindings = constr.constructor_bindings.ivar_bindings_for(instance.name.to_s)
-        bindings = bindings.select { |ivar, _| never_rewritten?(constr, instance, ivar) }
+        chain = initialize_chain(constr, instance) or return call
+        bindings = compose(chain).select { |ivar, _| never_rewritten?(constr, instance, ivar) }
         return call if bindings.empty?
 
         ivars = bindings.filter_map do |ivar, index|
@@ -63,8 +63,83 @@ module Steep
         !%i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(argument.type)
       end
 
-      # Nothing but the `initialize` that binds `ivar` writes it: no method of
-      # the class or of any ancestor has it in `may_write`. That answer comes
+      # The `initialize` methods `Klass.new` runs, from the one it calls to the
+      # last one a `super` reaches (felixefelip/steep#230), as
+      # `[owner, initializer]` pairs. Which one runs, and which one a `super`
+      # reaches, is the RBS definition's answer, so an inherited `initialize`
+      # and one from an included module are found the way any other method
+      # is. Nil when the chain cannot be read whole:
+      #
+      # - a Ruby `initialize` the RBS does not place there would run first;
+      # - one the project defines twice, or that could not be read;
+      # - a `super` that may not run, or reaches a body with no source
+      #   (`BasicObject#initialize`, which writes nothing, ends the chain).
+      def initialize_chain(constr, instance)
+        registry = constr.constructor_bindings
+        definition = constr.checker.factory.definition_builder.build_instance(instance.name)
+        ancestors = definition.ancestors.ancestors.map(&:name)
+        method = definition.methods[:initialize] or return nil
+
+        chain = [] #: Array[[RBS::TypeName, TypeInference::ConstructorBindingAnalyzer::Initializer?]]
+        passed = 0
+        loop do
+          owner = method.implemented_in or return nil
+          index = ancestors.index(owner) or return nil
+          return nil if index < passed
+          skipped = ancestors[passed...index] || []
+          return nil if skipped.any? { |name| !registry.initializers_for(name.to_s).empty? }
+
+          initializers = registry.initializers_for(owner.to_s)
+          if initializers.empty?
+            return nil unless owner == RBS::BuiltinNames::BasicObject.name
+            chain << [owner, nil]
+            return chain
+          end
+          initializer = initializers.first
+          return nil unless initializers.size == 1 && initializer
+
+          chain << [owner, initializer]
+          passed = index + 1
+          case initializer.super_args
+          when nil then return chain
+          when :opaque then return nil
+          end
+          method = method.super_method or return nil
+        end
+      rescue RBS::BaseError
+        nil
+      end
+
+      # `@ivar => call-site position` for the object `chain` leaves behind,
+      # composed from the last `initialize` up. A `super` hands an ancestor's
+      # binding on through the argument it passed at that position; an ivar
+      # one level writes and another level also writes is bound by neither,
+      # since which write lands last is a question of order this does not ask.
+      def compose(chain)
+        bindings = {} #: Hash[Symbol, Integer]
+        writes = Set[] #: Set[Symbol]
+        chain.reverse_each do |_, initializer|
+          next unless initializer
+
+          super_args = initializer.super_args
+          inherited = {} #: Hash[Symbol, Integer]
+          if super_args.is_a?(Array)
+            bindings.each do |ivar, position|
+              source = super_args[position]
+              inherited[ivar] = source if source && !initializer.writes.include?(ivar)
+            end
+          end
+          own = initializer.bindings.reject { |ivar, _| writes.include?(ivar) }
+          bindings = inherited.merge(own)
+          writes |= initializer.writes
+        end
+        bindings
+      end
+
+      # Nothing but an `initialize` writes `ivar`: no other method of the class
+      # or of any ancestor has it in `may_write`. An `initialize` runs on the
+      # object only while it is built, and the ones that do are the chain
+      # `compose` already read; the others never run on it at all. That answer comes
       # from the postconditions sidecar, so with none loaded yet nothing is
       # fixed; and `may_write` only records ivars the RBS declares, so an
       # undeclared one is not either.
@@ -80,8 +155,7 @@ module Steep
         return false unless definition.instance_variables.key?(ivar)
 
         definition.ancestors.ancestors.none? do |ancestor|
-          except = ancestor.name == instance.name ? :initialize : nil
-          postconditions.may_write?(ancestor.name.to_s, ivar, except: except)
+          postconditions.may_write?(ancestor.name.to_s, ivar, except: :initialize)
         end
       rescue RBS::BaseError
         false

@@ -28,11 +28,23 @@ module Steep
     # wherever `initialize` binds it (felixefelip/steep#205). Whether anything
     # writes the ivar afterwards is the postconditions' `may_write`, not this.
     class ConstructorBindingAnalyzer
-      # `readers` as above. `initializers` lists, per class, the bindings of
-      # every `initialize` this source defines for it, or nil for one that
-      # binds nothing this can read: two, across sources or within one, and
-      # which runs is a question of load order.
+      # `readers` as above. `initializers` lists, per class or module, every
+      # `initialize` this source defines for it, or nil for one that binds
+      # nothing this can read: two, across sources or within one, and which
+      # runs is a question of load order.
       Scan = Struct.new(:readers, :initializers, keyword_init: true)
+
+      # One `initialize`, as far as the object it leaves behind goes:
+      #
+      # - `bindings`: `@ivar => position` for each ivar it assigns straight
+      #   from the argument at that call-site position;
+      # - `writes`: every ivar it assigns at all;
+      # - `super_args`: what its `super` hands on (felixefelip/steep#230). Nil
+      #   when it calls none; for each position of the `super` call, the
+      #   call-site position of the argument passed there, or nil when that is
+      #   not one of this method's arguments as given; `:opaque` when the
+      #   `super` may not run, or which arguments land where is not known.
+      Initializer = Struct.new(:bindings, :writes, :super_args, keyword_init: true)
 
       def self.analyze(node)
         scan(node).readers
@@ -44,7 +56,7 @@ module Steep
 
       def initialize
         @result = {} #: Hash[String, Hash[Symbol, Integer]]
-        @initializers = {} #: Hash[String, Array[Hash[Symbol, Integer]?]]
+        @initializers = {} #: Hash[String, Array[Initializer?]]
       end
 
       def scan(node)
@@ -69,6 +81,8 @@ module Steep
           const_node, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
+          # A module's `initialize` runs for the classes that include it.
+          register_initializers(body, names: defined_names(const_node, nesting)) if body && name
           walk(body, nesting: new_nesting) if body
         else
           node.children.each { |c| walk(c, nesting: nesting) if c.is_a?(::Parser::AST::Node) }
@@ -108,8 +122,50 @@ module Steep
       # known, and it binds nothing.
       def register_initializers(body, names:)
         each_initialize(body) do |args, mbody|
-          bindings = names.size == 1 ? ivar_param_bindings(args, mbody) : nil
-          names.each { |name| (@initializers[name] ||= []) << bindings }
+          initializer = names.size == 1 ? initializer(args, mbody) : nil
+          names.each { |name| (@initializers[name] ||= []) << initializer }
+        end
+      end
+
+      def initializer(args_node, body)
+        writes = Set[] #: Set[Symbol]
+        each_node(body) { |node| writes << node.children[0] if node.type == :ivasgn }
+        Initializer.new(bindings: ivar_param_bindings(args_node, body), writes: writes, super_args: super_args(args_node, body))
+      end
+
+      # Where each argument of this method's `super` comes from, by call-site
+      # position. Only a `super` written as a statement of the body itself,
+      # the only one in it, in a body that cannot `return` before it: anything
+      # else may not run, or may run twice.
+      #
+      #   def initialize(name, options)
+      #     super(options, name)        # => [1, 0]
+      #   end
+      #
+      # A bare `super` passes every parameter where it stands, as it holds
+      # at that point: a reassigned one is not the argument it was given.
+      def super_args(args_node, body)
+        calls = [] #: Array[::Parser::AST::Node]
+        each_node(body) { |node| calls << node if node.type == :super || node.type == :zsuper }
+        return nil if calls.empty?
+
+        call = calls.first or raise
+        return :opaque if calls.size > 1 || contains?(body, :return)
+        top_level = false
+        each_stmt(body) { |stmt| top_level ||= stmt.equal?(call) }
+        return :opaque unless top_level
+
+        reassigned = Set[] #: Set[Symbol]
+        each_node(body) { |node| reassigned << node.children[0] if node.type == :lvasgn }
+        positions = call_positions(args_node).reject { |name, _| reassigned.include?(name) }
+
+        if call.type == :zsuper
+          params = args_node.is_a?(::Parser::AST::Node) ? args_node.children.grep(::Parser::AST::Node) : []
+          params.take_while { |param| param.type == :arg || param.type == :optarg }.map { |param| positions[param.children[0]] }
+        else
+          call.children
+            .take_while { |arg| !%i[splat block_pass kwargs forwarded_args forwarded_restarg].include?(arg.type) }
+            .map { |arg| arg.type == :lvar ? positions[arg.children[0]] : nil }
         end
       end
 

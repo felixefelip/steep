@@ -137,4 +137,29 @@ class IvarBindingsTest < Minitest::Test
     assert_equal({}, bindings.ivar_bindings_for("Ex::Reflection"))
     assert_equal({}, bindings.ivar_bindings_for("Wrap::Ex::Reflection"))
   end
+
+  # What a `super` in `initialize` hands on, by call-site position
+  # (felixefelip/steep#230).
+  def test_what_super_hands_on
+    super_args = ->(body, params = "name, options") do
+      registry("class S < B\n  def initialize(#{params})\n#{body}\n  end\nend").initializers_for("S").first.super_args
+    end
+
+    assert_nil super_args.("@name = name")
+    assert_equal [1, 0], super_args.("super(options, name)")
+    assert_equal [0, 1], super_args.("super")
+    assert_equal [nil, 0], super_args.("super(:fixed, name)")
+    assert_equal [0], super_args.("super(name, *rest)")
+    assert_equal [nil, 1], super_args.("name = name.to_s\nsuper")
+    assert_equal :opaque, super_args.("super if name")
+    assert_equal :opaque, super_args.("super\nsuper")
+    assert_equal :opaque, super_args.("return if name\nsuper")
+  end
+
+  def test_a_module_initialize_is_recorded
+    initializers = registry("module Named\n  def initialize(name) = @name = name\nend").initializers_for("Named")
+
+    assert_equal [{ :@name => 0 }], initializers.map(&:bindings)
+    assert_equal [Set[:@name]], initializers.map(&:writes)
+  end
 end
