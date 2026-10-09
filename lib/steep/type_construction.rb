@@ -4502,6 +4502,8 @@ module Steep
               receiver: receiver
             )
 
+            constr = constr.apply_param_establishments(call: call, arguments: arguments)
+
             # felixefelip/steep#68 (item 1): the callee may WRITE ivars this
             # frame has narrowed — directly, or through anything it calls on
             # `self`. Drop those narrowings, or the caller keeps believing a
@@ -8471,7 +8473,61 @@ module Steep
       return self unless last_arg && typing.has_type?(last_arg)
       rhs_type = typing.type_of(node: last_arg)
 
-      read_node = ::Parser::AST::Node.new(:send, [receiver, attr.to_sym], location: node.location)
+      cache_attribute_read(receiver, attr.to_sym, rhs_type, location: node.location) || self
+    end
+
+    # After `publish(box)`, `box.value` is what `publish` always writes
+    # (`unconditional.params`), as if `box.value = :published` were written
+    # here. Positional arguments only, up to the first one whose position is
+    # not its parameter's.
+    def apply_param_establishments(call:, arguments:)
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self if postconditions.empty?
+
+      entry = lookup_param_establishments_entry(call) or return self
+      constr = self
+      entry.unconditional.param_establishes_rbs_types.each do |index, attrs|
+        prefix = arguments.first(index + 1)
+        next unless prefix.size == index + 1
+        next if prefix.any? { |arg| %i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(arg.type) }
+
+        argument = prefix.last
+        next if argument.type == :self || !constr.narrowable_pure_receiver?(argument)
+
+        attrs.each do |attr, rbs_type|
+          type = checker.factory.type(rbs_type) rescue next
+          constr = constr.cache_attribute_read(argument, attr, type, location: argument.location, fits_reader: true) || constr
+        end
+      end
+      constr
+    end
+
+    # Entries are keyed by class and method name alone, so a name the class
+    # defines both as `publish` and `self.publish` establishes nothing.
+    def lookup_param_establishments_entry(call)
+      call.method_decls.each do |decl|
+        name = decl.method_name
+        next unless name.is_a?(InstanceMethodName) || name.is_a?(SingletonMethodName)
+        next if defined_on_both_sides?(name.type_name, name.method_name)
+
+        entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
+        return entry if entry&.unconditional && !entry.unconditional.param_establishes_type_strings.empty?
+      end
+      nil
+    end
+
+    def defined_on_both_sides?(type_name, method_name)
+      builder = checker.factory.definition_builder
+      [builder.build_instance(type_name), builder.build_singleton(type_name)].all? do |definition|
+        definition.methods[method_name]&.defs&.any? { |defn| defn.implemented_in == type_name }
+      end
+    rescue RBS::BaseError
+      true
+    end
+
+    # Nil when nothing is cached.
+    def cache_attribute_read(receiver, attr, type, location:, fits_reader: false)
+      read_node = ::Parser::AST::Node.new(:send, [receiver, attr], location: location)
 
       getter_call = nil #: TypeInference::MethodCall::Typed?
       begin
@@ -8489,13 +8545,17 @@ module Steep
           end
         end
       rescue StandardError => exn
-        Steep.logger.warn { "[contracts] attr-write narrowing failed for #{name}: #{exn.message}" }
-        return self
+        Steep.logger.warn { "[contracts] attr-write narrowing failed for #{attr}=: #{exn.message}" }
+        return nil
       end
-      return self unless getter_call
+      return nil unless getter_call
+      # Against what the reader declares, not `return_type`: a read narrowed
+      # earlier in this frame returns the narrowed type, and the value a call
+      # leaves behind replaces that narrowing rather than refining it.
+      return nil if fits_reader && !check_relation(sub_type: type, super_type: getter_call.actual_method_type.type.return_type).success?
 
       update_type_env do |env|
-        env.add_pure_call(read_node, getter_call, rhs_type)
+        env.add_pure_call(read_node, getter_call, type)
       end
     end
 

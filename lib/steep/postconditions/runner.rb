@@ -1032,6 +1032,15 @@ module Steep
         end
       end
 
+      # Two definitions of one method: only what both always leave holds,
+      # whichever runs.
+      def common_param_establishments(left, right)
+        left.each_with_object({}) do |(index, attrs), result|
+          common = attrs.select { |attr, type| right.dig(index, attr) == type }
+          result[index] = common unless common.empty?
+        end
+      end
+
       def merge(entries)
         by_key = {}
         entries.each do |entry|
@@ -1076,6 +1085,7 @@ module Steep
               conditional_block_truthy: existing.conditional_block_truthy || entry.conditional_block_truthy,
               block_call_establishments: existing.block_call_establishments + entry.block_call_establishments,
               param_call_deps: existing.param_call_deps.merge(entry.param_call_deps),
+              param_establishments: common_param_establishments(existing.param_establishments, entry.param_establishments),
               self_arg_calls: existing.self_arg_calls.merge(entry.self_arg_calls),
               halts_via_param: existing.halts_via_param || entry.halts_via_param,
               returns_ivar: existing.returns_ivar || entry.returns_ivar,
