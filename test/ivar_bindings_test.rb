@@ -162,4 +162,27 @@ class IvarBindingsTest < Minitest::Test
     assert_equal [{ :@name => 0 }], initializers.map(&:bindings)
     assert_equal [Set[:@name]], initializers.map(&:writes)
   end
+
+  # Each method a class or module defines, and the ivar a `def x = @x`
+  # returns (felixefelip/steep#230).
+  def test_reader_ivars
+    registry = registry(<<~RUBY)
+      module M
+        def name = @name
+      end
+      class C
+        def name = @name
+        def label = :label
+      end
+      class C
+        def name = @other
+      end
+    RUBY
+
+    assert_equal :@name, registry.reader_ivar("M", :name)
+    assert_nil registry.reader_ivar("C", :label)
+    assert registry.defines?("C", :label)
+    assert_nil registry.reader_ivar("C", :name), "defined twice"
+    refute registry.defines?("M", :label)
+  end
 end

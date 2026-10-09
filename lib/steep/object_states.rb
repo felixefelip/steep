@@ -173,16 +173,23 @@ module Steep
         end
       end
 
-      # A reader written as `def name = @name` rather than `attr_reader`: the
-      # constructor index knows which argument it returns, and so which ivar.
+      # A reader written as `def name = @name` rather than `attr_reader`, in
+      # the class or in the ancestor that defines it (felixefelip/steep#230).
+      # Which one runs is the RBS definition's answer, as for `initialize`;
+      # its body, read off the source, says which ivar it returns. Nil when a
+      # Ruby method of that name the RBS does not place would run first.
       def bound_reader_ivar(constr, receiver_type, call)
-        method_name = call.method_decls.first&.method_name&.method_name or return nil
-        class_name = receiver_type.back_type.name.to_s
-        index = constr.constructor_bindings.lookup(class_name, method_name) or return nil
+        method_name = call.method_name or return nil
+        registry = constr.constructor_bindings
+        definition = constr.checker.factory.definition_builder.build_instance(receiver_type.back_type.name)
+        owner = definition.methods[method_name]&.implemented_in or return nil
+        ancestors = definition.ancestors.ancestors.map(&:name)
+        index = ancestors.index(owner) or return nil
+        return nil if ancestors.take(index).any? { |name| registry.defines?(name.to_s, method_name) }
 
-        bindings = constr.constructor_bindings.ivar_bindings_for(class_name)
-        matching = bindings.select { |_, bound| bound == index }.keys
-        matching.first if matching.size == 1
+        registry.reader_ivar(owner.to_s, method_name)
+      rescue RBS::BaseError
+        nil
       end
     end
   end

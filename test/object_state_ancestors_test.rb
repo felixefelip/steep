@@ -59,6 +59,23 @@ class ObjectStateAncestorsTest < Minitest::Test
     class Shadow < Macro
       def initialize: (Symbol name) -> void
     end
+    class DefBase
+      @name: Symbol
+      def name: () -> Symbol
+      def initialize: (Symbol name) -> void
+    end
+    class DefKid < DefBase
+    end
+    class DefHidden < DefBase
+    end
+    module DefNamed
+      @name: Symbol
+      def name: () -> Symbol
+      def initialize: (Symbol name) -> void
+    end
+    class DefMixed
+      include DefNamed
+    end
   RBS
 
   RUBY = <<~RUBY
@@ -129,6 +146,26 @@ class ObjectStateAncestorsTest < Minitest::Test
         @name = name
       end
     end
+    class DefBase
+      def name = @name
+      def initialize(name)
+        @name = name
+      end
+    end
+    class DefKid < DefBase
+    end
+    class DefHidden < DefBase
+      def name = :hidden
+    end
+    module DefNamed
+      def name = @name
+      def initialize(name)
+        @name = name
+      end
+    end
+    class DefMixed
+      include DefNamed
+    end
   RUBY
 
   # Each `initialize` writes the ivars it assigns, and nothing else does.
@@ -139,7 +176,9 @@ class ObjectStateAncestorsTest < Minitest::Test
     ["Overwrites", "initialize", "@name"],
     ["Undeclared", "initialize", "@name"],
     ["FromOpaque", "initialize", "@name"],
-    ["Shadow", "initialize", "@name"]
+    ["Shadow", "initialize", "@name"],
+    ["DefBase", "initialize", "@name"],
+    ["DefNamed", "initialize", "@name"]
   ].freeze
 
   def postconditions(rows)
@@ -235,5 +274,16 @@ class ObjectStateAncestorsTest < Minitest::Test
     check("n = Inherits.new(:posts).name\n", sidecar: sidecar) do |env|
       assert_equal parse_type("::Symbol"), env[:n]
     end
+  end
+
+  # A reader written as `def name = @name` in the ancestor that defines it.
+  def test_an_inherited_def_reader_reads_the_ivar
+    assert_name ":posts", "DefKid"
+    assert_name ":posts", "DefMixed"
+  end
+
+  # The RBS places `name` in `DefBase`, but the one Ruby runs is `DefHidden`'s.
+  def test_a_def_the_rbs_does_not_place_reads_nothing
+    assert_name "::Symbol", "DefHidden"
   end
 end

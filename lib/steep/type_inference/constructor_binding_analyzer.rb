@@ -31,8 +31,10 @@ module Steep
       # `readers` as above. `initializers` lists, per class or module, every
       # `initialize` this source defines for it, or nil for one that binds
       # nothing this can read: two, across sources or within one, and which
-      # runs is a question of load order.
-      Scan = Struct.new(:readers, :initializers, keyword_init: true)
+      # runs is a question of load order. `methods` lists, per class or module,
+      # every instance method this source defines for it, valued by the ivar
+      # it returns when its body is exactly `@ivar`, nil otherwise.
+      Scan = Struct.new(:readers, :initializers, :methods, keyword_init: true)
 
       # One `initialize`, as far as the object it leaves behind goes:
       #
@@ -57,11 +59,12 @@ module Steep
       def initialize
         @result = {} #: Hash[String, Hash[Symbol, Integer]]
         @initializers = {} #: Hash[String, Array[Initializer?]]
+        @methods = {} #: Hash[String, Hash[Symbol, Array[Symbol?]]]
       end
 
       def scan(node)
         walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
-        Scan.new(readers: @result, initializers: @initializers)
+        Scan.new(readers: @result, initializers: @initializers, methods: @methods)
       end
 
       private
@@ -75,6 +78,7 @@ module Steep
           if body && name
             register_class(body, nesting: new_nesting)
             register_initializers(body, names: defined_names(const_node, nesting))
+            register_methods(body, names: defined_names(const_node, nesting))
           end
           walk(body, nesting: new_nesting) if body
         when :module
@@ -82,7 +86,10 @@ module Steep
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
           # A module's `initialize` runs for the classes that include it.
-          register_initializers(body, names: defined_names(const_node, nesting)) if body && name
+          if body && name
+            register_initializers(body, names: defined_names(const_node, nesting))
+            register_methods(body, names: defined_names(const_node, nesting))
+          end
           walk(body, nesting: new_nesting) if body
         else
           node.children.each { |c| walk(c, nesting: nesting) if c.is_a?(::Parser::AST::Node) }
@@ -124,6 +131,18 @@ module Steep
         each_initialize(body) do |args, mbody|
           initializer = names.size == 1 ? initializer(args, mbody) : nil
           names.each { |name| (@initializers[name] ||= []) << initializer }
+        end
+      end
+
+      # Every instance method this class body defines, with the ivar it
+      # returns when its body is exactly `@ivar`. Where the constant may name
+      # two classes, which one has the method is not known, so it reads none.
+      def register_methods(body, names:)
+        each_stmt(body) do |stmt|
+          next unless stmt.type == :def
+          mname, _args, mbody = stmt.children
+          ivar = names.size == 1 ? single_ivar_reader(mbody) : nil
+          names.each { |name| ((@methods[name] ||= {})[mname] ||= []) << ivar }
         end
       end
 

@@ -17,7 +17,8 @@ module Steep
 
       def initialize
         @entries = {} #: Hash[String, Hash[Symbol, Integer]]
-        @initializers = {} #: Hash[String, Array[Hash[Symbol, Integer]?]]
+        @initializers = {} #: Hash[String, Array[TypeInference::ConstructorBindingAnalyzer::Initializer?]]
+        @methods = {} #: Hash[String, Hash[Symbol, Array[Symbol?]]]
       end
 
       # @return self
@@ -33,6 +34,7 @@ module Steep
         end
         @entries.freeze
         @initializers.freeze
+        @methods.freeze
         self
       end
 
@@ -71,6 +73,19 @@ module Steep
         @initializers[class_name.to_s.delete_prefix("::")] || []
       end
 
+      # The ivar `class_name#method_name` returns, read off its body: `:@name`
+      # for `def name = @name`. Nil unless the project defines the method
+      # there exactly once, and as exactly that.
+      def reader_ivar(class_name, method_name)
+        bodies = methods_of(class_name)[method_name.to_sym] or return nil
+        bodies.first if bodies.size == 1
+      end
+
+      # Whether the project defines `method_name` in `class_name` at all.
+      def defines?(class_name, method_name)
+        methods_of(class_name).key?(method_name.to_sym)
+      end
+
       def empty?
         @entries.empty?
       end
@@ -89,11 +104,19 @@ module Steep
         scan.initializers.each do |class_name, initializers|
           (@initializers[class_name] ||= []).concat(initializers)
         end
+        scan.methods.each do |class_name, methods|
+          entry = (@methods[class_name] ||= {})
+          methods.each { |name, bodies| (entry[name] ||= []).concat(bodies) }
+        end
       rescue StandardError, ::Parser::SyntaxError => e
         Steep.logger.warn { "[constructor_binding_registry] failed to ingest #{path_name}: #{e.message}" }
       end
 
       private
+
+      def methods_of(class_name)
+        @methods[class_name.to_s.delete_prefix("::")] || {}
+      end
 
       def ruby_source?(path)
         ext = path.extname
