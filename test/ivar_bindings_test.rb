@@ -137,4 +137,100 @@ class IvarBindingsTest < Minitest::Test
     assert_equal({}, bindings.ivar_bindings_for("Ex::Reflection"))
     assert_equal({}, bindings.ivar_bindings_for("Wrap::Ex::Reflection"))
   end
+
+  # What a `super` in `initialize` hands on, by call-site position
+  # (felixefelip/steep#230).
+  def test_what_super_hands_on
+    super_args = ->(body, params = "name, options") do
+      registry("class S < B\n  def initialize(#{params})\n#{body}\n  end\nend").initializers_for("S").first.super_args
+    end
+
+    assert_nil super_args.("@name = name")
+    assert_equal [1, 0], super_args.("super(options, name)")
+    assert_equal [0, 1], super_args.("super")
+    assert_equal [nil, 0], super_args.("super(:fixed, name)")
+    assert_equal [0], super_args.("super(name, *rest)")
+    assert_equal [nil, 1], super_args.("name = name.to_s\nsuper")
+    assert_equal :opaque, super_args.("super if name")
+    assert_equal :opaque, super_args.("super\nsuper")
+    assert_equal :opaque, super_args.("return if name\nsuper")
+  end
+
+  def test_a_module_initialize_is_recorded
+    initializers = registry("module Named\n  def initialize(name) = @name = name\nend").initializers_for("Named")
+
+    assert_equal [{ :@name => 0 }], initializers.map(&:bindings)
+    assert_equal [Set[:@name]], initializers.map(&:writes)
+  end
+
+  # Each method a class or module defines, and the ivar a `def x = @x`
+  # returns (felixefelip/steep#230).
+  def test_reader_ivars
+    registry = registry(<<~RUBY)
+      module M
+        def name = @name
+      end
+      class C
+        def name = @name
+        def label = :label
+      end
+      class C
+        def name = @other
+      end
+    RUBY
+
+    assert_equal :@name, registry.reader_ivar("M", :name)
+    assert_nil registry.reader_ivar("C", :label)
+    assert registry.defines?("C", :label)
+    assert_nil registry.reader_ivar("C", :name), "defined twice"
+    refute registry.defines?("M", :label)
+  end
+
+  # The same `def x = @x` written in two reopens is still defined twice:
+  # which one runs is load order, so neither is read.
+  def test_a_reader_repeated_in_a_reopen_reads_nothing
+    registry = registry("class C\n  def name = @name\nend\nclass C\n  def name = @name\nend")
+
+    assert_nil registry.reader_ivar("C", :name)
+  end
+
+  # Every shape that may put a method on the class counts as defining it;
+  # only a definition that always runs and returns exactly `@ivar` reads.
+  def test_what_may_define_a_method
+    registry = registry(<<~RUBY)
+      class C
+        private def priv = @priv
+        attr_reader :reader
+        attr_accessor :accessor
+        attr_writer :writer
+        alias aliased priv
+        alias_method :alias_m, :priv
+        define_method(:defined) { @defined }
+        public def wrapped = :wrapped
+        if ENV["X"]
+          def conditional = @conditional
+        end
+        class_eval do
+          def in_block = @in_block
+        end
+        def outer
+          def inner = @inner
+        end
+        class << self
+          def singleton = @singleton
+        end
+        def self.on_self = @on_self
+      end
+    RUBY
+
+    assert_equal :@priv, registry.reader_ivar("C", :priv)
+    assert_equal :@reader, registry.reader_ivar("C", :reader)
+    assert_equal :@accessor, registry.reader_ivar("C", :accessor)
+    %i[accessor= writer= aliased alias_m defined wrapped conditional in_block inner].each do |name|
+      assert registry.defines?("C", name), name.to_s
+      assert_nil registry.reader_ivar("C", name), name.to_s
+    end
+    refute registry.defines?("C", :singleton)
+    refute registry.defines?("C", :on_self)
+  end
 end

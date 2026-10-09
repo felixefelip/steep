@@ -28,11 +28,25 @@ module Steep
     # wherever `initialize` binds it (felixefelip/steep#205). Whether anything
     # writes the ivar afterwards is the postconditions' `may_write`, not this.
     class ConstructorBindingAnalyzer
-      # `readers` as above. `initializers` lists, per class, the bindings of
-      # every `initialize` this source defines for it, or nil for one that
-      # binds nothing this can read: two, across sources or within one, and
-      # which runs is a question of load order.
-      Scan = Struct.new(:readers, :initializers, keyword_init: true)
+      # `readers` as above. `initializers` lists, per class or module, every
+      # `initialize` this source defines for it, or nil for one that binds
+      # nothing this can read: two, across sources or within one, and which
+      # runs is a question of load order. `methods` lists, per class or module,
+      # every instance method this source may define for it, valued by the
+      # ivar it returns when that is certain, nil otherwise.
+      Scan = Struct.new(:readers, :initializers, :methods, keyword_init: true)
+
+      # One `initialize`, as far as the object it leaves behind goes:
+      #
+      # - `bindings`: `@ivar => position` for each ivar it assigns straight
+      #   from the argument at that call-site position;
+      # - `writes`: every ivar it assigns at all;
+      # - `super_args`: what its `super` hands on (felixefelip/steep#230). Nil
+      #   when it calls none; for each position of the `super` call, the
+      #   call-site position of the argument passed there, or nil when that is
+      #   not one of this method's arguments as given; `:opaque` when the
+      #   `super` may not run, or which arguments land where is not known.
+      Initializer = Struct.new(:bindings, :writes, :super_args, keyword_init: true)
 
       def self.analyze(node)
         scan(node).readers
@@ -44,12 +58,13 @@ module Steep
 
       def initialize
         @result = {} #: Hash[String, Hash[Symbol, Integer]]
-        @initializers = {} #: Hash[String, Array[Hash[Symbol, Integer]?]]
+        @initializers = {} #: Hash[String, Array[Initializer?]]
+        @methods = {} #: Hash[String, Hash[Symbol, Array[Symbol?]]]
       end
 
       def scan(node)
         walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
-        Scan.new(readers: @result, initializers: @initializers)
+        Scan.new(readers: @result, initializers: @initializers, methods: @methods)
       end
 
       private
@@ -63,12 +78,18 @@ module Steep
           if body && name
             register_class(body, nesting: new_nesting)
             register_initializers(body, names: defined_names(const_node, nesting))
+            register_methods(body, names: defined_names(const_node, nesting))
           end
           walk(body, nesting: new_nesting) if body
         when :module
           const_node, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
+          # A module's `initialize` runs for the classes that include it.
+          if body && name
+            register_initializers(body, names: defined_names(const_node, nesting))
+            register_methods(body, names: defined_names(const_node, nesting))
+          end
           walk(body, nesting: new_nesting) if body
         else
           node.children.each { |c| walk(c, nesting: nesting) if c.is_a?(::Parser::AST::Node) }
@@ -108,8 +129,116 @@ module Steep
       # known, and it binds nothing.
       def register_initializers(body, names:)
         each_initialize(body) do |args, mbody|
-          bindings = names.size == 1 ? ivar_param_bindings(args, mbody) : nil
-          names.each { |name| (@initializers[name] ||= []) << bindings }
+          initializer = names.size == 1 ? initializer(args, mbody) : nil
+          names.each { |name| (@initializers[name] ||= []) << initializer }
+        end
+      end
+
+      # Every instance method this class body may define, with the ivar it
+      # returns when that is certain. Where the constant may name two classes,
+      # which one has the method is not known, so it reads none.
+      def register_methods(body, names:)
+        each_method_definition(body, direct: true) do |mname, ivar|
+          ivar = nil unless names.size == 1
+          names.each { |name| ((@methods[name] ||= {})[mname] ||= []) << ivar }
+        end
+      end
+
+      # Yields each method name `node` may define on the class whose body it
+      # is, with the ivar the method returns when the definition always runs
+      # and returns exactly that: `def x = @x` or `attr_reader :x`, as a
+      # statement of the body or under a modifier (`private def x = @x`).
+      #
+      # Anything else that may name a method counts, returning nothing this
+      # reads: an `alias`, `alias_method`, `define_method`, or a definition
+      # under a condition, inside a block (`class_eval do`) or inside another
+      # method. A nested class, module or singleton body defines elsewhere.
+      def each_method_definition(node, direct:, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        case node.type
+        when :class, :module, :sclass
+          nil
+        when :begin
+          node.children.each { |child| each_method_definition(child, direct: direct, &block) }
+        when :def
+          mname, _args, mbody = node.children
+          yield mname, (direct ? single_ivar_reader(mbody) : nil)
+          each_method_definition(mbody, direct: false, &block)
+        when :alias
+          new_name = node.children[0]
+          yield new_name.children[0], nil if new_name.type == :sym
+        when :send
+          receiver, mname, *args = node.children
+          if receiver.nil? && %i[private public protected module_function].include?(mname)
+            args.each { |arg| each_method_definition(arg, direct: direct, &block) }
+          else
+            macro_definitions(mname, args, direct: direct).each { |name, ivar| yield name, ivar } if receiver.nil?
+            node.children.each { |child| each_method_definition(child, direct: false, &block) }
+          end
+        else
+          node.children.each { |child| each_method_definition(child, direct: false, &block) }
+        end
+      end
+
+      # The methods a receiverless macro call defines, as `[name, ivar]`
+      # pairs: `attr_reader :x` returns `@x` when it always runs, the rest
+      # return nothing this reads.
+      def macro_definitions(mname, args, direct:)
+        names = args.filter_map { |arg| arg.children[0].to_sym if %i[sym str].include?(arg.type) }
+        case mname
+        when :alias_method, :define_method
+          names.take(1).map { |name| [name, nil] }
+        when :attr_reader
+          names.map { |name| [name, (direct ? :"@#{name}" : nil)] }
+        when :attr_accessor
+          names.flat_map { |name| [[name, (direct ? :"@#{name}" : nil)], [:"#{name}=", nil]] }
+        when :attr_writer
+          names.map { |name| [:"#{name}=", nil] }
+        else
+          []
+        end
+      end
+
+      def initializer(args_node, body)
+        writes = Set[] #: Set[Symbol]
+        each_node(body) { |node| writes << node.children[0] if node.type == :ivasgn }
+        Initializer.new(bindings: ivar_param_bindings(args_node, body), writes: writes, super_args: super_args(args_node, body))
+      end
+
+      # Where each argument of this method's `super` comes from, by call-site
+      # position. Only a `super` written as a statement of the body itself,
+      # the only one in it, in a body that cannot `return` before it: anything
+      # else may not run, or may run twice.
+      #
+      #   def initialize(name, options)
+      #     super(options, name)        # => [1, 0]
+      #   end
+      #
+      # A bare `super` passes every parameter where it stands, as it holds
+      # at that point: a reassigned one is not the argument it was given.
+      def super_args(args_node, body)
+        calls = [] #: Array[::Parser::AST::Node]
+        each_node(body) { |node| calls << node if node.type == :super || node.type == :zsuper }
+        return nil if calls.empty?
+
+        call = calls.first or raise
+        return :opaque if calls.size > 1 || contains?(body, :return)
+        top_level = false
+        each_stmt(body) { |stmt| top_level ||= stmt.equal?(call) }
+        return :opaque unless top_level
+
+        reassigned = Set[] #: Set[Symbol]
+        each_node(body) { |node| reassigned << node.children[0] if node.type == :lvasgn }
+        positions = call_positions(args_node).reject { |name, _| reassigned.include?(name) }
+
+        if call.type == :zsuper
+          params = args_node.is_a?(::Parser::AST::Node) ? args_node.children.grep(::Parser::AST::Node) : []
+          params.take_while { |param| param.type == :arg || param.type == :optarg }.map { |param| positions[param.children[0]] }
+        else
+          call.children
+            .take_while { |arg| !%i[splat block_pass kwargs forwarded_args forwarded_restarg].include?(arg.type) }
+            .map { |arg| arg.type == :lvar ? positions[arg.children[0]] : nil }
         end
       end
 

@@ -8,7 +8,7 @@ module Steep
     #
     # Built and invalidated exactly like `DelegationRegistry`: a full source
     # sweep on first access, rebuilt from scratch on any source change. RBS-only
-    # classes have no Ruby body to analyze and are simply absent — `lookup`
+    # classes have no Ruby body to analyze and are simply absent — `bindings_for`
     # returns nil and the caller falls through.
     class ConstructorBindingRegistry
       def self.build(project)
@@ -17,7 +17,8 @@ module Steep
 
       def initialize
         @entries = {} #: Hash[String, Hash[Symbol, Integer]]
-        @initializers = {} #: Hash[String, Array[Hash[Symbol, Integer]?]]
+        @initializers = {} #: Hash[String, Array[TypeInference::ConstructorBindingAnalyzer::Initializer?]]
+        @methods = {} #: Hash[String, Hash[Symbol, Array[Symbol?]]]
       end
 
       # @return self
@@ -33,15 +34,8 @@ module Steep
         end
         @entries.freeze
         @initializers.freeze
+        @methods.freeze
         self
-      end
-
-      # @param class_name [String, #to_s] absolute (`"::Proxy"`) or bare
-      # @param reader [Symbol, #to_sym]
-      # @return [Integer, nil] the constructor parameter index, or nil
-      def lookup(class_name, reader)
-        key = class_name.to_s.sub(/\A::/, "")
-        @entries.dig(key, reader.to_sym)
       end
 
       # @param class_name [String, #to_s]
@@ -58,10 +52,30 @@ module Steep
       # the class. Whether anything writes the ivar afterwards is not this
       # index's question: `ObjectStates` asks the postconditions' `may_write`.
       def ivar_bindings_for(class_name)
-        initializers = @initializers[class_name.to_s.delete_prefix("::")] or return {}
+        initializers = initializers_for(class_name)
         return {} unless initializers.size == 1
 
-        initializers.first || {}
+        initializers.first&.bindings || {}
+      end
+
+      # Every `initialize` the project defines for `class_name` (a class or a
+      # module), as `TypeInference::ConstructorBindingAnalyzer::Initializer`,
+      # nil for one it cannot read. More than one: which runs is load order.
+      def initializers_for(class_name)
+        @initializers[class_name.to_s.delete_prefix("::")] || []
+      end
+
+      # The ivar `class_name#method_name` returns, read off its body: `:@name`
+      # for `def name = @name`. Nil unless the project defines the method
+      # there exactly once, and as exactly that.
+      def reader_ivar(class_name, method_name)
+        bodies = methods_of(class_name)[method_name.to_sym] or return nil
+        bodies.first if bodies.size == 1
+      end
+
+      # Whether the project may define `method_name` in `class_name` at all.
+      def defines?(class_name, method_name)
+        methods_of(class_name).key?(method_name.to_sym)
       end
 
       def empty?
@@ -82,11 +96,19 @@ module Steep
         scan.initializers.each do |class_name, initializers|
           (@initializers[class_name] ||= []).concat(initializers)
         end
+        scan.methods.each do |class_name, methods|
+          entry = (@methods[class_name] ||= {})
+          methods.each { |name, bodies| (entry[name] ||= []).concat(bodies) }
+        end
       rescue StandardError, ::Parser::SyntaxError => e
         Steep.logger.warn { "[constructor_binding_registry] failed to ingest #{path_name}: #{e.message}" }
       end
 
       private
+
+      def methods_of(class_name)
+        @methods[class_name.to_s.delete_prefix("::")] || {}
+      end
 
       def ruby_source?(path)
         ext = path.extname
