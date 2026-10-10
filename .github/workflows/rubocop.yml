@@ -18,9 +18,9 @@ jobs:
     - uses: ruby/setup-ruby@v1
       with:
         ruby-version: "4.0"
-        bundler: none
-    # Only RuboCop, at the version the lock pins.
-    - name: Install RuboCop
-      run: gem install rubocop --no-document --version "$(sed -n 's/^    rubocop (\(.*\))$/\1/p' Gemfile.lock)"
+        bundler-cache: true
+    # Through the bundle, not a bare `gem install rubocop`: RuboCop parses with
+    # Prism, and a bare install settles for the Ruby's default Prism (rubocop-ast
+    # only asks for `~> 1.7`), which reports offenses the locked version does not.
     - name: Run RuboCop
-      run: rubocop --format github
+      run: bundle exec rubocop --format github
