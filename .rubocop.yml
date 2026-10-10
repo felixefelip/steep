@@ -1,7 +1,7 @@
 inherit_from: .rubocop_todo.yml
 
 require:
-  - ./.rubocop/class_length_ceiling.rb
+  - ./.rubocop/length_ceiling.rb
 
 AllCops:
   TargetRubyVersion: 3.3
@@ -43,7 +43,11 @@ Project/ClassLengthCeiling:
     "lib/steep/services/completion_provider/ruby.rb": 472
     "lib/steep/drivers/check.rb": 452
 
-Metrics/ModuleLength:
+# Replaced by Project/ModuleLengthCeiling, which takes the same settings plus a
+# per-file ceiling.
+Project/ModuleLengthCeiling:
   Enabled: true
   CountAsOne: ["array", "hash", "heredoc", "method_call"]
   Max: 400
+  Ceilings:
+    "lib/steep/accumulators.rb": 630

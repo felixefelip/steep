@@ -97,9 +97,3 @@ Metrics/MethodLength:
     - "lib/steep/type_inference/send_args.rb"
     - "lib/steep/type_inference/type_env.rb"
     - "lib/steep/typing.rb"
-
-# Offense count: 1
-# Configuration parameters: CountComments, Max, CountAsOne.
-Metrics/ModuleLength:
-  Exclude:
-    - "lib/steep/accumulators.rb"
