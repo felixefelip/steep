@@ -378,7 +378,7 @@ module Steep
           LSP::Interface::CompletionItem.new(
             label: item.identifier.to_s,
             kind: LSP::Constant::CompletionItemKind::FIELD,
-            label_details: LSP::Interface::CompletionItemLabelDetails.new(description: 'Keyword argument'),
+            label_details: LSP::Interface::CompletionItemLabelDetails.new(description: "Keyword argument"),
             documentation: LSPFormatter.markup_content { LSPFormatter.format_completion_docs(item) },
             text_edit: LSP::Interface::TextEdit.new(
               range: range,

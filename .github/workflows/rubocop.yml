@@ -1,0 +1,26 @@
+name: RuboCop
+
+on:
+  push:
+    branches:
+      - rbs_infer
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  rubocop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v7
+    - uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: "4.0"
+        bundler: none
+    # Only RuboCop, at the version the lock pins.
+    - name: Install RuboCop
+      run: gem install rubocop --no-document --version "$(sed -n 's/^    rubocop (\(.*\))$/\1/p' Gemfile.lock)"
+    - name: Run RuboCop
+      run: rubocop --format github

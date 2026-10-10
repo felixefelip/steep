@@ -197,7 +197,7 @@ module Steep
       def merge(contracts)
         by_key = {}
         contracts.each do |c|
-          key = "#{c.type_name}#{c.singleton ? '.' : '#'}#{c.method_name}"
+          key = "#{c.type_name}#{c.singleton ? "." : "#"}#{c.method_name}"
           if (existing = by_key[key])
             seen = existing.requires.map { |r| predicate_signature(r) }.to_set
             extras = c.requires.reject { |r| seen.include?(predicate_signature(r)) }

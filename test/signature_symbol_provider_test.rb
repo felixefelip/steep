@@ -106,11 +106,11 @@ RBS
       end
 
       assert_any! provider.query_symbol("class1") do |symbol|
-        assert_equal 'Class1', symbol.name
+        assert_equal "Class1", symbol.name
       end
 
       assert_any! provider.query_symbol("class") do |symbol|
-        assert_equal 'Class1', symbol.name
+        assert_equal "Class1", symbol.name
       end
     end
   end

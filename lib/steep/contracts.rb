@@ -95,7 +95,7 @@ module Steep
       end
 
       def key
-        "#{type_name}#{singleton ? '.' : '#'}#{method_name}"
+        "#{type_name}#{singleton ? "." : "#"}#{method_name}"
       end
 
       def with_enforced(value)
