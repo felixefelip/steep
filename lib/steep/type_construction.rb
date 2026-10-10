@@ -403,13 +403,13 @@ module Steep
         super_method: super_method,
         forward_arg_type: method_params.forward_arg_type,
         block_param_name: block_param_name,
-        reassigned_parameters: TypeInference::ArgumentFacts.reassigned_parameters(node)
+        node: node
       )
 
       local_variable_types = method_params.each_param.with_object({}) do |param, hash| #$ Hash[Symbol, AST::Types::t]
         if param.name
           if !SPECIAL_LVAR_NAMES.include?(param.name)
-            hash[param.name] = param.var_type
+            hash[param.name] = method_context.held_locals.held?(param.name) ? param.var_type : ObjectStates.settled(self, param.var_type)
           elsif param.name == :_ && !cast_lvar?(:_)
             # Untyped as before, but bound: an ordinary `_` from outside must
             # not show through it.
@@ -4392,8 +4392,7 @@ module Steep
               )
               # felixefelip/steep#205: what an object built with known values
               # holds, and what its readers answer.
-              call = ObjectStates.built(constr, call, arguments: arguments)
-              call = ObjectStates.read(constr, call, receiver_type: receiver_type, arguments: arguments)
+              call, constr = ObjectStates.answered(constr, call, node: node, receiver_type: receiver_type, arguments: arguments)
             end
             record_built_value(node, call, declared_return_type) unless call.equal?(nominal)
 
@@ -4847,7 +4846,11 @@ module Steep
           private: private,
           dispatch: dispatch
         )
-        return correlated if correlated
+        return correlated.with(
+          constr: ObjectStates.after_call(
+            correlated.constr, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments
+          )
+        ) if correlated
       end
 
       type, constr =
@@ -4917,6 +4920,7 @@ module Steep
           constr, node, receiver, unwidened_receiver_type, method_name, arguments, type: type, private: private
         )
       end
+      constr = ObjectStates.after_call(constr, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments)
 
       Pair.new(type: type, constr: constr)
     end

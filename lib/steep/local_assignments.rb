@@ -41,7 +41,7 @@ module Steep
     Analysis = Struct.new(:interpolated, :choices, :decided, keyword_init: true)
 
     # Bodies the checker enters with the method's locals pinned.
-    PINNING = %i[block numblock lambda while until while_post until_post for].freeze
+    PINNING = [*LocalReach::CLOSURES, :lambda, *LocalReach::REPEATS, :for].freeze
 
     # Calls whose operands are read as a condition, and pass on only a boolean.
     COMPARISONS = %i[== != !].freeze
@@ -55,11 +55,14 @@ module Steep
         decided = {}.compare_by_identity #: Hash[untyped, bool]
 
         each_body(node) do |def_node, body|
+          reach = LocalReach.reach(body)
           each_interpolated(def_node, body) do |assignment|
+            next if reach.include?(assignment.children[0])
+
             interpolated[assignment] = true
             each_choice(assignment.children[1]) { |choice| choices[choice] = true }
           end
-          each_decided(body) { |assignment| decided[assignment] = true }
+          each_decided(body) { |assignment| decided[assignment] = true unless reach.include?(assignment.children[0]) }
         end
 
         Analysis.new(interpolated: interpolated, choices: choices, decided: decided)
@@ -88,7 +91,7 @@ module Steep
         interpolations = Hash.new(0) #: Hash[Symbol, Integer]
         assignments = [] #: Array[untyped]
 
-        each_node(body) do |node|
+        LocalReach.each_node(body) do |node|
           case node.type
           when :lvar
             reads[node.children[0]] += 1
@@ -162,7 +165,7 @@ module Steep
       # encloses it. Stops at a body of its own.
       def walk(node, parent, pinned, &block)
         return unless node.is_a?(Parser::AST::Node)
-        return if Accumulators::SCOPES.include?(node.type)
+        return if LocalReach::SCOPES.include?(node.type)
 
         yield node, parent, pinned
         inner = pinned || PINNING.include?(node.type)
@@ -182,16 +185,6 @@ module Steep
         when :begin
           each_choice(node.children.last, &block)
         end
-      end
-
-      # Every node of one body, stopping at a body of its own — its locals are
-      # another method's.
-      def each_node(node, &block)
-        return unless node.is_a?(Parser::AST::Node)
-        return if Accumulators::SCOPES.include?(node.type)
-
-        yield node
-        node.children.each { |child| each_node(child, &block) }
       end
     end
   end

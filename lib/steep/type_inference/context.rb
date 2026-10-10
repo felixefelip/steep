@@ -10,12 +10,9 @@ module Steep
         attr_reader :forward_arg_type
         attr_reader :block_param_name
 
-        # Parameter names the body reassigns (`which = :name`). Argument-sensitive entry
-        # facts (peça 3) correlate a branch with the CALLER's argument, so a parameter that
-        # no longer holds what the caller passed must not carry that correlation.
-        attr_reader :reassigned_parameters
+        attr_reader :node
 
-        def initialize(name:, method:, method_type:, return_type:, super_method:, forward_arg_type:, block_param_name: nil, reassigned_parameters: Set.new)
+        def initialize(name:, method:, method_type:, return_type:, super_method:, forward_arg_type:, node:, block_param_name: nil)
           @name = name
           @method = method
           @return_type = return_type
@@ -23,7 +20,18 @@ module Steep
           @super_method = super_method
           @forward_arg_type = forward_arg_type
           @block_param_name = block_param_name
-          @reassigned_parameters = reassigned_parameters
+          @node = node
+        end
+
+        # Parameter names the body reassigns (`which = :name`). Argument-sensitive entry
+        # facts (peça 3) correlate a branch with the CALLER's argument, so a parameter that
+        # no longer holds what the caller passed must not carry that correlation.
+        def reassigned_parameters
+          @reassigned_parameters ||= ArgumentFacts.reassigned_parameters(node)
+        end
+
+        def held_locals
+          @held_locals ||= HeldLocals.of(node, reassigned: reassigned_parameters)
         end
 
         def reassigned_parameter?(name)

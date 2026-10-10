@@ -621,6 +621,78 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  # felixefelip/steep#205, stage 2: the same ivar, changed after `new` through
+  # the one local that owns the object, per call site.
+  def test_a_stored_literal_changed_through_its_only_local_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Reflection
+          attr_reader name: Symbol
+          def initialize: (Symbol name) -> void
+          def rename: (Symbol to) -> Symbol
+        end
+        module Writer
+          def self.define_stored: (untyped model, Reflection reflection) -> void
+          def self.keep: (Reflection reflection) -> void
+        end
+        class Base
+          def self.has_renamed: (Symbol name, Symbol as) -> untyped
+          def self.has_kept: (Symbol name, Symbol as) -> untyped
+        end
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Reflection
+          attr_reader :name
+
+          def initialize(name)
+            @name = name
+          end
+
+          def rename(to) = @name = to
+        end
+
+        module Writer
+          def self.define_stored(model, reflection)
+            model.module_eval "def \#{reflection.name}; end"
+          end
+
+          def self.keep(reflection)
+            @kept = reflection
+          end
+        end
+
+        class Base
+          def self.has_renamed(name, as)
+            reflection = Reflection.new(name)
+            reflection.rename(as)
+            Writer.define_stored(self, reflection)
+          end
+
+          def self.has_kept(name, as)
+            reflection = Reflection.new(name)
+            reflection.rename(as)
+            Writer.keep(reflection)
+            Writer.define_stored(self, reflection)
+          end
+        end
+
+        class Article < Base
+          has_renamed :posts, :articles
+          has_renamed :comments, :replies
+          has_kept :tags, :labels
+        end
+      RUBY
+
+      write_postconditions(setup_project)
+      assert_equal(
+        { "app/base.rb:37:2" => ["def articles; end"], "app/base.rb:38:2" => ["def replies; end"], "app/base.rb:39:2" => [nil] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
   # A gem namespaces its writer and calls it by the relative name, the way
   # `Module#delegate` calls `ActiveSupport::Delegation.generate` from inside
   # `class Module`. The constant is spelled `Writer` and names

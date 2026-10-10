@@ -17,8 +17,8 @@ module Steep
 
       def initialize
         @entries = {} #: Hash[String, Hash[Symbol, Integer]]
-        @initializers = {} #: Hash[String, Array[TypeInference::ConstructorBindingAnalyzer::Initializer?]]
-        @methods = {} #: Hash[String, Hash[Symbol, Array[Symbol?]]]
+        @initializers = {} #: Hash[String, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]
+        @methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
       end
 
       # @return self
@@ -59,16 +59,17 @@ module Steep
       end
 
       # Every `initialize` the project defines for `class_name` (a class or a
-      # module), as `TypeInference::ConstructorBindingAnalyzer::Initializer`,
+      # module), as `TypeInference::ConstructorBindingAnalyzer::Body`,
       # nil for one it cannot read. More than one: which runs is load order.
       def initializers_for(class_name)
         @initializers[class_name.to_s.delete_prefix("::")] || []
       end
 
-      # The ivar `class_name#method_name` returns, read off its body: `:@name`
-      # for `def name = @name`. Nil unless the project defines the method
-      # there exactly once, and as exactly that.
-      def reader_ivar(class_name, method_name)
+      # What `class_name#method_name` does to the object it runs on, read off
+      # its body (`TypeInference::ConstructorBindingAnalyzer::Body`). Nil
+      # unless the project defines the method there exactly once, in a shape
+      # that always runs.
+      def body_of(class_name, method_name)
         bodies = methods_of(class_name)[method_name.to_sym] or return nil
         bodies.first if bodies.size == 1
       end
