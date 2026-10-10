@@ -112,3 +112,7 @@ bundle exec rake build
 - Diagnostic severity levels: error, warning, information, hint
 - Supports gradual typing with @dynamic annotations
 - Implements LSP for IDE integration
+
+## Engineering principles (fork)
+
+@docs/engineering/comments-only-when-code-is-hard.md
