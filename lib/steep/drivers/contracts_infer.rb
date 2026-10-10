@@ -55,7 +55,7 @@ module Steep
           "self"
         when Contracts::Expr::Send
           base = "#{format_expr(expr.receiver)}.#{expr.method}"
-          expr.chain.empty? ? base : "#{base}.#{expr.chain.join('.')}"
+          expr.chain.empty? ? base : "#{base}.#{expr.chain.join(".")}"
         end
       end
     end
