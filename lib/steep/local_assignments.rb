@@ -55,11 +55,14 @@ module Steep
         decided = {}.compare_by_identity #: Hash[untyped, bool]
 
         each_body(node) do |def_node, body|
+          reach = LocalReach.reach(body)
           each_interpolated(def_node, body) do |assignment|
+            next if reach.include?(assignment.children[0])
+
             interpolated[assignment] = true
             each_choice(assignment.children[1]) { |choice| choices[choice] = true }
           end
-          each_decided(body) { |assignment| decided[assignment] = true }
+          each_decided(body) { |assignment| decided[assignment] = true unless reach.include?(assignment.children[0]) }
         end
 
         Analysis.new(interpolated: interpolated, choices: choices, decided: decided)
@@ -74,7 +77,7 @@ module Steep
 
         if node.type == :def || node.type == :defs
           body = node.type == :defs ? node.children[3] : node.children[2]
-          yield node, body if body && !LocalReach.reflective?(body)
+          yield node, body if body
         end
 
         node.children.each { |child| each_body(child, &block) }

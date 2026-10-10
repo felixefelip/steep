@@ -43,10 +43,11 @@ module Steep
 
       def analyze(def_node)
         args, body = def_node.type == :defs ? def_node.children.drop(2) : def_node.children.drop(1)
-        return if [args, body].any? { |root| LocalReach.reflective?(root) }
+        reach = LocalReach.reach(args, body)
+        return if reach.every
 
         @assignments = {} #: Hash[Symbol, Array[::Parser::AST::Node]]
-        @escaped = Set[] #: Set[Symbol]
+        @escaped = Set.new(reach.names) #: Set[Symbol]
         @forwards = false
         [args, body].each { |root| walk(root, [], detached: false) { |node, parents, detached| visit(node, parents, detached) } }
 

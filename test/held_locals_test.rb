@@ -121,6 +121,17 @@ class HeldLocalsTest < Minitest::Test
     RUBY
   end
 
+  def test_a_string_run_once_reaches_only_what_follows_it
+    assert_equal [:owner, :before], held(<<~RUBY)
+      def run(owner)
+        before = Reflection.new(:a)
+        after = Reflection.new(:b)
+        owner.module_eval(before.name)
+        after.name
+      end
+    RUBY
+  end
+
   def test_the_value_assigned
     def_node = parse(<<~RUBY)
       def run

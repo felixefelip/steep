@@ -322,14 +322,14 @@ module Steep
 
         each_def_with_owner(node) do |def_node, owner|
           each_returned(def_node) { |array| returned[array] = true }
-          next if LocalReach.reflective?(body_of(def_node))
+          next if (reach = LocalReach.reach(body_of(def_node))).every
 
           methods = builders_for(builders, owner, def_node)
 
           each_line_list(def_node) do |lines, top|
           last = {} #: Hash[Symbol, [untyped, Array[untyped]]]
 
-          replay(def_node, lines, top, methods) do |statement, pushed, contents|
+          replay(def_node, lines, top, methods, reach) do |statement, pushed, contents|
             # A loop over a local this vouches for READS it, and the checker asks
             # for the count of passes at the `each`. The loop cannot push onto
             # the local it runs over, so the contents are the same either side.
@@ -404,8 +404,8 @@ module Steep
       # answered with the contents of an array that does not exist yet — while
       # the `parts` it actually reads is whatever else that name holds there, a
       # method argument included.
-      def replay(def_node, lines, top, builders)
-        readable = top ? in_body(def_node, builders) : in_lines(def_node, lines, builders)
+      def replay(def_node, lines, top, builders, reach)
+        readable = (top ? in_body(def_node, builders) : in_lines(def_node, lines, builders)).reject { |name, _| reach.include?(name) }
         return if readable.empty?
 
         contents = {} #: Hash[Symbol, Array[untyped]]
@@ -588,10 +588,9 @@ module Steep
       # a body this declines rather than one it chases.
       def appends_in(def_node)
         body = body_of(def_node) or return nil
-        return nil if LocalReach.reflective?(body)
-
         names = positionals_of(def_node) or return nil
         return nil if names.empty?
+        return nil if LocalReach.reach(body, outliving: names).any?(names)
 
         found = names.to_h { |name| [name, []] } #: Hash[Symbol, Array[untyped]?]
 

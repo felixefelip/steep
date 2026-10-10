@@ -14,9 +14,23 @@ module Steep
     # Loops whose condition and body both run once per turn.
     REPEATS = %i[while until while_post until_post].freeze
 
-    # Receiverless calls that read or write any local by a name given as a
-    # value, so no mention of it is written.
-    REFLECTIVE = %i[binding eval local_variable_get local_variable_set].freeze
+    # Calls that reach a local by a name given as a value, so no mention of it
+    # is written. `binding` on any receiver (`Kernel`, `self`, a proc) hands out
+    # the frame; a string any of `STRING_EVALS` runs is run in it.
+    STRING_EVALS = %i[eval instance_eval class_eval module_eval].freeze
+    DISPATCHES = %i[send __send__ public_send].freeze
+    METHOD_OBJECTS = %i[method instance_method].freeze
+
+    LOCALS = %i[lvar lvasgn].freeze
+    COMPOUND_ASSIGNMENTS = %i[op_asgn or_asgn and_asgn masgn].freeze
+
+    # The locals of a body something other than their own name can reach.
+    Reach = Struct.new(:every, :names) do
+      def include?(name) = every || names.include?(name)
+      def any?(locals) = locals.any? { |name| include?(name) }
+    end
+    NOWHERE = Reach.new(false, Set[].freeze).freeze
+    EVERYWHERE = Reach.new(true, Set[].freeze).freeze
 
     module_function
 
@@ -38,11 +52,92 @@ module Steep
       count
     end
 
-    def reflective?(body)
-      each_node(body) do |node|
-        return true if node.type == :send && node.children[0].nil? && REFLECTIVE.include?(node.children[1])
+    # A frame handed out reaches every local, and so does a string run where it
+    # may run twice. A string run once reaches only what runs after it: the
+    # locals mentioned later, the one its value is assigned to, and those whose
+    # values the caller reads once the body returns (`outliving`).
+    def reach(*roots, outliving: [])
+      evals = [] #: Array[[untyped, Array[untyped]]]
+      roots.each do |root|
+        each_call(root, [], false) do |call, ancestors, repeated|
+          case frame_access(call.children[1], call.children.drop(2))
+          when :frame
+            return EVERYWHERE
+          when :string
+            return EVERYWHERE if repeated || !call.location&.expression
+
+            evals << [call, ancestors]
+          end
+        end
       end
+      return NOWHERE if evals.empty?
+      return EVERYWHERE if roots.any? { |root| retries?(root) }
+
+      names = Set.new(outliving) #: Set[Symbol]
+      evals.each do |call, ancestors|
+        ancestors.each { |ancestor| names.merge(assigned_by(ancestor)) }
+        roots.each do |root|
+          each_node(root) { |node| names << node.children[0] if LOCALS.include?(node.type) && after?(node, call) }
+        end
+      end
+      Reach.new(false, names)
+    end
+
+    def each_call(node, ancestors, repeated, &block)
+      return unless node.is_a?(Parser::AST::Node)
+      return if SCOPES.include?(node.type)
+
+      yield node, ancestors, repeated if node.type == :send || node.type == :csend
+      inner = [*ancestors, node]
+      node.children.each_with_index do |child, index|
+        each_call(child, inner, repeated || repeats?(node, index), &block)
+      end
+    end
+
+    def repeats?(node, index)
+      case node.type
+      when *CLOSURES then index > 0
+      when *REPEATS then true
+      when :for then index != 1
+      else false
+      end
+    end
+
+    # The block form of an `*_eval` is a closure, which is read as one; only an
+    # argument is a string to run. A name chosen at run time may be any of them.
+    def frame_access(name, arguments)
+      return :frame if name == :binding
+      return :string if STRING_EVALS.include?(name) && arguments.any? { |argument| argument.type != :block_pass }
+
+      target, *rest = arguments
+      return unless target && (DISPATCHES.include?(name) || METHOD_OBJECTS.include?(name))
+      return :frame unless target.type == :sym || target.type == :str
+
+      target_name = target.children[0].to_sym
+      return :frame if METHOD_OBJECTS.include?(name) && STRING_EVALS.include?(target_name)
+
+      frame_access(target_name, rest) if DISPATCHES.include?(name)
+    end
+
+    def retries?(root)
+      each_node(root) { |node| return true if node.type == :retry }
       false
+    end
+
+    def assigned_by(node)
+      case node.type
+      when :lvasgn then [node.children[0]]
+      when *COMPOUND_ASSIGNMENTS
+        names = [] #: Array[Symbol]
+        each_node(node.children[0]) { |child| names << child.children[0] if child.type == :lvasgn }
+        names
+      else []
+      end
+    end
+
+    def after?(node, call)
+      range = node.location&.expression or return true
+      range.begin_pos >= call.location.expression.end_pos
     end
 
     # The values a call made with `arguments` hands on: the positional ones
