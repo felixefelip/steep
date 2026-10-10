@@ -19,6 +19,8 @@ module Steep
         @entries = {} #: Hash[String, Hash[Symbol, Integer]]
         @initializers = {} #: Hash[String, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]
         @methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
+        @memos = {} #: Hash[String, Hash[Symbol, Array[[Symbol, String]?]]]
+        @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
       end
 
       # @return self
@@ -35,6 +37,9 @@ module Steep
         @entries.freeze
         @initializers.freeze
         @methods.freeze
+        @memos.freeze
+        @uses.default_proc = nil
+        @uses.freeze
         self
       end
 
@@ -74,6 +79,18 @@ module Steep
         bodies.first if bodies.size == 1
       end
 
+      # `[ivar, class name]` when `class_name.method_name` is the project's only
+      # definition of it and is a memo (`TypeInference::ClassMemoAnalyzer`).
+      def class_memo(class_name, method_name)
+        memos = (@memos[class_name.to_s.delete_prefix("::")] || {})[method_name.to_sym] or return nil
+        memos.first if memos.size == 1
+      end
+
+      # Every place the project names `name`, a method or an ivar, by spelling.
+      def uses_of(name)
+        @uses.fetch(name.to_sym, [])
+      end
+
       # Whether the project may define `method_name` in `class_name` at all.
       def defines?(class_name, method_name)
         methods_of(class_name).key?(method_name.to_sym)
@@ -101,11 +118,21 @@ module Steep
           entry = (@methods[class_name] ||= {})
           methods.each { |name, bodies| (entry[name] ||= []).concat(bodies) }
         end
+        ingest_memos(node)
       rescue StandardError, ::Parser::SyntaxError => e
         Steep.logger.warn { "[constructor_binding_registry] failed to ingest #{path_name}: #{e.message}" }
       end
 
       private
+
+      def ingest_memos(node)
+        scan = TypeInference::ClassMemoAnalyzer.scan(node)
+        scan.memos.each do |class_name, memos|
+          entry = (@memos[class_name] ||= {})
+          memos.each { |name, found| (entry[name] ||= []).concat(found) }
+        end
+        scan.uses.each { |name, uses| @uses[name].concat(uses) }
+      end
 
       def methods_of(class_name)
         @methods[class_name.to_s.delete_prefix("::")] || {}

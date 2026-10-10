@@ -19,8 +19,25 @@ module Steep
       # postconditions, so a fact one states about them (`unconditional.params`)
       # is not dropped by the settling.
       def answered(constr, call, node:, receiver_type:, arguments:)
-        call = read(constr, built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
+        call = remembered(constr, call, node) || built(constr, call, node: node, arguments: arguments)
+        call = read(constr, call, receiver_type: receiver_type, arguments: arguments)
         [call, handed_on(constr, arguments)]
+      end
+
+      # A memo called on `self` hands back the object its ivar holds, as the
+      # state the env knows it in (`TypeInference::ClassMemoAnalyzer`).
+      def remembered(constr, call, node)
+        return unless on_self?(node)
+
+        ivar, = tracked_memo(constr, call)
+        state = ivar && state_in(constr.context.type_env[ivar]) or return
+        call.with_return_type(state)
+      end
+
+      # The ivars of `self` whose object the env knows the state of, for a body
+      # this one calls on `self` to start from.
+      def self_ivars(constr)
+        constr.context.type_env.instance_variable_types.select { |_, type| state_in(type) }
       end
 
       # A `.new` call whose `initialize` binds an ivar from one of the values
@@ -62,7 +79,55 @@ module Steep
           name = receiver.children[0]
           constr = refine_local(constr, name, left(constr, receiver_type, constr.context.type_env[name], method_name, arguments))
         end
+        constr = remembered_after(constr, receiver, receiver_type, method_name, arguments) if receiver && on_self?(receiver)
         handed_on(constr, arguments)
+      end
+
+      # A call made on what a memo answered moves the object its ivar holds.
+      # Where nothing was known yet, it is still that one object, so what the
+      # call binds is known from here.
+      def remembered_after(constr, receiver, receiver_type, method_name, arguments)
+        memo_call = constr.typing.call_of(node: receiver) rescue nil
+        ivar, instance = tracked_memo(constr, memo_call) if memo_call
+        return constr unless ivar && instance
+
+        state = state_in(receiver_type) || AST::Types::ObjectState.new(back_type: instance, ivars: {})
+        constr.update_type_env do |env|
+          env.invalidate_pure_node(receiver).refine_types(instance_variable_types: { ivar => changed(constr, state, method_name, arguments) })
+        end
+      end
+
+      def on_self?(node)
+        %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
+      end
+
+      # `[ivar, instance]` for a call to a class's memo whose object no code
+      # the project holds can reach but through a call on it: every use of the
+      # memo and of its ivar is the receiver of a call whose effect is known,
+      # and only a statement of a class body, made on `self`, may change it.
+      def tracked_memo(constr, call)
+        return unless call.is_a?(TypeInference::MethodCall::Typed)
+
+        names = call.method_decls.map(&:method_name).uniq
+        name = names.first
+        return unless names.size == 1 && name.is_a?(SingletonMethodName)
+
+        ivar, = constr.constructor_bindings.class_memo(name.type_name, name.method_name)
+        return unless ivar
+        instance = constr.typing.nominal_of(node: call.node) || call.return_type
+        return unless instance.is_a?(AST::Types::Name::Instance)
+        return unless [name.method_name, ivar].all? { |used| confined?(constr, instance, used) }
+
+        [ivar, instance]
+      end
+
+      def confined?(constr, instance, name)
+        constr.constructor_bindings.uses_of(name).all? do |use|
+          next false if use.kind == :escape
+
+          effect = method_effect(constr, instance, use.called) or next false
+          use.kind == :statement || effect.writes.empty?
+        end
       end
 
       def handed_on(constr, arguments)
@@ -124,7 +189,7 @@ module Steep
         plain = arguments.all? { |argument| plain_argument?(argument) }
         rebound = plain ? bound_values(constr, effect.bindings, arguments) : {} #: Hash[Symbol, AST::Types::t]
         ivars = state.ivars.reject { |ivar, _| effect.writes.include?(ivar) }
-        ivars.merge!(rebound.slice(*state.ivars.keys))
+        ivars.merge!(rebound)
         ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
       end
 

@@ -442,7 +442,7 @@ module Steep
 
       type_env = apply_callbacks_for_method(method_name, type_env)
       type_env = apply_contract_self_type(node, method_name, type_env)
-      type_env = apply_method_entry_facts(method_name, type_env)
+      type_env = apply_method_entry_facts(method_name, type_env).refine_types(instance_variable_types: arguments&.self_ivars || {})
 
       method_params.errors.each do |error|
         typing.add_error error
@@ -1523,7 +1523,7 @@ module Steep
       end
 
       typing.add_typing(call.node, call.return_type, nil)
-      typing.add_call(call.node, call, self_type: self_type)
+      typing.add_call(call.node, call, self_type: self_type, self_ivars: ObjectStates.self_ivars(self))
 
       Pair.new(type: call.return_type, constr: self)
     end
@@ -9101,7 +9101,8 @@ module Steep
             method_decls: inlined_call.method_decls,
             return_type: inlined_call.return_type
           ),
-          self_type: constr.self_type
+          self_type: constr.self_type,
+          self_ivars: ObjectStates.self_ivars(constr)
         )
       when TypeInference::MethodCall::Untyped
         constr.typing.add_call(
@@ -9111,7 +9112,8 @@ module Steep
             context: inlined_call.context,
             method_name: method_name
           ),
-          self_type: constr.self_type
+          self_type: constr.self_type,
+          self_ivars: ObjectStates.self_ivars(constr)
         )
       end
     end
