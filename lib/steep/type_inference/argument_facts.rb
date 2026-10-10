@@ -125,8 +125,8 @@ module Steep
       end
 
       # The parameter names a def reassigns anywhere in its body (`which = :name`), including
-      # inside nested blocks/conditionals. Computed once per method at `for_new_method` time
-      # and cached on the MethodContext.
+      # inside nested blocks/conditionals. Computed once per method, on demand, and cached
+      # on the MethodContext.
       def self.reassigned_parameters(def_node)
         return Set.new unless def_node.is_a?(Parser::AST::Node)
 

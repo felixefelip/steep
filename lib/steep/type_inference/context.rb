@@ -10,7 +10,6 @@ module Steep
         attr_reader :forward_arg_type
         attr_reader :block_param_name
 
-        # The `def` being checked, or nil.
         attr_reader :node
 
         def initialize(name:, method:, method_type:, return_type:, super_method:, forward_arg_type:, node:, block_param_name: nil)
@@ -32,7 +31,7 @@ module Steep
         end
 
         def held_locals
-          @held_locals ||= HeldLocals.of(node)
+          @held_locals ||= HeldLocals.of(node, reassigned: reassigned_parameters)
         end
 
         def reassigned_parameter?(name)

@@ -4846,7 +4846,11 @@ module Steep
           private: private,
           dispatch: dispatch
         )
-        return correlated.with(constr: ObjectStates.after_call(correlated.constr, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments)) if correlated
+        return correlated.with(
+          constr: ObjectStates.after_call(
+            correlated.constr, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments
+          )
+        ) if correlated
       end
 
       type, constr =

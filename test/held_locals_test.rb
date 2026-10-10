@@ -7,9 +7,13 @@ class HeldLocalsTest < Minitest::Test
     Steep::Source.new_parser.parse(Parser::Source::Buffer.new("a.rb", source: source))
   end
 
+  def held_locals(def_node)
+    Steep::TypeInference::HeldLocals.of(def_node, reassigned: Steep::TypeInference::ArgumentFacts.reassigned_parameters(def_node))
+  end
+
   def held(source)
     def_node = parse(source)
-    locals = Steep::TypeInference::HeldLocals.of(def_node)
+    locals = held_locals(def_node)
     names = [] #: Array[Symbol]
     each_node(def_node) { |node| names << node.children[0] if %i[lvasgn arg optarg kwarg].include?(node.type) }
     names.uniq.select { |name| locals.held?(name) }
@@ -126,7 +130,7 @@ class HeldLocalsTest < Minitest::Test
         r.name
       end
     RUBY
-    locals = Steep::TypeInference::HeldLocals.of(def_node)
+    locals = held_locals(def_node)
     first, second = def_node.children[2].children.take(2).map { |assignment| assignment.children[1] }
 
     assert locals.held_value?(first)

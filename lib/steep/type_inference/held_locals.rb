@@ -20,13 +20,16 @@ module Steep
       LOOPS = %i[while until while_post until_post for].freeze
       REFLECTIVE = %i[binding eval local_variable_get local_variable_set].freeze
 
-      def self.of(def_node)
-        new(def_node)
+      # `reassigned`: the parameters the body assigns
+      # (`ArgumentFacts.reassigned_parameters`).
+      def self.of(def_node, reassigned:)
+        new(def_node, reassigned: reassigned)
       end
 
-      def initialize(def_node)
+      def initialize(def_node, reassigned:)
         @names = Set[] #: Set[Symbol]
         @values = {}.compare_by_identity #: Hash[::Parser::AST::Node, Symbol]
+        @reassigned = reassigned
         analyze(def_node) if def_node
       end
 
@@ -34,7 +37,6 @@ module Steep
         @names.include?(name)
       end
 
-      # Whether `node` is the value assigned to a held local.
       def held_value?(node)
         @values.key?(node)
       end
@@ -69,7 +71,7 @@ module Steep
       end
 
       def register(parameters, assignments, escaped)
-        parameters.each { |name| @names << name unless assignments.key?(name) || escaped.include?(name) }
+        parameters.each { |name| @names << name unless @reassigned.include?(name) || escaped.include?(name) }
         assignments.each do |name, nodes|
           next if nodes.size > 1 || parameters.include?(name) || escaped.include?(name)
 

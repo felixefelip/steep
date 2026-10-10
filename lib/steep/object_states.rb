@@ -8,23 +8,16 @@ module Steep
   # Both are read off the call the checker already typed, against the method it
   # resolved to, and only ever narrow it: the declared return is the bound.
   #
-  # An ivar no method but `initialize` writes is fixed for good, and holds
-  # under any name. One another method writes holds only while a single local
-  # owns the object (`TypeInference::HeldLocals`), and moves with each call
-  # made through it (stage 2):
-  #
-  #   reflection = Reflection.new(:posts)   # ::Reflection{@name: :posts}
-  #   reflection.rename(:articles)          # ::Reflection{@name: :articles}
-  #   define_stored(reflection)             # handed on; ::Reflection here after
+  # An ivar no method but `initialize` writes holds under any name. One another
+  # method writes holds only while a single local owns the object
+  # (`TypeInference::HeldLocals`), and each call made through it moves it.
   module ObjectStates
-    # What running a method does to the object it runs on: the ivars it may
-    # write, and the ones it leaves holding an argument, by call-site position.
     Effect = Struct.new(:bindings, :writes, keyword_init: true)
 
     class << self
-      # `call` as `built` and `read` answer it, and `constr` with the locals it
-      # was handed settled ahead of what the callee's postconditions say about
-      # them.
+      # The locals handed on are settled here, ahead of the callee's
+      # postconditions, so a fact one states about them (`unconditional.params`)
+      # is not dropped by the settling.
       def answered(constr, call, node:, receiver_type:, arguments:)
         call = read(constr, built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
         [call, handed_on(constr, arguments)]
@@ -45,8 +38,8 @@ module Steep
         return call unless instance.is_a?(AST::Types::Name::Instance)
 
         chain = initialize_chain(constr, instance) or return call
-        held = held_value?(constr, node) && chain.all? { |_, body| body.nil? || effect(constr, instance, body, [:initialize]) }
-        bindings = compose(chain).select { |ivar, _| held || never_rewritten?(constr, instance, ivar) }
+        held = held_value?(constr, node) && chain.none? { |_, body| body && exposes_self?(constr, instance, body, [:initialize]) }
+        bindings = compose(chain).select { |ivar, _| held ? declared?(constr, instance, ivar) : never_rewritten?(constr, instance, ivar) }
         ivars = bound_values(constr, bindings, arguments)
         return call if ivars.empty?
 
@@ -58,7 +51,9 @@ module Steep
       # by; and each local handed on as an argument with only the ivars that
       # hold under any name, since the callee may change or keep it
       # (`TypeInference::HeldLocals` keeps such a local out of anything it
-      # cannot follow).
+      # cannot follow). `answered` settled those already on a typed call without
+      # a block; this covers a block, an untyped receiver and the correlated
+      # paths.
       def after_call(constr, method_name:, receiver:, receiver_type:, arguments:)
         if receiver&.type == :lvar && holds_state?(receiver_type)
           name = receiver.children[0]
@@ -119,12 +114,10 @@ module Steep
         end.to_h
       end
 
-      # `state` once `method_name` ran on it with `arguments`: an ivar the
-      # method does not write keeps its value, one it binds takes the
-      # argument's, and any other it writes is no longer known. A method whose
-      # body this cannot read leaves only what holds under any name.
+      # A method whose body this cannot read leaves only what holds under any
+      # name.
       def changed(constr, state, method_name, arguments)
-        effect = method_effect(constr, state.back_type, method_name, [method_name]) or return settled(constr, state)
+        effect = method_effect(constr, state.back_type, method_name) or return settled(constr, state)
         plain = arguments.all? { |argument| plain_argument?(argument) }
         rebound = plain ? bound_values(constr, effect.bindings, arguments) : {} #: Hash[Symbol, AST::Types::t]
         ivars = state.ivars.reject { |ivar, _| effect.writes.include?(ivar) }
@@ -132,9 +125,8 @@ module Steep
         ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
       end
 
-      # `receiver_type` once the call ran on it. A union is each of the
-      # objects it may be, and only a state alone keeps the markers the
-      # postcondition left in `current`.
+      # Only a state alone keeps the markers the postcondition left in
+      # `current`: a union member cannot tell which of them is its own.
       def left(constr, receiver_type, current, method_name, arguments)
         if receiver_type.is_a?(AST::Types::Union)
           return AST::Types::Union.build(types: receiver_type.types.map { |member| left(constr, member, nil, method_name, arguments) })
@@ -159,9 +151,6 @@ module Steep
         end
       end
 
-      # The markers the local is met with once the call returned: the ones
-      # the callee's postcondition put in place of the class, or the ones it
-      # already had.
       def markers_in(current, state)
         return [] unless current.is_a?(AST::Types::Intersection)
 
@@ -183,32 +172,45 @@ module Steep
         values.filter_map { |value| value.children[0] if value.type == :lvar }
       end
 
-      # What `method_name` does to an instance of `instance`, read off the
-      # body the RBS definition says runs, and off every method it calls on
-      # `self`. Nil when that body may hand `self` on, calls `super` or a
-      # method with no body to read, or calls back into itself.
-      def method_effect(constr, instance, method_name, visiting)
-        body = resolved_body(constr, instance, method_name) or return nil
-        return nil if body.super_args
+      # What `method_name` does to an instance of `instance`: the ivars it may
+      # write, from `may_write` (closed over the methods it calls on `self`),
+      # and the ones its body binds to an argument and nothing it calls on
+      # `self` may write after. Nil when the body cannot be read, calls
+      # `super`, or may hand `self` on; and until `steep check` has written a
+      # sidecar, since nothing then says what any method writes.
+      def method_effect(constr, instance, method_name)
+        return nil if constr.postconditions.empty?
 
-        effect(constr, instance, body, visiting)
-      end
+        owner, body = resolved_body(constr, instance, method_name)
+        return nil if owner.nil? || body.nil? || body.super_args || exposes_self?(constr, instance, body, [method_name])
 
-      def effect(constr, instance, body, visiting)
-        return nil if body.exposes_self
-
-        callee_writes = Set[] #: Set[Symbol]
-        body.self_sends.each do |name|
-          return nil if visiting.include?(name)
-
-          callee = method_effect(constr, instance, name, [*visiting, name]) or return nil
-          callee_writes.merge(callee.writes)
+        callee_writes = body.self_sends.flat_map do |name|
+          callee_owner, = resolved_body(constr, instance, name)
+          may_write(constr, callee_owner, name).to_a
         end
-        Effect.new(bindings: body.bindings.reject { |ivar, _| callee_writes.include?(ivar) }, writes: body.writes | callee_writes)
+        Effect.new(bindings: body.bindings.reject { |ivar, _| callee_writes.include?(ivar) }, writes: may_write(constr, owner, method_name))
       end
 
-      # The body of the `method_name` an instance of `instance` runs. Which
-      # one runs is the RBS definition's answer, as for `initialize`
+      # Whether `self` may reach anything but a call made on it, here or in a
+      # method this calls on `self`. One with no body to read may: `itself`,
+      # `tap` and `define_singleton_method` hand it on.
+      def exposes_self?(constr, instance, body, visiting)
+        return true if body.exposes_self
+
+        body.self_sends.any? do |name|
+          next false if visiting.include?(name)
+
+          _, callee = resolved_body(constr, instance, name)
+          callee.nil? || exposes_self?(constr, instance, callee, [*visiting, name])
+        end
+      end
+
+      def may_write(constr, owner, method_name)
+        constr.postconditions.lookup_instance(owner, method_name)&.may_write_ivars || Set[]
+      end
+
+      # `[owner, body]` for the `method_name` an instance of `instance` runs.
+      # Which one runs is the RBS definition's answer, as for `initialize`
       # (felixefelip/steep#230). Nil when a Ruby method of that name the RBS
       # does not place would run first.
       def resolved_body(constr, instance, method_name)
@@ -219,7 +221,8 @@ module Steep
         index = ancestors.index(owner) or return nil
         return nil if ancestors.take(index).any? { |name| registry.defines?(name.to_s, method_name) }
 
-        registry.body_of(owner.to_s, method_name)
+        body = registry.body_of(owner.to_s, method_name) or return nil
+        [owner, body]
       rescue RBS::BaseError
         nil
       end
@@ -323,14 +326,18 @@ module Steep
       # (writes from outside the class).
       def never_rewritten?(constr, instance, ivar)
         postconditions = constr.postconditions
-        return false if postconditions.empty?
+        return false if postconditions.empty? || !declared?(constr, instance, ivar)
 
         definition = constr.checker.factory.definition_builder.build_instance(instance.name)
-        return false unless definition.instance_variables.key?(ivar)
-
         definition.ancestors.ancestors.none? do |ancestor|
           postconditions.may_write?(ancestor.name.to_s, ivar, except: :initialize)
         end
+      rescue RBS::BaseError
+        false
+      end
+
+      def declared?(constr, instance, ivar)
+        constr.checker.factory.definition_builder.build_instance(instance.name).instance_variables.key?(ivar)
       rescue RBS::BaseError
         false
       end
@@ -351,7 +358,7 @@ module Steep
       # the class or in the ancestor that defines it (felixefelip/steep#230).
       def bound_reader_ivar(constr, receiver_type, call)
         method_name = call.method_name or return nil
-        resolved_body(constr, receiver_type.back_type, method_name)&.returns
+        resolved_body(constr, receiver_type.back_type, method_name)&.last&.returns
       end
     end
   end

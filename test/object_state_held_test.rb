@@ -20,6 +20,8 @@ class ObjectStateHeldTest < Minitest::Test
       def rename: (Symbol to) -> Symbol
       def rename_if: (Symbol to, bool flag) -> Symbol?
       def refresh: () -> Symbol
+      def rename_then_clear: (Symbol to) -> Symbol
+      def clear: () -> Symbol
       def shout: () -> Symbol
       def register: () -> void
     end
@@ -58,6 +60,11 @@ class ObjectStateHeldTest < Minitest::Test
         @name = to if flag
       end
       def refresh = rename(:fresh)
+      def rename_then_clear(to)
+        @name = to
+        clear
+      end
+      def clear = @name = :cleared
       def shout = name
       def register = Writer.take(self)
     end
@@ -75,6 +82,8 @@ class ObjectStateHeldTest < Minitest::Test
     ["Reflection", "rename", "@name"],
     ["Reflection", "rename_if", "@name"],
     ["Reflection", "refresh", "@name"],
+    ["Reflection", "rename_then_clear", "@name"],
+    ["Reflection", "clear", "@name"],
     ["Reflection", "label=", "@label"],
     ["Fixed", "initialize", "@name"]
   ].freeze
@@ -151,6 +160,33 @@ class ObjectStateHeldTest < Minitest::Test
       r = Reflection.new(:posts, :draft)
       r.label = :x
       r.current_label
+    RUBY
+  end
+
+  def test_an_attr_writer_and_the_reader_cache_agree
+    assert_equal ":x", last_value(<<~RUBY)
+      r = Reflection.new(:posts, :draft)
+      r.label = :x
+      r.label
+    RUBY
+  end
+
+  def test_a_binding_a_method_called_on_self_may_overwrite
+    assert_equal "::Symbol", last_value(<<~RUBY)
+      r = Reflection.new(:posts)
+      r.rename_then_clear(:articles)
+      r.name
+    RUBY
+  end
+
+  # Until `steep check` has written a sidecar, nothing says what any method
+  # writes.
+  def test_no_postconditions_yet
+    empty = Steep::Postconditions::Store.empty
+    assert_equal "::Symbol", last_value(<<~RUBY, postconditions: empty)
+      r = Reflection.new(:posts)
+      r.rename(:articles)
+      r.name
     RUBY
   end
 
