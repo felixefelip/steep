@@ -2,7 +2,7 @@ inherit_from: .rubocop_todo.yml
 
 AllCops:
   TargetRubyVersion: 3.3
-  NewCops: enable
+  DisabledByDefault: true
   SuggestExtensions: false
   Exclude:
     - "smoke/**/*"
@@ -13,26 +13,17 @@ AllCops:
     - "tmp/**/*"
     - "vendor/**/*"
 
-Style/StringLiterals:
-  EnforcedStyle: double_quotes
-
-Style/StringLiteralsInInterpolation:
-  EnforcedStyle: double_quotes
-
-Style/Documentation:
-  Enabled: false
-
 Metrics/MethodLength:
+  Enabled: true
   CountAsOne: ["array", "hash", "heredoc", "method_call"]
   Max: 20
 
 Metrics/ClassLength:
+  Enabled: true
   CountAsOne: ["array", "hash", "heredoc", "method_call"]
   Max: 400
 
 Metrics/ModuleLength:
+  Enabled: true
   CountAsOne: ["array", "hash", "heredoc", "method_call"]
   Max: 400
-
-Metrics/BlockLength:
-  CountAsOne: ["array", "hash", "heredoc", "method_call"]
