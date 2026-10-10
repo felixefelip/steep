@@ -84,6 +84,49 @@ module Steep
         types && AST::Types::Tuple.new(types: types)
       end
 
+      def truthiness(type)
+        case type
+        when AST::Types::Nil then :falsy
+        when AST::Types::Literal then type.value == false ? :falsy : :truthy
+        when AST::Types::Tuple, AST::Types::FiniteSet, AST::Types::RegexpLiteral, AST::Types::ObjectState then :truthy
+        end
+      end
+
+      # The block's parameters bound to one element, the way `yield element`
+      # binds them: one parameter takes the element, several or a pattern take it
+      # apart. Anything else — a rest, an optional — declines.
+      #
+      # One parameter is `procarg0` only when written `|k|`. `|k,|` parses as a
+      # plain `arg`, and Ruby takes the element apart for it as for several:
+      # `[["ab", "cde"]].map { |k,| k }` is `["ab"]`.
+      def element_bindings(block_params, element)
+        return if block_params.rest_param || block_params.block_param || !block_params.optional_params.empty?
+
+        params = block_params.params
+        return {} if params.empty?
+
+        if params.size == 1 && params[0].node.type == :procarg0
+          return { params[0].var => element } if params[0].is_a?(TypeInference::BlockParams::Param)
+
+          params = params[0].params
+        end
+        destructured_bindings(params, element)
+      end
+
+      def destructured_bindings(params, element)
+        return unless element.is_a?(AST::Types::Tuple)
+
+        params.each_with_index.each_with_object({}) do |(param, index), bindings|
+          value = element.types[index] || AST::Builtin.nil_type
+          nested =
+            case param
+            when TypeInference::BlockParams::MultipleParam then destructured_bindings(param.params, value)
+            when TypeInference::BlockParams::Param then ({ param.var => value } if param.node.type == :arg)
+            end
+          bindings.merge!(nested || (return nil))
+        end
+      end
+
       private
 
       def exact?(type)
@@ -91,14 +134,6 @@ module Steep
         when AST::Types::Literal, AST::Types::Nil, AST::Types::RegexpLiteral then true
         when AST::Types::Tuple, AST::Types::FiniteSet then type.types.all? { |element| exact?(element) }
         else false
-        end
-      end
-
-      def truthiness(type)
-        case type
-        when AST::Types::Nil then :falsy
-        when AST::Types::Literal then type.value == false ? :falsy : :truthy
-        when AST::Types::Tuple, AST::Types::FiniteSet, AST::Types::RegexpLiteral, AST::Types::ObjectState then :truthy
         end
       end
     end
