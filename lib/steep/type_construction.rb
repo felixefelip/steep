@@ -678,18 +678,9 @@ module Steep
       #       first = false
       #     end
       #
-      # A block body is entered with the method's locals PINNED to the types they
-      # have at the call (`for_block`), because nothing says when or how often a
-      # closure runs, and a write in it must keep what every run assumes. Here
-      # the runs are known — one per element, in order — so the pins are lifted:
-      # exactly the ones `for_block` added, and nothing an annotation enforces.
-      #
       # Only the locals the body is entered with carry over. One born in the
       # body is bound anew on every pass, and the parameter is the next element.
-      env = entry.context.type_env
-      outer = context.type_env.local_variable_types
-      unpinned = outer.select { |name, (type, enforced)| enforced.nil? && env.local_variable_types[name] == [type, type] }
-      env = env.merge(local_variable_types: unpinned)
+      env = UnrolledEach.starting_env(self, entry)
       carried = env.local_variable_types.keys
 
       passes = collection.types.map do |element|
@@ -759,7 +750,7 @@ module Steep
       collection = iterated_collection(node.children[0], receiver_type) or return
 
       results = collection.types.map do |element|
-        bindings = element_bindings(block_params, element) or return
+        bindings = IterationIntrinsics.element_bindings(block_params, element) or return
         pass = entry
           .with_new_typing(typing.new_child)
           .update_type_env { |env| env.refine_types(local_variable_types: bindings) }
@@ -794,31 +785,6 @@ module Steep
     # The local a symbol's pass binds the element to. Not a name Ruby can
     # spell, so it can shadow nothing the program reads.
     ITERATED_ELEMENT = :"*element"
-
-    # The block's parameters bound to one element, the way `yield element`
-    # binds them: one parameter takes the element, several take it apart.
-    # Anything else — a rest, an optional, a nested pattern — declines.
-    #
-    # One parameter is `procarg0` only when written `|k|`. `|k,|` parses as a
-    # plain `arg`, and Ruby takes the element apart for it as for several:
-    # `[["ab", "cde"]].map { |k,| k }` is `["ab"]`.
-    def element_bindings(block_params, element)
-      return if block_params.rest_param || block_params.block_param || !block_params.optional_params.empty?
-
-      params = block_params.params
-      return unless params.all? { |param| param.is_a?(TypeInference::BlockParams::Param) }
-
-      case
-      when params.empty?
-        {}
-      when params.size == 1 && params[0].node.type == :procarg0
-        { params[0].var => element }
-      else
-        return unless element.is_a?(AST::Types::Tuple)
-
-        params.each_with_index.to_h { |param, index| [param.var, element.types[index] || AST::Builtin.nil_type] }
-      end
-    end
 
     # The env a condition leaves on one side, joined from the operands that can
     # reach it. In `!x.nil? || nil.respond_to?(:name)` the right operand is
@@ -2059,6 +2025,7 @@ module Steep
             typing.add_error Diagnostic::Ruby::UnexpectedJump.new(node: node)
           end
 
+          typing.add_break_env(node, context.type_env)
           add_typing(node, type: AST::Builtin.bottom_type)
 
         when :next
@@ -5956,7 +5923,7 @@ module Steep
     # against `String`). Specialized calls already arrive here as literal types;
     # this only recovers values that are visibly literal in the source.
     def literal_operand_type(node, inferred_type)
-      return inferred_type if inferred_type.is_a?(AST::Types::Literal)
+      return inferred_type if inferred_type.is_a?(AST::Types::Literal) || inferred_type.is_a?(AST::Types::RegexpLiteral)
       return built_here_only(inferred_type) unless node.is_a?(::Parser::AST::Node)
 
       # An array written out in the source is exact information the same way a
@@ -5972,7 +5939,7 @@ module Steep
           # as it would have before.
           inferred = typing.has_type?(child) ? typing.type_of(node: child) : AST::Builtin.any_type
           element = literal_operand_type(child, inferred)
-          element if element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple)
+          element if element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple) || element.is_a?(AST::Types::RegexpLiteral)
         end
 
         return elements.all? ? AST::Types::Tuple.new(types: elements) : built_here_only(inferred_type)
@@ -6822,6 +6789,17 @@ module Steep
                 )
 
                 iterated = constr.iterated_value(
+                  node,
+                  entry: entry_constr,
+                  receiver_type: receiver_type,
+                  block_params: block_params_,
+                  block_body: block_body,
+                  block_type_hint: method_type.block.type.return_type,
+                  decls: decls
+                )
+
+                constr = UnrolledEach.apply(
+                  constr,
                   node,
                   entry: entry_constr,
                   receiver_type: receiver_type,

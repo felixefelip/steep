@@ -445,5 +445,6 @@ end
 # end
 require "steep/collection_readers"
 require "steep/accumulators"
+require "steep/unrolled_each"
 require "steep/local_assignments"
 require "steep/constants"

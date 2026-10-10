@@ -217,6 +217,10 @@ module Steep
     # computed tuple but goes on to be pushed onto (`Accumulators` keeps its
     # contents; a tuple type would make the push demand the first element).
     attr_reader :nominals
+    # The types the locals a block body may change in place had before
+    # `StringMutation` widened them, by the body; and the env each `break` was
+    # reached with. What `UnrolledEach` runs an `each` from and stops it with.
+    attr_reader :unwidened, :break_envs
     attr_reader :source_index
     attr_reader :cursor_context
 
@@ -242,6 +246,8 @@ module Steep
       (@arms = {}).compare_by_identity
       (@vouched = {}).compare_by_identity
       (@nominals = {}).compare_by_identity
+      (@unwidened = {}).compare_by_identity
+      (@break_envs = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -308,6 +314,22 @@ module Steep
 
     def arm_of(node:)
       arms.fetch(node) { parent&.arm_of(node: node) }
+    end
+
+    def add_unwidened(node, types)
+      unwidened[node] = types
+    end
+
+    def unwidened_of(node:)
+      unwidened.fetch(node) { parent&.unwidened_of(node: node) }
+    end
+
+    def add_break_env(node, env)
+      break_envs[node] = env
+    end
+
+    def break_env_of(node:)
+      break_envs[node]
     end
 
     def add_vouched(node, type)

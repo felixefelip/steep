@@ -62,13 +62,16 @@ module Steep
       # value from its second pass on. `shadowed` are the names a block
       # parameter rebinds, which are not the outer variable.
       def widen_mutated_in(constr, node, shadowed: Set[])
+        unwidened = {} #: Hash[Symbol, AST::Types::t]
         each_variable_call(node, shadowed) do |receiver, method_name, block|
           type = constr.context.type_env[receiver.children[0]] or next
           widened = mutated_type(constr, type, method_name, private: false, block: block) or next
 
+          unwidened[receiver.children[0]] ||= type if receiver.type == :lvar
           constr = refine(constr, receiver, widened)
         end
 
+        constr.typing.add_unwidened(node, unwidened) unless unwidened.empty?
         constr
       end
 

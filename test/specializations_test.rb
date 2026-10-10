@@ -649,7 +649,7 @@ class SpecializationsTest < Minitest::Test
 
   # The shape `ActiveSupport::Inflector.apply_inflections` has: the `sub!` is
   # inside the block, `break` included.
-  def test_runner_records_nothing_for_a_literal_mutated_inside_a_block
+  def test_runner_folds_rules_applied_in_order_until_one_matches
     in_tmpdir do
       write("sig/mutation.rbs", <<~RBS)
         class Mutation
@@ -664,7 +664,42 @@ class SpecializationsTest < Minitest::Test
         class Mutation
           def self.apply(word)
             result = word.dup
-            [[/s\z/, ""]].each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+            [[/ies\z/, "y"], [/s\z/, ""]].each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+            result
+          end
+        end
+
+        class MutationUse
+          def self.a = Mutation.apply("posts")
+          def self.b = Mutation.apply("categories")
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ '("posts")' => '"post"', '("categories")' => '"category"' }, methods.fetch("Mutation.apply"))
+    end
+  end
+
+  def test_runner_records_nothing_for_a_literal_mutated_by_rules_it_does_not_know
+    in_tmpdir do
+      write("sig/mutation.rbs", <<~RBS)
+        class Mutation
+          def self.rules: () -> Array[[Regexp, String]]
+          def self.apply: (String word) -> String
+        end
+        class MutationUse
+          def self.a: () -> String
+          def self.b: () -> String
+        end
+      RBS
+      write("app/mutation.rb", <<~'RUBY')
+        class Mutation
+          def self.rules = [[/s\z/, ""]]
+
+          def self.apply(word)
+            result = word.dup
+            rules.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
             result
           end
         end
