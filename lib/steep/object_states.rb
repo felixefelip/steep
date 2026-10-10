@@ -169,10 +169,7 @@ module Steep
       end
 
       def handed_locals(arguments)
-        values = arguments.flat_map do |argument|
-          argument.type == :kwargs ? argument.children.filter_map { |pair| pair.children[1] if pair.type == :pair } : [argument]
-        end
-        values.filter_map { |value| value.children[0] if value.type == :lvar }
+        LocalReach.argument_values(arguments).filter_map { |value| value.children[0] if value.type == :lvar }
       end
 
       # What `method_name` does to an instance of `instance`: the ivars it may

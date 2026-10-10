@@ -15,10 +15,8 @@ module Steep
     # that runs later), or reach it out of order (inside a loop, a `rescue`,
     # or twice in one call).
     class HeldLocals
-      SCOPES = %i[def defs class module sclass].freeze
       CALLS = %i[send csend].freeze
-      LOOPS = %i[while until while_post until_post for].freeze
-      REFLECTIVE = %i[binding eval local_variable_get local_variable_set].freeze
+      LOOPS = [*LocalReach::REPEATS, :for].freeze
 
       # `reassigned`: the parameters the body assigns
       # (`ArgumentFacts.reassigned_parameters`).
@@ -45,12 +43,12 @@ module Steep
 
       def analyze(def_node)
         args, body = def_node.type == :defs ? def_node.children.drop(2) : def_node.children.drop(1)
+        return if [args, body].any? { |root| LocalReach.reflective?(root) }
+
         @assignments = {} #: Hash[Symbol, Array[::Parser::AST::Node]]
         @escaped = Set[] #: Set[Symbol]
-        @reflective = false
         @forwards = false
         [args, body].each { |root| walk(root, [], detached: false) { |node, parents, detached| visit(node, parents, detached) } }
-        return if @reflective
 
         parameters = parameters(args)
         register(parameters, @assignments, @forwards ? @escaped | parameters : @escaped)
@@ -63,8 +61,6 @@ module Steep
           node.children[1] && !detached ? (@assignments[name] ||= []) << node : @escaped << name
         when :lvar
           @escaped << node.children[0] if detached || !handed?(node, parents)
-        when *CALLS
-          @reflective ||= node.children[0].nil? && REFLECTIVE.include?(node.children[1])
         when :zsuper
           @forwards = true
         end
@@ -82,7 +78,7 @@ module Steep
 
       def walk(node, parents, detached:, &block)
         return unless node.is_a?(::Parser::AST::Node)
-        return if SCOPES.include?(node.type)
+        return if LocalReach::SCOPES.include?(node.type)
 
         yield node, parents, detached
         inner = [*parents, node]
@@ -95,29 +91,18 @@ module Steep
       # the statements around them were cut short.
       def detaches?(node, index)
         case node.type
-        when :block, :numblock, :rescue, :ensure then index > 0
+        when *LocalReach::CLOSURES, :rescue, :ensure then index > 0
         when *LOOPS then true
         else false
         end
       end
 
+      # A keyword argument's value sits two nodes below its call.
       def handed?(node, parents)
-        parent = parents[-1] or return false
-        call =
-          if CALLS.include?(parent.type)
-            parent if parent.children[0].equal?(node) || parent.children.drop(2).any? { |arg| arg.equal?(node) }
-          elsif parent.type == :pair && parent.children[1].equal?(node) && parents[-2]&.type == :kwargs
-            parents[-3] if CALLS.include?(parents[-3]&.type)
-          end
-        call ? mentions(call, node.children[0]) == 1 : false
-      end
-
-      def mentions(node, name)
-        return 0 unless node.is_a?(::Parser::AST::Node)
-        return 0 if SCOPES.include?(node.type)
-
-        own = node.type == :lvar && node.children[0] == name ? 1 : 0
-        own + node.children.sum { |child| mentions(child, name) }
+        call = parents.last(3).reverse.find { |parent| CALLS.include?(parent.type) } or return false
+        handed = call.children[0].equal?(node) ||
+                 LocalReach.argument_values(call.children.drop(2)).any? { |value| value.equal?(node) }
+        handed && LocalReach.mentions(call, node.children[0]) == 1
       end
 
       def parameters(args)

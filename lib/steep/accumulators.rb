@@ -101,16 +101,11 @@ module Steep
     # `CollectionReaders` for why a call is on the list or is not.
     READERS = CollectionReaders::METHODS
 
-    # Nodes that open a body of their own. A local named inside one is a
-    # DIFFERENT variable that happens to share a name, so nothing outside says
-    # anything about it and nothing inside says anything about the outside.
-    SCOPES = %i[def defs class module sclass].freeze
+    SCOPES = LocalReach::SCOPES
 
-    # Nodes whose body closes over the locals around it but runs on its own
-    # schedule — an argument-position block, a lambda, a `numblock`. What the
-    # array holds when one is WRITTEN is not what it holds when the body runs,
-    # so a mention inside one takes the local away.
-    CLOSURES = %i[block numblock].freeze
+    # What the array holds when a closure is WRITTEN is not what it holds when
+    # its body runs, so a mention inside one takes the local away.
+    CLOSURES = LocalReach::CLOSURES
 
     # The pushes one `each` makes on every pass, in the order it makes them.
     # The count is not here: it is the length of the collection, which the
@@ -163,8 +158,7 @@ module Steep
     # Writes of a value to a name other than a local's.
     ASSIGNMENTS = %i[ivasgn gvasgn cvasgn casgn].freeze
 
-    # Loops whose condition and body both run once per turn.
-    REPEATS = %i[while until while_post until_post].freeze
+    REPEATS = LocalReach::REPEATS
 
     class << self
       # `{ name => [element node, …] }` for every local in `def_node` whose
@@ -236,7 +230,7 @@ module Steep
 
         yield statements(body), true
 
-        each_node(body) do |node|
+        LocalReach.each_node(body) do |node|
           yield node.children, false if node.type == :begin && !node.equal?(body)
         end
       end
@@ -247,15 +241,7 @@ module Steep
         args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
         return false if args.is_a?(Parser::AST::Node) && args.children.any? { |arg| arg.children[0] == name }
 
-        mentions_of(body_of(def_node), name) == lines.sum { |line| mentions_of(line, name) }
-      end
-
-      def mentions_of(node, name)
-        count = 0
-        each_node(node) do |child|
-          count += 1 if (child.type == :lvar || child.type == :lvasgn) && child.children[0] == name
-        end
-        count
+        LocalReach.mentions(body_of(def_node), name) == lines.sum { |line| LocalReach.mentions(line, name) }
       end
 
       # What one walk of a whole source says, for the checker to ask node by
@@ -336,6 +322,8 @@ module Steep
 
         each_def_with_owner(node) do |def_node, owner|
           each_returned(def_node) { |array| returned[array] = true }
+          next if LocalReach.reflective?(body_of(def_node))
+
           methods = builders_for(builders, owner, def_node)
 
           each_line_list(def_node) do |lines, top|
@@ -375,7 +363,7 @@ module Steep
               at_args[argument] = contents.fetch(argument.children[0])
             end
 
-            each_node(statement) do |child|
+            LocalReach.each_node(statement) do |child|
               next unless child.type == :send
               next unless READERS.include?(child.children[1]) || BLOCK_READS.include?(child.children[1])
 
@@ -525,17 +513,6 @@ module Steep
         end
       end
 
-      # Every node of one statement, stopping at a body of its own — `parts`
-      # inside a nested `def` is that def's variable, and answering its read
-      # with the contents out here is an answer about a different array.
-      def each_node(node, &block)
-        return unless node.is_a?(Parser::AST::Node)
-        return if SCOPES.include?(node.type)
-
-        yield node
-        node.children.each { |child| each_node(child, &block) }
-      end
-
       # Every `def` with the `class`/`module`/`sclass` node it is written in, or
       # nil where it is written at the top level. The owner is the node itself
       # and not a name: two classes of one name in one file are one class, but
@@ -611,6 +588,8 @@ module Steep
       # a body this declines rather than one it chases.
       def appends_in(def_node)
         body = body_of(def_node) or return nil
+        return nil if LocalReach.reflective?(body)
+
         names = positionals_of(def_node) or return nil
         return nil if names.empty?
 
@@ -873,7 +852,7 @@ module Steep
 
       def mention_nodes(node, name)
         mentions = [] #: Array[untyped]
-        each_node(node) do |child|
+        LocalReach.each_node(node) do |child|
           mentions << child if (child.type == :lvar || child.type == :lvasgn) && child.children[0] == name
         end
         mentions
@@ -924,25 +903,12 @@ module Steep
         candidates = [] #: Array[untyped]
 
         each_call_once(statement) do |child|
-          arguments = child.children.drop(2)
-          if arguments.last&.type == :kwargs
-            pairs = arguments.pop.children
-            arguments.concat(pairs.filter_map { |pair| pair.children[1] if pair.type == :pair })
-          end
-
-          arguments.each do |argument|
+          LocalReach.argument_values(child.children.drop(2)).each do |argument|
             candidates << argument if argument.type == :lvar && found[argument.children[0]]
           end
         end
 
-        candidates.select do |argument|
-          name = argument.children[0]
-          count = 0
-          each_node(statement) do |child|
-            count += 1 if (child.type == :lvar || child.type == :lvasgn) && child.children[0] == name
-          end
-          count == 1
-        end
+        candidates.select { |argument| LocalReach.mentions(statement, argument.children[0]) == 1 }
       end
 
       # Every `send` in `node` that runs at most once each time `node` does. A
@@ -969,7 +935,7 @@ module Steep
       end
 
       def jumps_back?(node)
-        each_node(node) do |child|
+        LocalReach.each_node(node) do |child|
           return true if child.type == :retry
         end
 
@@ -1136,7 +1102,7 @@ module Steep
       # The watched locals `node` reads or writes, stopping at a body of its own.
       def names_in(node, names)
         found = Set.new #: Set[Symbol]
-        each_node(node) do |child|
+        LocalReach.each_node(node) do |child|
           found << child.children[0] if (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0])
         end
         found
@@ -1161,7 +1127,7 @@ module Steep
       # Whether `node` reads or writes one of `names`, stopping at a body of its
       # own.
       def mentions?(node, names)
-        each_node(node) do |child|
+        LocalReach.each_node(node) do |child|
           return true if (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0])
         end
 
@@ -1169,7 +1135,7 @@ module Steep
       end
 
       def jumps?(node)
-        each_node(node) do |child|
+        LocalReach.each_node(node) do |child|
           return true if JUMPS.include?(child.type)
         end
 

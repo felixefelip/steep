@@ -34,7 +34,7 @@ Project/ClassLengthCeiling:
     "lib/steep/subtyping/check.rb": 963
     "lib/steep/type_inference/logic_type_interpreter.rb": 759
     "lib/steep/server/master.rb": 731
-    "lib/steep/accumulators.rb": 614
+    "lib/steep/accumulators.rb": 591
     "lib/steep/interface/builder.rb": 607
     "lib/steep/source.rb": 574
     "lib/steep/postconditions/runner.rb": 526
@@ -50,4 +50,4 @@ Project/ModuleLengthCeiling:
   CountAsOne: ["array", "hash", "heredoc", "method_call"]
   Max: 400
   Ceilings:
-    "lib/steep/accumulators.rb": 630
+    "lib/steep/accumulators.rb": 607
