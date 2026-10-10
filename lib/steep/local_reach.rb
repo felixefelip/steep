@@ -57,19 +57,7 @@ module Steep
     # locals mentioned later, the one its value is assigned to, and those whose
     # values the caller reads once the body returns (`outliving`).
     def reach(*roots, outliving: [])
-      evals = [] #: Array[[untyped, Array[untyped]]]
-      roots.each do |root|
-        each_call(root, [], false) do |call, ancestors, repeated|
-          case frame_access(call.children[1], call.children.drop(2))
-          when :frame
-            return EVERYWHERE
-          when :string
-            return EVERYWHERE if repeated || !call.location&.expression
-
-            evals << [call, ancestors]
-          end
-        end
-      end
+      evals = string_evals(roots) or return EVERYWHERE
       return NOWHERE if evals.empty?
       return EVERYWHERE if roots.any? { |root| retries?(root) }
 
@@ -81,6 +69,25 @@ module Steep
         end
       end
       Reach.new(false, names)
+    end
+
+    # Each string run once, with the nodes it is written in; nil where the
+    # frame is handed out or a string may run more than once.
+    def string_evals(roots)
+      evals = [] #: Array[[untyped, Array[untyped]]]
+      roots.each do |root|
+        each_call(root, [], false) do |call, ancestors, repeated|
+          case frame_access(call.children[1], call.children.drop(2))
+          when :frame
+            return nil
+          when :string
+            return nil if repeated || !call.location&.expression
+
+            evals << [call, ancestors]
+          end
+        end
+      end
+      evals
     end
 
     def each_call(node, ancestors, repeated, &block)
