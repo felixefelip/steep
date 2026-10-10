@@ -33,6 +33,8 @@ module Steep
         #
         attr_reader block_param_name: Symbol?
 
+        attr_reader node: Parser::AST::Node?
+
         def initialize: (
           name: Symbol,
           method: RBS::Definition::Method?,
@@ -40,8 +42,13 @@ module Steep
           return_type: AST::Types::t,
           super_method: RBS::Definition::Method?,
           forward_arg_type: [Params, Block?] | true | nil,
+          node: Parser::AST::Node?,
           ?block_param_name: Symbol?
         ) -> void
+
+        def reassigned_parameters: () -> Set[Symbol]
+
+        def held_locals: () -> HeldLocals
 
         # Type of the block of the current method type
         def block_type: () -> Interface::Block?

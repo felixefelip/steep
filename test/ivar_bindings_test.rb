@@ -179,10 +179,10 @@ class IvarBindingsTest < Minitest::Test
       end
     RUBY
 
-    assert_equal :@name, registry.reader_ivar("M", :name)
-    assert_nil registry.reader_ivar("C", :label)
+    assert_equal :@name, registry.body_of("M", :name)&.returns
+    assert_nil registry.body_of("C", :label)&.returns
     assert registry.defines?("C", :label)
-    assert_nil registry.reader_ivar("C", :name), "defined twice"
+    assert_nil registry.body_of("C", :name)&.returns, "defined twice"
     refute registry.defines?("M", :label)
   end
 
@@ -191,7 +191,7 @@ class IvarBindingsTest < Minitest::Test
   def test_a_reader_repeated_in_a_reopen_reads_nothing
     registry = registry("class C\n  def name = @name\nend\nclass C\n  def name = @name\nend")
 
-    assert_nil registry.reader_ivar("C", :name)
+    assert_nil registry.body_of("C", :name)&.returns
   end
 
   # Every shape that may put a method on the class counts as defining it;
@@ -223,14 +223,44 @@ class IvarBindingsTest < Minitest::Test
       end
     RUBY
 
-    assert_equal :@priv, registry.reader_ivar("C", :priv)
-    assert_equal :@reader, registry.reader_ivar("C", :reader)
-    assert_equal :@accessor, registry.reader_ivar("C", :accessor)
+    assert_equal :@priv, registry.body_of("C", :priv)&.returns
+    assert_equal :@reader, registry.body_of("C", :reader)&.returns
+    assert_equal :@accessor, registry.body_of("C", :accessor)&.returns
     %i[accessor= writer= aliased alias_m defined wrapped conditional in_block inner].each do |name|
       assert registry.defines?("C", name), name.to_s
-      assert_nil registry.reader_ivar("C", name), name.to_s
+      assert_nil registry.body_of("C", name)&.returns, name.to_s
     end
     refute registry.defines?("C", :singleton)
     refute registry.defines?("C", :on_self)
+  end
+
+  # What a method other than `initialize` does to the object it runs on
+  # (felixefelip/steep#205, stage 2).
+  def test_method_bodies
+    registry = registry(<<~RUBY)
+      class C
+        attr_accessor :label
+
+        def rename(to)
+          @name = to
+          log(:renamed)
+        end
+
+        def register = Registry.add(self)
+        def each_label = [1].each { label }
+      end
+    RUBY
+
+    rename = registry.body_of("C", :rename)
+    assert_equal({ :@name => 0 }, rename.bindings)
+    assert_equal Set[:log], rename.self_sends
+    refute rename.exposes_self
+
+    assert registry.body_of("C", :register).exposes_self
+    assert registry.body_of("C", :each_label).exposes_self
+
+    writer = registry.body_of("C", :label=)
+    assert_equal({ :@label => 0 }, writer.bindings)
+    assert_equal Set[:@label], writer.writes
   end
 end
