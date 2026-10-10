@@ -39,7 +39,10 @@ module Steep
 
         chain = initialize_chain(constr, instance) or return call
         held = held_value?(constr, node) && chain.none? { |_, body| body && exposes_self?(constr, instance, body, [:initialize]) }
-        bindings = compose(chain).select { |ivar, _| held ? declared?(constr, instance, ivar) : never_rewritten?(constr, instance, ivar) }
+        rewritten = chain.flat_map { |_, body| body ? callee_writes(constr, instance, body, [:initialize]).to_a : [] }
+        bindings = compose(chain).select do |ivar, _|
+          held ? declared?(constr, instance, ivar) && !rewritten.include?(ivar) : never_rewritten?(constr, instance, ivar)
+        end
         ivars = bound_values(constr, bindings, arguments)
         return call if ivars.empty?
 
@@ -184,11 +187,23 @@ module Steep
         owner, body = resolved_body(constr, instance, method_name)
         return nil if owner.nil? || body.nil? || body.super_args || exposes_self?(constr, instance, body, [method_name])
 
-        callee_writes = body.self_sends.flat_map do |name|
-          callee_owner, = resolved_body(constr, instance, name)
-          may_write(constr, callee_owner, name).to_a
+        rewritten = callee_writes(constr, instance, body, [method_name])
+        Effect.new(bindings: body.bindings.reject { |ivar, _| rewritten.include?(ivar) }, writes: may_write(constr, owner, method_name) | rewritten)
+      end
+
+      # What the methods `body` calls on `self` may write, each resolved on
+      # `instance`. `may_write` alone is closed in the class that defines the
+      # caller, so it misses a subclass's override.
+      def callee_writes(constr, instance, body, visiting)
+        body.self_sends.each_with_object(Set[]) do |name, writes|
+          next if visiting.include?(name)
+
+          owner, callee = resolved_body(constr, instance, name)
+          next unless owner
+
+          writes.merge(may_write(constr, owner, name))
+          writes.merge(callee_writes(constr, instance, callee, [*visiting, name])) if callee
         end
-        Effect.new(bindings: body.bindings.reject { |ivar, _| callee_writes.include?(ivar) }, writes: may_write(constr, owner, method_name))
       end
 
       # Whether `self` may reach anything but a call made on it, here or in a

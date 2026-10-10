@@ -35,6 +35,24 @@ class ObjectStateHeldTest < Minitest::Test
       attr_reader name: Symbol
       def initialize: (Symbol name) -> void
     end
+    class Base
+      @name: Symbol
+      @label: Symbol
+      attr_reader name: Symbol
+      attr_reader label: Symbol
+      def initialize: (Symbol name, Symbol label) -> void
+      def rename: (Symbol to) -> void
+      def touch: () -> void
+    end
+    class Child < Base
+      def touch: () -> void
+    end
+    class Norm
+      @name: Symbol
+      attr_reader name: Symbol
+      def initialize: (Symbol name) -> void
+      def normalize: () -> Symbol
+    end
     class Writer
       def self.take: (untyped) -> void
       def self.take_renamed: (Reflection & Reflection::AfterRename) -> void
@@ -74,6 +92,29 @@ class ObjectStateHeldTest < Minitest::Test
         @name = name
       end
     end
+    class Base
+      attr_reader :name, :label
+      def initialize(name, label)
+        @name = name
+        @label = label
+      end
+      def rename(to)
+        @name = to
+        touch
+      end
+      def touch = nil
+    end
+    class Child < Base
+      def touch = @label = :touched
+    end
+    class Norm
+      attr_reader :name
+      def initialize(name)
+        @name = name
+        normalize
+      end
+      def normalize = @name = :normal
+    end
   RUBY
 
   SIDECAR = [
@@ -85,7 +126,13 @@ class ObjectStateHeldTest < Minitest::Test
     ["Reflection", "rename_then_clear", "@name"],
     ["Reflection", "clear", "@name"],
     ["Reflection", "label=", "@label"],
-    ["Fixed", "initialize", "@name"]
+    ["Fixed", "initialize", "@name"],
+    ["Base", "initialize", "@name"],
+    ["Base", "initialize", "@label"],
+    ["Base", "rename", "@name"],
+    ["Child", "touch", "@label"],
+    ["Norm", "initialize", "@name"],
+    ["Norm", "normalize", "@name"]
   ].freeze
 
   def postconditions(unconditional = {})
@@ -176,6 +223,23 @@ class ObjectStateHeldTest < Minitest::Test
       r = Reflection.new(:posts)
       r.rename_then_clear(:articles)
       r.name
+    RUBY
+  end
+
+  # `may_write` is closed in the class that defines `rename`, which calls
+  # `Base#touch`; on a `Child` it runs `Child#touch`.
+  def test_a_method_called_on_self_that_a_subclass_overrides
+    assert_equal "::Symbol", last_value(<<~RUBY)
+      c = Child.new(:a, :b)
+      c.rename(:x)
+      c.label
+    RUBY
+  end
+
+  def test_an_initialize_that_rewrites_what_it_binds
+    assert_equal "::Symbol", last_value(<<~RUBY)
+      n = Norm.new(:posts)
+      n.name
     RUBY
   end
 
