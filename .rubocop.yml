@@ -1,5 +1,8 @@
 inherit_from: .rubocop_todo.yml
 
+require:
+  - ./.rubocop/class_length_ceiling.rb
+
 AllCops:
   TargetRubyVersion: 3.3
   DisabledByDefault: true
@@ -18,10 +21,42 @@ Metrics/MethodLength:
   CountAsOne: ["array", "hash", "heredoc", "method_call"]
   Max: 20
 
-Metrics/ClassLength:
+# Replaced by Project/ClassLengthCeiling, which takes the same settings plus a
+# per-file ceiling.
+Project/ClassLengthCeiling:
   Enabled: true
   CountAsOne: ["array", "hash", "heredoc", "method_call"]
   Max: 400
+  Ceilings:
+    "test/type_construction_test.rb": 5973
+    "lib/steep/type_construction.rb": 3884
+    "test/type_check_test.rb": 1572
+    "lib/steep/postconditions/inferrer.rb": 1047
+    "lib/steep/subtyping/check.rb": 963
+    "test/validation_test.rb": 823
+    "lib/steep/type_inference/logic_type_interpreter.rb": 759
+    "test/goto_service_test.rb": 756
+    "lib/steep/server/master.rb": 731
+    "test/postconditions/runner_test.rb": 709
+    "test/cli_test.rb": 690
+    "test/postconditions/inferrer_test.rb": 648
+    "test/subtyping_test.rb": 624
+    "lib/steep/accumulators.rb": 614
+    "lib/steep/interface/builder.rb": 607
+    "test/source_test.rb": 597
+    "lib/steep/source.rb": 574
+    "test/args_test.rb": 560
+    "test/master_test.rb": 527
+    "lib/steep/postconditions/runner.rb": 526
+    "lib/steep/signature/validator.rb": 489
+    "test/locator_test.rb": 476
+    "test/type_check_service_test.rb": 476
+    "lib/steep/services/goto_service.rb": 473
+    "lib/steep/services/completion_provider/ruby.rb": 472
+    "test/server_type_check_controller_test.rb": 460
+    "lib/steep/drivers/check.rb": 452
+    "test/type_check_worker_test.rb": 424
+    "test/source/module_self_types_test.rb": 415
 
 Metrics/ModuleLength:
   Enabled: true
