@@ -97,6 +97,15 @@ class AccumulatedIvarStateTest < Minitest::Test
       "an element handed to a project method" => { body: "def self.log(text) = text\nrules.singulars.each { |(_, replacement)| log(replacement) }" },
       "the list kept under another name" => { body: "KEPT = rules.singulars" },
       "a method of the class that changes it, called" => { rules: "def clear = @singulars.clear", body: "rules.clear" },
+      "a method of the class that changes it, called through a class method" => {
+        rules: "def clear = @singulars.clear", body: "def self.reset = rules.clear\nreset"
+      },
+      "a method of the class that changes it, called through self" => {
+        rules: "def clear = @singulars.clear", body: "def self.reset = rules.clear\nself.reset"
+      },
+      "a method of the class that changes it, called from another class" => {
+        rules: "def clear = @singulars.clear", body: "class Helper\n  def self.wipe = Inflector.rules.clear\nend\nHelper.wipe"
+      },
       "a push that may not run, made" => {
         rules: "def maybe(rule, replacement, flag) = (@singulars << [rule, replacement] if flag)",
         body: 'rules.maybe(/x\z/, "z", $flag)'
@@ -114,6 +123,7 @@ class AccumulatedIvarStateTest < Minitest::Test
       ruby = change[:reads] ? source(body: change[:body], reads: change[:reads]) : source(body: change[:body] || "")
       ruby = ruby.sub("    def singular(", "    #{change[:rules]}\n\n    def singular(") if change[:rules]
       rbs = RBS.sub("def singular:", "def clear: () -> Array[untyped]\n    def maybe: (untyped, untyped, untyped) -> untyped\n    def singular:")
+                 .sub("  def self.rules:", "  def self.reset: () -> untyped\n  class Helper\n    def self.wipe: () -> untyped\n  end\n  def self.rules:")
       assert_equal [[nil], [nil]], chunks(ruby, rbs: rbs), label
     end
   end
