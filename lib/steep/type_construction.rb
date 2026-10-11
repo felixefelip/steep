@@ -442,7 +442,7 @@ module Steep
 
       type_env = apply_callbacks_for_method(method_name, type_env)
       type_env = apply_contract_self_type(node, method_name, type_env)
-      type_env = apply_method_entry_facts(method_name, type_env).refine_types(instance_variable_types: arguments&.self_ivars || {})
+      type_env = ObjectStates::ClassStates.entered_method(apply_method_entry_facts(method_name, type_env), arguments)
 
       method_params.errors.each do |error|
         typing.add_error error
@@ -1489,7 +1489,7 @@ module Steep
       end
 
       typing.add_typing(call.node, call.return_type, nil)
-      typing.add_call(call.node, call, self_type: self_type, self_ivars: ObjectStates.self_ivars(self))
+      typing.add_call(call.node, call, self_type: self_type, self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call))
 
       Pair.new(type: call.return_type, constr: self)
     end
@@ -2334,6 +2334,7 @@ module Steep
               end
             end
 
+            exit = nil
             with_class_constr(node, class_name, super_name) do |constructor|
               if module_type = constructor.module_context&.module_type
                 _, constructor = constructor.add_typing(name_node, type: module_type)
@@ -2344,14 +2345,14 @@ module Steep
               constructor.typing.cursor_context.set_node_context(node, constructor.context)
               constructor.typing.cursor_context.set_body_context(node, constructor.context)
 
-              ObjectStates::ClassMemos.entered_class(constructor).synthesize(node.children[2]) if node.children[2]
+              exit = ObjectStates::ClassStates.entered(constructor, self).synthesize(node.children[2]).constr if node.children[2]
 
               if constructor.module_context&.implement_name && !namespace_module?(node)
                 constructor.validate_method_definitions(node, constructor.module_context.implement_name || raise)
               end
             end
 
-            add_typing(node, type: AST::Builtin.nil_type)
+            ObjectStates::ClassStates.left(self, exit).add_typing(node, type: AST::Builtin.nil_type)
           end
 
         when :module
@@ -2377,6 +2378,7 @@ module Steep
               constr.typing.source_index.add_definition(constant: module_name, definition: name_node)
             end
 
+            exit = nil
             with_module_constr(node, module_name) do |constructor|
               if module_type = constructor.module_context&.module_type
                 _, constructor = constructor.add_typing(name_node, type: module_type)
@@ -2387,14 +2389,14 @@ module Steep
               constructor.typing.cursor_context.set_node_context(node, constructor.context)
               constructor.typing.cursor_context.set_body_context(node, constructor.context)
 
-              constructor.synthesize(node.children[1]) if node.children[1]
+              exit = ObjectStates::ClassStates.entered(constructor, self).synthesize(node.children[1]).constr if node.children[1]
 
               if constructor.module_context&.implement_name && !namespace_module?(node)
                 constructor.validate_method_definitions(node, constructor.module_context.implement_name || raise)
               end
             end
 
-            add_typing(node, type: AST::Builtin.nil_type)
+            ObjectStates::ClassStates.left(self, exit).add_typing(node, type: AST::Builtin.nil_type)
           end
 
         when :sclass
@@ -5851,8 +5853,8 @@ module Steep
       return call if specializations.empty? || block_params || block_body
 
       key = Specializations.method_key(call.method_decls) or return call
-      arguments = Specializations::Arguments.from_send(
-        node, typing, receiver_ivars: Specializations::Arguments.receiver_ivars(call.receiver_type, ObjectStates.self_ivars(self))
+      arguments = Specializations::Arguments.at_call(
+        node, typing, call, self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call)
       ) or return call
       type = specializations.return_type(key, arguments.key, factory: checker.factory) or return call
 
@@ -9082,7 +9084,8 @@ module Steep
             return_type: inlined_call.return_type
           ),
           self_type: constr.self_type,
-          self_ivars: ObjectStates.self_ivars(constr)
+          self_ivars: ObjectStates.self_ivars(constr),
+          class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
         )
       when TypeInference::MethodCall::Untyped
         constr.typing.add_call(
@@ -9093,7 +9096,8 @@ module Steep
             method_name: method_name
           ),
           self_type: constr.self_type,
-          self_ivars: ObjectStates.self_ivars(constr)
+          self_ivars: ObjectStates.self_ivars(constr),
+          class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
         )
       end
     end

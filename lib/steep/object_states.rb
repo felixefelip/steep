@@ -57,7 +57,7 @@ module Steep
       # A method runs whenever it is called, not where it is written: nothing
       # the class body around it cached about a call answers one there.
       def entered_method(env)
-        env.pure_method_calls.empty? ? env : env.update(pure_method_calls: {})
+        env.pure_method_calls.empty? && env.class_states.empty? ? env : env.update(pure_method_calls: {}, class_states: {})
       end
 
       # The ivars of `self` whose object the env knows the state of, for a body
@@ -136,8 +136,7 @@ module Steep
       def exit_of(constr, node)
         call = recorded_call(constr, node)
         key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls) or return
-        receiver_ivars = Specializations::Arguments.recorded_receiver_ivars(node, constr.typing)
-        arguments = Specializations::Arguments.from_send(node, constr.typing, receiver_ivars: receiver_ivars) or return
+        arguments = Specializations::Arguments.recorded(node, constr.typing) or return
         constr.specializations.exit_ivars(key, arguments.key) if arguments.stateful?
       end
 

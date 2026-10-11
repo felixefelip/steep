@@ -79,7 +79,8 @@ class LogicTypeInterpreterTest < Minitest::Test
           return_type: parse_type("bool")
         ),
         self_type: AST::Builtin::Object.instance_type,
-        self_ivars: {}
+        self_ivars: {},
+        class_states: {}
       )
 
       store = Steep::Postconditions::Store.from_hash(

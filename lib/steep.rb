@@ -73,6 +73,7 @@ require "steep/array_mutation"
 require "steep/element_reads"
 require "steep/object_states"
 require "steep/object_states/class_memos"
+require "steep/object_states/class_states"
 
 require "steep/range_extension"
 
