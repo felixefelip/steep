@@ -36,6 +36,15 @@ module Steep
     # collection it is being looked for in.
     BINARY = %i[+ - & | intersect?].freeze
 
+    # Calls that hand each element to a block and change nothing themselves
+    # (`IterationIntrinsics`). `read?` refuses them, because the block may
+    # change an element in place. They read the collection only together with
+    # a proof that the block cannot: that it names each element only as an
+    # argument of a call in `ElementReads`, or in an interpolation
+    # (`TypeInference::ClassMemoAnalyzer#element_calls`). `Accumulators` and
+    # `Constants` make no such proof, so for them a block stays out.
+    ITERATIONS = %i[each map collect filter_map].freeze
+
     class << self
       # Whether this send only READS its receiver. A block takes it out of the
       # question whatever the method: `count { |value| value << "b" }` hands

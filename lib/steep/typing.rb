@@ -197,6 +197,7 @@ module Steep
     # The ivars of that `self` whose object's state the env knew at the call
     # (`ObjectStates.self_ivars`), only where there were any.
     attr_reader :call_self_ivars
+    attr_reader :exit_ivars
     # What one `each` pushes on each pass: `{ block node => [{ value node =>
     # type }, …] }`, one hash per element of the collection, or nil for a loop
     # that could not be expanded. Each pass is checked in a typing of its own
@@ -246,6 +247,7 @@ module Steep
       (@method_calls = {}).compare_by_identity
       (@call_self_types = {}).compare_by_identity
       (@call_self_ivars = {}).compare_by_identity
+      (@exit_ivars = {}).compare_by_identity
       (@iterations = {}).compare_by_identity
       (@arms = {}).compare_by_identity
       (@vouched = {}).compare_by_identity
@@ -307,6 +309,16 @@ module Steep
 
     def self_ivars_of_call(node:)
       call_self_ivars.fetch(node) { parent&.self_ivars_of_call(node: node) || {} }
+    end
+
+    # The ivars a body checked under its receiver's contents
+    # (`Specializations::Arguments#self_ivars`) leaves that receiver holding.
+    def add_exit_ivars(node, ivars)
+      exit_ivars[node] = ivars
+    end
+
+    def exit_ivars_of(node:)
+      exit_ivars.fetch(node) { parent&.exit_ivars_of(node: node) }
     end
 
     def add_iterations(node, passes)
@@ -469,6 +481,7 @@ module Steep
       parent.method_calls.merge!(method_calls)
       parent.call_self_types.merge!(call_self_types)
       parent.call_self_ivars.merge!(call_self_ivars)
+      parent.exit_ivars.merge!(exit_ivars)
       parent.iterations.merge!(iterations)
       parent.arms.merge!(arms)
       parent.vouched.merge!(vouched)

@@ -43,7 +43,7 @@ module Steep
           next unless call.is_a?(TypeInference::MethodCall::Typed)
 
           key = Specializations.method_key(call.method_decls) or next
-          arguments = Arguments.from_send(node, typing) or next
+          arguments = Arguments.from_send(node, typing, receiver_ivars: Arguments.recorded_receiver_ivars(node, typing)) or next
 
           yield key, arguments, node
         end

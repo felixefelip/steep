@@ -96,8 +96,16 @@ class AccumulatedIvarStateTest < Minitest::Test
       "an element changed in a block" => { body: 'rules.singulars.each { |(_, replacement)| replacement << "zz" }' },
       "an element handed to a project method" => { body: "def self.log(text) = text\nrules.singulars.each { |(_, replacement)| log(replacement) }" },
       "the list kept under another name" => { body: "KEPT = rules.singulars" },
-      "a method of the class that changes it" => { rules: "def clear = @singulars.clear" },
-      "a push that may not run" => { rules: "def maybe(rule, replacement, flag) = (@singulars << [rule, replacement] if flag)" },
+      "a method of the class that changes it, called" => { rules: "def clear = @singulars.clear", body: "rules.clear" },
+      "a push that may not run, made" => {
+        rules: "def maybe(rule, replacement, flag) = (@singulars << [rule, replacement] if flag)",
+        body: 'rules.maybe(/x\z/, "z", $flag)'
+      },
+      "a push the project replaced" => { body: "class ::Array\n  def prepend(*) = self\nend" },
+      "a core method the block hands an element to, replaced by define_method" => {
+        body: '::String.define_method(:start_with?) { |*a| a.first.replace("q"); true }',
+        reads: 'rules.singulars.each { |(rule, replacement)| "x".start_with?(replacement); break if result.sub!(rule, replacement) }'
+      },
       "a core method the block hands an element to, redefined" => {
         body: "class ::String\n  def start_with?(*) = true\nend",
         reads: 'rules.singulars.each { |(rule, replacement)| "x".start_with?(replacement); break if result.sub!(rule, replacement) }'
@@ -105,7 +113,8 @@ class AccumulatedIvarStateTest < Minitest::Test
     }.each do |label, change|
       ruby = change[:reads] ? source(body: change[:body], reads: change[:reads]) : source(body: change[:body] || "")
       ruby = ruby.sub("    def singular(", "    #{change[:rules]}\n\n    def singular(") if change[:rules]
-      assert_equal [[nil], [nil]], chunks(ruby), label
+      rbs = RBS.sub("def singular:", "def clear: () -> Array[untyped]\n    def maybe: (untyped, untyped, untyped) -> untyped\n    def singular:")
+      assert_equal [[nil], [nil]], chunks(ruby, rbs: rbs), label
     end
   end
 
@@ -135,5 +144,35 @@ class AccumulatedIvarStateTest < Minitest::Test
 
       refute_includes Steep::Specializations::Runner.run(setup_project).keys, "Inflector.singularize"
     end
+  end
+
+  def test_the_rules_reach_a_method_the_macro_calls
+    ruby = source(reads: "")
+      .sub('class_eval "def #{result}_ids; []; end"', 'class_eval "def #{singularize(name.to_s)}_ids; []; end"')
+      .sub("    result = name.to_s.dup\n    \n", "")
+      .sub("  def self.has_many_like", <<~'RUBY'.gsub(/^/, "  ") + "  def self.has_many_like")
+        def self.singularize(word)
+          result = word.dup
+          rules.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+          result
+        end
+
+      RUBY
+    rbs = RBS.sub("def self.has_many_like", "def self.singularize: (String word) -> String\n  def self.has_many_like")
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
+  end
+
+  def test_a_reopen_that_only_defines_methods_runs_nothing_first
+    rbs = RBS.sub("def self.has_many_like", "def extra: () -> Integer\n  def self.has_many_like")
+    reopen = "class Inflector\n  def extra = 1\nend\n"
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(reopen + source, rbs: rbs)
+  end
+
+  def test_a_second_body_that_runs_code_may_have_built_the_object_first
+    reopen = "class Inflector\n  rules.singular(/x\\z/, \"z\")\nend\n"
+
+    assert_equal [[nil], [nil]], chunks(reopen + source)
   end
 end

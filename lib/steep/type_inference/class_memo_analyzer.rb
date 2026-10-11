@@ -31,18 +31,6 @@ module Steep
       # Calls that run a string as code where the class's `self` may be.
       STRING_EVALS = %i[eval instance_eval class_eval module_eval class_exec].freeze
 
-      # Calls that hand each element of a collection to a block and change
-      # nothing themselves. A use as their receiver counts only with a block
-      # whose parameters reach nothing that may change an element.
-      ITERATIONS = %i[each map collect filter_map select filter reject find detect any? all? none? each_with_index].freeze
-
-      # Core methods that neither change nor keep a value passed to them as an
-      # argument: what a block may hand an element to. Whether the project
-      # redefines one is `ObjectStates`' question.
-      ARGUMENT_READS = %i[
-        sub sub! gsub gsub! match match? =~ === == != eql? equal? start_with? end_with? include?
-        index rindex tr delete count scan split partition rpartition casecmp casecmp? <=> + %
-      ].freeze
 
       def self.uses(node, names:)
         new(names).uses(node)
@@ -112,7 +100,7 @@ module Steep
 
         @uses[name] <<
           if parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
-            element_calls = ITERATIONS.include?(parent.children[1]) ? element_calls(parent) : Set[]
+            element_calls = CollectionReaders::ITERATIONS.include?(parent.children[1]) ? element_calls(parent) : Set[]
             return @uses[name] << ESCAPE unless element_calls
 
             on_self = node.type == :ivar || node.children[0].nil? || node.children[0].type == :self
@@ -123,7 +111,7 @@ module Steep
       end
 
       # The methods an iteration's block hands each element to, when it names
-      # them only as an argument of a call in `ARGUMENT_READS`, or inside an
+      # them only as an argument of a call in `ElementReads`, or inside an
       # interpolation, which builds a new string. Nil for any other block.
       def element_calls(call)
         block = @parents[call]
@@ -144,7 +132,7 @@ module Steep
 
         case parent.type
         when :send, :csend
-          parent.children[1] if ARGUMENT_READS.include?(parent.children[1]) && parent.children.drop(2).any? { |argument| argument.equal?(mention) }
+          parent.children[1] if ElementReads::NAMES.include?(parent.children[1]) && parent.children.drop(2).any? { |argument| argument.equal?(mention) }
         when :begin
           @parents.fetch(parent, nil)&.type == :dstr || nil
         end

@@ -82,7 +82,8 @@ module Steep
         bodies.first if bodies.size == 1
       end
 
-      # How many `class`/`module` bodies the project writes for `class_name`.
+      # How many `class`/`module` bodies the project writes for `class_name`
+      # that run code (`ConstructorBindingAnalyzer::Scan#class_bodies`).
       def class_bodies(class_name)
         @class_bodies[class_name.to_s.delete_prefix("::")]
       end
@@ -147,6 +148,7 @@ module Steep
         merge_bodies(@singleton_methods, scan.singleton_methods)
         @nodes << node
         @uses = nil
+        @defined_names = nil
       rescue StandardError, ::Parser::SyntaxError => e
         Steep.logger.warn { "[constructor_binding_registry] failed to ingest #{path_name}: #{e.message}" }
       end
@@ -176,11 +178,11 @@ module Steep
         end
       end
 
-      # The ivars a class's methods push onto, and the readers that hand them
-      # out.
+      # The ivars a class's methods start as an empty array, and the readers
+      # that hand them out.
       def accumulated_names(methods)
         bodies = methods.values.flatten.compact
-        ivars = bodies.flat_map { |body| body.appends.keys }.to_set
+        ivars = bodies.flat_map { |body| body.empties.to_a }.to_set
         readers = methods.select { |_, found| found.any? { |body| body && ivars.include?(body.returns) } }.keys
         ivars | readers
       end

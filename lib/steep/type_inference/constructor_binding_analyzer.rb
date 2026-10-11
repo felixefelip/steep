@@ -39,7 +39,9 @@ module Steep
       # object itself: `def self.x`, and a `def` in `class << self`.
       #
       # `class_bodies` counts the bodies the source writes for each class or
-      # module, under every name the constant may resolve to.
+      # module that run any code but a method definition, under every name the
+      # constant may resolve to. One that only defines methods sets nothing on
+      # the class.
       Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
@@ -60,19 +62,14 @@ module Steep
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
       #   it is written. Not a `returns`: while the ivar is unset it answers
       #   the new object, not what the ivar held.
-      # - `appends`: `@ivar => [[side, value], …]` for each statement of the
-      #   body that pushes onto the array an ivar holds (`@rules.prepend(x)`),
-      #   in order, `side` being `:front` or `:back` and `value` the argument
-      #   position it pushes, or an array of them (`[rule, replacement]`);
       # - `empties`: the ivars a statement of the body sets to `[]`;
-      # - `touches`: the ivars it names anywhere else, in a way that may change
-      #   the object they hold or hand it on.
+      # - `handed`: the ivars whose object it lets out, naming one other than as
+      #   the receiver of a call, the target of an assignment or the value it
+      #   returns as a reader (`returns`).
       Body = Struct.new(
-        :bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, :appends, :empties, :touches,
+        :bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, :empties, :handed,
         keyword_init: true
       )
-
-      APPENDS = { prepend: :front, unshift: :front, "<<": :back, push: :back }.freeze
 
       def self.analyze(node)
         scan(node).readers
@@ -105,7 +102,7 @@ module Steep
           const_node, _super, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
-          defined_names(const_node, nesting).each { |defined| @class_bodies[defined] += 1 }
+          defined_names(const_node, nesting).each { |defined| @class_bodies[defined] += 1 } if runs_code?(body)
           if body && name
             register_class(body, nesting: new_nesting)
             register_initializers(body, names: defined_names(const_node, nesting))
@@ -117,7 +114,7 @@ module Steep
           const_node, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
-          defined_names(const_node, nesting).each { |defined| @class_bodies[defined] += 1 }
+          defined_names(const_node, nesting).each { |defined| @class_bodies[defined] += 1 } if runs_code?(body)
           # A module's `initialize` runs for the classes that include it.
           if body && name
             register_initializers(body, names: defined_names(const_node, nesting))
@@ -262,7 +259,7 @@ module Steep
       def attr_reader_body(name)
         Body.new(
           bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, returns: :"@#{name}",
-          appends: {}, empties: Set[], touches: Set[]
+          empties: Set[], handed: Set[]
         )
       end
 
@@ -270,7 +267,7 @@ module Steep
         ivar = :"@#{name}"
         Body.new(
           bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, returns: nil,
-          appends: {}, empties: Set[], touches: Set[]
+          empties: Set[], handed: Set[]
         )
       end
 
@@ -281,11 +278,9 @@ module Steep
           writes << node.children[0] if node.type == :ivasgn
           self_sends << node.children[1] if %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
         end
-        appends, empties, touches = collection_effects(args_node, body)
         Body.new(
-          appends: appends,
-          empties: empties,
-          touches: touches,
+          empties: empties_of(body),
+          handed: handed_ivars(body),
           bindings: ivar_param_bindings(args_node, body),
           writes: writes,
           super_args: super_args(args_node, body),
@@ -428,53 +423,29 @@ module Steep
         nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
       end
 
-      def collection_effects(args_node, body)
-        appends = {} #: Hash[Symbol, Array[[Symbol, untyped]]]
+      def empties_of(body)
         empties = Set[] #: Set[Symbol]
-        counted = {}.compare_by_identity #: Hash[::Parser::AST::Node, bool]
-        unless contains?(body, :return)
-          positions = stable_positions(args_node, body)
-          each_stmt(body) do |stmt|
-            if stmt.type == :ivasgn && stmt.children[1]&.type == :array && stmt.children[1].children.empty?
-              empties << stmt.children[0]
-            elsif (append = append_of(stmt, positions))
-              (appends[append[0]] ||= []) << append.drop(1)
-              counted[stmt.children[0]] = true
-            end
-          end
+        each_stmt(body) do |stmt|
+          empties << stmt.children[0] if stmt.type == :ivasgn && stmt.children[1]&.type == :array && stmt.children[1].children.empty?
         end
-
-        touches = Set[] #: Set[Symbol]
-        each_node(body) { |node| touches << node.children[0] if node.type == :ivar && !counted.key?(node) }
-        [appends, empties, touches]
+        empties
       end
 
-      def append_of(stmt, positions)
-        return unless stmt.type == :send
+      def handed_ivars(body, parent = nil, handed = Set[])
+        return handed unless body.is_a?(::Parser::AST::Node)
 
-        receiver, method_name, *arguments = stmt.children
-        side = APPENDS[method_name]
-        return unless side && receiver&.type == :ivar && arguments.size == 1
-
-        value = pushed_value(arguments[0], positions) or return
-        [receiver.children[0], side, value]
-      end
-
-      # The argument position `node` reads, or an array of them.
-      def pushed_value(node, positions)
-        case node.type
-        when :lvar
-          positions[node.children[0]]
-        when :array
-          values = node.children.map { |element| pushed_value(element, positions) }
-          values if values.none?(&:nil?)
+        if body.type == :ivar
+          receiver = parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(body)
+          handed << body.children[0] unless receiver || parent.nil?
         end
+        body.children.each { |child| handed_ivars(child, body, handed) }
+        handed
       end
 
-      def stable_positions(args_node, body)
-        reassigned = Set[] #: Set[Symbol]
-        each_node(body) { |node| reassigned << node.children[0] if node.type == :lvasgn }
-        call_positions(args_node).reject { |name, _| reassigned.include?(name) }
+      def runs_code?(body)
+        stmts = [] #: Array[::Parser::AST::Node]
+        each_stmt(body) { |stmt| stmts << stmt }
+        stmts.any? { |stmt| !%i[def defs].include?(stmt.type) }
       end
 
       def memo_of(body, nesting)
