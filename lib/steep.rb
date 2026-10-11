@@ -69,7 +69,10 @@ require "steep/literal_intrinsics"
 require "steep/reflection_intrinsics"
 require "steep/iteration_intrinsics"
 require "steep/string_mutation"
+require "steep/array_mutation"
+require "steep/element_reads"
 require "steep/object_states"
+require "steep/object_states/class_memos"
 
 require "steep/range_extension"
 

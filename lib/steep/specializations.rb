@@ -75,8 +75,14 @@ module Steep
       # it — but a body that writes code is decided by its defaults and its
       # control flow as much as by its arguments, and `slot()` with a literal
       # default is as determined as `slot(:ro)`.
-      def self.from_send(node, typing)
-        _receiver, _name, *args = node.children
+      # `receiver_ivars`: what the receiver's contents are known to be
+      # (`receiver_ivars`), read off the call where it is recorded already and
+      # off the checker where it is being typed.
+      def self.from_send(node, typing, receiver_ivars:)
+        _receiver, name, *args = node.children
+        # `send(:name, …)` resolved to `name`: the literal names the method,
+        # and the arguments are the rest (`TypeConstruction::SendDispatch`).
+        args = args.drop(1) if TypeConstruction::SEND_SPELLINGS.key?(name) && dispatched?(node, typing)
 
         keywords = {} #: Hash[Symbol, AST::Types::t]
         if args.last&.type == :kwargs
@@ -100,7 +106,48 @@ module Steep
           positionals << argument_type(arg, typing)
         end
 
-        new(positionals: positionals, keywords: keywords, self_ivars: {})
+        new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars)
+      end
+
+      def self.dispatched?(node, typing)
+        typing.call_of(node: node).method_name != node.children[1]
+      rescue Typing::UnknownNodeError
+        false
+      end
+
+      # The value an argument written as a literal is, whatever the parameter
+      # it lands in is declared: an `untyped` one would otherwise widen it at
+      # the call, and the call fixes the value all the same.
+      def self.written_literal(arg)
+        case arg.type
+        when :str, :sym, :int
+          value = arg.children[0]
+          AST::Types::Literal.new(value: value) if value.is_a?(::String) || value.is_a?(::Symbol) || value.is_a?(::Integer)
+        when :regexp
+          *parts, flags = arg.children
+          return unless parts.all? { |part| part.type == :str }
+
+          options = flags.children.sum { |flag| TypeConstruction::REGEXP_OPTIONS.fetch(flag) { return } }
+          AST::Types::RegexpLiteral.new(value: ::Regexp.new(parts.map { |part| part.children[0] }.join, options))
+        end
+      rescue RegexpError
+        nil
+      end
+
+      # The ivars of the object the call is made on whose contents are known
+      # (`AST::Types::ObjectState`): `self`'s where the call is made on it
+      # (`Typing#self_ivars_of_call`), the receiver's state's otherwise.
+      def self.receiver_ivars(receiver_type, self_ivars)
+        return self_ivars if receiver_type.is_a?(AST::Types::Self)
+
+        state = receiver_type.is_a?(AST::Types::Intersection) ? receiver_type.types.grep(AST::Types::ObjectState).first : receiver_type
+        state.is_a?(AST::Types::ObjectState) ? state.ivars : {}
+      end
+
+      def self.recorded_receiver_ivars(node, typing)
+        receiver_ivars(typing.call_of(node: node).receiver_type, typing.self_ivars_of_call(node: node))
+      rescue Typing::UnknownNodeError
+        {}
       end
 
       # The type a call site keys this argument on. A tuple stands for the
@@ -117,6 +164,7 @@ module Steep
       #   parts.reverse!
       #   fill(parts)          # ["b", "a"] at runtime
       def self.argument_type(arg, typing)
+        written = written_literal(arg) and return written
         type = typing.type_of(node: arg)
         vouched = typing.vouched_of(node: arg)
         # A local is vouched for IN PLACE of its declared type; a call only while
@@ -156,20 +204,20 @@ module Steep
       # harvest, which attributes to one call site, sets it.
       attr_reader :self_type
 
-      # The objects that `self`'s ivars hold at the call site, as the states
-      # the caller knew them in (`ObjectStates.self_ivars`): a class body that
-      # set its memo's object up before calling a macro that reads it. Keyed
-      # like `self_type`, and out of `key` for the same reason.
+      # The ivars of the receiver whose contents the caller knew
+      # (`receiver_ivars`). The body is checked starting from them, and they
+      # are part of `key`, so only a caller that knows the same contents reads
+      # back what was recorded under them.
       attr_reader :self_ivars
 
-      def with_self(self_type, self_ivars)
+      def with_self(self_type)
         Arguments.new(
           positionals: @positionals,
           keywords: @keywords,
           positional_defaults: @positional_defaults,
           keyword_defaults: @keyword_defaults,
           self_type: self_type,
-          self_ivars: self_ivars
+          self_ivars: @self_ivars
         )
       end
 
@@ -214,11 +262,27 @@ module Steep
       def key
         parts = positionals.map(&:to_s)
         parts.concat(keywords.keys.sort.map { |name| "#{name}: #{keywords[name]}" })
-        "(#{parts.join(", ")})"
+        return "(#{parts.join(", ")})" if self_ivars.empty?
+
+        "(#{parts.join(", ")})#{STATE_MARKER}#{self_ivars.sort_by(&:first).map { |name, type| "#{name}: #{type}" }.join(", ")}}"
+      end
+
+      # Where a key goes on to name the receiver's contents. No sidecar holds
+      # such a key: the contents have no RBS spelling, and only a run that
+      # computed them can read them back.
+      STATE_MARKER = " with {"
+
+      def self.stateful_key?(key)
+        key.include?(STATE_MARKER)
+      end
+
+      def stateful?
+        !self_ivars.empty?
       end
 
       def literal?
-        positionals.any? { |type| literal_type?(type) } ||
+        stateful? ||
+          positionals.any? { |type| literal_type?(type) } ||
           keywords.each_value.any? { |type| literal_type?(type) }
       end
 
@@ -400,19 +464,29 @@ module Steep
         new(methods: methods, source: source)
       end
 
-      def initialize(methods:, source:, active: {})
+      # `typed`: returns a run computed, as types, read ahead of `methods`.
+      # `exits`: the ivars a body left its receiver holding, under a key that
+      # names what it held on entry (`Arguments#stateful?`).
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {})
         @methods = methods
         @source = source
         @active = active
+        @typed = typed
+        @exits = exits
       end
 
       def empty?
-        @methods.empty? && @active.empty?
+        @methods.empty? && @active.empty? && @typed.empty? && @exits.empty?
+      end
+
+      def exit_ivars(method_key, argument_key)
+        @exits.dig(method_key, argument_key)
       end
 
       # The recorded return type for `method_key` called with `argument_key`, as a
       # Steep type, or nil when nothing was recorded or the entry no longer parses.
       def return_type(method_key, argument_key, factory:)
+        typed = @typed.dig(method_key, argument_key) and return typed
         raw = @methods.dig(method_key, argument_key) or return nil
 
         factory.type(RBS::Parser.parse_type(raw).map_type_name { |name, _, _| name.absolute! })
@@ -436,7 +510,7 @@ module Steep
       end
 
       def with_active(active)
-        Store.new(methods: @methods, source: @source, active: active)
+        Store.new(methods: @methods, source: @source, active: active, typed: @typed, exits: @exits)
       end
     end
   end

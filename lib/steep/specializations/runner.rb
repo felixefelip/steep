@@ -44,6 +44,8 @@ module Steep
       # it widens whatever the generation.
       LITERAL_WIDTH = 64
 
+      STATE_WIDTH = 1024
+
       class TargetContext
         attr_reader :subtyping, :constant_resolver, :sources
 
@@ -61,6 +63,7 @@ module Steep
       def initialize(project)
         @project = project
         @evals = {} #: Hash[String, Array[String?]]
+        @exits = {} #: Hash[String, Hash[String, Hash[Symbol, AST::Types::t]]]
       end
 
       # What each call site of a code-writing method defines there, by
@@ -70,6 +73,7 @@ module Steep
       def run
         methods = {} #: Hash[String, Hash[String, String]]
         @evals = {}
+        @exits = {}
         @project.targets.each { |target| specialize_target(target, methods) }
         methods
       end
@@ -114,7 +118,7 @@ module Steep
 
         found = {} #: Hash[String, Hash[String, AST::Types::t]]
         widened = Set[] #: Set[[String, String]]
-        seen = Set[] #: Set[Hash[String, Hash[String, AST::Types::t]]]
+        seen = Set[] #: Set[[Hash[String, Hash[String, AST::Types::t]], Hash[String, Set[Arguments]]]]
         generation = 0
 
         loop do
@@ -129,7 +133,7 @@ module Steep
           # already been. Widening bounds an entry's literals; this bounds the one
           # shape it says nothing about — a return alternating between two
           # CLASSES, which no amount of widening settles.
-          break unless seen.add?(discovered)
+          break unless seen.add?([discovered, grown])
 
           paths = affected_paths(callees, changed_keys(found, discovered))
           found = discovered
@@ -138,7 +142,8 @@ module Steep
         end
 
         found.each do |key, entries|
-          (methods[key] ||= {}).merge!(entries.transform_values(&:to_s))
+          writable = entries.reject { |argument_key, _| Arguments.stateful_key?(argument_key) }
+          (methods[key] ||= {}).merge!(writable.transform_values(&:to_s)) unless writable.empty?
         end
 
         harvest_evals(context, store(found), locations, definitions, parameter_writers)
@@ -184,6 +189,7 @@ module Steep
 
           active.each do |key, arguments|
             path, def_node = definitions.fetch(key)
+            record_exit(key, arguments, typings[path], def_node)
             type = body_type(typings[path], def_node) or next
             next if type.to_s == baselines[key]
 
@@ -271,7 +277,8 @@ module Steep
       def delegated_sources(context, store, typing, effect, definitions)
         entry = definitions[effect.callee] or return [nil]
         path, callee_node = entry
-        arguments = Specializations::Arguments.from_send(effect.node, typing) or return [nil]
+        receiver_ivars = Specializations::Arguments.recorded_receiver_ivars(effect.node, typing)
+        arguments = Specializations::Arguments.from_send(effect.node, typing, receiver_ivars: receiver_ivars) or return [nil]
         frame_self = typing.self_type_of_call(node: effect.node) or return [nil]
         arguments = arguments.resolve_self(frame_self)
         receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]
@@ -335,12 +342,27 @@ module Steep
       # Whether this tuple's literals rise to their classes instead of fixing a
       # value. Widening one and dropping it are the same thing here: a tuple that
       # fixes nothing records the declaration back.
+      # A key naming its receiver's contents (`Arguments#stateful?`) is found
+      # one statement at a time, so no count of generations bounds it; the size
+      # of the contents does.
       def widened?(arguments, generation)
+        return arguments.key.length > STATE_WIDTH if arguments.stateful?
+
         generation >= WIDEN_AFTER || arguments.key.length > LITERAL_WIDTH
       end
 
+      def record_exit(key, arguments, typing, def_node)
+        return unless arguments.stateful? && typing
+
+        exit = typing.exit_ivars_of(node: def_node)
+        exit ? (@exits[key] ||= {})[arguments.key] = exit : @exits[key]&.delete(arguments.key)
+      end
+
       def store(methods)
-        Store.new(methods: methods.transform_values { |entries| entries.transform_values(&:to_s) }, source: nil)
+        Store.new(
+          methods: methods.transform_values { |entries| entries.transform_values(&:to_s) },
+          source: nil, typed: methods, exits: @exits
+        )
       end
 
       # The argument tuples the call sites in `paths` supply when read under
@@ -385,9 +407,14 @@ module Steep
       def record_location(locations, key, arguments, path, node, typing)
         expression = node.loc.expression or return
         site = "#{@project.relative_path(path)}:#{expression.line}:#{expression.column}"
-        arguments = arguments.with_self(callee_self(typing, node), callee_self_ivars(typing, node))
+        arguments = arguments.with_self(callee_self(typing, node))
 
-        ((locations[key] ||= {})[arguments] ||= Set.new) << site
+        # A site re-read under a later generation's findings is that site under
+        # what it passes now, not also under what it passed before.
+        by_arguments = (locations[key] ||= {})
+        by_arguments.each_value { |sites| sites.delete(site) }
+        by_arguments.delete_if { |_, sites| sites.empty? }
+        (by_arguments[arguments] ||= Set.new) << site
       end
 
       # What `self` is inside the method `node` calls: its receiver, or — for a
@@ -402,10 +429,6 @@ module Steep
         when AST::Types::Name::Singleton, AST::Types::Name::Instance then type
         when AST::Types::Intersection then lexical_self(typing, node, type)
         end
-      end
-
-      def callee_self_ivars(typing, node)
-        typing.call_of(node: node).receiver_type.is_a?(AST::Types::Self) ? typing.self_ivars_of_call(node: node) : {}
       end
 
       # A module body's `self` is that module, whatever an annotation adds to

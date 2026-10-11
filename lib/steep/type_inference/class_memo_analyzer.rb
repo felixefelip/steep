@@ -17,9 +17,10 @@ module Steep
       # statement of a class body, made on `self`; `:receiver` for the receiver
       # of any other call; `:escape` for anything else — a value stored,
       # handed on or returned, or a name given to a call that reaches a method
-      # or an ivar by it. `called` is the method called on it.
-      Use = Struct.new(:kind, :called)
-      ESCAPE = Use.new(:escape, nil).freeze
+      # or an ivar by it. `called` is the method called on it, and
+      # `element_calls` the methods an iteration's block hands it elements to.
+      Use = Struct.new(:kind, :called, :element_calls)
+      ESCAPE = Use.new(:escape, nil, Set[].freeze).freeze
 
       # Calls that reach a method or an ivar by a name given as a value.
       REFLECTIVE = %i[
@@ -30,6 +31,7 @@ module Steep
       # Calls that run a string as code where the class's `self` may be.
       STRING_EVALS = %i[eval instance_eval class_eval module_eval class_exec].freeze
 
+
       def self.uses(node, names:)
         new(names).uses(node)
       end
@@ -37,6 +39,7 @@ module Steep
       def initialize(names)
         @names = names
         @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[Use]]
+        @parents = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node?]
       end
 
       def uses(node)
@@ -52,20 +55,12 @@ module Steep
       # block, whose `self` some call may change. `singleton_defs`: whether a
       # `def` here defines a method of the class object (`class << self`).
       def walk(node, parent, statement:, in_statement:, on_class:, singleton_defs: false)
+        @parents[node] = parent
         case node.type
-        when :class, :module
-          body = node.children.last
-          each_statement(body) { |child| walk(child, node, statement: true, in_statement: false, on_class: true) }
-          return
-        when :sclass
-          each_statement(node.children[1]) { |child| walk(child, node, statement: false, in_statement: false, on_class: true, singleton_defs: true) }
-          return
-        when :def
-          walk_children(node, statement: false, on_class: singleton_defs)
-          return
-        when :block, :numblock
-          walk_children(node, statement: false, on_class: true)
-          return
+        when :class, :module, :sclass
+          return walk_body(node)
+        when :def, :block, :numblock
+          return walk_children(node, statement: false, on_class: node.type != :def || singleton_defs)
         when :send, :csend
           record_send(node, parent, in_statement)
         when :ivar
@@ -73,6 +68,15 @@ module Steep
         end
 
         walk_children(node, statement: statement, on_class: on_class)
+      end
+
+      # A class or module body runs its statements on the class; `class << self`
+      # defines its methods there.
+      def walk_body(node)
+        singleton = node.type == :sclass
+        each_statement(node.children.last) do |child|
+          walk(child, node, statement: !singleton, in_statement: false, on_class: true, singleton_defs: singleton)
+        end
       end
 
       def walk_children(node, statement:, on_class:)
@@ -96,11 +100,64 @@ module Steep
 
         @uses[name] <<
           if parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
+            element_calls = CollectionReaders::ITERATIONS.include?(parent.children[1]) ? element_calls(parent) : Set[]
+            return @uses[name] << ESCAPE unless element_calls
+
             on_self = node.type == :ivar || node.children[0].nil? || node.children[0].type == :self
-            Use.new(in_statement && on_self ? :statement : :receiver, parent.children[1])
+            Use.new(in_statement && on_self ? :statement : :receiver, parent.children[1], element_calls)
           else
             ESCAPE
           end
+      end
+
+      # The methods an iteration's block hands each element to, when it names
+      # them only as an argument of a call in `ElementReads`, or inside an
+      # interpolation, which builds a new string. Nil for any other block.
+      def element_calls(call)
+        block = @parents[call]
+        return unless block && %i[block numblock].include?(block.type) && block.children[0].equal?(call)
+
+        _, params, body = block.children
+        names = Set[] #: Set[Symbol]
+        each_param(params) { |name| names << name }
+        each_mention(body, nil, names).each_with_object(Set[]) do |(mention, parent), calls|
+          read = element_read(mention, parent) or return
+          calls << read if read.is_a?(Symbol)
+        end
+      end
+
+      # The method `mention` is handed to, or true inside an interpolation.
+      def element_read(mention, parent)
+        return unless mention.type == :lvar && parent
+
+        case parent.type
+        when :send, :csend
+          parent.children[1] if ElementReads::NAMES.include?(parent.children[1]) && parent.children.drop(2).any? { |argument| argument.equal?(mention) }
+        when :begin
+          @parents.fetch(parent, nil)&.type == :dstr || nil
+        end
+      end
+
+      def each_param(node, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        case node.type
+        when :arg, :procarg0, :optarg, :restarg, :blockarg, :shadowarg
+          name = node.children[0]
+          name.is_a?(Symbol) ? yield(name) : node.children.each { |child| each_param(child, &block) }
+        else
+          node.children.each { |child| each_param(child, &block) }
+        end
+      end
+
+      # `[node, parent]` for every read or write of one of `names` in `node`.
+      def each_mention(node, parent, names, found = [])
+        return found unless node.is_a?(::Parser::AST::Node)
+
+        @parents[node] ||= parent
+        found << [node, parent] if %i[lvar lvasgn].include?(node.type) && names.include?(node.children[0])
+        node.children.each { |child| each_mention(child, node, names, found) }
+        found
       end
 
       def named?(node)

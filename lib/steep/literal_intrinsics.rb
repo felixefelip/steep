@@ -174,6 +174,8 @@ module Steep
         # written in.
         when nil
           AST::Types::Nil.instance
+        when ::Regexp
+          AST::Types::RegexpLiteral.new(value: value)
         else
           AST::Types::Literal.new(value: value) if literal_value?(value)
         end
@@ -247,6 +249,9 @@ module Steep
     # nothing was substituted — with no second question to disagree with it.
     STRING_SUB_BANG = ->(receiver, arguments) { receiver.dup.sub!(*arguments) }
     STRING_AFFIX = ->(_receiver, arguments) { arguments.first.is_a?(String) }
+    # On a copy, as `sub!`: what an array holds once a value is pushed onto it
+    # (`ArrayMutation::IN_PLACE`).
+    ARRAY_PUSH = ->(method_name) { ->(receiver, arguments) { receiver.dup.public_send(method_name, *arguments) } }
     INTEGER_BINARY = ->(_receiver, arguments) { arguments.first.is_a?(Integer) }
     INTEGER_DIVISION = lambda do |_receiver, arguments|
       divisor = arguments.first
@@ -340,6 +345,10 @@ module Steep
         method: String.instance_method(:sub!), arity: 2, preflight: STRING_SUB, native: STRING_SUB_BANG
       ),
       "::String#delete_suffix" => Entry.new(method: String.instance_method(:delete_suffix), arity: 1, preflight: STRING_AFFIX),
+      "::Array#prepend" => Entry.new(method: Array.instance_method(:prepend), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:prepend)),
+      "::Array#unshift" => Entry.new(method: Array.instance_method(:unshift), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:unshift)),
+      "::Array#push" => Entry.new(method: Array.instance_method(:push), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:push)),
+      "::Array#<<" => Entry.new(method: Array.instance_method(:<<), arity: 1, preflight: ALWAYS, native: ARRAY_PUSH.(:<<)),
       # A String literal is a `String` itself, never a subclass, so `to_s` is
       # the receiver unchanged. `Delegation.generate` writes it once the name
       # is already a string — `method_name.to_s` under `prefix:`.

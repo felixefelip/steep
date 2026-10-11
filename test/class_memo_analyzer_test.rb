@@ -66,4 +66,20 @@ class ClassMemoAnalyzerTest < Minitest::Test
       end
     RUBY
   end
+
+  def test_an_iteration_counts_only_while_its_block_reads_the_elements
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~'RUBY'), names: Set[:singulars])
+      class Base
+        def self.a = rules.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+        def self.b = rules.singulars.map { |(rule, _)| "#{rule}" }
+        def self.c = rules.singulars.each { |(_, replacement)| replacement << "x" }
+        def self.d = rules.singulars.each { |pair| log(pair) }
+        def self.e = rules.singulars.each
+        def self.f = rules.singulars.size
+      end
+    RUBY
+
+    assert_equal [[:receiver, :each], [:receiver, :map], [:escape, nil], [:escape, nil], [:escape, nil], [:receiver, :size]],
+                 found.fetch(:singulars).map { |use| [use.kind, use.called] }
+  end
 end

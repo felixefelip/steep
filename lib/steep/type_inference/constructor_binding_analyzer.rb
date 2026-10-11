@@ -37,7 +37,12 @@ module Steep
       #
       # `singleton_methods` the same, for the methods defined on the class
       # object itself: `def self.x`, and a `def` in `class << self`.
-      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, keyword_init: true)
+      #
+      # `class_bodies` counts the bodies the source writes for each class or
+      # module that run any code but a method definition, under every name the
+      # constant may resolve to. One that only defines methods sets nothing on
+      # the class.
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
       #
@@ -57,7 +62,14 @@ module Steep
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
       #   it is written. Not a `returns`: while the ivar is unset it answers
       #   the new object, not what the ivar held.
-      Body = Struct.new(:bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, keyword_init: true)
+      # - `empties`: the ivars a statement of the body sets to `[]`;
+      # - `handed`: the ivars whose object it lets out, naming one other than as
+      #   the receiver of a call, the target of an assignment or the value it
+      #   returns as a reader (`returns`).
+      Body = Struct.new(
+        :bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, :empties, :handed,
+        keyword_init: true
+      )
 
       def self.analyze(node)
         scan(node).readers
@@ -72,11 +84,14 @@ module Steep
         @initializers = {} #: Hash[String, Array[Body?]]
         @methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
         @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
+        @class_bodies = Hash.new(0) #: Hash[String, Integer]
       end
 
       def scan(node)
         walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
-        Scan.new(readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods)
+        Scan.new(
+          readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods, class_bodies: @class_bodies
+        )
       end
 
       private
@@ -87,6 +102,7 @@ module Steep
           const_node, _super, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
+          defined_names(const_node, nesting).each { |defined| @class_bodies[defined] += 1 } if runs_code?(body)
           if body && name
             register_class(body, nesting: new_nesting)
             register_initializers(body, names: defined_names(const_node, nesting))
@@ -98,6 +114,7 @@ module Steep
           const_node, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
+          defined_names(const_node, nesting).each { |defined| @class_bodies[defined] += 1 } if runs_code?(body)
           # A module's `initialize` runs for the classes that include it.
           if body && name
             register_initializers(body, names: defined_names(const_node, nesting))
@@ -240,12 +257,18 @@ module Steep
       end
 
       def attr_reader_body(name)
-        Body.new(bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, returns: :"@#{name}")
+        Body.new(
+          bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, returns: :"@#{name}",
+          empties: Set[], handed: Set[]
+        )
       end
 
       def attr_writer_body(name)
         ivar = :"@#{name}"
-        Body.new(bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, returns: nil)
+        Body.new(
+          bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, returns: nil,
+          empties: Set[], handed: Set[]
+        )
       end
 
       def method_body(args_node, body, nesting: nil)
@@ -256,6 +279,8 @@ module Steep
           self_sends << node.children[1] if %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
         end
         Body.new(
+          empties: empties_of(body),
+          handed: handed_ivars(body),
           bindings: ivar_param_bindings(args_node, body),
           writes: writes,
           super_args: super_args(args_node, body),
@@ -396,6 +421,31 @@ module Steep
         return [[*nesting, name].join("::")] unless scope
 
         nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+      end
+
+      def empties_of(body)
+        empties = Set[] #: Set[Symbol]
+        each_stmt(body) do |stmt|
+          empties << stmt.children[0] if stmt.type == :ivasgn && stmt.children[1]&.type == :array && stmt.children[1].children.empty?
+        end
+        empties
+      end
+
+      def handed_ivars(body, parent = nil, handed = Set[])
+        return handed unless body.is_a?(::Parser::AST::Node)
+
+        if body.type == :ivar
+          receiver = parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(body)
+          handed << body.children[0] unless receiver || parent.nil?
+        end
+        body.children.each { |child| handed_ivars(child, body, handed) }
+        handed
+      end
+
+      def runs_code?(body)
+        stmts = [] #: Array[::Parser::AST::Node]
+        each_stmt(body) { |stmt| stmts << stmt }
+        stmts.any? { |stmt| !%i[def defs].include?(stmt.type) }
       end
 
       def memo_of(body, nesting)

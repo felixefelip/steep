@@ -419,7 +419,7 @@ module Steep
           hash[ANONYMOUS_BLOCK_PASSABLE_LVAR] = param.var_type
         end
       end
-      type_env = context.type_env.assign_local_variables(local_variable_types)
+      type_env = ObjectStates.entered_method(context.type_env).assign_local_variables(local_variable_types)
 
       type_env = TypeInference::TypeEnvBuilder.new(
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots).merge!.on_duplicate! do |name, original, annotated|
@@ -1850,6 +1850,7 @@ module Steep
                           end
 
               if body_node
+                ObjectStates.record_exit(new, node, body_pair)
                 # Add context to ranges from the end of the method body to the beginning of the `end` keyword
                 if node.loc.end
                   # Skip end-less def
@@ -1914,8 +1915,7 @@ module Steep
             end
 
             if node.children[3]
-              return_type = expand_alias(new.method_context!.return_type)
-              if !return_type.is_a?(AST::Types::Void)
+              body_pair = if !(return_type = expand_alias(new.method_context!.return_type)).is_a?(AST::Types::Void)
                 new.check(node.children[3], return_type) do |return_type, actual_type, result|
                   typing.add_error(
                     Diagnostic::Ruby::MethodBodyTypeMismatch.new(
@@ -1929,6 +1929,7 @@ module Steep
               else
                 new.synthesize(node.children[3])
               end
+              ObjectStates.record_exit(new, node, body_pair)
             end
           end
 
@@ -2343,7 +2344,7 @@ module Steep
               constructor.typing.cursor_context.set_node_context(node, constructor.context)
               constructor.typing.cursor_context.set_body_context(node, constructor.context)
 
-              constructor.synthesize(node.children[2]) if node.children[2]
+              ObjectStates::ClassMemos.entered_class(constructor).synthesize(node.children[2]) if node.children[2]
 
               if constructor.module_context&.implement_name && !namespace_module?(node)
                 constructor.validate_method_definitions(node, constructor.module_context.implement_name || raise)
@@ -3732,7 +3733,7 @@ module Steep
       # RHS type — keeping subtype checks honest against the declared
       # union and giving readers the most precise type seen at this
       # program point.
-      apply_union_narrowing = assignment_passed && declared_type.is_a?(AST::Types::Union)
+      narrowed = ObjectStates.assigned_ivar(context.type_env[name], declared_type, rhs_type, passed: assignment_passed)
 
       update_type_env do |env|
         # ivar pure-call narrowing (issue felixefelip/steep#8): once the ivar
@@ -3740,8 +3741,7 @@ module Steep
         # must be dropped so subsequent `@name.foo` doesn't reuse the previous
         # type.
         env = env.invalidate_pure_node(::Parser::AST::Node.new(:ivar, [name]))
-        env = env.refine_types(instance_variable_types: { name => rhs_type }) if apply_union_narrowing
-        env
+        narrowed ? env.refine_types(instance_variable_types: { name => narrowed }) : env
       end.add_typing(node, type: rhs_type)
     end
 
@@ -4815,7 +4815,7 @@ module Steep
         )
         return correlated.with(
           constr: ObjectStates.after_call(
-            correlated.constr, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments
+            correlated.constr, node: node, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments
           )
         ) if correlated
       end
@@ -4887,7 +4887,7 @@ module Steep
           constr, node, receiver, unwidened_receiver_type, method_name, arguments, type: type, private: private
         )
       end
-      constr = ObjectStates.after_call(constr, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments)
+      constr = ObjectStates.after_call(constr, node: node, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments)
 
       Pair.new(type: type, constr: constr)
     end
@@ -5851,7 +5851,9 @@ module Steep
       return call if specializations.empty? || block_params || block_body
 
       key = Specializations.method_key(call.method_decls) or return call
-      arguments = Specializations::Arguments.from_send(node, typing) or return call
+      arguments = Specializations::Arguments.from_send(
+        node, typing, receiver_ivars: Specializations::Arguments.receiver_ivars(call.receiver_type, ObjectStates.self_ivars(self))
+      ) or return call
       type = specializations.return_type(key, arguments.key, factory: checker.factory) or return call
 
       call.with_return_type(type)

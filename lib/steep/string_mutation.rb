@@ -49,6 +49,10 @@ module Steep
       # from here on. Dispatched against `::String` where the call may change
       # the value, so a `self` return (`sub!`) is not the old value either.
       def widen_receiver(constr, receiver, receiver_type, method_name, private:, block:)
+        if receiver_type.is_a?(AST::Types::Tuple)
+          return ArrayMutation.widen_receiver(constr, receiver, receiver_type, method_name, private: private, block: block)
+        end
+
         widened = mutated_type(constr, receiver_type, method_name, private: private, block: block)
         return [receiver_type, constr] unless widened
 
@@ -127,6 +131,10 @@ module Steep
       # `type` is the call's return over `::String`. Both unchanged where the
       # value cannot be computed, leaving that widening in place.
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
+        if receiver_type.is_a?(AST::Types::Tuple)
+          return ArrayMutation.fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type: type, private: private)
+        end
+
         return [type, constr] unless receiver_type.is_a?(AST::Types::Literal) && receiver_type.value.is_a?(::String)
 
         keys = string_method_keys(constr, method_name, private: private)

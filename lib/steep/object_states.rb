@@ -12,26 +12,52 @@ module Steep
   # method writes holds only while a single local owns the object
   # (`TypeInference::HeldLocals`), and each call made through it moves it.
   module ObjectStates
-    Effect = Struct.new(:bindings, :writes, keyword_init: true)
+    # `reads_only`: the method only answers an ivar (`attr_reader`, `def x = @x`).
+    Effect = Struct.new(:bindings, :writes, :reads_only, keyword_init: true)
 
     class << self
       # The locals handed on are settled here, ahead of the callee's
       # postconditions, so a fact one states about them (`unconditional.params`)
       # is not dropped by the settling.
       def answered(constr, call, node:, receiver_type:, arguments:)
-        call = remembered(constr, call, node) || built(constr, call, node: node, arguments: arguments)
-        call = read(constr, call, receiver_type: receiver_type, arguments: arguments)
+        memo, constr = ClassMemos.remembered(constr, call, node)
+        call = read(constr, memo || built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
         [call, handed_on(constr, arguments)]
       end
 
-      # A memo called on `self` hands back the object its ivar holds, as the
-      # state the env knows it in (`TypeInference::ClassMemoAnalyzer`).
-      def remembered(constr, call, node)
-        return unless on_self?(node)
+      # What a body checked under its receiver's contents leaves the receiver
+      # holding, of the ivars it was entered with. Only where the body ends
+      # where it falls off: a `return` leaves from elsewhere.
+      def record_exit(constr, def_node, pair)
+        arguments = constr.specialization_arguments(def_node) or return
+        return if arguments.self_ivars.empty? || returns_early?(pair_body(def_node))
 
-        ivar, = tracked_memo(constr, call)
-        state = ivar && state_in(constr.context.type_env[ivar]) or return
-        call.with_return_type(state)
+        env = pair.context.type_env
+        exit = arguments.self_ivars.keys.to_h { |ivar| [ivar, env[ivar]] }.select { |_, type| state_value?(type) }
+        root = constr.typing
+        root = root.parent while root.parent
+        root.add_exit_ivars(def_node, exit)
+      end
+
+      def returns_early?(body)
+        LocalReach.each_node(body) { |node| return true if node.type == :return }
+        false
+      end
+
+      def pair_body(def_node)
+        def_node.type == :defs ? def_node.children[3] : def_node.children[2]
+      end
+
+      # A value a state may hold: one nothing can change, or the contents of an
+      # array, kept only where nothing else reaches it (`collection_confined?`).
+      def state_value?(type)
+        fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral)
+      end
+
+      # A method runs whenever it is called, not where it is written: nothing
+      # the class body around it cached about a call answers one there.
+      def entered_method(env)
+        env.pure_method_calls.empty? ? env : env.update(pure_method_calls: {})
       end
 
       # The ivars of `self` whose object the env knows the state of, for a body
@@ -74,27 +100,56 @@ module Steep
       # cannot follow). `answered` settled those already on a typed call without
       # a block; this covers a block, an untyped receiver and the correlated
       # paths.
-      def after_call(constr, method_name:, receiver:, receiver_type:, arguments:)
+      def after_call(constr, node:, method_name:, receiver:, receiver_type:, arguments:)
         if receiver&.type == :lvar && holds_state?(receiver_type)
           name = receiver.children[0]
-          constr = refine_local(constr, name, left(constr, receiver_type, constr.context.type_env[name], method_name, arguments))
+          constr = refine_local(constr, name, left(constr, receiver_type, constr.context.type_env[name], method_name, arguments, node))
         end
-        constr = remembered_after(constr, receiver, receiver_type, method_name, arguments) if receiver && on_self?(receiver)
+        constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver && on_self?(receiver)
+        constr = self_moved(constr, node) if receiver.nil? || receiver.type == :self
         handed_on(constr, arguments)
       end
 
-      # A call made on what a memo answered moves the object its ivar holds.
-      # Where nothing was known yet, it is still that one object, so what the
-      # call binds is known from here.
-      def remembered_after(constr, receiver, receiver_type, method_name, arguments)
-        memo_call = recorded_call(constr, receiver)
-        ivar, instance = tracked_memo(constr, memo_call) if memo_call
-        return constr unless ivar && instance
+      # A call on `self` from a body checked under its receiver's contents
+      # leaves them as that call's own check left them, and where nothing says
+      # so, keeps only what no call can change.
+      def self_moved(constr, node)
+        def_node = constr.method_context&.node or return constr
+        entered = constr.specialization_arguments(def_node)&.self_ivars
+        return constr if entered.nil? || entered.empty?
 
-        state = state_in(receiver_type) || AST::Types::ObjectState.new(back_type: instance, ivars: {})
-        constr.update_type_env do |env|
-          env.invalidate_pure_node(receiver).refine_types(instance_variable_types: { ivar => changed(constr, state, method_name, arguments) })
+        env = constr.context.type_env
+        exit = exit_of(constr, node) || entered.keys.to_h { |ivar| [ivar, env[ivar]] }.reject { |_, type| !type || !fixed?(type) || state_in(type) }
+        constr.update_type_env do |current|
+          entered.each_key.reduce(current) do |result, ivar|
+            result.refine_types(instance_variable_types: { ivar => exit.fetch(ivar) { declared_ivar(constr, ivar) } })
+          end
         end
+      end
+
+      def declared_ivar(constr, ivar)
+        constr.context.type_env.declared_instance_variable_types[ivar] || AST::Builtin.any_type
+      end
+
+      # What the body a call reached left its receiver holding, where it was
+      # checked under the contents this call's receiver holds.
+      def exit_of(constr, node)
+        call = recorded_call(constr, node)
+        key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls) or return
+        receiver_ivars = Specializations::Arguments.recorded_receiver_ivars(node, constr.typing)
+        arguments = Specializations::Arguments.from_send(node, constr.typing, receiver_ivars: receiver_ivars) or return
+        constr.specializations.exit_ivars(key, arguments.key) if arguments.stateful?
+      end
+
+      # The type an ivar takes after an assignment, or nil to leave it at its
+      # declaration: the value assigned where the declaration is a union (the
+      # branch it selects, felixefelip/steep#16) or where the env held a
+      # refined view — a state's contents are no longer what it holds.
+      def assigned_ivar(current, declared_type, rhs_type, passed:)
+        refined = declared_type && current != declared_type
+        return rhs_type if passed && (declared_type.is_a?(AST::Types::Union) || refined)
+
+        declared_type if refined
       end
 
       def on_self?(node)
@@ -105,50 +160,6 @@ module Steep
         constr.typing.call_of(node: node)
       rescue Typing::UnknownNodeError
         nil
-      end
-
-      # `[ivar, instance]` for a call on `self` to a class's memo
-      # (`Body#memo`) whose object no code the project holds can reach but
-      # through a call on it: `initialize` does not hand it on, no other method
-      # may write the ivar, every use of the memo and of its ivar is the
-      # receiver of a call whose effect is known, and only a statement of a
-      # class body, made on `self`, may change it.
-      def tracked_memo(constr, call)
-        singleton = constr.self_type
-        return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
-
-        owner, body = resolved_body(constr, singleton, call.method_name)
-        ivar, classes = body&.memo
-        instance = constr.typing.nominal_of(node: call.node) || call.return_type
-        return unless ivar && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
-        return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, call.method_name)
-        return unless [call.method_name, ivar].all? { |used| confined?(constr, instance, used) }
-
-        [ivar, instance]
-      end
-
-      # `Klass.new` hands back an object nothing else holds.
-      def fresh?(constr, instance)
-        chain = initialize_chain(constr, instance) or return false
-        chain.none? { |_, body| body && exposes_self?(constr, instance, body, [:initialize]) }
-      end
-
-      def written_only_by?(constr, singleton, ivar, owner, method_name)
-        definition = constr.checker.factory.definition_builder.build_singleton(singleton.name)
-        definition.ancestors.ancestors.none? do |ancestor|
-          constr.postconditions.may_write?(ancestor.name.to_s, ivar, except: ancestor.name == owner ? method_name : nil)
-        end
-      rescue RBS::BaseError
-        false
-      end
-
-      def confined?(constr, instance, name)
-        constr.constructor_bindings.uses_of(name).all? do |use|
-          next false if use.kind == :escape
-
-          effect = method_effect(constr, instance, use.called) or next false
-          use.kind == :statement || effect.writes.empty?
-        end
       end
 
       def handed_on(constr, arguments)
@@ -163,7 +174,7 @@ module Steep
       def settled(constr, type)
         case type
         when AST::Types::ObjectState
-          ivars = type.ivars.select { |ivar, _| never_rewritten?(constr, type.back_type, ivar) }
+          ivars = type.ivars.select { |ivar, value| fixed?(value) && never_rewritten?(constr, type.back_type, ivar) }
           ivars.empty? ? type.back_type : AST::Types::ObjectState.new(back_type: type.back_type, ivars: ivars)
         when AST::Types::Union, AST::Types::Intersection
           members = type.types.map { |member| settled(constr, member) }
@@ -182,53 +193,11 @@ module Steep
         ivar = constr.attr_method_backing_ivar(call.method_decls) ||
                bound_reader_ivar(constr, state, call)
         value = ivar && state.ivar_type(ivar) or return call
+        # The checker cannot bind a block's parameters to the elements of `[]`.
+        return call if value.is_a?(AST::Types::Tuple) && value.types.empty?
         return call unless constr.check_relation(sub_type: value, super_type: call.return_type).success?
 
         call.with_return_type(value)
-      end
-
-      private
-
-      def held_value?(constr, node)
-        constr.method_context&.held_locals&.held_value?(node) || false
-      end
-
-      def bound_values(constr, bindings, arguments)
-        bindings.filter_map do |ivar, index|
-          argument = arguments[index] or next
-          next unless constr.typing.has_type?(argument)
-
-          type = settled(constr, constr.literal_operand_type(argument, constr.typing.type_of(node: argument)))
-          [ivar, type] if fixed?(type)
-        end.to_h
-      end
-
-      # A method whose body this cannot read leaves only what holds under any
-      # name.
-      def changed(constr, state, method_name, arguments)
-        effect = method_effect(constr, state.back_type, method_name) or return settled(constr, state)
-        plain = arguments.all? { |argument| plain_argument?(argument) }
-        rebound = plain ? bound_values(constr, effect.bindings, arguments) : {} #: Hash[Symbol, AST::Types::t]
-        ivars = state.ivars.reject { |ivar, _| effect.writes.include?(ivar) }
-        ivars.merge!(rebound)
-        ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
-      end
-
-      # Only a state alone keeps the markers the postcondition left in
-      # `current`: a union member cannot tell which of them is its own.
-      def left(constr, receiver_type, current, method_name, arguments)
-        if receiver_type.is_a?(AST::Types::Union)
-          return AST::Types::Union.build(types: receiver_type.types.map { |member| left(constr, member, nil, method_name, arguments) })
-        end
-        state = state_in(receiver_type) or return receiver_type
-
-        changed = changed(constr, state, method_name, arguments)
-        markers = markers_in(current, state)
-        markers.empty? ? changed : AST::Types::Intersection.build(types: [changed, *markers])
-      end
-
-      def holds_state?(type)
-        state_in(type) || (type.is_a?(AST::Types::Union) && type.types.any? { |member| state_in(member) })
       end
 
       # The state `type` is, alone or met with the markers a postcondition
@@ -238,107 +207,6 @@ module Steep
         when AST::Types::ObjectState then type
         when AST::Types::Intersection then type.types.grep(AST::Types::ObjectState).first
         end
-      end
-
-      def markers_in(current, state)
-        return [] unless current.is_a?(AST::Types::Intersection)
-
-        current.types.reject { |member| member.is_a?(AST::Types::ObjectState) || member == state.back_type }
-      end
-
-      def refine_local(constr, name, type)
-        return constr if constr.context.type_env[name] == type
-
-        constr.update_type_env do |env|
-          env.invalidate_pure_node(::Parser::AST::Node.new(:lvar, [name])).refine_types(local_variable_types: { name => type })
-        end
-      end
-
-      def handed_locals(arguments)
-        LocalReach.argument_values(arguments).filter_map { |value| value.children[0] if value.type == :lvar }
-      end
-
-      # What `method_name` does to an instance of `instance`: the ivars it may
-      # write, from `may_write` (closed over the methods it calls on `self`),
-      # and the ones its body binds to an argument and nothing it calls on
-      # `self` may write after. Nil when the body cannot be read, calls
-      # `super`, or may hand `self` on; and until `steep check` has written a
-      # sidecar, since nothing then says what any method writes.
-      def method_effect(constr, instance, method_name)
-        return nil if constr.postconditions.empty?
-
-        owner, body = resolved_body(constr, instance, method_name)
-        return nil if owner.nil? || body.nil? || body.super_args || exposes_self?(constr, instance, body, [method_name])
-
-        rewritten = callee_writes(constr, instance, body, [method_name])
-        Effect.new(bindings: body.bindings.reject { |ivar, _| rewritten.include?(ivar) }, writes: may_write(constr, owner, method_name) | rewritten)
-      end
-
-      # What the methods `body` calls on `self` may write, each resolved on
-      # `instance`. `may_write` alone is closed in the class that defines the
-      # caller, so it misses a subclass's override.
-      def callee_writes(constr, instance, body, visiting)
-        body.self_sends.each_with_object(Set[]) do |name, writes|
-          next if visiting.include?(name)
-
-          owner, callee = resolved_body(constr, instance, name)
-          next unless owner
-
-          writes.merge(may_write(constr, owner, name))
-          writes.merge(callee_writes(constr, instance, callee, [*visiting, name])) if callee
-        end
-      end
-
-      # Whether `self` may reach anything but a call made on it, here or in a
-      # method this calls on `self`. One with no body to read may: `itself`,
-      # `tap` and `define_singleton_method` hand it on.
-      def exposes_self?(constr, instance, body, visiting)
-        return true if body.exposes_self
-
-        body.self_sends.any? do |name|
-          next false if visiting.include?(name)
-
-          _, callee = resolved_body(constr, instance, name)
-          callee.nil? || exposes_self?(constr, instance, callee, [*visiting, name])
-        end
-      end
-
-      def may_write(constr, owner, method_name)
-        constr.postconditions.lookup_instance(owner, method_name)&.may_write_ivars || Set[]
-      end
-
-      # `[owner, body]` for the `method_name` an instance of `type` runs, or
-      # the class object `type` names when it is a singleton. Which one runs is
-      # the RBS definition's answer, as for `initialize`
-      # (felixefelip/steep#230). Nil when a Ruby method of that name the RBS
-      # does not place would run first.
-      def resolved_body(constr, type, method_name)
-        registry = constr.constructor_bindings
-        singleton = type.is_a?(AST::Types::Name::Singleton)
-        builder = constr.checker.factory.definition_builder
-        definition = singleton ? builder.build_singleton(type.name) : builder.build_instance(type.name)
-        owner = definition.methods[method_name]&.implemented_in or return nil
-        ancestors = definition.ancestors.ancestors.map(&:name)
-        index = ancestors.index(owner) or return nil
-        return nil if ancestors.take(index).any? { |name| registry.defines?(name.to_s, method_name, singleton: singleton) }
-
-        body = singleton ? registry.singleton_body_of(owner.to_s, method_name) : registry.body_of(owner.to_s, method_name)
-        body ? [owner, body] : nil
-      rescue RBS::BaseError
-        nil
-      end
-
-      # `Klass.new` resolved to the class's own `initialize`: a `def self.new`
-      # answers whatever it likes.
-      def initialize_call?(call)
-        !call.method_decls.empty? &&
-          call.method_decls.all? { |decl| decl.method_def&.member.respond_to?(:name) && decl.method_def.member.name == :initialize }
-      end
-
-      # One argument, one position: a splat, keywords or a block pass move what
-      # lands where.
-      def plain_argument?(argument)
-        !%i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(argument.type)
       end
 
       # The `initialize` methods `Klass.new` runs, from the one it calls to the
@@ -386,6 +254,191 @@ module Steep
         end
       rescue RBS::BaseError
         nil
+      end
+
+      # Whether `self` may reach anything but a call made on it, here or in a
+      # method this calls on `self`. One with no body to read may: `itself`,
+      # `tap` and `define_singleton_method` hand it on.
+      def exposes_self?(constr, instance, body, visiting)
+        return true if body.exposes_self
+
+        body.self_sends.any? do |name|
+          next false if visiting.include?(name)
+
+          _, callee = resolved_body(constr, instance, name)
+          callee.nil? || exposes_self?(constr, instance, callee, [*visiting, name])
+        end
+      end
+
+      # What `method_name` does to an instance of `instance`: the ivars it may
+      # write, from `may_write` (closed over the methods it calls on `self`),
+      # and the ones its body binds to an argument and nothing it calls on
+      # `self` may write after. Nil when the body cannot be read, calls
+      # `super`, or may hand `self` on; and until `steep check` has written a
+      # sidecar, since nothing then says what any method writes.
+      def method_effect(constr, instance, method_name)
+        return nil if constr.postconditions.empty?
+
+        owner, body = resolved_body(constr, instance, method_name)
+        return nil if owner.nil? || body.nil? || body.super_args || exposes_self?(constr, instance, body, [method_name])
+
+        rewritten = callee_writes(constr, instance, body, [method_name])
+        writes = may_write(constr, owner, method_name) | rewritten
+        reads_only = !body.returns.nil? && body.self_sends.empty? && writes.empty?
+        Effect.new(bindings: body.bindings.reject { |ivar, _| rewritten.include?(ivar) }, writes: writes, reads_only: reads_only)
+      end
+
+      # `[owner, body]` for the `method_name` an instance of `type` runs, or
+      # the class object `type` names when it is a singleton. Which one runs is
+      # the RBS definition's answer, as for `initialize`
+      # (felixefelip/steep#230). Nil when a Ruby method of that name the RBS
+      # does not place would run first.
+      def resolved_body(constr, type, method_name)
+        registry = constr.constructor_bindings
+        singleton = type.is_a?(AST::Types::Name::Singleton)
+        builder = constr.checker.factory.definition_builder
+        definition = singleton ? builder.build_singleton(type.name) : builder.build_instance(type.name)
+        owner = definition.methods[method_name]&.implemented_in or return nil
+        ancestors = definition.ancestors.ancestors.map(&:name)
+        index = ancestors.index(owner) or return nil
+        return nil if ancestors.take(index).any? { |name| registry.defines?(name.to_s, method_name, singleton: singleton) }
+
+        body = singleton ? registry.singleton_body_of(owner.to_s, method_name) : registry.body_of(owner.to_s, method_name)
+        body ? [owner, body] : nil
+      rescue RBS::BaseError
+        nil
+      end
+
+      # A method whose body this cannot read leaves only what holds under any
+      # name.
+      # What a call leaves the object it was made on holding: what its own
+      # check under the object's contents left (`exit_of`); otherwise what its
+      # effect binds, and only the ivars no call can change — an array crosses a
+      # call only through a check that followed it.
+      def changed(constr, state, method_name, arguments, node)
+        if (exit = exit_of(constr, node))
+          kept = exit.select { |ivar, value| !value.is_a?(AST::Types::Tuple) || ClassMemos.collection_confined?(constr, state.back_type, ivar) }
+          return kept.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: kept)
+        end
+
+        effect = method_effect(constr, state.back_type, method_name) or return settled(constr, state)
+        plain = arguments.all? { |argument| plain_argument?(argument) }
+        rebound = plain ? bound_values(constr, effect.bindings, arguments) : {} #: Hash[Symbol, AST::Types::t]
+        ivars = state.ivars.reject { |ivar, value| effect.writes.include?(ivar) || (!fixed?(value) && !effect.reads_only) }
+        ivars.merge!(rebound)
+        ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
+      end
+
+      # A value nothing can change afterwards, or one of several. A String
+      # literal names a value that can (felixefelip/steep#216), and so does an
+      # array.
+      def fixed?(type)
+        case type
+        when AST::Types::Literal then !type.value.is_a?(::String)
+        when AST::Types::Nil, AST::Types::ObjectState then true
+        when AST::Types::Union then type.types.all? { |member| fixed?(member) }
+        else false
+        end
+      end
+
+      # One argument, one position: a splat, keywords or a block pass move what
+      # lands where.
+      def plain_argument?(argument)
+        !%i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(argument.type)
+      end
+
+      private
+
+      def held_value?(constr, node)
+        constr.method_context&.held_locals&.held_value?(node) || false
+      end
+
+      def bound_values(constr, bindings, arguments)
+        bindings.filter_map do |ivar, index|
+          argument = arguments[index] or next
+          next unless constr.typing.has_type?(argument)
+
+          type = settled(constr, constr.literal_operand_type(argument, constr.typing.type_of(node: argument)))
+          [ivar, type] if fixed?(type) || frozen_literal?(constr, argument, type)
+        end.to_h
+      end
+
+      # A string written in a source under `# frozen_string_literal: true`,
+      # which no name can change. Only as written: an interpolation builds a
+      # string that is not frozen.
+      def frozen_literal?(constr, node, type)
+        return false unless node.type == :str && type.is_a?(AST::Types::Literal) && type.value.is_a?(::String)
+
+        frozen_source?(constr.source)
+      end
+
+      def frozen_source?(source)
+        @frozen_sources ||= {}.compare_by_identity
+        @frozen_sources.fetch(source) do
+          comments = Prism.parse(source.buffer.content).magic_comments
+          @frozen_sources[source] = comments.any? { |comment| comment.key == "frozen_string_literal" && comment.value == "true" }
+        end
+      end
+
+      # Only a state alone keeps the markers the postcondition left in
+      # `current`: a union member cannot tell which of them is its own.
+      def left(constr, receiver_type, current, method_name, arguments, node)
+        if receiver_type.is_a?(AST::Types::Union)
+          return AST::Types::Union.build(types: receiver_type.types.map { |member| left(constr, member, nil, method_name, arguments, node) })
+        end
+        state = state_in(receiver_type) or return receiver_type
+
+        changed = changed(constr, state, method_name, arguments, node)
+        markers = markers_in(current, state)
+        markers.empty? ? changed : AST::Types::Intersection.build(types: [changed, *markers])
+      end
+
+      def holds_state?(type)
+        state_in(type) || (type.is_a?(AST::Types::Union) && type.types.any? { |member| state_in(member) })
+      end
+
+      def markers_in(current, state)
+        return [] unless current.is_a?(AST::Types::Intersection)
+
+        current.types.reject { |member| member.is_a?(AST::Types::ObjectState) || member == state.back_type }
+      end
+
+      def refine_local(constr, name, type)
+        return constr if constr.context.type_env[name] == type
+
+        constr.update_type_env do |env|
+          env.invalidate_pure_node(::Parser::AST::Node.new(:lvar, [name])).refine_types(local_variable_types: { name => type })
+        end
+      end
+
+      def handed_locals(arguments)
+        LocalReach.argument_values(arguments).filter_map { |value| value.children[0] if value.type == :lvar }
+      end
+
+      # What the methods `body` calls on `self` may write, each resolved on
+      # `instance`. `may_write` alone is closed in the class that defines the
+      # caller, so it misses a subclass's override.
+      def callee_writes(constr, instance, body, visiting)
+        body.self_sends.each_with_object(Set[]) do |name, writes|
+          next if visiting.include?(name)
+
+          owner, callee = resolved_body(constr, instance, name)
+          next unless owner
+
+          writes.merge(may_write(constr, owner, name))
+          writes.merge(callee_writes(constr, instance, callee, [*visiting, name])) if callee
+        end
+      end
+
+      def may_write(constr, owner, method_name)
+        constr.postconditions.lookup_instance(owner, method_name)&.may_write_ivars || Set[]
+      end
+
+      # `Klass.new` resolved to the class's own `initialize`: a `def self.new`
+      # answers whatever it likes.
+      def initialize_call?(call)
+        !call.method_decls.empty? &&
+          call.method_decls.all? { |decl| decl.method_def&.member.respond_to?(:name) && decl.method_def.member.name == :initialize }
       end
 
       # `@ivar => call-site position` for the object `chain` leaves behind,
@@ -441,18 +494,6 @@ module Steep
         constr.checker.factory.definition_builder.build_instance(instance.name).instance_variables.key?(ivar)
       rescue RBS::BaseError
         false
-      end
-
-      # A value nothing can change afterwards, or one of several. A String
-      # literal names a value that can (felixefelip/steep#216), and so does an
-      # array.
-      def fixed?(type)
-        case type
-        when AST::Types::Literal then !type.value.is_a?(::String)
-        when AST::Types::Nil, AST::Types::ObjectState then true
-        when AST::Types::Union then type.types.all? { |member| fixed?(member) }
-        else false
-        end
       end
 
       # A reader written as `def name = @name` rather than `attr_reader`, in
