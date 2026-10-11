@@ -70,7 +70,7 @@ module Steep
         # through a call on it: `initialize` does not hand it on, no other method
         # may write the ivar, every use of the memo and of its ivar is the
         # receiver of a call whose effect is known, and only a statement of a
-        # class body, made on `self`, may change it.
+        # class body, made on `self`, may call more than a reader on it.
         def tracked_memo(constr, call)
           singleton = constr.self_type
           return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
@@ -106,7 +106,7 @@ module Steep
             next false if use.kind == :escape
 
             effect = ObjectStates.method_effect(constr, instance, use.called) or next false
-            use.kind == :statement || effect.writes.empty?
+            use.kind == :statement || effect.reads_only
           end
         end
 
