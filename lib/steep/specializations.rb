@@ -100,7 +100,7 @@ module Steep
           positionals << argument_type(arg, typing)
         end
 
-        new(positionals: positionals, keywords: keywords)
+        new(positionals: positionals, keywords: keywords, self_ivars: {})
       end
 
       # The type a call site keys this argument on. A tuple stands for the
@@ -129,12 +129,13 @@ module Steep
         AST::Builtin::Array.instance_type(type.types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: type.types))
       end
 
-      def initialize(positionals:, keywords:, positional_defaults: {}, keyword_defaults: {}, self_type: nil)
+      def initialize(positionals:, keywords:, self_ivars:, positional_defaults: {}, keyword_defaults: {}, self_type: nil)
         @positionals = positionals
         @keywords = keywords
         @positional_defaults = positional_defaults
         @keyword_defaults = keyword_defaults
         @self_type = self_type
+        @self_ivars = self_ivars
       end
 
       # The `self` the body runs with at this call site, or nil for the one its
@@ -155,13 +156,20 @@ module Steep
       # harvest, which attributes to one call site, sets it.
       attr_reader :self_type
 
-      def with_self(self_type)
+      # The objects that `self`'s ivars hold at the call site, as the states
+      # the caller knew them in (`ObjectStates.self_ivars`): a class body that
+      # set its memo's object up before calling a macro that reads it. Keyed
+      # like `self_type`, and out of `key` for the same reason.
+      attr_reader :self_ivars
+
+      def with_self(self_type, self_ivars)
         Arguments.new(
           positionals: @positionals,
           keywords: @keywords,
           positional_defaults: @positional_defaults,
           keyword_defaults: @keyword_defaults,
-          self_type: self_type
+          self_type: self_type,
+          self_ivars: self_ivars
         )
       end
 
@@ -179,7 +187,8 @@ module Steep
           keywords: @keywords.transform_values { |type| type.subst(substitution) },
           positional_defaults: @positional_defaults,
           keyword_defaults: @keyword_defaults,
-          self_type: @self_type
+          self_type: @self_type,
+          self_ivars: @self_ivars
         )
       end
 
@@ -197,7 +206,8 @@ module Steep
           keywords: @keywords,
           positional_defaults: positionals,
           keyword_defaults: keywords,
-          self_type: @self_type
+          self_type: @self_type,
+          self_ivars: @self_ivars
         )
       end
 
@@ -296,13 +306,13 @@ module Steep
 
       def ==(other)
         other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords &&
-          other.self_type == self_type
+          other.self_type == self_type && other.self_ivars == self_ivars
       end
 
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash ^ self_type.hash
+        positionals.hash ^ keywords.hash ^ self_type.hash ^ self_ivars.hash
       end
 
       private

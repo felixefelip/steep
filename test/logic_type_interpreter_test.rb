@@ -78,7 +78,8 @@ class LogicTypeInterpreterTest < Minitest::Test
           method_decls: Set[TypeInference::MethodCall::MethodDecl.new(method_name: MethodName("::LTISource#present?"), method_def: present_def.defs.first)],
           return_type: parse_type("bool")
         ),
-        self_type: AST::Builtin::Object.instance_type
+        self_type: AST::Builtin::Object.instance_type,
+        self_ivars: {}
       )
 
       store = Steep::Postconditions::Store.from_hash(

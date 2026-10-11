@@ -385,7 +385,7 @@ module Steep
       def record_location(locations, key, arguments, path, node, typing)
         expression = node.loc.expression or return
         site = "#{@project.relative_path(path)}:#{expression.line}:#{expression.column}"
-        arguments = arguments.with_self(callee_self(typing, node))
+        arguments = arguments.with_self(callee_self(typing, node), callee_self_ivars(typing, node))
 
         ((locations[key] ||= {})[arguments] ||= Set.new) << site
       end
@@ -402,6 +402,10 @@ module Steep
         when AST::Types::Name::Singleton, AST::Types::Name::Instance then type
         when AST::Types::Intersection then lexical_self(typing, node, type)
         end
+      end
+
+      def callee_self_ivars(typing, node)
+        typing.call_of(node: node).receiver_type.is_a?(AST::Types::Self) ? typing.self_ivars_of_call(node: node) : {}
       end
 
       # A module body's `self` is that module, whatever an annotation adds to

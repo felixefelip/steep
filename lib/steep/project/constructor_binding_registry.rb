@@ -19,6 +19,9 @@ module Steep
         @entries = {} #: Hash[String, Hash[Symbol, Integer]]
         @initializers = {} #: Hash[String, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]
         @methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
+        @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
+        @nodes = [] #: Array[::Parser::AST::Node]
+        @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
       end
 
       # @return self
@@ -35,6 +38,10 @@ module Steep
         @entries.freeze
         @initializers.freeze
         @methods.freeze
+        @singleton_methods.freeze
+        index_uses
+        @uses.freeze
+        @nodes.clear
         self
       end
 
@@ -74,9 +81,25 @@ module Steep
         bodies.first if bodies.size == 1
       end
 
-      # Whether the project may define `method_name` in `class_name` at all.
-      def defines?(class_name, method_name)
-        methods_of(class_name).key?(method_name.to_sym)
+      # `body_of` for a method of the class object itself.
+      def singleton_body_of(class_name, method_name)
+        bodies = (@singleton_methods[class_name.to_s.delete_prefix("::")] || {})[method_name.to_sym] or return nil
+        bodies.first if bodies.size == 1
+      end
+
+      # Every place the project names `name`, one of its class memos
+      # (`Body#memo`) or a memo's ivar, by spelling
+      # (`TypeInference::ClassMemoAnalyzer`).
+      def uses_of(name)
+        index_uses unless @uses
+        @uses.fetch(name.to_sym, [])
+      end
+
+      # Whether the project may define `method_name` in `class_name` at all, on
+      # its instances or, with `singleton`, on the class object.
+      def defines?(class_name, method_name, singleton: false)
+        methods = singleton ? @singleton_methods[class_name.to_s.delete_prefix("::")] || {} : methods_of(class_name)
+        methods.key?(method_name.to_sym)
       end
 
       def empty?
@@ -97,15 +120,37 @@ module Steep
         scan.initializers.each do |class_name, initializers|
           (@initializers[class_name] ||= []).concat(initializers)
         end
-        scan.methods.each do |class_name, methods|
-          entry = (@methods[class_name] ||= {})
-          methods.each { |name, bodies| (entry[name] ||= []).concat(bodies) }
-        end
+        merge_bodies(@methods, scan.methods)
+        merge_bodies(@singleton_methods, scan.singleton_methods)
+        @nodes << node
+        @uses = nil
       rescue StandardError, ::Parser::SyntaxError => e
         Steep.logger.warn { "[constructor_binding_registry] failed to ingest #{path_name}: #{e.message}" }
       end
 
       private
+
+      def merge_bodies(index, scanned)
+        scanned.each do |class_name, methods|
+          entry = (index[class_name] ||= {})
+          methods.each { |name, bodies| (entry[name] ||= []).concat(bodies) }
+        end
+      end
+
+      # Read only once every source is in, since a memo may be used in a
+      # source read before the one that defines it.
+      def index_uses
+        names = Set[] #: Set[Symbol]
+        @singleton_methods.each_value do |methods|
+          methods.each do |name, bodies|
+            bodies.each { |body| names << name << body.memo[0] if body&.memo }
+          end
+        end
+        @uses = {}
+        @nodes.each do |node|
+          TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (@uses[name] ||= []).concat(uses) }
+        end
+      end
 
       def methods_of(class_name)
         @methods[class_name.to_s.delete_prefix("::")] || {}
