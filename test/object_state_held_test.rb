@@ -210,6 +210,14 @@ class ObjectStateHeldTest < Minitest::Test
     RUBY
   end
 
+  def test_an_attr_writer_binds_an_ivar_the_state_did_not_know
+    assert_equal ":x", last_value(<<~RUBY)
+      r = Reflection.new(:posts)
+      r.label = :x
+      r.current_label
+    RUBY
+  end
+
   def test_an_attr_writer_and_the_reader_cache_agree
     assert_equal ":x", last_value(<<~RUBY)
       r = Reflection.new(:posts, :draft)

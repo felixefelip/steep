@@ -67,14 +67,14 @@ class ClassBodyStateTest < Minitest::Test
     assert_equal({ "app/app.rb:12:2" => ["def posts; end"], "app/app.rb:14:2" => ["def comments; end"] }, evals)
   end
 
-  def source(extra_base: "", article:)
+  def source(extra_base: "", article:, settings: "attr_accessor :name", memo: "def self.settings = @settings ||= Settings.new")
     <<~RUBY
       class Settings
-        attr_accessor :name
+      #{settings.gsub(/^/, "  ")}
       end
 
       class Base
-        def self.settings = @settings ||= Settings.new
+      #{memo.gsub(/^/, "  ")}
         def self.define_named = class_eval("def \#{settings.name}; end")
       #{extra_base.gsub(/^/, "  ")}
       end
@@ -112,5 +112,28 @@ class ClassBodyStateTest < Minitest::Test
       article = "settings.name = :posts\n#{extra_article}\ndefine_named"
       assert_equal [[nil]], chunks(RBS, source(extra_base: extra_base, article: article)).values, label
     end
+  end
+
+  def test_a_memo_written_in_class_self
+    memo = "class << self\n  def settings = @settings ||= Settings.new\nend"
+
+    assert_equal [["def posts; end"]], chunks(RBS, source(memo: memo, article: "settings.name = :posts\ndefine_named")).values
+  end
+
+  def test_declines_an_object_its_initialize_hands_on
+    rbs = RBS.sub("attr_accessor name: Symbol", "ALL: Array[Settings]\n  attr_accessor name: Symbol\n  def initialize: () -> void")
+    settings = "ALL = []\nattr_accessor :name\ndef initialize = ALL << self"
+    article = "settings.name = :posts\nSettings::ALL.each { |s| s.name = :other }\ndefine_named"
+
+    assert_equal [[nil]], chunks(rbs, source(settings: settings, article: article)).values
+  end
+
+  def test_a_name_no_call_reaches_the_memo_by_is_no_use_of_it
+    rbs = RBS + "class Routes\n  def draw: () -> untyped\n  def resources: (Symbol) -> untyped\nend\n" \
+                "class Panel\n  @settings: Integer\n  def show: () -> Integer\nend\n"
+    others = "class Routes\n  def draw = resources(:settings)\n  def resources(name) = name\nend\n" \
+             "class Panel\n  def show = @settings = 1\nend\n"
+
+    assert_equal [["def posts; end"]], chunks(rbs, source(article: "settings.name = :posts\ndefine_named") + others).values
   end
 end

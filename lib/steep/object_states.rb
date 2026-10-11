@@ -87,7 +87,7 @@ module Steep
       # Where nothing was known yet, it is still that one object, so what the
       # call binds is known from here.
       def remembered_after(constr, receiver, receiver_type, method_name, arguments)
-        memo_call = constr.typing.call_of(node: receiver) rescue nil
+        memo_call = recorded_call(constr, receiver)
         ivar, instance = tracked_memo(constr, memo_call) if memo_call
         return constr unless ivar && instance
 
@@ -101,24 +101,45 @@ module Steep
         %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
       end
 
-      # `[ivar, instance]` for a call to a class's memo whose object no code
-      # the project holds can reach but through a call on it: every use of the
-      # memo and of its ivar is the receiver of a call whose effect is known,
-      # and only a statement of a class body, made on `self`, may change it.
+      def recorded_call(constr, node)
+        constr.typing.call_of(node: node)
+      rescue Typing::UnknownNodeError
+        nil
+      end
+
+      # `[ivar, instance]` for a call on `self` to a class's memo
+      # (`Body#memo`) whose object no code the project holds can reach but
+      # through a call on it: `initialize` does not hand it on, no other method
+      # may write the ivar, every use of the memo and of its ivar is the
+      # receiver of a call whose effect is known, and only a statement of a
+      # class body, made on `self`, may change it.
       def tracked_memo(constr, call)
-        return unless call.is_a?(TypeInference::MethodCall::Typed)
+        singleton = constr.self_type
+        return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
 
-        names = call.method_decls.map(&:method_name).uniq
-        name = names.first
-        return unless names.size == 1 && name.is_a?(SingletonMethodName)
-
-        ivar, = constr.constructor_bindings.class_memo(name.type_name, name.method_name)
-        return unless ivar
+        owner, body = resolved_body(constr, singleton, call.method_name)
+        ivar, classes = body&.memo
         instance = constr.typing.nominal_of(node: call.node) || call.return_type
-        return unless instance.is_a?(AST::Types::Name::Instance)
-        return unless [name.method_name, ivar].all? { |used| confined?(constr, instance, used) }
+        return unless ivar && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
+        return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, call.method_name)
+        return unless [call.method_name, ivar].all? { |used| confined?(constr, instance, used) }
 
         [ivar, instance]
+      end
+
+      # `Klass.new` hands back an object nothing else holds.
+      def fresh?(constr, instance)
+        chain = initialize_chain(constr, instance) or return false
+        chain.none? { |_, body| body && exposes_self?(constr, instance, body, [:initialize]) }
+      end
+
+      def written_only_by?(constr, singleton, ivar, owner, method_name)
+        definition = constr.checker.factory.definition_builder.build_singleton(singleton.name)
+        definition.ancestors.ancestors.none? do |ancestor|
+          constr.postconditions.may_write?(ancestor.name.to_s, ivar, except: ancestor.name == owner ? method_name : nil)
+        end
+      rescue RBS::BaseError
+        false
       end
 
       def confined?(constr, instance, name)
@@ -286,20 +307,23 @@ module Steep
         constr.postconditions.lookup_instance(owner, method_name)&.may_write_ivars || Set[]
       end
 
-      # `[owner, body]` for the `method_name` an instance of `instance` runs.
-      # Which one runs is the RBS definition's answer, as for `initialize`
+      # `[owner, body]` for the `method_name` an instance of `type` runs, or
+      # the class object `type` names when it is a singleton. Which one runs is
+      # the RBS definition's answer, as for `initialize`
       # (felixefelip/steep#230). Nil when a Ruby method of that name the RBS
       # does not place would run first.
-      def resolved_body(constr, instance, method_name)
+      def resolved_body(constr, type, method_name)
         registry = constr.constructor_bindings
-        definition = constr.checker.factory.definition_builder.build_instance(instance.name)
+        singleton = type.is_a?(AST::Types::Name::Singleton)
+        builder = constr.checker.factory.definition_builder
+        definition = singleton ? builder.build_singleton(type.name) : builder.build_instance(type.name)
         owner = definition.methods[method_name]&.implemented_in or return nil
         ancestors = definition.ancestors.ancestors.map(&:name)
         index = ancestors.index(owner) or return nil
-        return nil if ancestors.take(index).any? { |name| registry.defines?(name.to_s, method_name) }
+        return nil if ancestors.take(index).any? { |name| registry.defines?(name.to_s, method_name, singleton: singleton) }
 
-        body = registry.body_of(owner.to_s, method_name) or return nil
-        [owner, body]
+        body = singleton ? registry.singleton_body_of(owner.to_s, method_name) : registry.body_of(owner.to_s, method_name)
+        body ? [owner, body] : nil
       rescue RBS::BaseError
         nil
       end

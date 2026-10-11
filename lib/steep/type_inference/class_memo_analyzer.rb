@@ -1,122 +1,127 @@
 module Steep
   module TypeInference
-    # The objects a class keeps in an ivar of its own, built by a memo, and
-    # every place the project names them (felixefelip/steep#205, stage 3):
-    #
-    #   class Base
-    #     def self.settings = @settings ||= Settings.new   # the memo
-    #   end
+    # Where a source names one of the class memos the project defines
+    # (`ConstructorBindingAnalyzer::Body#memo`), or its ivar, by spelling
+    # (felixefelip/steep#205, stage 3):
     #
     #   class Article < Base
-    #     settings.name = :posts    # a call on it, as a statement of a class body
+    #     settings.name = :posts    # the receiver of a statement of a class body
     #     define_named              # whose body reads `settings.name`
     #   end
     #
-    # Names are matched by spelling alone, whoever the receiver is: a use this
-    # cannot attribute to one class counts against every memo of that name.
+    # A use this cannot attribute to one class counts against every memo of
+    # that name. Writes to the ivar are the postconditions' `may_write`, not
+    # this.
     class ClassMemoAnalyzer
       # `kind`: `:statement` for the receiver of a call that is itself a
       # statement of a class body, made on `self`; `:receiver` for the receiver
       # of any other call; `:escape` for anything else — a value stored,
-      # handed on, returned, or spelled as a symbol or a string. `called` is
-      # the method called on it.
+      # handed on or returned, or a name given to a call that reaches a method
+      # or an ivar by it. `called` is the method called on it.
       Use = Struct.new(:kind, :called)
       ESCAPE = Use.new(:escape, nil).freeze
 
-      Scan = Struct.new(:memos, :uses, keyword_init: true)
+      # Calls that reach a method or an ivar by a name given as a value.
+      REFLECTIVE = %i[
+        send __send__ public_send method public_method singleton_method define_singleton_method
+        instance_variable_get instance_variable_set instance_variable_defined? remove_instance_variable
+      ].freeze
 
-      def self.scan(node)
-        new.scan(node)
+      # Calls that run a string as code where the class's `self` may be.
+      STRING_EVALS = %i[eval instance_eval class_eval module_eval class_exec].freeze
+
+      def self.uses(node, names:)
+        new(names).uses(node)
       end
 
-      def initialize
-        @memos = {} #: Hash[String, Hash[Symbol, Array[[Symbol, String]?]]]
+      def initialize(names)
+        @names = names
         @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[Use]]
       end
 
-      def scan(node)
-        walk(node, nil, [], false, false) if node.is_a?(::Parser::AST::Node)
-        Scan.new(memos: @memos, uses: @uses)
+      def uses(node)
+        walk(node, nil, statement: false, in_statement: false, on_class: true) if node.is_a?(::Parser::AST::Node)
+        @uses
       end
 
       private
 
-      # `statement`: whether `node` is a statement of a class or module body.
-      # `in_statement`: whether `parent` is.
-      def walk(node, parent, nesting, statement, in_statement)
+      # `statement`: whether `node` is a statement of a class or module body;
+      # `in_statement`: whether its parent is. `on_class`: whether `self` may
+      # be a class object here — anywhere but an instance method, outside a
+      # block, whose `self` some call may change. `singleton_defs`: whether a
+      # `def` here defines a method of the class object (`class << self`).
+      def walk(node, parent, statement:, in_statement:, on_class:, singleton_defs: false)
         case node.type
         when :class, :module
-          const_node, *, body = node.children
-          name = const_name(const_node)
-          inner = name ? [*nesting, name] : nesting
-          statements(body).each { |child| walk(child, node, inner, true, false) }
+          body = node.children.last
+          each_statement(body) { |child| walk(child, node, statement: true, in_statement: false, on_class: true) }
           return
-        when :defs
-          register_memo(node, nesting)
-        when :send, :csend, :ivar
-          record(node, parent, in_statement)
-        when :ivasgn
-          @uses[node.children[0]] << ESCAPE unless memo_write?(node, parent)
-        when :sym, :str
-          value = node.children[0]
-          @uses[value.to_sym] << ESCAPE if value.is_a?(::String) || value.is_a?(::Symbol)
+        when :sclass
+          each_statement(node.children[1]) { |child| walk(child, node, statement: false, in_statement: false, on_class: true, singleton_defs: true) }
+          return
+        when :def
+          walk_children(node, statement: false, on_class: singleton_defs)
+          return
+        when :block, :numblock
+          walk_children(node, statement: false, on_class: true)
+          return
+        when :send, :csend
+          record_send(node, parent, in_statement)
+        when :ivar
+          record(node.children[0], node, parent, in_statement) if on_class
         end
 
-        node.children.each { |child| walk(child, node, nesting, false, statement) if child.is_a?(::Parser::AST::Node) }
+        walk_children(node, statement: statement, on_class: on_class)
       end
 
-      def record(node, parent, statement)
-        name = node.type == :ivar ? node.children[0] : node.children[1]
-        return unless node.type == :ivar || node.children.size == 2
+      def walk_children(node, statement:, on_class:)
+        node.children.each do |child|
+          walk(child, node, statement: false, in_statement: statement, on_class: on_class) if child.is_a?(::Parser::AST::Node)
+        end
+      end
+
+      def record_send(node, parent, in_statement)
+        _, name, *arguments = node.children
+        record(name, node, parent, in_statement) if arguments.empty?
+        if REFLECTIVE.include?(name)
+          arguments.each { |argument| @uses[argument.children[0].to_sym] << ESCAPE if named?(argument) }
+        elsif STRING_EVALS.include?(name)
+          arguments.each { |argument| each_string(argument) { |text| escape_mentioned(text) } }
+        end
+      end
+
+      def record(name, node, parent, in_statement)
+        return unless @names.include?(name)
 
         @uses[name] <<
           if parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
             on_self = node.type == :ivar || node.children[0].nil? || node.children[0].type == :self
-            Use.new(statement && on_self ? :statement : :receiver, parent.children[1])
+            Use.new(in_statement && on_self ? :statement : :receiver, parent.children[1])
           else
             ESCAPE
           end
       end
 
-      # `def self.name = @ivar ||= Klass.new`, or the same as the only
-      # statement of a body.
-      def register_memo(node, nesting)
-        receiver, name, args, body = node.children
-        return unless receiver.type == :self && args.children.empty? && !nesting.empty?
-
-        memo = memo_of(body)
-        ((@memos[nesting.join("::")] ||= {})[name] ||= []) << memo
+      def named?(node)
+        %i[sym str].include?(node.type) && @names.include?(node.children[0].to_sym)
       end
 
-      def memo_of(body)
-        return unless body&.type == :or_asgn
+      def each_string(node, &block)
+        return unless node.is_a?(::Parser::AST::Node)
 
-        target, value = body.children
-        return unless target.type == :ivasgn && value.type == :send
-
-        klass, method_name, *arguments = value.children
-        klass_name = const_name(klass)
-        [target.children[0], klass_name] if method_name == :new && arguments.empty? && klass_name
+        yield node.children[0] if node.type == :str
+        node.children.each { |child| each_string(child, &block) }
       end
 
-      def memo_write?(node, parent)
-        parent&.type == :or_asgn && parent.children[0].equal?(node) && memo_of(parent)
+      def escape_mentioned(text)
+        @names.each { |name| @uses[name] << ESCAPE if text.match?(/(?<![\w@])#{Regexp.escape(name.to_s)}(?!\w)/) }
       end
 
-      def statements(body)
-        return [] unless body.is_a?(::Parser::AST::Node)
+      def each_statement(body, &block)
+        return unless body.is_a?(::Parser::AST::Node)
 
-        body.type == :begin ? body.children : [body]
-      end
-
-      def const_name(node)
-        return unless node.is_a?(::Parser::AST::Node) && node.type == :const
-
-        scope, name = node.children
-        case scope&.type
-        when nil, :cbase then name.to_s
-        when :const then (prefix = const_name(scope)) && "#{prefix}::#{name}"
-        end
+        (body.type == :begin ? body.children : [body]).each(&block)
       end
     end
   end

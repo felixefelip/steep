@@ -34,7 +34,10 @@ module Steep
       # runs is a question of load order. `methods` lists, per class or module,
       # every instance method this source may define for it, as its `Body`
       # when the definition always runs, nil otherwise.
-      Scan = Struct.new(:readers, :initializers, :methods, keyword_init: true)
+      #
+      # `singleton_methods` the same, for the methods defined on the class
+      # object itself: `def self.x`, and a `def` in `class << self`.
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
       #
@@ -50,7 +53,11 @@ module Steep
       # - `exposes_self`: whether `self` may reach anything but those calls,
       #   a block included (felixefelip/steep#205, stage 2);
       # - `returns`: the ivar it returns, when its body is exactly that.
-      Body = Struct.new(:bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, keyword_init: true)
+      # - `memo`: `[ivar, class names]` when its body is exactly
+      #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
+      #   it is written. Not a `returns`: while the ivar is unset it answers
+      #   the new object, not what the ivar held.
+      Body = Struct.new(:bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, keyword_init: true)
 
       def self.analyze(node)
         scan(node).readers
@@ -64,11 +71,12 @@ module Steep
         @result = {} #: Hash[String, Hash[Symbol, Integer]]
         @initializers = {} #: Hash[String, Array[Body?]]
         @methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
+        @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
       end
 
       def scan(node)
         walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
-        Scan.new(readers: @result, initializers: @initializers, methods: @methods)
+        Scan.new(readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods)
       end
 
       private
@@ -83,6 +91,7 @@ module Steep
             register_class(body, nesting: new_nesting)
             register_initializers(body, names: defined_names(const_node, nesting))
             register_methods(body, names: defined_names(const_node, nesting))
+            register_singleton_methods(body, names: defined_names(const_node, nesting), nesting: new_nesting)
           end
           walk(body, nesting: new_nesting) if body
         when :module
@@ -93,6 +102,7 @@ module Steep
           if body && name
             register_initializers(body, names: defined_names(const_node, nesting))
             register_methods(body, names: defined_names(const_node, nesting))
+            register_singleton_methods(body, names: defined_names(const_node, nesting), nesting: new_nesting)
           end
           walk(body, nesting: new_nesting) if body
         else
@@ -145,6 +155,30 @@ module Steep
         each_method_definition(body, direct: true) do |mname, method_body|
           method_body = nil unless names.size == 1
           names.each { |name| ((@methods[name] ||= {})[mname] ||= []) << method_body }
+        end
+      end
+
+      # Every method this class body may define on the class object, as for
+      # `register_methods`.
+      def register_singleton_methods(body, names:, nesting:)
+        each_singleton_definition(body) do |mname, args, mbody|
+          method_body = names.size == 1 ? method_body(args, mbody, nesting: nesting) : nil
+          names.each { |name| ((@singleton_methods[name] ||= {})[mname] ||= []) << method_body }
+        end
+      end
+
+      def each_singleton_definition(body, &block)
+        each_stmt(body) do |stmt|
+          case stmt.type
+          when :defs
+            receiver, mname, args, mbody = stmt.children
+            yield mname, args, mbody if receiver.type == :self
+          when :sclass
+            target, sbody = stmt.children
+            next unless target.type == :self
+
+            each_stmt(sbody) { |inner| yield(*inner.children) if inner.type == :def }
+          end
         end
       end
 
@@ -214,7 +248,7 @@ module Steep
         Body.new(bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, returns: nil)
       end
 
-      def method_body(args_node, body)
+      def method_body(args_node, body, nesting: nil)
         writes = Set[] #: Set[Symbol]
         self_sends = Set[] #: Set[Symbol]
         each_node(body) do |node|
@@ -227,7 +261,8 @@ module Steep
           super_args: super_args(args_node, body),
           self_sends: self_sends,
           exposes_self: exposes_self?(body),
-          returns: single_ivar_reader(body)
+          returns: single_ivar_reader(body),
+          memo: nesting && memo_of(body, nesting)
         )
       end
 
@@ -361,6 +396,20 @@ module Steep
         return [[*nesting, name].join("::")] unless scope
 
         nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+      end
+
+      def memo_of(body, nesting)
+        return unless body&.type == :or_asgn
+
+        target, value = body.children
+        return unless target.type == :ivasgn && value.type == :send
+
+        klass, method_name, *arguments = value.children
+        return unless method_name == :new && arguments.empty? && klass&.type == :const
+
+        name = const_to_name(klass) or return
+        names = klass.children[0]&.type == :cbase ? [name] : nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+        [target.children[0], names]
       end
 
       # A reader whose body is exactly `@ivar` (normal or endless def) →

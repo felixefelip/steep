@@ -100,7 +100,7 @@ module Steep
           positionals << argument_type(arg, typing)
         end
 
-        new(positionals: positionals, keywords: keywords)
+        new(positionals: positionals, keywords: keywords, self_ivars: {})
       end
 
       # The type a call site keys this argument on. A tuple stands for the
@@ -129,7 +129,7 @@ module Steep
         AST::Builtin::Array.instance_type(type.types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: type.types))
       end
 
-      def initialize(positionals:, keywords:, positional_defaults: {}, keyword_defaults: {}, self_type: nil, self_ivars: {})
+      def initialize(positionals:, keywords:, self_ivars:, positional_defaults: {}, keyword_defaults: {}, self_type: nil)
         @positionals = positionals
         @keywords = keywords
         @positional_defaults = positional_defaults
@@ -162,7 +162,7 @@ module Steep
       # like `self_type`, and out of `key` for the same reason.
       attr_reader :self_ivars
 
-      def with_self(self_type, self_ivars = {})
+      def with_self(self_type, self_ivars)
         Arguments.new(
           positionals: @positionals,
           keywords: @keywords,
