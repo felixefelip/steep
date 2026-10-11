@@ -277,8 +277,7 @@ module Steep
       def delegated_sources(context, store, typing, effect, definitions)
         entry = definitions[effect.callee] or return [nil]
         path, callee_node = entry
-        receiver_ivars = Specializations::Arguments.recorded_receiver_ivars(effect.node, typing)
-        arguments = Specializations::Arguments.from_send(effect.node, typing, receiver_ivars: receiver_ivars) or return [nil]
+        arguments = Specializations::Arguments.recorded(effect.node, typing) or return [nil]
         frame_self = typing.self_type_of_call(node: effect.node) or return [nil]
         arguments = arguments.resolve_self(frame_self)
         receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]

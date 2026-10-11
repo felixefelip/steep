@@ -78,7 +78,7 @@ module Steep
       # `receiver_ivars`: what the receiver's contents are known to be
       # (`receiver_ivars`), read off the call where it is recorded already and
       # off the checker where it is being typed.
-      def self.from_send(node, typing, receiver_ivars:)
+      def self.from_send(node, typing, receiver_ivars:, class_states:)
         _receiver, name, *args = node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
         # and the arguments are the rest (`TypeConstruction::SendDispatch`).
@@ -106,7 +106,7 @@ module Steep
           positionals << argument_type(arg, typing)
         end
 
-        new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars)
+        new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states)
       end
 
       def self.dispatched?(node, typing)
@@ -136,18 +136,49 @@ module Steep
 
       # The ivars of the object the call is made on whose contents are known
       # (`AST::Types::ObjectState`): `self`'s where the call is made on it
-      # (`Typing#self_ivars_of_call`), the receiver's state's otherwise.
-      def self.receiver_ivars(receiver_type, self_ivars)
+      # (`Typing#self_ivars_of_call`), a class object's where a class body left
+      # them known (`class_states`), the receiver's state's otherwise.
+      def self.receiver_ivars(receiver_type, self_ivars, class_states)
         return self_ivars if receiver_type.is_a?(AST::Types::Self)
+        return class_states.fetch(receiver_type.name, {}) if receiver_type.is_a?(AST::Types::Name::Singleton)
 
         state = receiver_type.is_a?(AST::Types::Intersection) ? receiver_type.types.grep(AST::Types::ObjectState).first : receiver_type
         state.is_a?(AST::Types::ObjectState) ? state.ivars : {}
       end
 
       def self.recorded_receiver_ivars(node, typing)
-        receiver_ivars(typing.call_of(node: node).receiver_type, typing.self_ivars_of_call(node: node))
+        receiver_ivars(typing.call_of(node: node).receiver_type, typing.self_ivars_of_call(node: node), typing.class_states_of_call(node: node))
       rescue Typing::UnknownNodeError
         {}
+      end
+
+      # The arguments of `call`, being typed at `node`, keyed under what the
+      # checker knows there.
+      def self.at_call(node, typing, call, self_ivars:, class_states:)
+        from_send(
+          node, typing,
+          receiver_ivars: receiver_ivars(call.receiver_type, self_ivars, class_states),
+          class_states: callee_class_states(call, class_states)
+        )
+      end
+
+      # The arguments of the call recorded at `node`, keyed under what the
+      # checker knew there.
+      def self.recorded(node, typing)
+        from_send(
+          node, typing,
+          receiver_ivars: recorded_receiver_ivars(node, typing),
+          class_states: callee_class_states(typing.call_of(node: node), typing.class_states_of_call(node: node))
+        )
+      rescue Typing::UnknownNodeError
+        nil
+      end
+
+      # The class states a callee is checked under, but its receiver's own:
+      # those it starts from as `self_ivars`.
+      def self.callee_class_states(call, class_states)
+        receiver_type = call.is_a?(TypeInference::MethodCall::Typed) ? call.receiver_type : nil
+        receiver_type.is_a?(AST::Types::Name::Singleton) ? class_states.except(receiver_type.name) : class_states
       end
 
       # The type a call site keys this argument on. A tuple stands for the
@@ -177,13 +208,14 @@ module Steep
         AST::Builtin::Array.instance_type(type.types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: type.types))
       end
 
-      def initialize(positionals:, keywords:, self_ivars:, positional_defaults: {}, keyword_defaults: {}, self_type: nil)
+      def initialize(positionals:, keywords:, self_ivars:, class_states:, positional_defaults: {}, keyword_defaults: {}, self_type: nil)
         @positionals = positionals
         @keywords = keywords
         @positional_defaults = positional_defaults
         @keyword_defaults = keyword_defaults
         @self_type = self_type
         @self_ivars = self_ivars
+        @class_states = class_states
       end
 
       # The `self` the body runs with at this call site, or nil for the one its
@@ -210,6 +242,10 @@ module Steep
       # back what was recorded under them.
       attr_reader :self_ivars
 
+      # The states of class objects the caller knew and the body may read
+      # (`ObjectStates::ClassStates`): part of `key` for the same reason.
+      attr_reader :class_states
+
       def with_self(self_type)
         Arguments.new(
           positionals: @positionals,
@@ -217,7 +253,8 @@ module Steep
           positional_defaults: @positional_defaults,
           keyword_defaults: @keyword_defaults,
           self_type: self_type,
-          self_ivars: @self_ivars
+          self_ivars: @self_ivars,
+          class_states: @class_states
         )
       end
 
@@ -236,7 +273,8 @@ module Steep
           positional_defaults: @positional_defaults,
           keyword_defaults: @keyword_defaults,
           self_type: @self_type,
-          self_ivars: @self_ivars
+          self_ivars: @self_ivars,
+          class_states: @class_states
         )
       end
 
@@ -255,16 +293,25 @@ module Steep
           positional_defaults: positionals,
           keyword_defaults: keywords,
           self_type: @self_type,
-          self_ivars: @self_ivars
+          self_ivars: @self_ivars,
+          class_states: @class_states
         )
       end
 
       def key
         parts = positionals.map(&:to_s)
         parts.concat(keywords.keys.sort.map { |name| "#{name}: #{keywords[name]}" })
-        return "(#{parts.join(", ")})" if self_ivars.empty?
+        return "(#{parts.join(", ")})" unless stateful?
 
-        "(#{parts.join(", ")})#{STATE_MARKER}#{self_ivars.sort_by(&:first).map { |name, type| "#{name}: #{type}" }.join(", ")}}"
+        "(#{parts.join(", ")})#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key].join(", ")}}"
+      end
+
+      def ivars_key(ivars)
+        ivars.sort_by(&:first).map { |name, type| "#{name}: #{type}" }
+      end
+
+      def class_states_key
+        class_states.sort_by { |name, _| name.to_s }.map { |name, ivars| "#{name}{#{ivars_key(ivars).join(", ")}}" }
       end
 
       # Where a key goes on to name the receiver's contents. No sidecar holds
@@ -277,7 +324,7 @@ module Steep
       end
 
       def stateful?
-        !self_ivars.empty?
+        !self_ivars.empty? || !class_states.empty?
       end
 
       def literal?
@@ -370,13 +417,13 @@ module Steep
 
       def ==(other)
         other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords &&
-          other.self_type == self_type && other.self_ivars == self_ivars
+          other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states
       end
 
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash ^ self_type.hash ^ self_ivars.hash
+        positionals.hash ^ keywords.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash
       end
 
       private

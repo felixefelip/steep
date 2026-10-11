@@ -20,6 +20,9 @@ module Steep
       # since the method only runs if the guard didn't halt). Applied at reads of
       # these self-methods / `Const.attr` paths, with no gate.
       attr_reader :unconditional_method_returns, :unconditional_const_returns
+      # `{ class name => { ivar => type } }`: the ivars of a class object whose
+      # state a class body left known (`ObjectStates::ClassStates`).
+      attr_reader :class_states
 
       def to_s
         array = [] #: Array[String]
@@ -52,7 +55,7 @@ module Steep
         "{ #{array.join(", ")} }"
       end
 
-      def initialize(constant_env, local_variable_types: {}, instance_variable_types: {}, declared_instance_variable_types: nil, global_types: {}, constant_types: {}, pure_method_calls: {}, refined_self_type: nil, conditional_method_returns: {}, conditional_const_returns: {}, unconditional_method_returns: {}, unconditional_const_returns: {})
+      def initialize(constant_env, local_variable_types: {}, instance_variable_types: {}, declared_instance_variable_types: nil, global_types: {}, constant_types: {}, pure_method_calls: {}, refined_self_type: nil, conditional_method_returns: {}, conditional_const_returns: {}, unconditional_method_returns: {}, unconditional_const_returns: {}, class_states: {})
         @constant_env = constant_env
         @local_variable_types = local_variable_types
         @instance_variable_types = instance_variable_types
@@ -65,11 +68,12 @@ module Steep
         @conditional_const_returns = conditional_const_returns
         @unconditional_method_returns = unconditional_method_returns
         @unconditional_const_returns = unconditional_const_returns
+        @class_states = class_states
 
         @pure_node_descendants = {}
       end
 
-      def update(local_variable_types: self.local_variable_types, instance_variable_types: self.instance_variable_types, global_types: self.global_types, constant_types: self.constant_types, pure_method_calls: self.pure_method_calls, refined_self_type: self.refined_self_type, conditional_method_returns: self.conditional_method_returns, conditional_const_returns: self.conditional_const_returns, unconditional_method_returns: self.unconditional_method_returns, unconditional_const_returns: self.unconditional_const_returns)
+      def update(local_variable_types: self.local_variable_types, instance_variable_types: self.instance_variable_types, global_types: self.global_types, constant_types: self.constant_types, pure_method_calls: self.pure_method_calls, refined_self_type: self.refined_self_type, conditional_method_returns: self.conditional_method_returns, conditional_const_returns: self.conditional_const_returns, unconditional_method_returns: self.unconditional_method_returns, unconditional_const_returns: self.unconditional_const_returns, class_states: self.class_states)
         TypeEnv.new(
           constant_env,
           local_variable_types: local_variable_types,
@@ -82,11 +86,12 @@ module Steep
           conditional_method_returns: conditional_method_returns,
           conditional_const_returns: conditional_const_returns,
           unconditional_method_returns: unconditional_method_returns,
-          unconditional_const_returns: unconditional_const_returns
+          unconditional_const_returns: unconditional_const_returns,
+          class_states: class_states
         )
       end
 
-      def merge(local_variable_types: {}, instance_variable_types: {}, global_types: {}, constant_types: {}, pure_method_calls: {}, refined_self_type: self.refined_self_type, conditional_method_returns: self.conditional_method_returns, conditional_const_returns: self.conditional_const_returns, unconditional_method_returns: self.unconditional_method_returns, unconditional_const_returns: self.unconditional_const_returns)
+      def merge(local_variable_types: {}, instance_variable_types: {}, global_types: {}, constant_types: {}, pure_method_calls: {}, refined_self_type: self.refined_self_type, conditional_method_returns: self.conditional_method_returns, conditional_const_returns: self.conditional_const_returns, unconditional_method_returns: self.unconditional_method_returns, unconditional_const_returns: self.unconditional_const_returns, class_states: self.class_states)
         local_variable_types = self.local_variable_types.merge(local_variable_types)
         instance_variable_types = self.instance_variable_types.merge(instance_variable_types)
         global_types = self.global_types.merge(global_types)
@@ -105,7 +110,8 @@ module Steep
           conditional_method_returns: conditional_method_returns,
           conditional_const_returns: conditional_const_returns,
           unconditional_method_returns: unconditional_method_returns,
-          unconditional_const_returns: unconditional_const_returns
+          unconditional_const_returns: unconditional_const_returns,
+          class_states: class_states
         )
       end
 
@@ -129,7 +135,8 @@ module Steep
           declared_instance_variable_types: new_declared,
           global_types: global_types,
           constant_types: constant_types,
-          pure_method_calls: pure_method_calls
+          pure_method_calls: pure_method_calls,
+          class_states: class_states
         )
       end
 
@@ -362,6 +369,7 @@ module Steep
         end
 
         result = assign_local_variables(assignments).merge(pure_method_calls: pure_call_updates)
+        result = result.update(class_states: class_states.select { |name, ivars| envs.all? { |env| env.class_states[name] == ivars } })
         result = result.refine_types(instance_variable_types: ivar_updates) unless ivar_updates.empty?
         result
       end

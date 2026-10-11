@@ -66,8 +66,9 @@ module Steep
       # - `handed`: the ivars whose object it lets out, naming one other than as
       #   the receiver of a call, the target of an assignment or the value it
       #   returns as a reader (`returns`).
+      # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
-        :bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, :empties, :handed,
+        :bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, :empties, :handed, :consts,
         keyword_init: true
       )
 
@@ -259,7 +260,7 @@ module Steep
       def attr_reader_body(name)
         Body.new(
           bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, returns: :"@#{name}",
-          empties: Set[], handed: Set[]
+          empties: Set[], handed: Set[], consts: Set[]
         )
       end
 
@@ -267,15 +268,17 @@ module Steep
         ivar = :"@#{name}"
         Body.new(
           bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, returns: nil,
-          empties: Set[], handed: Set[]
+          empties: Set[], handed: Set[], consts: Set[]
         )
       end
 
       def method_body(args_node, body, nesting: nil)
         writes = Set[] #: Set[Symbol]
         self_sends = Set[] #: Set[Symbol]
+        consts = Set[] #: Set[String]
         each_node(body) do |node|
           writes << node.children[0] if node.type == :ivasgn
+          consts.merge(referenced_names(node, nesting || [])) if node.type == :const
           self_sends << node.children[1] if %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
         end
         Body.new(
@@ -287,7 +290,8 @@ module Steep
           self_sends: self_sends,
           exposes_self: exposes_self?(body),
           returns: single_ivar_reader(body),
-          memo: nesting && memo_of(body, nesting)
+          memo: nesting && memo_of(body, nesting),
+          consts: consts
         )
       end
 
@@ -419,6 +423,13 @@ module Steep
         scope = const_node.children[0]
         return [name] if scope&.type == :cbase || nesting.empty?
         return [[*nesting, name].join("::")] unless scope
+
+        nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+      end
+
+      def referenced_names(const_node, nesting)
+        name = const_to_name(const_node) or return []
+        return [name] if const_node.children[0]&.type == :cbase
 
         nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
       end

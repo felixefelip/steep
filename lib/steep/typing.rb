@@ -197,6 +197,9 @@ module Steep
     # The ivars of that `self` whose object's state the env knew at the call
     # (`ObjectStates.self_ivars`), only where there were any.
     attr_reader :call_self_ivars
+    # The states of class objects the env knew at the call that the callee may
+    # read (`ObjectStates::ClassStates.of_call`), only where there were any.
+    attr_reader :call_class_states
     attr_reader :exit_ivars
     # What one `each` pushes on each pass: `{ block node => [{ value node =>
     # type }, …] }`, one hash per element of the collection, or nil for a loop
@@ -247,6 +250,7 @@ module Steep
       (@method_calls = {}).compare_by_identity
       (@call_self_types = {}).compare_by_identity
       (@call_self_ivars = {}).compare_by_identity
+      (@call_class_states = {}).compare_by_identity
       (@exit_ivars = {}).compare_by_identity
       (@iterations = {}).compare_by_identity
       (@arms = {}).compare_by_identity
@@ -299,16 +303,21 @@ module Steep
       type
     end
 
-    def add_call(node, call, self_type:, self_ivars:)
+    def add_call(node, call, self_type:, self_ivars:, class_states:)
       method_calls[node] = call
       call_self_types[node] = self_type
       call_self_ivars[node] = self_ivars unless self_ivars.empty?
+      call_class_states[node] = class_states unless class_states.empty?
 
       call
     end
 
     def self_ivars_of_call(node:)
       call_self_ivars.fetch(node) { parent&.self_ivars_of_call(node: node) || {} }
+    end
+
+    def class_states_of_call(node:)
+      call_class_states.fetch(node) { parent&.class_states_of_call(node: node) || {} }
     end
 
     # The ivars a body checked under its receiver's contents
@@ -481,6 +490,7 @@ module Steep
       parent.method_calls.merge!(method_calls)
       parent.call_self_types.merge!(call_self_types)
       parent.call_self_ivars.merge!(call_self_ivars)
+      parent.call_class_states.merge!(call_class_states)
       parent.exit_ivars.merge!(exit_ivars)
       parent.iterations.merge!(iterations)
       parent.arms.merge!(arms)
