@@ -20,9 +20,9 @@ class ClassStateAcrossBodiesTest < Minitest::Test
     project
   end
 
-  def chunks(ruby, kind: "class")
+  def chunks(ruby, kind: "class", signatures: rbs(kind))
     in_tmpdir do
-      write("sig/app.rbs", rbs(kind))
+      write("sig/app.rbs", signatures)
       write("app/app.rb", ruby)
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
@@ -132,5 +132,65 @@ class ClassStateAcrossBodiesTest < Minitest::Test
   def test_a_method_is_checked_under_its_call_site_not_its_definition
     ruby = RULES + model(body: "") + inflector + "Model.has_many_like(:posts)\n"
     assert_equal ["def post_ids; []; end"], chunks(ruby)
+  end
+
+  CONFIG_RBS = <<~RBS
+    class Config
+      attr_reader name: Symbol
+      def initialize: (Symbol) -> void
+    end
+
+    class Inflector
+      self.@config: Config?
+      def self.reset!: () -> Config
+      def self.suffix: () -> Symbol
+    end
+
+    class Model
+      def self.has_many_like: (Symbol name) -> untyped
+    end
+  RBS
+
+  def config_inflector(after: "")
+    <<~RUBY
+      class Config
+        attr_reader :name
+
+        def initialize(name)
+          @name = name
+        end
+      end
+
+      class Inflector
+        @config = Config.new(:post)
+
+        def self.reset! = (@config = Config.new(:article))
+        def self.suffix = @config.name
+
+        #{after}
+      end
+    RUBY
+  end
+
+  def config_model(body: "")
+    <<~RUBY
+      class Model
+        def self.has_many_like(name)
+          class_eval "def \#{Inflector.suffix}_ids; []; end"
+        end
+
+        #{body}
+      end
+    RUBY
+  end
+
+  def test_a_class_ivar_a_class_method_rewrites_in_a_later_body_does_not_fold
+    ruby = config_inflector + config_model(body: "Inflector.reset!\n  has_many_like :posts")
+    assert_equal [nil], chunks(ruby, signatures: CONFIG_RBS)
+  end
+
+  def test_a_class_ivar_a_class_method_rewrites_in_its_own_body_does_not_fold
+    ruby = config_model + config_inflector(after: "reset!\n  Model.has_many_like(:posts)")
+    assert_equal [nil], chunks(ruby, signatures: CONFIG_RBS)
   end
 end

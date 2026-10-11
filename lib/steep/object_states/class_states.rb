@@ -45,7 +45,7 @@ module Steep
         def of_call(constr, call)
           known = constr.context.type_env.class_states
           singleton = constr.self_type
-          if singleton.is_a?(AST::Types::Name::Singleton) && !(own = ObjectStates.self_ivars(constr)).empty?
+          if singleton.is_a?(AST::Types::Name::Singleton) && !(own = held(constr, singleton)).empty?
             known = known.merge(singleton.name => own)
           end
           return known if known.empty?
@@ -67,14 +67,11 @@ module Steep
 
         private
 
-        # `self`'s ivars a body leaves known: a memo's object as it stands, any
-        # other only with what holds under any name.
+        # `self`'s ivars a body leaves known: its memos' objects, the only ones
+        # no class method may rewrite.
         def held(constr, singleton)
           memos = memo_ivars(constr, singleton.name)
-          ObjectStates.self_ivars(constr).filter_map do |ivar, type|
-            value = memos.include?(ivar) ? type : ObjectStates.settled(constr, type)
-            [ivar, value] if ObjectStates.state_in(value)
-          end.to_h
+          ObjectStates.self_ivars(constr).select { |ivar, _| memos.include?(ivar) }
         end
 
         def memo_ivars(constr, name)
