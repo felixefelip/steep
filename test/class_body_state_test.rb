@@ -136,4 +136,12 @@ class ClassBodyStateTest < Minitest::Test
 
     assert_equal [["def posts; end"]], chunks(rbs, source(article: "settings.name = :posts\ndefine_named") + others).values
   end
+
+  def test_a_string_only_where_its_source_freezes_it
+    rbs = RBS.sub("attr_accessor name: Symbol", "attr_accessor name: String")
+    ruby = source(article: "settings.name = \"posts\"\ndefine_named")
+
+    assert_equal [["def posts; end"]], chunks(rbs, "# frozen_string_literal: true\n#{ruby}").values
+    assert_equal [[nil]], chunks(rbs, ruby).values
+  end
 end

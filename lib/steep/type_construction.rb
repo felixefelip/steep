@@ -419,7 +419,7 @@ module Steep
           hash[ANONYMOUS_BLOCK_PASSABLE_LVAR] = param.var_type
         end
       end
-      type_env = context.type_env.assign_local_variables(local_variable_types)
+      type_env = ObjectStates.entered_method(context.type_env).assign_local_variables(local_variable_types)
 
       type_env = TypeInference::TypeEnvBuilder.new(
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots).merge!.on_duplicate! do |name, original, annotated|
@@ -2343,7 +2343,7 @@ module Steep
               constructor.typing.cursor_context.set_node_context(node, constructor.context)
               constructor.typing.cursor_context.set_body_context(node, constructor.context)
 
-              constructor.synthesize(node.children[2]) if node.children[2]
+              ObjectStates.entered_class(constructor).synthesize(node.children[2]) if node.children[2]
 
               if constructor.module_context&.implement_name && !namespace_module?(node)
                 constructor.validate_method_definitions(node, constructor.module_context.implement_name || raise)

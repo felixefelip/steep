@@ -21,6 +21,7 @@ module Steep
         @methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
         @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
         @nodes = [] #: Array[::Parser::AST::Node]
+        @class_bodies = Hash.new(0) #: Hash[String, Integer]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
       end
 
@@ -81,6 +82,27 @@ module Steep
         bodies.first if bodies.size == 1
       end
 
+      # How many `class`/`module` bodies the project writes for `class_name`.
+      def class_bodies(class_name)
+        @class_bodies[class_name.to_s.delete_prefix("::")]
+      end
+
+      # Every body the project may define for `class_name#method_name`s,
+      # nil for one this cannot read.
+      def method_bodies(class_name)
+        methods_of(class_name)
+      end
+
+      # Whether any class of the project defines one of `names`.
+      def defines_any?(names)
+        @defined_names ||= @methods.each_value.flat_map(&:keys).to_set
+        names.any? { |name| @defined_names.include?(name) }
+      end
+
+      def singleton_method_bodies(class_name)
+        @singleton_methods[class_name.to_s.delete_prefix("::")] || {}
+      end
+
       # `body_of` for a method of the class object itself.
       def singleton_body_of(class_name, method_name)
         bodies = (@singleton_methods[class_name.to_s.delete_prefix("::")] || {})[method_name.to_sym] or return nil
@@ -120,6 +142,7 @@ module Steep
         scan.initializers.each do |class_name, initializers|
           (@initializers[class_name] ||= []).concat(initializers)
         end
+        scan.class_bodies.each { |class_name, count| @class_bodies[class_name] += count }
         merge_bodies(@methods, scan.methods)
         merge_bodies(@singleton_methods, scan.singleton_methods)
         @nodes << node
@@ -146,10 +169,20 @@ module Steep
             bodies.each { |body| names << name << body.memo[0] if body&.memo }
           end
         end
+        @methods.each_value { |methods| names.merge(accumulated_names(methods)) }
         @uses = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (@uses[name] ||= []).concat(uses) }
         end
+      end
+
+      # The ivars a class's methods push onto, and the readers that hand them
+      # out.
+      def accumulated_names(methods)
+        bodies = methods.values.flatten.compact
+        ivars = bodies.flat_map { |body| body.appends.keys }.to_set
+        readers = methods.select { |_, found| found.any? { |body| body && ivars.include?(body.returns) } }.keys
+        ivars | readers
       end
 
       def methods_of(class_name)
