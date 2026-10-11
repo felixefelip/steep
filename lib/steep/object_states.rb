@@ -63,7 +63,7 @@ module Steep
       # The ivars of `self` whose object the env knows the state of, for a body
       # this one calls on `self` to start from.
       def self_ivars(constr)
-        constr.context.type_env.instance_variable_types.select { |_, type| state_in(type) }
+        ClassStates.carried(constr, constr.context.type_env.instance_variable_types.select { |_, type| state_in(type) })
       end
 
       # A `.new` call whose `initialize` binds an ivar from one of the values
@@ -107,6 +107,7 @@ module Steep
         end
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver && on_self?(receiver)
         constr = self_moved(constr, node) if receiver.nil? || receiver.type == :self
+        constr = ClassStates.after_call(constr)
         handed_on(constr, arguments)
       end
 

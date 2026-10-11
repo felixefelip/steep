@@ -151,7 +151,7 @@ class ClassStateAcrossBodiesTest < Minitest::Test
     end
   RBS
 
-  def config_inflector(after: "")
+  def config_inflector(after: "", writer: "def self.reset! = (@config = Config.new(:article))")
     <<~RUBY
       class Config
         attr_reader :name
@@ -164,7 +164,7 @@ class ClassStateAcrossBodiesTest < Minitest::Test
       class Inflector
         @config = Config.new(:post)
 
-        def self.reset! = (@config = Config.new(:article))
+        #{writer}
         def self.suffix = @config.name
 
         #{after}
@@ -192,5 +192,29 @@ class ClassStateAcrossBodiesTest < Minitest::Test
   def test_a_class_ivar_a_class_method_rewrites_in_its_own_body_does_not_fold
     ruby = config_model + config_inflector(after: "reset!\n  Model.has_many_like(:posts)")
     assert_equal [nil], chunks(ruby, signatures: CONFIG_RBS)
+  end
+
+  SAME_BODY_MACRO = 'def self.has_many_like(name) = class_eval "def #{suffix}_ids; []; end"'
+
+  def test_a_class_ivar_a_class_method_rewrites_in_the_same_body_does_not_fold
+    ruby = config_inflector(after: "#{SAME_BODY_MACRO}\n  reset!\n  has_many_like :posts")
+    assert_equal [nil], chunks(ruby, signatures: CONFIG_RBS.sub("def self.suffix", "def self.has_many_like: (Symbol name) -> untyped\n  def self.suffix"))
+  end
+
+  def test_a_class_ivar_read_directly_after_a_call_that_may_rewrite_it_does_not_fold
+    stamp = 'def self.stamp(name) = class_eval "def #{name}_ids; []; end"'
+    ruby = config_inflector(after: "#{stamp}\n  reset!\n  stamp(@config.name)")
+    assert_equal [nil], chunks(ruby, signatures: CONFIG_RBS.sub("def self.suffix", "def self.stamp: (Symbol name) -> untyped\n  def self.suffix"))
+  end
+
+  def test_a_class_ivar_no_method_rewrites_folds_in_the_same_body
+    ruby = config_inflector(writer: "", after: "#{SAME_BODY_MACRO}\n  has_many_like :posts")
+    signatures = CONFIG_RBS.sub("def self.reset!: () -> Config", "def self.has_many_like: (Symbol name) -> untyped")
+    assert_equal ["def post_ids; []; end"], chunks(ruby, signatures: signatures)
+  end
+
+  def test_a_class_ivar_no_method_rewrites_folds_in_a_later_body
+    ruby = config_inflector(writer: "") + config_model(body: "has_many_like :posts")
+    assert_equal ["def post_ids; []; end"], chunks(ruby, signatures: CONFIG_RBS.sub("def self.reset!: () -> Config\n", ""))
   end
 end
