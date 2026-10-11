@@ -12,10 +12,11 @@ module Steep
     #     has_many_like :posts           # checked under that state
     #   end
     #
-    # Only the memos `ClassMemos` follows keep their state past the body:
-    # nothing but a statement of that body may change what they hold. A method
-    # runs whenever it is called, so it is entered with the states its call
-    # site knew (`of_call`), not the ones around its definition.
+    # A class ivar keeps its state only while no method of the class may
+    # rewrite it (`rewritable?`); a memo `ClassMemos` follows already knows its
+    # one writer. A method runs whenever it is called, so it is entered with
+    # the states its call site knew (`of_call`), not the ones around its
+    # definition.
     module ClassStates
       class << self
         # A `class`/`module` body entered from `outer`, knowing what `outer`
@@ -65,13 +66,56 @@ module Steep
           env.refine_types(instance_variable_types: arguments.self_ivars).update(class_states: arguments.class_states)
         end
 
+        # The ivars of a class object whose state a call may carry: none a
+        # method of the class may rewrite.
+        def carried(constr, ivars)
+          singleton = constr.self_type
+          return ivars unless singleton.is_a?(AST::Types::Name::Singleton) && !ivars.empty?
+
+          ivars.reject { |ivar, _| rewritable?(constr, singleton.name, ivar) }
+        end
+
+        # A call made in a class body may reach a method that rewrites one of
+        # the class's ivars, by whatever path: those it held are known no
+        # longer.
+        def after_call(constr)
+          singleton = constr.self_type
+          return constr unless singleton.is_a?(AST::Types::Name::Singleton) && !constr.method_context
+
+          env = constr.context.type_env
+          stale = env.instance_variable_types.keys.select do |ivar|
+            ObjectStates.state_in(env[ivar]) && rewritable?(constr, singleton.name, ivar)
+          end
+          return constr if stale.empty?
+
+          constr.update_type_env do |current|
+            current.refine_types(instance_variable_types: stale.to_h { |ivar| [ivar, ObjectStates.declared_ivar(constr, ivar)] })
+          end
+        end
+
         private
 
-        # `self`'s ivars a body leaves known: its memos' objects, the only ones
-        # no class method may rewrite.
+        # `self`'s ivars a body leaves known: its memos' objects as they stand,
+        # any other with what holds under any name.
         def held(constr, singleton)
           memos = memo_ivars(constr, singleton.name)
-          ObjectStates.self_ivars(constr).select { |ivar, _| memos.include?(ivar) }
+          ObjectStates.self_ivars(constr).filter_map do |ivar, type|
+            value = memos.include?(ivar) ? type : ObjectStates.settled(constr, type)
+            [ivar, value] if ObjectStates.state_in(value)
+          end.to_h
+        end
+
+        def rewritable?(constr, name, ivar)
+          return false if memo_ivars(constr, name).include?(ivar)
+
+          postconditions = constr.postconditions
+          return true if postconditions.empty?
+
+          constr.checker.factory.definition_builder.build_singleton(name).ancestors.ancestors.any? do |ancestor|
+            postconditions.may_write?(ancestor.name.to_s, ivar)
+          end
+        rescue RBS::BaseError
+          true
         end
 
         def memo_ivars(constr, name)
