@@ -66,9 +66,6 @@ module Steep
         # out on its own. `kind` is `"module"` for a target declared as one.
         Chunk = Struct.new(:source, :target, :kind, keyword_init: true)
 
-        # What one walk of a body reads as writing code: the receivers it may
-        # write on, the methods a call hands its self to by position, the
-        # methods a call on self reaches, and the body's own parameters.
         Walk = Struct.new(:receivers, :parameter_writers, :self_writers, :typing, :parameters, keyword_init: true)
 
         # Whether the method writes code, directly or by handing its own self
@@ -316,9 +313,7 @@ module Steep
           end
         end
 
-        # The writer a call on this method's own self reaches, keyed as
-        # `Specializations.method_key` keys it: the one the checker resolved, or
-        # for the gate that has no typing, any writer of that name.
+        # Without a typing, any writer of that name.
         def self_write(node, walk)
           return nil if walk.self_writers.empty? || node.type != :send
           return nil unless node.children[0].nil? || node.children[0].type == :self
@@ -441,10 +436,8 @@ module Steep
           type.name.to_s
         end
 
-        # `module Name` for `const_set(:Name, Module.new)`, and `class Name` for a
-        # `Class.new` with no superclass or one named exactly. A value built
-        # anywhere else is an existing module given a second name, which no
-        # declaration says.
+        # A value not built here is an existing module given a second name,
+        # which no declaration says.
         def constant_source(typing, node)
           name_node, value = node.children.drop(2)
           name = literal_symbol(typing, name_node) or return nil
@@ -470,7 +463,6 @@ module Steep
           " < #{type.name}" if type.is_a?(AST::Types::Name::Singleton)
         end
 
-        # `include ::A, ::B` where every argument names its module exactly.
         def include_source(typing, node)
           names = node.children.drop(2).map do |argument|
             return nil unless typing.has_type?(argument)

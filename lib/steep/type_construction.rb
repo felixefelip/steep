@@ -5856,7 +5856,7 @@ module Steep
       arguments = Specializations::Arguments.at_call(
         node, typing, call, self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call), exact_self: Specializations.exact_self(self)
       ) or return call
-      type = specializations.return_type(key, arguments.key, factory: checker.factory) or return call
+      type = specializations.call_return_type(key, arguments, factory: checker.factory) or return call
 
       call.with_return_type(type)
     end

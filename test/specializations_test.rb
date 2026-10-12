@@ -99,6 +99,29 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_records_an_inherited_class_method_called_on_a_subclass
+    in_tmpdir do
+      write("sig/base.rbs", "class Base\n  def self.label: (Symbol name) -> Symbol\nend\nclass Widget < Base\nend\n")
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.label(name)
+            name
+          end
+        end
+
+        class Widget < Base
+          label(:size)
+        end
+
+        Widget.label(:weight)
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(:size)" => ":size", "(:weight)" => ":weight" }, methods.fetch("Base.label"))
+    end
+  end
+
   def test_runner_records_nothing_for_a_call_that_fixes_no_literal
     in_tmpdir do
       write("sig/foo.rbs", FIXTURE_RBS)

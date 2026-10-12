@@ -20,7 +20,7 @@ module Steep
         each_call_site(typing) do |key, arguments, _node|
           # A tuple fixing no value specializes nothing: the body would be
           # re-checked under the declaration it already has.
-          (result[key] ||= Set.new) << arguments if arguments.literal?
+          (result[key] ||= Set.new).merge(arguments.tuples)
         end
 
         result

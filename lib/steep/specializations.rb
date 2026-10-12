@@ -31,10 +31,8 @@ module Steep
         Store.empty
       end
 
-      # The one class object `self` is where `constr` checks, or nil where it
-      # may be any of several: a class body runs on its class, and a specialized
-      # body on the class of the call site it is checked for. Anywhere else a
-      # class method runs on whichever subclass calls it.
+      # nil where `self` may be any subclass: in a class method checked under
+      # its declaration rather than for one call site.
       def exact_self(constr)
         type = constr.self_type
         return nil unless type.is_a?(AST::Types::Name::Singleton)
@@ -122,10 +120,6 @@ module Steep
         new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states, self_type: self_type)
       end
 
-      # The class object a singleton method a superclass defines runs on at this
-      # call, where the call says which one exactly. Ruby hands the body that
-      # class as `self`, and what it answers can depend on it:
-      #
       #   class Base
       #     def self.generated_methods = const_set(:GeneratedMethods, Module.new)
       #   end
@@ -282,6 +276,15 @@ module Steep
       # (`ObjectStates::ClassStates`): part of `key` for the same reason.
       attr_reader :class_states
 
+      # The one every class shares is the one a declaration can hold.
+      def tuples
+        [self, (without_self if self_type)].compact.select(&:literal?)
+      end
+
+      def without_self
+        with_self(nil)
+      end
+
       def with_self(self_type)
         Arguments.new(
           positionals: @positionals,
@@ -342,7 +345,6 @@ module Steep
         "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key].join(", ")}}"
       end
 
-      # The arguments alone, which is what grows when a body keeps folding.
       def arguments_key
         parts = positionals.map(&:to_s)
         parts.concat(keywords.keys.sort.map { |name| "#{name}: #{keywords[name]}" })
@@ -364,8 +366,6 @@ module Steep
 
       SELF_MARKER = " on "
 
-      # Whether a declaration can say what the key does: one naming the
-      # receiver's contents or its class cannot.
       def self.persistable_key?(key)
         !key.include?(STATE_MARKER) && !key.include?(SELF_MARKER)
       end
@@ -581,6 +581,11 @@ module Steep
 
       # The recorded return type for `method_key` called with `argument_key`, as a
       # Steep type, or nil when nothing was recorded or the entry no longer parses.
+      def call_return_type(method_key, arguments, factory:)
+        return_type(method_key, arguments.key, factory: factory) ||
+          (arguments.self_type && return_type(method_key, arguments.without_self.key, factory: factory))
+      end
+
       def return_type(method_key, argument_key, factory:)
         typed = @typed.dig(method_key, argument_key) and return typed
         raw = @methods.dig(method_key, argument_key) or return nil

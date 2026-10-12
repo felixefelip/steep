@@ -319,7 +319,7 @@ module Steep
       call_self_ivars.fetch(node) { parent&.self_ivars_of_call(node: node) || {} }
     end
 
-    # The one class object `self` was at the call (`TypeConstruction#exact_self_type`).
+    # `Specializations.exact_self` at the call.
     def exact_self_of_call(node:)
       call_exact_selves.fetch(node) { parent&.exact_self_of_call(node: node) }
     end

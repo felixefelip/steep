@@ -467,16 +467,10 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
-  # The macro writes into a module `generated_methods` builds on the class it
-  # runs on and includes there (felixefelip/steep#208). Before the signatures
-  # declare that module, what the call writes is the module itself, and the
-  # include of a value nothing names yet is a hole.
   def test_a_module_a_method_on_self_builds_is_declared_first
     assert_equal [["module GeneratedMethods\nend", nil, nil], nil], generated_module_chunks(GENERATED_MODULE_RBS)
   end
 
-  # Once it is declared, `generated_methods` called on `Widget` answers
-  # `Widget::GeneratedMethods`, and the eval lands there.
   def test_an_eval_on_a_module_a_method_on_self_builds_lands_in_it
     signatures = GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n"
 
@@ -488,6 +482,46 @@ class StringEvalsTest < Minitest::Test
       ],
       generated_module_chunks(signatures)
     )
+  end
+
+  def test_a_module_and_an_include_written_on_a_parameter_land_on_the_class_that_handed_itself
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner) -> void
+        end
+
+        module Mixin
+        end
+
+        class Base
+          def self.setup: () -> void
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner)
+            owner.const_set(:Helpers, Module.new)
+            owner.include(Mixin)
+          end
+        end
+
+        class Base
+          def self.setup
+            Writer.generate(self)
+          end
+        end
+
+        class Article < Base
+          setup
+        end
+      RUBY
+
+      assert_equal({ "app/base.rb:15:2" => ["module Helpers\nend", "include ::Mixin"] }, evals_of(setup_project))
+    end
   end
 
   # A local holding the constant is the same question with an assignment in

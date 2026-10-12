@@ -251,65 +251,32 @@ module Steep
             # Code is written here and this call site does not decide what: a
             # hole, the same answer an eval it cannot fold gets.
             next [nil] unless effect.certain
-            next delegated_sources(context, store, typing, effect, definitions) if effect.kind == :delegated
             next [] if reading.include?(effect.callee)
 
-            self_sources(context, store, typing, effect, definitions, parameter_writers, writers, reading)
+            frame_sources(context, store, typing, effect, definitions, parameter_writers, writers, reading)
           else
             [Evals.chunk_of(typing, effect, context.subtyping.factory.env)]
           end
         end
       end
 
-      # What a method called on this body's own self writes, read under the
-      # arguments this call passes and on the same class: `generated_methods`
-      # called from a macro running in `Widget` runs in `Widget` too.
-      def self_sources(context, store, typing, effect, definitions, parameter_writers, writers, reading)
+      # Handed as an argument (`Writer.generate(self, name)`), the callee is read
+      # on the ONE parameter that got it: a helper writing on two parameters
+      # writes for two objects, and only one of them is this class.
+      def frame_sources(context, store, typing, effect, definitions, parameter_writers, writers, reading)
         entry = definitions[effect.callee] or return [nil]
         path, callee_node = entry
         arguments = Specializations::Arguments.recorded(effect.node, typing) or return [nil]
-        frame_self = typing.exact_self_of_call(node: effect.node) || typing.self_type_of_call(node: effect.node)
-        positionals, keywords = Collector.defaults(callee_node)
-        arguments = arguments.with_self(frame_self).with_defaults(positionals: positionals, keywords: keywords)
-
-        inner = check_definitions(context, store, { effect.callee => arguments }, definitions)[path] or return [nil]
-        eval_sources(context, store, inner, callee_node, definitions, parameter_writers, writers, reading | [effect.callee])
-      end
-
-      # What the method this one hands its own `self` to writes there, read under
-      # the arguments THIS call passes it.
-      #
-      #   def has_rich_text(name)
-      #     Writer.generate(self, name)      # ← the call read here
-      #   end
-      #
-      # The frame in between is what the answer belongs to: `generate` evals on
-      # an object it was handed, so its own call site — one line inside a gem —
-      # is the wrong place to attribute anything to, while `has_rich_text`'s call
-      # sites are written in the classes that actually get the methods.
-      #
-      # The inner body is read with ONE receiver allowed: the parameter this call
-      # was seen to hand its self to. A helper evaling on two parameters writes
-      # for two different objects, and only one of them is the class being
-      # attributed to.
-      #
-      # One frame, deliberately. Two would need the argument threaded through a
-      # chain, and nothing yet asks for it.
-      def delegated_sources(context, store, typing, effect, definitions)
-        entry = definitions[effect.callee] or return [nil]
-        path, callee_node = entry
-        arguments = Specializations::Arguments.recorded(effect.node, typing) or return [nil]
-        frame_self = typing.self_type_of_call(node: effect.node) or return [nil]
-        arguments = arguments.resolve_self(frame_self)
-        receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]
-
+        frame_self = typing.exact_self_of_call(node: effect.node) || typing.self_type_of_call(node: effect.node) or return [nil]
+        arguments = effect.kind == :on_self ? arguments.with_self(frame_self) : arguments.resolve_self(frame_self)
         positionals, keywords = Collector.defaults(callee_node)
         arguments = arguments.with_defaults(positionals: positionals, keywords: keywords)
 
-        inner = check_definitions(context, store, { effect.callee => arguments }, definitions)
-        inner_typing = inner[path] or return [nil]
+        inner = check_definitions(context, store, { effect.callee => arguments }, definitions)[path] or return [nil]
+        return eval_sources(context, store, inner, callee_node, definitions, parameter_writers, writers, reading | [effect.callee]) if effect.kind == :on_self
 
-        Evals.sources(inner_typing, callee_node, context.subtyping.factory.env, [receiver])
+        receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]
+        Evals.sources(inner, callee_node, context.subtyping.factory.env, [receiver])
       end
 
       # The methods that eval on a PARAMETER, by the position it sits in. Not
@@ -422,7 +389,7 @@ module Steep
           Collector.each_call_site(typing) do |key, arguments, node|
             next unless definitions.key?(key)
 
-            (tuples[key] ||= Set.new) << arguments if arguments.literal?
+            (tuples[key] ||= Set.new).merge(arguments.tuples)
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
         end
@@ -567,7 +534,7 @@ module Steep
           end
 
           Collector.each_call_site(typing) do |key, arguments, node|
-            (tuples[key] ||= Set.new) << arguments if arguments.literal?
+            (tuples[key] ||= Set.new).merge(arguments.tuples)
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
 

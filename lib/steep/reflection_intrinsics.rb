@@ -262,8 +262,6 @@ module Steep
         name if factory.env.class_decls[name].is_a?(RBS::Environment::ClassEntry)
       end
 
-      # Whether `constant` is declared as the kind of module `value` is: a
-      # `::Module` as a module, a `::Class` as a class.
       def declared_as?(constant, value, factory)
         return false unless value.is_a?(AST::Types::Name::Instance)
 
@@ -549,9 +547,6 @@ module Steep
       AST::Types::Literal.new(value: receiver.name.to_s.delete_prefix("::"))
     end
 
-    # `C.const_set(:N, value)` makes `C::N` the value it is handed, so a module
-    # or class the signatures declare as `C::N` is what that value is from
-    # here on, whether it was built by this call or not.
     CONST_SET = lambda do |receiver, argument_types, factory, _override_registry|
       name, value = argument_types
       next nil unless argument_types.size == 2 && receiver.is_a?(AST::Types::Name::Singleton)
