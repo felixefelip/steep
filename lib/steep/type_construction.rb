@@ -1478,7 +1478,7 @@ module Steep
       Pair.new(type: type, constr: constr)
     end
 
-    def add_call(call)
+    def add_call(call, entered: self)
       case call
       when TypeInference::MethodCall::NoMethodError
         typing.add_error(call.error)
@@ -1489,7 +1489,7 @@ module Steep
       end
 
       typing.add_typing(call.node, call.return_type, nil)
-      typing.add_call(call.node, call, self_type: self_type, keyed_self: Specializations.keyed_self(self, call), self_ivars: ObjectStates.call_ivars(self, call), class_states: ObjectStates::ClassStates.of_call(self, call))
+      typing.add_call(call.node, call, self_type: self_type, keyed_self: Specializations.keyed_self(entered, call), self_ivars: ObjectStates.call_ivars(entered, call), class_states: ObjectStates::ClassStates.of_call(entered, call))
 
       Pair.new(type: call.return_type, constr: self)
     end
@@ -4325,6 +4325,7 @@ module Steep
         )
 
         if call && constr
+          entered = constr
           case method_name.to_s
           when "[]="
             if test_send_node(node) {|_, _, _, loc| !loc.dot }
@@ -4335,9 +4336,7 @@ module Steep
             end
           when /\w=\Z/
             last_arg = arguments.last or raise
-            if typing.has_type?(last_arg)
-              call = call.with_return_type(typing.type_of(node: last_arg))
-            end
+            call = call.with_return_type(typing.type_of(node: last_arg)) if typing.has_type?(last_arg)
           end
 
           if call.is_a?(TypeInference::MethodCall::Typed)
@@ -4651,7 +4650,7 @@ module Steep
           end
         end
 
-        constr.add_call(call)
+        constr.add_call(call, entered: entered || constr)
       else
         skips = [] #: Array[Parser::AST::Node?]
         skips << receiver if receiver

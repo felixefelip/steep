@@ -482,6 +482,68 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_a_memo_a_module_extended_into_the_class_defines_is_followed_too
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Core
+          module ClassMethods
+            @generated_association_methods: Module?
+            def generated_association_methods: () -> Module
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+          def self.has_many: (Symbol name) -> untyped
+        end
+
+        class Post < Base
+        end
+
+        module Post::GeneratedAssociationMethods
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Core
+          module ClassMethods
+            def generated_association_methods
+              @generated_association_methods ||= begin
+                mod = const_set(:GeneratedAssociationMethods, Module.new)
+                include mod
+                mod
+              end
+            end
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+
+          def self.has_many(name)
+            generated_association_methods.class_eval "def \#{name}; 1; end"
+          end
+        end
+
+        class Post < Base
+          has_many :comments
+          has_many :tags
+        end
+      RUBY
+
+      chunks = chunks_of(setup_project).transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal(
+        [
+          ["module GeneratedAssociationMethods\nend", nil],
+          ["include ::Post::GeneratedAssociationMethods", nil],
+          ["def comments; 1; end", "::Post::GeneratedAssociationMethods"]
+        ],
+        chunks.fetch("app/base.rb:22:2")
+      )
+      assert_equal [["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:23:2")
+    end
+  end
+
   def test_an_eval_on_a_module_a_method_on_self_builds_lands_in_it
     signatures = GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n"
 

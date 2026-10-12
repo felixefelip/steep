@@ -99,29 +99,30 @@ module Steep
         # the project does not write (`const_set`, `name`).
         Reach = Struct.new(:ivars, :observes_self)
 
+        # Each method is the one the receiver's ancestry runs (`resolved_body`).
         def reach(constr, call)
           reach = Reach.new(Set[], false)
-          return reach unless call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.size == 1
+          return reach unless call.is_a?(TypeInference::MethodCall::Typed)
 
-          method_name = call.method_decls.first.method_name
-          singleton = method_name.is_a?(SingletonMethodName)
-          registry = constr.constructor_bindings
-          owner = method_name.type_name.to_s.delete_prefix("::")
-          body = singleton ? registry.singleton_body_of(owner, method_name.method_name) : registry.body_of(owner, method_name.method_name)
-          visit_reach(registry, owner, body, singleton, reach, Set[method_name.method_name]) if body
+          receiver = call.receiver_type
+          receiver = constr.self_type if receiver.is_a?(AST::Types::Self)
+          return reach unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
+
+          _, body = ObjectStates.resolved_body(constr, receiver, call.method_name)
+          visit_reach(constr, receiver, body, reach, Set[call.method_name]) if body
           reach
         end
 
         private
 
-        def visit_reach(registry, owner, body, singleton, reach, seen)
+        def visit_reach(constr, receiver, body, reach, seen)
           reach.ivars.merge(body.ivars || []).merge(body.writes).merge([body.returns].compact)
           reach.observes_self ||= body.exposes_self
           body.self_sends.each do |sent|
             next unless seen.add?(sent)
 
-            callee = singleton ? registry.singleton_body_of(owner, sent) : registry.body_of(owner, sent)
-            callee ? visit_reach(registry, owner, callee, singleton, reach, seen) : reach.observes_self = true
+            _, callee = ObjectStates.resolved_body(constr, receiver, sent)
+            callee ? visit_reach(constr, receiver, callee, reach, seen) : reach.observes_self = true
           end
         end
 
@@ -149,11 +150,7 @@ module Steep
         end
 
         def memo_ivars(constr, name)
-          registry = constr.constructor_bindings
-          ancestors = constr.checker.factory.definition_builder.build_singleton(name).ancestors.ancestors
-          ancestors.flat_map { |ancestor| registry.singleton_method_bodies(ancestor.name.to_s).values.flatten.filter_map { |body| body&.memo&.first } }.to_set
-        rescue RBS::BaseError
-          Set[]
+          ObjectStates.class_side_bodies(constr, AST::Types::Name::Singleton.new(name: name)).filter_map { |_, _, body| body&.memo&.first }.to_set
         end
 
         def named_classes(constr, call)
