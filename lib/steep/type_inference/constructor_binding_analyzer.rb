@@ -41,8 +41,11 @@ module Steep
       # `class_bodies` counts the bodies the source writes for each class or
       # module that run any code but a method definition, under every name the
       # constant may resolve to. One that only defines methods sets nothing on
-      # the class.
-      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, keyword_init: true)
+      # the class, nor does one declaring a module. One whose only code mixes in
+      # constants is in `mixin_bodies` instead, as the names they may resolve
+      # to: the mixed-in modules' hooks are the code it runs. `declared` is
+      # every class or module the source writes a body for.
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, :mixin_bodies, :declared, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
       #
@@ -62,13 +65,14 @@ module Steep
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
       #   it is written. Not a `returns`: while the ivar is unset it answers
       #   the new object, not what the ivar held.
+      # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
       # - `empties`: the ivars a statement of the body sets to `[]`;
       # - `handed`: the ivars whose object it lets out, naming one other than as
       #   the receiver of a call, the target of an assignment or the value it
       #   returns as a reader (`returns`).
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
-        :bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, :empties, :handed, :consts,
+        :bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, :memoizes, :empties, :handed, :consts,
         keyword_init: true
       )
 
@@ -86,12 +90,15 @@ module Steep
         @methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
         @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
         @class_bodies = Hash.new(0) #: Hash[String, Integer]
+        @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
+        @declared = Set[] #: Set[String]
       end
 
       def scan(node)
         walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
         Scan.new(
-          readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods, class_bodies: @class_bodies
+          readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods,
+          class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared
         )
       end
 
@@ -103,7 +110,7 @@ module Steep
           const_node, _super, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
-          defined_names(const_node, nesting).each { |defined| @class_bodies[defined] += 1 } if runs_code?(body)
+          record_body(defined_names(const_node, nesting), body, new_nesting)
           if body && name
             register_class(body, nesting: new_nesting)
             register_initializers(body, names: defined_names(const_node, nesting))
@@ -115,7 +122,7 @@ module Steep
           const_node, body = node.children
           name = const_to_name(const_node)
           new_nesting = name ? nesting + [name] : nesting
-          defined_names(const_node, nesting).each { |defined| @class_bodies[defined] += 1 } if runs_code?(body)
+          record_body(defined_names(const_node, nesting), body, new_nesting)
           # A module's `initialize` runs for the classes that include it.
           if body && name
             register_initializers(body, names: defined_names(const_node, nesting))
@@ -291,6 +298,7 @@ module Steep
           exposes_self: exposes_self?(body),
           returns: single_ivar_reader(body),
           memo: nesting && memo_of(body, nesting),
+          memoizes: memoized_ivar(body),
           consts: consts
         )
       end
@@ -453,10 +461,40 @@ module Steep
         handed
       end
 
-      def runs_code?(body)
-        stmts = [] #: Array[::Parser::AST::Node]
-        each_stmt(body) { |stmt| stmts << stmt }
-        stmts.any? { |stmt| !%i[def defs].include?(stmt.type) }
+      def record_body(names, body, nesting)
+        @declared.merge(names)
+        code = body_code(body, nesting) or return
+
+        names.each { |name| code == true ? @class_bodies[name] += 1 : (@mixin_bodies[name] ||= []) << code }
+      end
+
+      # `true` for a body that runs code but method and module definitions and
+      # mixing in constants, else the names those constants may resolve to, or
+      # nil. A class written with a superclass runs that superclass's
+      # `inherited`.
+      def body_code(body, nesting)
+        mixins = [] #: Array[String]
+        each_stmt(body) do |stmt|
+          next if %i[def defs module].include?(stmt.type) || (stmt.type == :class && stmt.children[1].nil?)
+
+          names = mixed_names(stmt, nesting) or return true
+          mixins.concat(names)
+        end
+        mixins.empty? ? nil : mixins
+      end
+
+      def mixed_names(stmt, nesting)
+        return unless stmt.type == :send && (stmt.children[0].nil? || stmt.children[0].type == :self)
+        return unless %i[include extend prepend].include?(stmt.children[1])
+
+        arguments = stmt.children.drop(2)
+        return if arguments.empty? || arguments.any? { |argument| argument.type != :const }
+
+        arguments.flat_map { |argument| referenced_names(argument, nesting) }
+      end
+
+      def memoized_ivar(body)
+        body.children[0].children[0] if body&.type == :or_asgn && body.children[0].type == :ivasgn
       end
 
       def memo_of(body, nesting)

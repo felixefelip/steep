@@ -519,6 +519,7 @@ module Steep
         def branches(node)
           case node.type
           when :if then conditional(node)
+          when :or_asgn then [[node.children[0], :certain], [node.children[1], ARM_STATES.fetch(@typing.arm_of(node: node), :unknown)]]
           when :case then case_branches(node)
           when :case_match then deferred_children(node, 1)
           when :and, :or then [[node.children[0], :certain], [node.children[1], :unknown]]
@@ -530,6 +531,8 @@ module Steep
         end
 
         private
+
+        ARM_STATES = { then: :certain, else: :dead }.freeze
 
         # `unless` and a ternary are `:if` nodes too, the parser having already
         # put the clauses in `then`/`else` order.

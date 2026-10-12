@@ -471,6 +471,17 @@ class StringEvalsTest < Minitest::Test
     assert_equal [["module GeneratedMethods\nend", nil, nil], nil], generated_module_chunks(GENERATED_MODULE_RBS)
   end
 
+  def test_a_second_call_finds_the_module_built_and_writes_only_its_method
+    in_tmpdir do
+      write("sig/base.rbs", GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n")
+      write("app/base.rb", GENERATED_MODULE_RUBY.sub("  define_reader :size\n", "  define_reader :size\n  define_reader :weight\n"))
+
+      chunks = chunks_of(setup_project).fetch("app/base.rb:17:2").map { |chunk| chunk && [chunk.source, chunk.target] }
+
+      assert_equal [["def weight; 1; end", "::Widget::GeneratedMethods"]], chunks
+    end
+  end
+
   def test_an_eval_on_a_module_a_method_on_self_builds_lands_in_it
     signatures = GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n"
 

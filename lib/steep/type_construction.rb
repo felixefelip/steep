@@ -3224,8 +3224,7 @@ module Steep
               type, constr = constr.lvasgn(asgn, type)
               constr.add_typing(node, type: type)
             when :ivasgn
-              type, constr = synthesize(rhs, hint: hint)
-              type, constr = constr.ivasgn(asgn, type)
+              type, constr = ObjectStates::ClassMemos.or_assigned(self, node, hint)
               constr.add_typing(node, type: type)
             when :gvasgn
               type, constr = synthesize(rhs, hint: hint)

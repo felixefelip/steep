@@ -51,7 +51,7 @@ module Steep
       # A value a state may hold: one nothing can change, or the contents of an
       # array, kept only where nothing else reaches it (`collection_confined?`).
       def state_value?(type)
-        fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral)
+        fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton)
       end
 
       # A method runs whenever it is called, not where it is written: nothing
@@ -60,10 +60,12 @@ module Steep
         env.pure_method_calls.empty? && env.class_states.empty? ? env : env.update(pure_method_calls: {}, class_states: {})
       end
 
-      # The ivars of `self` whose object the env knows the state of, for a body
-      # this one calls on `self` to start from.
+      # The ivars of `self` whose object the env knows the state of, and the
+      # memos whose value it knows, for a body this one calls on `self` to
+      # start from.
       def self_ivars(constr)
-        ClassStates.carried(constr, constr.context.type_env.instance_variable_types.select { |_, type| state_in(type) })
+        states = constr.context.type_env.instance_variable_types.select { |_, type| state_in(type) }
+        ClassStates.carried(constr, states).merge(ClassMemos.memo_values(constr))
       end
 
       # A `.new` call whose `initialize` binds an ivar from one of the values
@@ -107,6 +109,7 @@ module Steep
         end
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver && on_self?(receiver)
         constr = self_moved(constr, node) if receiver.nil? || receiver.type == :self
+        constr = ClassMemos.after_class_call(constr, node)
         constr = ClassStates.after_call(constr)
         handed_on(constr, arguments)
       end
@@ -120,7 +123,9 @@ module Steep
         return constr if entered.nil? || entered.empty?
 
         env = constr.context.type_env
-        exit = exit_of(constr, node) || entered.keys.to_h { |ivar| [ivar, env[ivar]] }.reject { |_, type| !type || !fixed?(type) || state_in(type) }
+        exit = exit_of(constr, node) || entered.keys.to_h { |ivar| [ivar, env[ivar]] }.reject do |ivar, type|
+          !type || !fixed?(type) || state_in(type) || (type.is_a?(AST::Types::Nil) && ClassMemos.value_memo?(constr, ivar))
+        end
         constr.update_type_env do |current|
           entered.each_key.reduce(current) do |result, ivar|
             result.refine_types(instance_variable_types: { ivar => exit.fetch(ivar) { declared_ivar(constr, ivar) } })

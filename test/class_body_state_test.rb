@@ -144,4 +144,16 @@ class ClassBodyStateTest < Minitest::Test
     assert_equal [["def posts; end"]], chunks(rbs, "# frozen_string_literal: true\n#{ruby}").values
     assert_equal [[nil]], chunks(rbs, ruby).values
   end
+
+  def test_an_or_assignment_is_decided_only_by_what_the_env_knows_beyond_the_declaration
+    memos = Steep::ObjectStates::ClassMemos
+    nil_type = Steep::AST::Builtin.nil_type
+    module_type = Steep::AST::Types::Name::Singleton.new(name: ::RBS::TypeName.parse("::Gen"))
+    declared = Steep::AST::Types::Union.build(types: [Steep::AST::Builtin::Module.instance_type, nil_type])
+
+    assert_equal :then, memos.or_arm(nil_type, declared)
+    assert_equal :else, memos.or_arm(module_type, declared)
+    assert_nil memos.or_arm(declared, declared)
+    assert_nil memos.or_arm(module_type, module_type)
+  end
 end
