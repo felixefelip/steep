@@ -33,6 +33,14 @@ module Steep
 
       # nil where `self` may be any subclass: in a class method checked under
       # its declaration rather than for one call site.
+      # The class a call is specialized for: the one an inherited singleton
+      # method runs on (`Arguments.inherited_self`), where its body may observe
+      # which one that is (`ClassStates.reach`).
+      def keyed_self(constr, call)
+        receiver = Arguments.inherited_self(call, exact_self(constr)) or return nil
+        receiver if ObjectStates::ClassStates.reach(constr, call).observes_self
+      end
+
       def exact_self(constr)
         type = constr.self_type
         return nil unless type.is_a?(AST::Types::Name::Singleton)
@@ -181,12 +189,12 @@ module Steep
 
       # The arguments of `call`, being typed at `node`, keyed under what the
       # checker knows there.
-      def self.at_call(node, typing, call, self_ivars:, class_states:, exact_self:)
+      def self.at_call(node, typing, call, self_ivars:, class_states:, keyed_self:)
         from_send(
           node, typing,
           receiver_ivars: receiver_ivars(call.receiver_type, self_ivars, class_states),
           class_states: callee_class_states(call, class_states),
-          self_type: inherited_self(call, exact_self)
+          self_type: keyed_self
         )
       end
 
@@ -198,7 +206,7 @@ module Steep
           node, typing,
           receiver_ivars: recorded_receiver_ivars(node, typing),
           class_states: callee_class_states(call, typing.class_states_of_call(node: node)),
-          self_type: inherited_self(call, typing.exact_self_of_call(node: node))
+          self_type: typing.keyed_self_of_call(node: node)
         )
       rescue Typing::UnknownNodeError
         nil

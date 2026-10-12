@@ -65,6 +65,7 @@ module Steep
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
       #   it is written. Not a `returns`: while the ivar is unset it answers
       #   the new object, not what the ivar held.
+      # - `ivars`: the ivars it reads;
       # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
       # - `empties`: the ivars a statement of the body sets to `[]`;
       # - `handed`: the ivars whose object it lets out, naming one other than as
@@ -72,7 +73,7 @@ module Steep
       #   returns as a reader (`returns`).
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
-        :bindings, :writes, :super_args, :self_sends, :exposes_self, :returns, :memo, :memoizes, :empties, :handed, :consts,
+        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :returns, :memo, :memoizes, :empties, :handed, :consts,
         keyword_init: true
       )
 
@@ -281,10 +282,12 @@ module Steep
 
       def method_body(args_node, body, nesting: nil)
         writes = Set[] #: Set[Symbol]
+        ivars = Set[] #: Set[Symbol]
         self_sends = Set[] #: Set[Symbol]
         consts = Set[] #: Set[String]
         each_node(body) do |node|
           writes << node.children[0] if node.type == :ivasgn
+          ivars << node.children[0] if node.type == :ivar
           consts.merge(referenced_names(node, nesting || [])) if node.type == :const
           self_sends << node.children[1] if %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
         end
@@ -293,6 +296,7 @@ module Steep
           handed: handed_ivars(body),
           bindings: ivar_param_bindings(args_node, body),
           writes: writes,
+          ivars: ivars,
           super_args: super_args(args_node, body),
           self_sends: self_sends,
           exposes_self: exposes_self?(body),
@@ -475,12 +479,22 @@ module Steep
       def body_code(body, nesting)
         mixins = [] #: Array[String]
         each_stmt(body) do |stmt|
-          next if %i[def defs module].include?(stmt.type) || (stmt.type == :class && stmt.children[1].nil?)
+          next if %i[def defs].include?(stmt.type)
 
-          names = mixed_names(stmt, nesting) or return true
+          names = nested_code(stmt, nesting) || mixed_names(stmt, nesting) or return true
           mixins.concat(names)
         end
         mixins.empty? ? nil : mixins
+      end
+
+      # What a nested `module`, or `class` with no superclass, runs: its own
+      # body's code, which runs as the outer body does.
+      def nested_code(stmt, nesting)
+        return unless stmt.type == :module || (stmt.type == :class && stmt.children[1].nil?)
+
+        name = const_to_name(stmt.children[0]) or return
+        code = body_code(stmt.children.last, nesting + [name])
+        code == true ? nil : code || []
       end
 
       def mixed_names(stmt, nesting)

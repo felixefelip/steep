@@ -95,6 +95,10 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
     assert_equal 1, class_bodies_of("class Widget\n  include Elsewhere\nend\n", "Widget")
   end
 
+  def test_a_nested_module_whose_body_runs_code_runs_it_in_the_outer_body
+    assert_equal 1, class_bodies_of("class Widget\n  module Helpers\n    Widget.registry\n  end\nend\n", "Widget")
+  end
+
   def test_rebuilt_after_invalidation
     in_tmpdir do
       write("app/proxy.rb", <<~RUBY)

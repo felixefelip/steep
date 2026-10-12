@@ -267,7 +267,7 @@ module Steep
         entry = definitions[effect.callee] or return [nil]
         path, callee_node = entry
         arguments = Specializations::Arguments.recorded(effect.node, typing) or return [nil]
-        frame_self = typing.exact_self_of_call(node: effect.node) || typing.self_type_of_call(node: effect.node) or return [nil]
+        frame_self = typing.self_type_of_call(node: effect.node) or return [nil]
         arguments = effect.kind == :on_self ? arguments.with_self(frame_self) : arguments.resolve_self(frame_self)
         positionals, keywords = Collector.defaults(callee_node)
         arguments = arguments.with_defaults(positionals: positionals, keywords: keywords)

@@ -79,7 +79,7 @@ class LogicTypeInterpreterTest < Minitest::Test
           return_type: parse_type("bool")
         ),
         self_type: AST::Builtin::Object.instance_type,
-        exact_self: nil,
+        keyed_self: nil,
         self_ivars: {},
         class_states: {}
       )

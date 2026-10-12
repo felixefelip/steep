@@ -60,12 +60,20 @@ module Steep
         env.pure_method_calls.empty? && env.class_states.empty? ? env : env.update(pure_method_calls: {}, class_states: {})
       end
 
-      # The ivars of `self` whose object the env knows the state of, and the
-      # memos whose value it knows, for a body this one calls on `self` to
-      # start from.
+      # The ivars of `self` whose object the env knows the state of, for a body
+      # this one calls on `self` to start from.
       def self_ivars(constr)
-        states = constr.context.type_env.instance_variable_types.select { |_, type| state_in(type) }
-        ClassStates.carried(constr, states).merge(ClassMemos.memo_values(constr))
+        ClassStates.carried(constr, constr.context.type_env.instance_variable_types.select { |_, type| state_in(type) })
+      end
+
+      # `self_ivars` for `call`, with the memos whose value the env knows that
+      # its body may read.
+      def call_ivars(constr, call)
+        memos = ClassMemos.memo_values(constr)
+        return self_ivars(constr) if memos.empty?
+
+        read = ClassStates.reach(constr, call).ivars
+        self_ivars(constr).merge(memos.select { |ivar, _| read.include?(ivar) })
       end
 
       # A `.new` call whose `initialize` binds an ivar from one of the values
