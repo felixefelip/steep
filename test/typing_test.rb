@@ -146,13 +146,13 @@ class TypingTest < Minitest::Test
     outer_self = parse_type("singleton(::Object)")
     inner_self = parse_type("::Object")
 
-    typing.add_call(outer, Steep::TypeInference::MethodCall::Untyped.new(node: outer, context: call_context, method_name: :foo), self_type: outer_self, self_ivars: {}, class_states: {})
+    typing.add_call(outer, Steep::TypeInference::MethodCall::Untyped.new(node: outer, context: call_context, method_name: :foo), self_type: outer_self, keyed_self: nil, self_ivars: {}, class_states: {})
 
     typing.new_child do |child|
       assert_equal outer_self, child.self_type_of_call(node: outer)
       assert_nil child.self_type_of_call(node: inner)
 
-      child.add_call(inner, Steep::TypeInference::MethodCall::Untyped.new(node: inner, context: call_context, method_name: :bar), self_type: inner_self, self_ivars: {}, class_states: {})
+      child.add_call(inner, Steep::TypeInference::MethodCall::Untyped.new(node: inner, context: call_context, method_name: :bar), self_type: inner_self, keyed_self: nil, self_ivars: {}, class_states: {})
       assert_nil typing.self_type_of_call(node: inner)
 
       child.save!

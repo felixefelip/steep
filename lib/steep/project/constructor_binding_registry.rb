@@ -22,6 +22,8 @@ module Steep
         @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
         @nodes = [] #: Array[::Parser::AST::Node]
         @class_bodies = Hash.new(0) #: Hash[String, Integer]
+        @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
+        @declared = Set[] #: Set[String]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
       end
 
@@ -85,7 +87,17 @@ module Steep
       # How many `class`/`module` bodies the project writes for `class_name`
       # that run code (`ConstructorBindingAnalyzer::Scan#class_bodies`).
       def class_bodies(class_name)
-        @class_bodies[class_name.to_s.delete_prefix("::")]
+        name = class_name.to_s.delete_prefix("::")
+        @class_bodies[name] + (@mixin_bodies[name] || []).count { |names| names.none? { |mixed| inert?(mixed) } }
+      end
+
+      MIXIN_HOOKS = %i[included extended prepended append_features extend_object prepend_features].freeze
+
+      # A module the project writes whose bodies run nothing, and which defines
+      # no hook: mixing it in runs no code of the project's.
+      def inert?(name)
+        @declared.include?(name) && @class_bodies[name].zero? && !@mixin_bodies.key?(name) &&
+          MIXIN_HOOKS.none? { |hook| defines?(name, hook, singleton: true) }
       end
 
       # Every body the project may define for `class_name#method_name`s,
@@ -144,6 +156,8 @@ module Steep
           (@initializers[class_name] ||= []).concat(initializers)
         end
         scan.class_bodies.each { |class_name, count| @class_bodies[class_name] += count }
+        scan.mixin_bodies.each { |class_name, bodies| (@mixin_bodies[class_name] ||= []).concat(bodies) }
+        @declared.merge(scan.declared)
         merge_bodies(@methods, scan.methods)
         merge_bodies(@singleton_methods, scan.singleton_methods)
         @nodes << node

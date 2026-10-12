@@ -44,12 +44,13 @@ module Steep
         # A chunk with no target stays a bare string — the version 1 spelling,
         # and still what an eval on the caller's own self writes, since only the
         # call site knows which class that is. One that NAMES its class says so,
-        # which is the whole of version 2.
+        # which is the whole of version 2, and version 3 says when that is a
+        # module, which a consumer reopening it has to know.
         def entry(chunk)
           return nil if chunk.nil?
           return chunk.source if chunk.target.nil?
 
-          { "source" => chunk.source, "target" => chunk.target }
+          { "source" => chunk.source, "target" => chunk.target, "kind" => chunk.kind }.compact
         end
       end
     end

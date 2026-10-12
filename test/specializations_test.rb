@@ -99,6 +99,60 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_records_an_inherited_class_method_called_on_a_subclass
+    in_tmpdir do
+      write("sig/base.rbs", "class Base\n  def self.label: (Symbol name) -> Symbol\nend\nclass Widget < Base\nend\n")
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.label(name)
+            name
+          end
+        end
+
+        class Widget < Base
+          label(:size)
+        end
+
+        Widget.label(:weight)
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(:size)" => ":size", "(:weight)" => ":weight" }, methods.fetch("Base.label"))
+    end
+  end
+
+  def test_runner_keeps_an_inherited_call_beside_a_memo_it_does_not_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          self.@registry: Module?
+          def self.registry: () -> Module
+          def self.label: (Symbol name) -> Symbol
+        end
+        class Widget < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.registry
+            @registry ||= const_set(:Registry, Module.new)
+          end
+
+          def self.label(name)
+            name
+          end
+        end
+
+        class Widget < Base
+          label(:size)
+        end
+      RUBY
+
+      assert_equal({ "(:size)" => ":size" }, Specializations::Runner.run(setup_project).fetch("Base.label"))
+    end
+  end
+
   def test_runner_records_nothing_for_a_call_that_fixes_no_literal
     in_tmpdir do
       write("sig/foo.rbs", FIXTURE_RBS)

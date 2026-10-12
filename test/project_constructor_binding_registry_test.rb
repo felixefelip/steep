@@ -54,6 +54,51 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
     end
   end
 
+  def class_bodies_of(source, name)
+    registry = ConstructorBindingRegistry.new
+    registry.ingest_source(source, path_name: "app.rb")
+    registry.class_bodies(name)
+  end
+
+  def test_a_body_that_declares_a_module_or_mixes_in_an_inert_one_runs_no_code
+    source = <<~RUBY
+      module Helpers
+        def help = 1
+      end
+
+      class Widget
+        def self.m = 1
+      end
+
+      class Widget
+        module Generated
+        end
+        include Helpers
+      end
+    RUBY
+
+    assert_equal 0, class_bodies_of(source, "Widget")
+  end
+
+  def test_a_body_mixing_in_a_module_with_a_hook_or_one_it_does_not_have_runs_code
+    hooked = <<~RUBY
+      module Hooked
+        def self.included(base) = nil
+      end
+
+      class Widget
+        include Hooked
+      end
+    RUBY
+
+    assert_equal 1, class_bodies_of(hooked, "Widget")
+    assert_equal 1, class_bodies_of("class Widget\n  include Elsewhere\nend\n", "Widget")
+  end
+
+  def test_a_nested_module_whose_body_runs_code_runs_it_in_the_outer_body
+    assert_equal 1, class_bodies_of("class Widget\n  module Helpers\n    Widget.registry\n  end\nend\n", "Widget")
+  end
+
   def test_rebuilt_after_invalidation
     in_tmpdir do
       write("app/proxy.rb", <<~RUBY)

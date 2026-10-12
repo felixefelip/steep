@@ -93,7 +93,37 @@ module Steep
           end
         end
 
+        # What a call's body may reach on its receiver, following the calls it
+        # makes on `self`: the ivars it names, and whether it observes which
+        # class it runs on — by handing `self` on, or by calling on it a method
+        # the project does not write (`const_set`, `name`).
+        Reach = Struct.new(:ivars, :observes_self)
+
+        def reach(constr, call)
+          reach = Reach.new(Set[], false)
+          return reach unless call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.size == 1
+
+          method_name = call.method_decls.first.method_name
+          singleton = method_name.is_a?(SingletonMethodName)
+          registry = constr.constructor_bindings
+          owner = method_name.type_name.to_s.delete_prefix("::")
+          body = singleton ? registry.singleton_body_of(owner, method_name.method_name) : registry.body_of(owner, method_name.method_name)
+          visit_reach(registry, owner, body, singleton, reach, Set[method_name.method_name]) if body
+          reach
+        end
+
         private
+
+        def visit_reach(registry, owner, body, singleton, reach, seen)
+          reach.ivars.merge(body.ivars || []).merge(body.writes).merge([body.returns].compact)
+          reach.observes_self ||= body.exposes_self
+          body.self_sends.each do |sent|
+            next unless seen.add?(sent)
+
+            callee = singleton ? registry.singleton_body_of(owner, sent) : registry.body_of(owner, sent)
+            callee ? visit_reach(registry, owner, callee, singleton, reach, seen) : reach.observes_self = true
+          end
+        end
 
         # `self`'s ivars a body leaves known: its memos' objects as they stand,
         # any other with what holds under any name.

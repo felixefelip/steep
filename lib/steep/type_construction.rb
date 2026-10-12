@@ -1489,7 +1489,7 @@ module Steep
       end
 
       typing.add_typing(call.node, call.return_type, nil)
-      typing.add_call(call.node, call, self_type: self_type, self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call))
+      typing.add_call(call.node, call, self_type: self_type, keyed_self: Specializations.keyed_self(self, call), self_ivars: ObjectStates.call_ivars(self, call), class_states: ObjectStates::ClassStates.of_call(self, call))
 
       Pair.new(type: call.return_type, constr: self)
     end
@@ -3224,8 +3224,7 @@ module Steep
               type, constr = constr.lvasgn(asgn, type)
               constr.add_typing(node, type: type)
             when :ivasgn
-              type, constr = synthesize(rhs, hint: hint)
-              type, constr = constr.ivasgn(asgn, type)
+              type, constr = ObjectStates::ClassMemos.or_assigned(self, node, hint)
               constr.add_typing(node, type: type)
             when :gvasgn
               type, constr = synthesize(rhs, hint: hint)
@@ -5854,9 +5853,9 @@ module Steep
 
       key = Specializations.method_key(call.method_decls) or return call
       arguments = Specializations::Arguments.at_call(
-        node, typing, call, self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call)
+        node, typing, call, self_ivars: ObjectStates.call_ivars(self, call), class_states: ObjectStates::ClassStates.of_call(self, call), keyed_self: Specializations.keyed_self(self, call)
       ) or return call
-      type = specializations.return_type(key, arguments.key, factory: checker.factory) or return call
+      type = specializations.call_return_type(key, arguments, factory: checker.factory) or return call
 
       call.with_return_type(type)
     end
@@ -5911,7 +5910,7 @@ module Steep
 
       type = ReflectionIntrinsics.fold(
         call: call,
-        receiver_type: receiver_type,
+        receiver_type: (Specializations.exact_self(self) if receiver_type.is_a?(AST::Types::Self)) || receiver_type,
         argument_types: argument_types,
         factory: checker.factory,
         override_registry: literal_method_registry
@@ -9083,8 +9082,8 @@ module Steep
             method_decls: inlined_call.method_decls,
             return_type: inlined_call.return_type
           ),
-          self_type: constr.self_type,
-          self_ivars: ObjectStates.self_ivars(constr),
+          self_type: constr.self_type, keyed_self: Specializations.keyed_self(constr, inlined_call),
+          self_ivars: ObjectStates.call_ivars(constr, inlined_call),
           class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
         )
       when TypeInference::MethodCall::Untyped
@@ -9095,8 +9094,8 @@ module Steep
             context: inlined_call.context,
             method_name: method_name
           ),
-          self_type: constr.self_type,
-          self_ivars: ObjectStates.self_ivars(constr),
+          self_type: constr.self_type, keyed_self: Specializations.keyed_self(constr, inlined_call),
+          self_ivars: ObjectStates.call_ivars(constr, inlined_call),
           class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
         )
       end

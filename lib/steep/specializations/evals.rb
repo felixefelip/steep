@@ -22,8 +22,6 @@ module Steep
     # answer applies where, and every shape it does not model is UNKNOWN rather
     # than assumed.
     module Evals
-      EVAL_METHODS = %i[class_eval module_eval].freeze
-
       # Written, never read back: nothing in Steep needs the text, since a
       # string it can fold is a string it has already typed. It is written for
       # the generator on the other side, which turns it into the Ruby the class
@@ -31,8 +29,9 @@ module Steep
       DEFAULT_OUTPUT_PATH = Pathname("sig/generated/.steep_string_evals.yml").freeze
       # 2 lets a chunk name the class it lands on; 1 could only write the source
       # and leave the WHERE to the consumer, which can answer it for an eval on
-      # the caller's own self and for nothing else (felixefelip/steep#175).
-      SCHEMA_VERSION = 2
+      # the caller's own self and for nothing else (felixefelip/steep#175). 3
+      # says when that class is a module (felixefelip/steep#208).
+      SCHEMA_VERSION = 3
 
       # Bodies the call does not run: a lambda it returns, a block it stores, a
       # method it defines. `-> { class_eval "def #{name}; end" }` writes nothing
@@ -55,19 +54,29 @@ module Steep
         # lands in — `index` is the position that got it, and the source is read
         # from THAT body under the arguments this call passes.
         #
+        # `:const_set` and `:include` write a module and an ancestor where an
+        # eval writes a method, and `:on_self` is a call on this method's own
+        # self to one that writes any of them: it runs on the same class.
+        #
         # `certain` is whether the call site's arguments decide it runs at all.
         Effect = Struct.new(:kind, :node, :callee, :index, :certain, keyword_init: true)
 
         # A chunk of source, and the class it lands on — nil for the class whose
         # body holds the macro call, which is the only one the consumer can work
-        # out on its own.
-        Chunk = Struct.new(:source, :target, keyword_init: true)
+        # out on its own. `kind` is `"module"` for a target declared as one.
+        Chunk = Struct.new(:source, :target, :kind, keyword_init: true)
+
+        Walk = Struct.new(:receivers, :parameter_writers, :self_writers, :typing, :parameters, keyword_init: true)
 
         # Whether the method writes code, directly or by handing its own self
         # to one that does. The gate that keeps a project without the idiom from
         # paying for a single extra check, so it reads the AST and nothing else.
-        def writes_code?(def_node, parameter_writers = {})
-          each_effect(body_of(def_node), nil, true, EVAL_ON_SELF_OR_NAMED, parameter_writers, nil, parameter_names(def_node)) { return true }
+        def writes_code?(def_node, parameter_writers = {}, self_writers = Set[])
+          walk = Walk.new(
+            receivers: EVAL_ON_SELF_OR_NAMED, parameter_writers: parameter_writers, self_writers: self_writers,
+            typing: nil, parameters: parameter_names(def_node)
+          )
+          each_effect(body_of(def_node), nil, true, walk) { return true }
           false
         end
 
@@ -83,7 +92,8 @@ module Steep
           names = parameter_names(def_node)
           found = Set[] #: Set[Integer]
 
-          each_effect(body_of(def_node), nil, true, names, {}, nil, names) do |effect|
+          walk = Walk.new(receivers: names, parameter_writers: {}, self_writers: Set[], typing: nil, parameters: names)
+          each_effect(body_of(def_node), nil, true, walk) do |effect|
             receiver = effect.node.children[0]
             next unless receiver&.type == :lvar
 
@@ -115,36 +125,48 @@ module Steep
         # parameter that frame proved it handed its own self to. A helper evaling
         # on two parameters writes for two different objects, and only one of
         # them is the class the harvest is attributing to.
-        def sources(typing, def_node, receivers = EVAL_ON_SELF)
+        def sources(typing, def_node, env, receivers = EVAL_ON_SELF)
           flow = Flow.new(typing)
           result = [] #: Array[Chunk?]
+          walk = Walk.new(receivers: receivers, parameter_writers: {}, self_writers: Set[], typing: typing, parameters: parameter_names(def_node))
 
-          each_effect(body_of(def_node), flow, true, receivers, {}, typing, parameter_names(def_node)) do |effect|
-            result << chunk_of(typing, effect)
+          each_effect(body_of(def_node), flow, true, walk) do |effect|
+            result << chunk_of(typing, effect, env)
           end
 
           result
         end
 
-        # The chunk one eval writes, or nil for a hole — a branch the call site
-        # does not decide, or a string it does not fix.
-        def chunk_of(typing, effect)
+        # The chunk one write makes, or nil for a hole — a branch the call site
+        # does not decide, or a value it does not fix.
+        def chunk_of(typing, effect, env)
           return nil unless effect.certain
 
-          source = literal_string(typing, effect.node) or return nil
+          source =
+            case effect.kind
+            when :eval then literal_string(typing, effect.node)
+            when :const_set then constant_source(typing, effect.node)
+            when :include then include_source(typing, effect.node)
+            end
+          return nil unless source
 
-          Chunk.new(source: source, target: eval_target(typing, effect.node))
+          target = eval_target(typing, effect.node)
+          Chunk.new(source: source, target: target, kind: target && module_kind(target, env))
         end
 
         # Every effect of this body, direct and delegated, in source order and
         # each carrying the flow's verdict. A macro that evals once and then
         # hands off writes both, and the class gets them in the order it is
         # written.
-        def effects(typing, def_node, parameter_writers)
+        def effects(typing, def_node, parameter_writers, self_writers)
           flow = Flow.new(typing)
           result = [] #: Array[Effect]
+          walk = Walk.new(
+            receivers: EVAL_ON_SELF_OR_NAMED, parameter_writers: parameter_writers, self_writers: self_writers,
+            typing: typing, parameters: parameter_names(def_node)
+          )
 
-          each_effect(body_of(def_node), flow, true, EVAL_ON_SELF_OR_NAMED, parameter_writers, typing, parameter_names(def_node)) do |effect|
+          each_effect(body_of(def_node), flow, true, walk) do |effect|
             result << effect
           end
 
@@ -254,18 +276,18 @@ module Steep
         # from whatever is inside it. `Writer.generate(self, name) if enabled`
         # writes nothing when the call site fixes `enabled` to false, and that is
         # not a fact the AST alone can produce.
-        def each_effect(node, flow, certain, receivers, parameter_writers, typing, parameters, &block)
+        #
+        # A write is yielded after what its receiver and arguments do, which
+        # Ruby runs first: `generated_methods.class_eval "…"` builds the module
+        # before it writes into it.
+        def each_effect(node, flow, certain, walk, &block)
           return unless node.is_a?(Parser::AST::Node)
           return if DEFERRED.include?(node.type)
 
-          if eval_send?(node, receivers, typing, parameters)
-            yield Effect.new(kind: :eval, node: node, certain: certain)
-            return
-          end
-
-          if (delegation = delegated_write(node, parameter_writers, typing))
-            callee, index = delegation
-            yield Effect.new(kind: :delegated, node: node, callee: callee, index: index, certain: certain)
+          if (effect = write_at(node, certain, walk))
+            # A delegated write reads its arguments in the frame it hands them to.
+            node.children.each { |child| each_effect(child, flow, certain, walk, &block) } unless effect.kind == :delegated
+            yield effect
             return
           end
 
@@ -274,10 +296,34 @@ module Steep
             children.each do |child, state|
               next if state == :dead
 
-              each_effect(child, flow, certain && state == :certain, receivers, parameter_writers, typing, parameters, &block)
+              each_effect(child, flow, certain && state == :certain, walk, &block)
             end
           else
-            node.children.each { |child| each_effect(child, flow, certain, receivers, parameter_writers, typing, parameters, &block) }
+            node.children.each { |child| each_effect(child, flow, certain, walk, &block) }
+          end
+        end
+
+        def write_at(node, certain, walk)
+          if (kind = written_kind(node, walk))
+            Effect.new(kind: kind, node: node, certain: certain)
+          elsif (delegation = delegated_write(node, walk.parameter_writers, walk.typing))
+            Effect.new(kind: :delegated, node: node, callee: delegation[0], index: delegation[1], certain: certain)
+          elsif (callee = self_write(node, walk))
+            Effect.new(kind: :on_self, node: node, callee: callee, certain: certain)
+          end
+        end
+
+        # Without a typing, any writer of that name.
+        def self_write(node, walk)
+          return nil if walk.self_writers.empty? || node.type != :send
+          return nil unless node.children[0].nil? || node.children[0].type == :self
+
+          if walk.typing
+            key = resolved_send_key(node, walk.typing)
+            key if key && walk.self_writers.include?(key)
+          else
+            name = node.children[1]
+            walk.self_writers.find { |key| key.end_with?(".#{name}", "##{name}") }
           end
         end
 
@@ -291,7 +337,8 @@ module Steep
         # only the receiver knows.
         EVAL_ON_SELF_OR_NAMED = [nil, :named].freeze
 
-        # A `class_eval` on this method's own self, with a string argument.
+        # What a `class_eval` of a string, a `const_set` or an `include` on a
+        # receiver this walk accepts writes.
         #
         # Receiverless or written `self.class_eval`, it is the SAME call: the
         # implicit receiver of the first IS self, and a macro that spells it out
@@ -308,13 +355,21 @@ module Steep
         #
         # A block is `ClassEvalExpander`'s shape and is plain Ruby a reader
         # already sees.
-        def eval_send?(node, receivers, typing, parameters)
-          return false unless node.type == :send
-          return false unless EVAL_METHODS.include?(node.children[1])
-          return false unless accepted_receiver?(node, receivers, typing, parameters)
+        def written_kind(node, walk)
+          return nil unless node.type == :send
 
-          accepted_argument?(node.children[2])
+          kind = WRITES[node.children[1]] or return nil
+          return nil unless accepted_receiver?(node, walk.receivers, walk.typing, walk.parameters)
+
+          arguments = node.children.drop(2)
+          case kind
+          when :eval then kind if accepted_argument?(arguments.first)
+          when :const_set then kind if arguments.size == 2
+          when :include then kind if !arguments.empty? && arguments.none? { |argument| FORWARDED_ARGUMENTS.include?(argument.type) }
+          end
         end
+
+        WRITES = { class_eval: :eval, module_eval: :eval, const_set: :const_set, include: :include }.freeze
 
         # Whether this is the STRING form. `class_eval` handed an argument at all
         # is: the block form takes none. So the argument's value is not what
@@ -381,6 +436,58 @@ module Steep
           type.name.to_s
         end
 
+        # A value not built here is an existing module given a second name,
+        # which no declaration says.
+        def constant_source(typing, node)
+          name_node, value = node.children.drop(2)
+          name = literal_symbol(typing, name_node) or return nil
+          return nil unless name.match?(/\A[A-Z]\w*\z/)
+          return nil unless value.type == :send && value.children[1] == :new && typing.has_type?(value.children[0] || value)
+
+          constructor = typing.type_of(node: value.children[0] || value)
+          return nil unless constructor.is_a?(AST::Types::Name::Singleton)
+
+          superclass = value.children[2..] || []
+          case constructor.name
+          when RBS::BuiltinNames::Module.name then "module #{name}\nend" if superclass.empty?
+          when RBS::BuiltinNames::Class.name
+            parent = superclass.empty? ? "" : (named_class(typing, superclass) or return nil)
+            "class #{name}#{parent}\nend"
+          end
+        end
+
+        def named_class(typing, arguments)
+          return nil unless arguments.size == 1 && typing.has_type?(arguments.first)
+
+          type = typing.type_of(node: arguments.first)
+          " < #{type.name}" if type.is_a?(AST::Types::Name::Singleton)
+        end
+
+        def include_source(typing, node)
+          names = node.children.drop(2).map do |argument|
+            return nil unless typing.has_type?(argument)
+
+            type = typing.type_of(node: argument)
+            return nil unless type.is_a?(AST::Types::Name::Singleton)
+
+            type.name.to_s
+          end
+
+          "include #{names.join(", ")}"
+        end
+
+        def literal_symbol(typing, node)
+          return node.children[0].to_s if node.type == :sym
+          return nil unless typing.has_type?(node)
+
+          type = typing.type_of(node: node)
+          type.value.to_s if type.is_a?(AST::Types::Literal) && type.value.is_a?(Symbol)
+        end
+
+        def module_kind(target, env)
+          "module" if env.class_decls[RBS::TypeName.parse(target)].is_a?(RBS::Environment::ModuleEntry)
+        end
+
         def literal_string(typing, node)
           argument = node.children[2]
           return nil unless typing.has_type?(argument)
@@ -412,6 +519,7 @@ module Steep
         def branches(node)
           case node.type
           when :if then conditional(node)
+          when :or_asgn then [[node.children[0], :certain], [node.children[1], ARM_STATES.fetch(@typing.arm_of(node: node), :unknown)]]
           when :case then case_branches(node)
           when :case_match then deferred_children(node, 1)
           when :and, :or then [[node.children[0], :certain], [node.children[1], :unknown]]
@@ -423,6 +531,8 @@ module Steep
         end
 
         private
+
+        ARM_STATES = { then: :certain, else: :dead }.freeze
 
         # `unless` and a ternary are `:if` nodes too, the parser having already
         # put the clauses in `then`/`else` order.

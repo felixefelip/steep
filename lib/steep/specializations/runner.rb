@@ -112,7 +112,7 @@ module Steep
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          harvest_evals(context, Store.empty, locations, definitions, parameter_writers)
+          harvest_evals(context, Store.empty, locations, definitions, parameter_writers, writers)
           return
         end
 
@@ -142,11 +142,11 @@ module Steep
         end
 
         found.each do |key, entries|
-          writable = entries.reject { |argument_key, _| Arguments.stateful_key?(argument_key) }
+          writable = entries.select { |argument_key, _| Arguments.persistable_key?(argument_key) }
           (methods[key] ||= {}).merge!(writable.transform_values(&:to_s)) unless writable.empty?
         end
 
-        harvest_evals(context, store(found), locations, definitions, parameter_writers)
+        harvest_evals(context, store(found), locations, definitions, parameter_writers, writers)
       end
 
       # `discovered` with every entry that disagrees with the generation before
@@ -216,7 +216,7 @@ module Steep
       #
       # Rounds, like `specialize`: two macros in one file are read by one check,
       # and only two tuples of the SAME macro cost two.
-      def harvest_evals(context, store, locations, definitions, parameter_writers)
+      def harvest_evals(context, store, locations, definitions, parameter_writers, writers)
         writing = locations.select { |key, _| definitions.key?(key) }
         return if writing.empty?
 
@@ -229,7 +229,7 @@ module Steep
             path, def_node = definitions.fetch(key)
             typing = typings[path] or next
 
-            sources = eval_sources(context, store, typing, def_node, definitions, parameter_writers)
+            sources = eval_sources(context, store, typing, def_node, definitions, parameter_writers, writers, Set[key])
             next if sources.empty?
 
             writing.fetch(key).fetch(arguments).each { |site| @evals[site] = sources }
@@ -241,54 +241,42 @@ module Steep
       # the methods it hands its own `self` to write there. A macro that evals
       # once and then hands off produces both, and the class gets them in source
       # order — the order the consumer places them in.
-      def eval_sources(context, store, typing, def_node, definitions, parameter_writers)
-        Evals.effects(typing, def_node, parameter_writers).flat_map do |effect|
-          if effect.kind == :eval
-            [Evals.chunk_of(typing, effect)]
-          elsif effect.certain
-            delegated_sources(context, store, typing, effect, definitions)
-          else
+      #
+      # `reading` holds the methods already being read on this self, so a writer
+      # that reaches itself is read once.
+      def eval_sources(context, store, typing, def_node, definitions, parameter_writers, writers, reading)
+        Evals.effects(typing, def_node, parameter_writers, writers).flat_map do |effect|
+          case effect.kind
+          when :delegated, :on_self
             # Code is written here and this call site does not decide what: a
             # hole, the same answer an eval it cannot fold gets.
-            [nil]
+            next [nil] unless effect.certain
+            next [] if reading.include?(effect.callee)
+
+            frame_sources(context, store, typing, effect, definitions, parameter_writers, writers, reading)
+          else
+            [Evals.chunk_of(typing, effect, context.subtyping.factory.env)]
           end
         end
       end
 
-      # What the method this one hands its own `self` to writes there, read under
-      # the arguments THIS call passes it.
-      #
-      #   def has_rich_text(name)
-      #     Writer.generate(self, name)      # ← the call read here
-      #   end
-      #
-      # The frame in between is what the answer belongs to: `generate` evals on
-      # an object it was handed, so its own call site — one line inside a gem —
-      # is the wrong place to attribute anything to, while `has_rich_text`'s call
-      # sites are written in the classes that actually get the methods.
-      #
-      # The inner body is read with ONE receiver allowed: the parameter this call
-      # was seen to hand its self to. A helper evaling on two parameters writes
-      # for two different objects, and only one of them is the class being
-      # attributed to.
-      #
-      # One frame, deliberately. Two would need the argument threaded through a
-      # chain, and nothing yet asks for it.
-      def delegated_sources(context, store, typing, effect, definitions)
+      # Handed as an argument (`Writer.generate(self, name)`), the callee is read
+      # on the ONE parameter that got it: a helper writing on two parameters
+      # writes for two objects, and only one of them is this class.
+      def frame_sources(context, store, typing, effect, definitions, parameter_writers, writers, reading)
         entry = definitions[effect.callee] or return [nil]
         path, callee_node = entry
         arguments = Specializations::Arguments.recorded(effect.node, typing) or return [nil]
         frame_self = typing.self_type_of_call(node: effect.node) or return [nil]
-        arguments = arguments.resolve_self(frame_self)
-        receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]
-
+        arguments = effect.kind == :on_self ? arguments.with_self(frame_self) : arguments.resolve_self(frame_self)
         positionals, keywords = Collector.defaults(callee_node)
         arguments = arguments.with_defaults(positionals: positionals, keywords: keywords)
 
-        inner = check_definitions(context, store, { effect.callee => arguments }, definitions)
-        inner_typing = inner[path] or return [nil]
+        inner = check_definitions(context, store, { effect.callee => arguments }, definitions)[path] or return [nil]
+        return eval_sources(context, store, inner, callee_node, definitions, parameter_writers, writers, reading | [effect.callee]) if effect.kind == :on_self
 
-        Evals.sources(inner_typing, callee_node, [receiver])
+        receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]
+        Evals.sources(inner, callee_node, context.subtyping.factory.env, [receiver])
       end
 
       # The methods that eval on a PARAMETER, by the position it sits in. Not
@@ -344,10 +332,13 @@ module Steep
       # A key naming its receiver's contents (`Arguments#stateful?`) is found
       # one statement at a time, so no count of generations bounds it; the size
       # of the contents does.
+      # A key fixing only the class a body runs on cannot keep growing: the
+      # project has finitely many.
       def widened?(arguments, generation)
         return arguments.key.length > STATE_WIDTH if arguments.stateful?
+        return false if arguments.self_type && !arguments.fixes_a_value?
 
-        generation >= WIDEN_AFTER || arguments.key.length > LITERAL_WIDTH
+        generation >= WIDEN_AFTER || arguments.arguments_key.length > LITERAL_WIDTH
       end
 
       def record_exit(key, arguments, typing, def_node)
@@ -370,13 +361,19 @@ module Steep
       # The methods that define methods by evaluating a string, which is the
       # only thing the eval harvest reads. A pure walk of trees already parsed,
       # so a project without the idiom pays this and nothing else.
+      # A method that only calls one of them on its own self writes code too,
+      # so the set grows until no call adds one.
       def code_writers(context, parameter_writers)
         writers = Set[] #: Set[String]
+        definitions = context.sources.each_value.flat_map { |source| Collector.definitions(source).to_a }
 
-        context.sources.each_value do |source|
-          Collector.definitions(source).each do |key, def_node|
-            writers << key if Evals.writes_code?(def_node, parameter_writers)
+        loop do
+          grown = definitions.filter_map do |key, def_node|
+            key if !writers.include?(key) && Evals.writes_code?(def_node, parameter_writers, writers)
           end
+          break if grown.empty?
+
+          writers.merge(grown)
         end
 
         writers
@@ -392,7 +389,7 @@ module Steep
           Collector.each_call_site(typing) do |key, arguments, node|
             next unless definitions.key?(key)
 
-            (tuples[key] ||= Set.new) << arguments if arguments.literal?
+            (tuples[key] ||= Set.new).merge(arguments.tuples)
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
         end
@@ -537,7 +534,7 @@ module Steep
           end
 
           Collector.each_call_site(typing) do |key, arguments, node|
-            (tuples[key] ||= Set.new) << arguments if arguments.literal?
+            (tuples[key] ||= Set.new).merge(arguments.tuples)
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
 

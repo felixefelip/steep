@@ -427,6 +427,114 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  GENERATED_MODULE_RUBY = <<~RUBY
+    class Base
+      def self.generated_methods
+        @generated_methods ||= begin
+          mod = const_set(:GeneratedMethods, Module.new)
+          include mod
+          mod
+        end
+      end
+
+      def self.define_reader(name)
+        generated_methods.class_eval "def \#{name}; 1; end"
+      end
+    end
+
+    class Widget < Base
+      define_reader :size
+    end
+  RUBY
+
+  GENERATED_MODULE_RBS = <<~RBS
+    class Base
+      self.@generated_methods: Module?
+      def self.generated_methods: () -> Module
+      def self.define_reader: (Symbol name) -> untyped
+    end
+
+    class Widget < Base
+    end
+  RBS
+
+  def generated_module_chunks(signatures)
+    in_tmpdir do
+      write("sig/base.rbs", signatures)
+      write("app/base.rb", GENERATED_MODULE_RUBY)
+
+      chunks_of(setup_project).fetch("app/base.rb:16:2").map { |chunk| chunk && [chunk.source, chunk.target, chunk.kind] }
+    end
+  end
+
+  def test_a_module_a_method_on_self_builds_is_declared_first
+    assert_equal [["module GeneratedMethods\nend", nil, nil], nil], generated_module_chunks(GENERATED_MODULE_RBS)
+  end
+
+  def test_a_second_call_finds_the_module_built_and_writes_only_its_method
+    in_tmpdir do
+      write("sig/base.rbs", GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n")
+      write("app/base.rb", GENERATED_MODULE_RUBY.sub("  define_reader :size\n", "  define_reader :size\n  define_reader :weight\n"))
+
+      chunks = chunks_of(setup_project).fetch("app/base.rb:17:2").map { |chunk| chunk && [chunk.source, chunk.target] }
+
+      assert_equal [["def weight; 1; end", "::Widget::GeneratedMethods"]], chunks
+    end
+  end
+
+  def test_an_eval_on_a_module_a_method_on_self_builds_lands_in_it
+    signatures = GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n"
+
+    assert_equal(
+      [
+        ["module GeneratedMethods\nend", nil, nil],
+        ["include ::Widget::GeneratedMethods", nil, nil],
+        ["def size; 1; end", "::Widget::GeneratedMethods", "module"]
+      ],
+      generated_module_chunks(signatures)
+    )
+  end
+
+  def test_a_module_and_an_include_written_on_a_parameter_land_on_the_class_that_handed_itself
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner) -> void
+        end
+
+        module Mixin
+        end
+
+        class Base
+          def self.setup: () -> void
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner)
+            owner.const_set(:Helpers, Module.new)
+            owner.include(Mixin)
+          end
+        end
+
+        class Base
+          def self.setup
+            Writer.generate(self)
+          end
+        end
+
+        class Article < Base
+          setup
+        end
+      RUBY
+
+      assert_equal({ "app/base.rb:15:2" => ["module Helpers\nend", "include ::Mixin"] }, evals_of(setup_project))
+    end
+  end
+
   # A local holding the constant is the same question with an assignment in
   # front of it — what decides is the receiver's TYPE, not the shape of the
   # expression that produced it.
@@ -1715,7 +1823,7 @@ class StringEvalsTest < Minitest::Test
       runner.write(runner.run)
 
       assert_equal(
-        { "version" => 2, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] } },
+        { "version" => 3, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] } },
         YAML.safe_load(runner.evals_output_path.read)
       )
     end
