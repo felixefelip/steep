@@ -166,15 +166,32 @@ class ReflectionIntrinsicsTest < Minitest::Test
     refute registry.blocked?("::Kernel#singleton_class")
   end
 
+  def const_set_fold(value, name: :Gen)
+    with_factory({ "probe.rbs" => "class ProbeBase\nend\nmodule ProbeBase::Gen\nend\nclass ProbeBase::Kls\nend\n" }, nostdlib: false) do |factory|
+      argument_types = [Steep::AST::Types::Literal.new(value: name), Steep::AST::Types::Name::Instance.new(name: RBS::TypeName.parse(value), args: [])]
+      return fold("::Module#const_set", singleton("::ProbeBase"), Registry.new, factory, argument_types: argument_types)
+    end
+  end
+
+  def test_const_set_answers_the_module_the_signatures_declare_under_that_name
+    assert_equal singleton("::ProbeBase::Gen"), const_set_fold("::Module")
+    assert_equal singleton("::ProbeBase::Kls"), const_set_fold("::Class", name: :Kls)
+  end
+
+  def test_const_set_declines_a_name_declared_as_another_kind_or_not_at_all
+    assert_nil const_set_fold("::Class")
+    assert_nil const_set_fold("::Module", name: :Missing)
+  end
+
   def test_watched_keys_and_dispatched_names
     assert_equal(
       ["::Kernel#method", "::Kernel#respond_to?", "::Kernel#singleton_class", "::Method#parameters",
-       "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::UnboundMethod#parameters"],
+       "::Module#const_set", "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::UnboundMethod#parameters"],
       Steep::ReflectionIntrinsics.watched_keys.to_a.sort
     )
     assert_equal ["::Method#parameters"], Steep::ReflectionIntrinsics.method_keys_for("Method")
     assert_equal(
-      [:instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
+      [:const_set, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
        :singleton_class],
       Steep::ReflectionIntrinsics.dispatched_names.to_a.sort
     )

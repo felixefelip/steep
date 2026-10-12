@@ -262,6 +262,19 @@ module Steep
         name if factory.env.class_decls[name].is_a?(RBS::Environment::ClassEntry)
       end
 
+      # Whether `constant` is declared as the kind of module `value` is: a
+      # `::Module` as a module, a `::Class` as a class.
+      def declared_as?(constant, value, factory)
+        return false unless value.is_a?(AST::Types::Name::Instance)
+
+        entry = factory.env.class_decls[constant]
+        case value.name
+        when RBS::BuiltinNames::Module.name then entry.is_a?(RBS::Environment::ModuleEntry)
+        when RBS::BuiltinNames::Class.name then entry.is_a?(RBS::Environment::ClassEntry)
+        else false
+        end
+      end
+
       # `Kernel#respond_to?(name)`: whether every class the receiver may be
       # an instance of — or, for `singleton(::C)`, every class object it may be
       # — gives the same answer, and which.
@@ -536,6 +549,18 @@ module Steep
       AST::Types::Literal.new(value: receiver.name.to_s.delete_prefix("::"))
     end
 
+    # `C.const_set(:N, value)` makes `C::N` the value it is handed, so a module
+    # or class the signatures declare as `C::N` is what that value is from
+    # here on, whether it was built by this call or not.
+    CONST_SET = lambda do |receiver, argument_types, factory, _override_registry|
+      name, value = argument_types
+      next nil unless argument_types.size == 2 && receiver.is_a?(AST::Types::Name::Singleton)
+      next nil unless name.is_a?(AST::Types::Literal) && name.value.is_a?(::Symbol)
+
+      constant = RBS::TypeName.new(name: name.value, namespace: receiver.name.to_namespace)
+      AST::Types::Name::Singleton.new(name: constant) if declared_as?(constant, value, factory)
+    end
+
     RESPOND_TO = lambda do |receiver, argument_types, factory, override_registry|
       responds_to(receiver, argument_types, factory, override_registry)
     end
@@ -575,6 +600,9 @@ module Steep
       ),
       "::Module#name" => Entry.new(
         method: ::Module.instance_method(:name), handler: NAME
+      ),
+      "::Module#const_set" => Entry.new(
+        method: ::Module.instance_method(:const_set), handler: CONST_SET
       ),
       "::Kernel#respond_to?" => Entry.new(
         method: ::Kernel.instance_method(:respond_to?), handler: RESPOND_TO

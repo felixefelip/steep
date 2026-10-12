@@ -1489,7 +1489,7 @@ module Steep
       end
 
       typing.add_typing(call.node, call.return_type, nil)
-      typing.add_call(call.node, call, self_type: self_type, self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call))
+      typing.add_call(call.node, call, self_type: self_type, exact_self: Specializations.exact_self(self), self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call))
 
       Pair.new(type: call.return_type, constr: self)
     end
@@ -5854,7 +5854,7 @@ module Steep
 
       key = Specializations.method_key(call.method_decls) or return call
       arguments = Specializations::Arguments.at_call(
-        node, typing, call, self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call)
+        node, typing, call, self_ivars: ObjectStates.self_ivars(self), class_states: ObjectStates::ClassStates.of_call(self, call), exact_self: Specializations.exact_self(self)
       ) or return call
       type = specializations.return_type(key, arguments.key, factory: checker.factory) or return call
 
@@ -5911,7 +5911,7 @@ module Steep
 
       type = ReflectionIntrinsics.fold(
         call: call,
-        receiver_type: receiver_type,
+        receiver_type: (Specializations.exact_self(self) if receiver_type.is_a?(AST::Types::Self)) || receiver_type,
         argument_types: argument_types,
         factory: checker.factory,
         override_registry: literal_method_registry
@@ -9083,7 +9083,7 @@ module Steep
             method_decls: inlined_call.method_decls,
             return_type: inlined_call.return_type
           ),
-          self_type: constr.self_type,
+          self_type: constr.self_type, exact_self: Specializations.exact_self(constr),
           self_ivars: ObjectStates.self_ivars(constr),
           class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
         )
@@ -9095,7 +9095,7 @@ module Steep
             context: inlined_call.context,
             method_name: method_name
           ),
-          self_type: constr.self_type,
+          self_type: constr.self_type, exact_self: Specializations.exact_self(constr),
           self_ivars: ObjectStates.self_ivars(constr),
           class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
         )

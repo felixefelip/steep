@@ -31,6 +31,19 @@ module Steep
         Store.empty
       end
 
+      # The one class object `self` is where `constr` checks, or nil where it
+      # may be any of several: a class body runs on its class, and a specialized
+      # body on the class of the call site it is checked for. Anywhere else a
+      # class method runs on whichever subclass calls it.
+      def exact_self(constr)
+        type = constr.self_type
+        return nil unless type.is_a?(AST::Types::Name::Singleton)
+
+        method_context = constr.context.method_context or return type
+        def_node = method_context.node or return nil
+        type if constr.specialization_arguments(def_node)&.self_type == type
+      end
+
       # `type` written the way a signature can say it.
       #
       # An entry is recorded as `type.to_s` and read back through
@@ -78,7 +91,7 @@ module Steep
       # `receiver_ivars`: what the receiver's contents are known to be
       # (`receiver_ivars`), read off the call where it is recorded already and
       # off the checker where it is being typed.
-      def self.from_send(node, typing, receiver_ivars:, class_states:)
+      def self.from_send(node, typing, receiver_ivars:, class_states:, self_type:)
         _receiver, name, *args = node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
         # and the arguments are the rest (`TypeConstruction::SendDispatch`).
@@ -106,7 +119,27 @@ module Steep
           positionals << argument_type(arg, typing)
         end
 
-        new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states)
+        new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states, self_type: self_type)
+      end
+
+      # The class object a singleton method a superclass defines runs on at this
+      # call, where the call says which one exactly. Ruby hands the body that
+      # class as `self`, and what it answers can depend on it:
+      #
+      #   class Base
+      #     def self.generated_methods = const_set(:GeneratedMethods, Module.new)
+      #   end
+      #
+      #   Widget.generated_methods   # Widget::GeneratedMethods, not Base's
+      def self.inherited_self(call, exact_self)
+        return nil unless call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.size == 1
+
+        receiver = call.receiver_type
+        receiver = exact_self if receiver.is_a?(AST::Types::Self)
+        return nil unless receiver.is_a?(AST::Types::Name::Singleton)
+
+        method_name = call.method_decls.first.method_name
+        receiver if method_name.is_a?(SingletonMethodName) && method_name.type_name != receiver.name
       end
 
       def self.dispatched?(node, typing)
@@ -154,21 +187,24 @@ module Steep
 
       # The arguments of `call`, being typed at `node`, keyed under what the
       # checker knows there.
-      def self.at_call(node, typing, call, self_ivars:, class_states:)
+      def self.at_call(node, typing, call, self_ivars:, class_states:, exact_self:)
         from_send(
           node, typing,
           receiver_ivars: receiver_ivars(call.receiver_type, self_ivars, class_states),
-          class_states: callee_class_states(call, class_states)
+          class_states: callee_class_states(call, class_states),
+          self_type: inherited_self(call, exact_self)
         )
       end
 
       # The arguments of the call recorded at `node`, keyed under what the
       # checker knew there.
       def self.recorded(node, typing)
+        call = typing.call_of(node: node)
         from_send(
           node, typing,
           receiver_ivars: recorded_receiver_ivars(node, typing),
-          class_states: callee_class_states(typing.call_of(node: node), typing.class_states_of_call(node: node))
+          class_states: callee_class_states(call, typing.class_states_of_call(node: node)),
+          self_type: inherited_self(call, typing.exact_self_of_call(node: node))
         )
       rescue Typing::UnknownNodeError
         nil
@@ -231,9 +267,9 @@ module Steep
       # unlike `defaults`, it is part of `==`: two call sites passing the same
       # arguments from two classes run the body twice.
       #
-      # It stays out of `key`. A return recorded under a self no declaration
-      # names would be read back by every caller of the tuple, so only the eval
-      # harvest, which attributes to one call site, sets it.
+      # It is part of `key` too, so a return recorded under it is read back only
+      # by a call on that class (`inherited_self`). No declaration can say
+      # that, so such a key stays out of the sidecar, as a stateful one does.
       attr_reader :self_type
 
       # The ivars of the receiver whose contents the caller knew
@@ -299,11 +335,18 @@ module Steep
       end
 
       def key
+        key = arguments_key
+        key += "#{SELF_MARKER}#{self_type}" if self_type
+        return key unless stateful?
+
+        "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key].join(", ")}}"
+      end
+
+      # The arguments alone, which is what grows when a body keeps folding.
+      def arguments_key
         parts = positionals.map(&:to_s)
         parts.concat(keywords.keys.sort.map { |name| "#{name}: #{keywords[name]}" })
-        return "(#{parts.join(", ")})" unless stateful?
-
-        "(#{parts.join(", ")})#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key].join(", ")}}"
+        "(#{parts.join(", ")})"
       end
 
       def ivars_key(ivars)
@@ -319,8 +362,12 @@ module Steep
       # computed them can read them back.
       STATE_MARKER = " with {"
 
-      def self.stateful_key?(key)
-        key.include?(STATE_MARKER)
+      SELF_MARKER = " on "
+
+      # Whether a declaration can say what the key does: one naming the
+      # receiver's contents or its class cannot.
+      def self.persistable_key?(key)
+        !key.include?(STATE_MARKER) && !key.include?(SELF_MARKER)
       end
 
       def stateful?
@@ -328,9 +375,11 @@ module Steep
       end
 
       def literal?
-        stateful? ||
-          positionals.any? { |type| literal_type?(type) } ||
-          keywords.each_value.any? { |type| literal_type?(type) }
+        stateful? || !self_type.nil? || fixes_a_value?
+      end
+
+      def fixes_a_value?
+        positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
       end
 
       def empty?

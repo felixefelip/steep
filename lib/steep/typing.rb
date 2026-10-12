@@ -197,6 +197,7 @@ module Steep
     # The ivars of that `self` whose object's state the env knew at the call
     # (`ObjectStates.self_ivars`), only where there were any.
     attr_reader :call_self_ivars
+    attr_reader :call_exact_selves
     # The states of class objects the env knew at the call that the callee may
     # read (`ObjectStates::ClassStates.of_call`), only where there were any.
     attr_reader :call_class_states
@@ -250,6 +251,7 @@ module Steep
       (@method_calls = {}).compare_by_identity
       (@call_self_types = {}).compare_by_identity
       (@call_self_ivars = {}).compare_by_identity
+      (@call_exact_selves = {}).compare_by_identity
       (@call_class_states = {}).compare_by_identity
       (@exit_ivars = {}).compare_by_identity
       (@iterations = {}).compare_by_identity
@@ -303,9 +305,10 @@ module Steep
       type
     end
 
-    def add_call(node, call, self_type:, self_ivars:, class_states:)
+    def add_call(node, call, self_type:, exact_self:, self_ivars:, class_states:)
       method_calls[node] = call
       call_self_types[node] = self_type
+      call_exact_selves[node] = exact_self if exact_self
       call_self_ivars[node] = self_ivars unless self_ivars.empty?
       call_class_states[node] = class_states unless class_states.empty?
 
@@ -314,6 +317,11 @@ module Steep
 
     def self_ivars_of_call(node:)
       call_self_ivars.fetch(node) { parent&.self_ivars_of_call(node: node) || {} }
+    end
+
+    # The one class object `self` was at the call (`TypeConstruction#exact_self_type`).
+    def exact_self_of_call(node:)
+      call_exact_selves.fetch(node) { parent&.exact_self_of_call(node: node) }
     end
 
     def class_states_of_call(node:)

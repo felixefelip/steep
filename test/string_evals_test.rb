@@ -427,6 +427,69 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  GENERATED_MODULE_RUBY = <<~RUBY
+    class Base
+      def self.generated_methods
+        @generated_methods ||= begin
+          mod = const_set(:GeneratedMethods, Module.new)
+          include mod
+          mod
+        end
+      end
+
+      def self.define_reader(name)
+        generated_methods.class_eval "def \#{name}; 1; end"
+      end
+    end
+
+    class Widget < Base
+      define_reader :size
+    end
+  RUBY
+
+  GENERATED_MODULE_RBS = <<~RBS
+    class Base
+      self.@generated_methods: Module?
+      def self.generated_methods: () -> Module
+      def self.define_reader: (Symbol name) -> untyped
+    end
+
+    class Widget < Base
+    end
+  RBS
+
+  def generated_module_chunks(signatures)
+    in_tmpdir do
+      write("sig/base.rbs", signatures)
+      write("app/base.rb", GENERATED_MODULE_RUBY)
+
+      chunks_of(setup_project).fetch("app/base.rb:16:2").map { |chunk| chunk && [chunk.source, chunk.target, chunk.kind] }
+    end
+  end
+
+  # The macro writes into a module `generated_methods` builds on the class it
+  # runs on and includes there (felixefelip/steep#208). Before the signatures
+  # declare that module, what the call writes is the module itself, and the
+  # include of a value nothing names yet is a hole.
+  def test_a_module_a_method_on_self_builds_is_declared_first
+    assert_equal [["module GeneratedMethods\nend", nil, nil], nil], generated_module_chunks(GENERATED_MODULE_RBS)
+  end
+
+  # Once it is declared, `generated_methods` called on `Widget` answers
+  # `Widget::GeneratedMethods`, and the eval lands there.
+  def test_an_eval_on_a_module_a_method_on_self_builds_lands_in_it
+    signatures = GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n"
+
+    assert_equal(
+      [
+        ["module GeneratedMethods\nend", nil, nil],
+        ["include ::Widget::GeneratedMethods", nil, nil],
+        ["def size; 1; end", "::Widget::GeneratedMethods", "module"]
+      ],
+      generated_module_chunks(signatures)
+    )
+  end
+
   # A local holding the constant is the same question with an assignment in
   # front of it — what decides is the receiver's TYPE, not the shape of the
   # expression that produced it.
@@ -1715,7 +1778,7 @@ class StringEvalsTest < Minitest::Test
       runner.write(runner.run)
 
       assert_equal(
-        { "version" => 2, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] } },
+        { "version" => 3, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] } },
         YAML.safe_load(runner.evals_output_path.read)
       )
     end
