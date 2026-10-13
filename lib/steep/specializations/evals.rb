@@ -46,101 +46,45 @@ module Steep
         Diagnostic::Ruby::UnreachableValueBranch
       ].freeze
 
+      # The `self_target` of a frame entered on a receiver naming no class.
+      UNNAMED_SELF = :unnamed
+
       class << self
         # One thing a body does that writes code, in source order.
         #
-        # `:eval` is a string eval written on this method's own self. `:delegated`
-        # is a call handing that self to a method which evals on the parameter it
-        # lands in — `index` is the position that got it, and the source is read
-        # from THAT body under the arguments this call passes.
-        #
-        # `:const_set` and `:include` write a module and an ancestor where an
-        # eval writes a method, and `:on_self` is a call on this method's own
-        # self to one that writes any of them: it runs on the same class.
+        # `:eval` is a string eval, and `:const_set` and `:include` write a
+        # module and an ancestor where an eval writes a method. `:frame` is a
+        # call to a method that writes any of them, on its own receiver or on
+        # an object it is handed; its body is read under the arguments this call
+        # passes.
         #
         # `certain` is whether the call site's arguments decide it runs at all.
-        Effect = Struct.new(:kind, :node, :callee, :index, :certain, keyword_init: true)
+        Effect = Struct.new(:kind, :node, :callee, :certain, keyword_init: true)
 
         # A chunk of source, and the class it lands on — nil for the class whose
         # body holds the macro call, which is the only one the consumer can work
         # out on its own. `kind` is `"module"` for a target declared as one.
         Chunk = Struct.new(:source, :target, :kind, keyword_init: true)
 
-        Walk = Struct.new(:receivers, :parameter_writers, :self_writers, :typing, :parameters, keyword_init: true)
+        Walk = Struct.new(:writers, :typing, keyword_init: true)
 
-        # Whether the method writes code, directly or by handing its own self
-        # to one that does. The gate that keeps a project without the idiom from
-        # paying for a single extra check, so it reads the AST and nothing else.
-        def writes_code?(def_node, parameter_writers = {}, self_writers = Set[])
-          walk = Walk.new(
-            receivers: EVAL_ON_SELF_OR_NAMED, parameter_writers: parameter_writers, self_writers: self_writers,
-            typing: nil, parameters: parameter_names(def_node)
-          )
+        # Whether the method writes code, directly or through a method it calls.
+        # The gate that keeps a project without the idiom from paying for a
+        # single extra check, so it reads the AST and nothing else.
+        def writes_code?(def_node, writers = Set[])
+          walk = Walk.new(writers: writers, typing: nil)
           each_effect(body_of(def_node), nil, true, walk) { return true }
           false
         end
 
-        # The positions of the parameters a body writes code on instead —
-        # `owner.module_eval "…"` in `generate(owner, name)` answers `[0]`.
-        #
-        # A method like that is NOT a writer in its own right: it writes on an
-        # object it was handed, so its own call site is the wrong place to
-        # attribute anything to. It becomes one only through a frame that passes
-        # its own `self` there, which is what `Runner#delegating_writers` looks
-        # for.
-        def eval_parameters(def_node)
-          names = parameter_names(def_node)
-          found = Set[] #: Set[Integer]
-
-          walk = Walk.new(receivers: names, parameter_writers: {}, self_writers: Set[], typing: nil, parameters: names)
-          each_effect(body_of(def_node), nil, true, walk) do |effect|
-            receiver = effect.node.children[0]
-            next unless receiver&.type == :lvar
-
-            index = names.index(receiver.children[0]) and found << index
-          end
-
-          found
-        end
-
-        # The positional parameters of a def, in order, so an eval written on one
-        # can be matched against the argument a caller passes there.
-        def parameter_names(def_node)
-          args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
-          return [] unless args
-
-          args.children.filter_map do |arg|
-            arg.children[0] if arg.type == :arg || arg.type == :optarg
-          end
-        end
-
-        # The strings this body evals, in source order, with nil for one whose
-        # value this call site does not fix OR whose execution it does not
-        # decide. A nil is reported rather than dropped: a consumer rendering
-        # the list needs to know its macro was read in part, since a class given
-        # a reader whose writer was skipped is worse than one given neither.
-        # `receivers` is what this body is allowed to eval ON, and the caller
-        # chooses it rather than the body offering everything it has. A direct
-        # writer gets `EVAL_ON_SELF`; a body reached through a frame gets the ONE
-        # parameter that frame proved it handed its own self to. A helper evaling
-        # on two parameters writes for two different objects, and only one of
-        # them is the class the harvest is attributing to.
-        def sources(typing, def_node, env, receivers = EVAL_ON_SELF)
-          flow = Flow.new(typing)
-          result = [] #: Array[Chunk?]
-          walk = Walk.new(receivers: receivers, parameter_writers: {}, self_writers: Set[], typing: typing, parameters: parameter_names(def_node))
-
-          each_effect(body_of(def_node), flow, true, walk) do |effect|
-            result << chunk_of(typing, effect, env)
-          end
-
-          result
-        end
-
         # The chunk one write makes, or nil for a hole — a branch the call site
-        # does not decide, or a value it does not fix.
-        def chunk_of(typing, effect, env)
+        # does not decide, a value it does not fix, or a write on a `self` that
+        # names no class. `self_target` is the class a write on `self` lands
+        # on: nil in the frame of the macro call itself, the receiver's class in
+        # a frame entered through one.
+        def chunk_of(typing, effect, env, self_target = nil)
           return nil unless effect.certain
+          return nil if self_target == UNNAMED_SELF && on_self?(effect.node)
 
           source =
             case effect.kind
@@ -150,21 +94,18 @@ module Steep
             end
           return nil unless source
 
-          target = eval_target(typing, effect.node)
+          target = on_self?(effect.node) ? self_target : eval_target(typing, effect.node)
           Chunk.new(source: source, target: target, kind: target && module_kind(target, env))
         end
 
-        # Every effect of this body, direct and delegated, in source order and
+        # Every effect of this body, written and called, in source order and
         # each carrying the flow's verdict. A macro that evals once and then
-        # hands off writes both, and the class gets them in the order it is
+        # calls a writer writes both, and the class gets them in the order it is
         # written.
-        def effects(typing, def_node, parameter_writers, self_writers)
+        def effects(typing, def_node, writers)
           flow = Flow.new(typing)
           result = [] #: Array[Effect]
-          walk = Walk.new(
-            receivers: EVAL_ON_SELF_OR_NAMED, parameter_writers: parameter_writers, self_writers: self_writers,
-            typing: typing, parameters: parameter_names(def_node)
-          )
+          walk = Walk.new(writers: writers, typing: typing)
 
           each_effect(body_of(def_node), flow, true, walk) do |effect|
             result << effect
@@ -183,40 +124,37 @@ module Steep
           def_node.type == :defs ? def_node.children[3] : def_node.children[2]
         end
 
-        private
-
-        # `[key, index]` when this send hands the caller's own `self` to a method
-        # which evals on the parameter it lands in:
-        #
-        #   Writer.generate(self, name)   # `Writer.generate` evals on parameter 0
-        #
-        # Which method that is, the checker says. A constant is written relative
-        # to where the call sits — `Module#delegate` calls `Delegation.generate`
-        # from inside `module ActiveSupport` — and only the typing knows what it
-        # names, so the callee is keyed as every call site is: by its
-        # declaration.
-        #
-        # The cheap gate has no typing. It takes every writer the spelling could
-        # name, as a suffix of its full name, and the typed walk that follows
-        # decides: a frame the gate lets through for nothing records nothing.
-        #
-        # `self` written at the call site is the whole proof that the two frames
-        # share an object — a syntactic check, not an alias analysis.
-        def delegated_write(node, parameter_writers, typing)
-          return nil if parameter_writers.empty?
-          return nil unless node.type == :send
-
-          keys = typing ? [resolved_send_key(node, typing)].compact : spelled_send_keys(node, parameter_writers)
-
-          keys.each do |key|
-            indices = parameter_writers[key] or next
-            index = indices.find { |position| node.children[2 + position]&.type == :self } or next
-
-            return [key, index]
-          end
-
-          nil
+        def on_self?(node)
+          receiver = node.children[0]
+          receiver.nil? || receiver.type == :self
         end
+
+        # The class a call's receiver NAMES exactly.
+        #
+        #   Target.class_eval "…"          # singleton(::Outer::Target)
+        #   target = Target; target.…      # the local keeps it
+        #   owner.module_eval "…"          # whatever the frame handed `owner`
+        #   self.class_eval "…"            # `self` — a type variable, not a name
+        #   Target.singleton_class.…       # singleton_class(::Target) — a class,
+        #                                  # on the side an entry has no field for
+        #
+        # nil for the last two, which decline: `self` names no class, and since
+        # S2 of #171 a singleton class names one — but on the SINGLETON side,
+        # and an entry records a class rather than a side, so a def written
+        # there would be placed as an instance method
+        # (felixefelip/steep#175).
+        def eval_target(typing, node)
+          receiver = node.children[0]
+          return nil if receiver.nil? || receiver.type == :self
+          return nil unless typing.has_type?(receiver)
+
+          type = typing.type_of(node: receiver)
+          return nil unless type.is_a?(AST::Types::Name::Singleton)
+
+          type.name.to_s
+        end
+
+        private
 
         def resolved_send_key(node, typing)
           call = typing.call_of(node: node)
@@ -227,14 +165,22 @@ module Steep
           nil
         end
 
-        # The writers `Writer.generate(…)` could name before anything resolves
-        # it: `Writer` itself, or a `Writer` nested anywhere. `::Writer` names
-        # only the first.
-        def spelled_send_keys(node, parameter_writers)
-          spelled = constant_send_key(node) or return []
-          return [spelled] if absolute_constant?(node.children[0])
+        # The writers a call could name before anything resolves it. A constant
+        # receiver is matched by its spelling, as a suffix of the full name
+        # (`::Writer` names only the top-level one); any other receiver by the
+        # method's name alone. The typed walk that follows decides: a call the
+        # gate lets through for nothing records nothing.
+        def spelled_send_keys(node, writers)
+          receiver = node.children[0]
+          unless receiver&.type == :const
+            name = node.children[1]
+            return writers.select { |key| key.end_with?(".#{name}", "##{name}") }
+          end
 
-          parameter_writers.keys.select { |key| key == spelled || key.end_with?("::#{spelled}") }
+          spelled = constant_send_key(node) or return []
+          return writers.select { |key| key == spelled } if absolute_constant?(receiver)
+
+          writers.select { |key| key == spelled || key.end_with?("::#{spelled}") }
         end
 
         def absolute_constant?(node)
@@ -270,7 +216,7 @@ module Steep
         #
         # `flow` is nil when the caller only asks WHETHER code is written, which
         # needs no decisions and no typing.
-        # Both kinds of effect come out of ONE walk, so a delegated call is
+        # Both kinds of effect come out of ONE walk, so a call to a writer is
         # classified by the same control flow an eval is: a branch the call site
         # kills is not reached, and one it does not decide takes `certain` away
         # from whatever is inside it. `Writer.generate(self, name) if enabled`
@@ -285,8 +231,7 @@ module Steep
           return if DEFERRED.include?(node.type)
 
           if (effect = write_at(node, certain, walk))
-            # A delegated write reads its arguments in the frame it hands them to.
-            node.children.each { |child| each_effect(child, flow, certain, walk, &block) } unless effect.kind == :delegated
+            node.children.each { |child| each_effect(child, flow, certain, walk, &block) }
             yield effect
             return
           end
@@ -306,52 +251,36 @@ module Steep
         def write_at(node, certain, walk)
           if (kind = written_kind(node, walk))
             Effect.new(kind: kind, node: node, certain: certain)
-          elsif (delegation = delegated_write(node, walk.parameter_writers, walk.typing))
-            Effect.new(kind: :delegated, node: node, callee: delegation[0], index: delegation[1], certain: certain)
-          elsif (callee = self_write(node, walk))
-            Effect.new(kind: :on_self, node: node, callee: callee, certain: certain)
+          elsif (callee = called_writer(node, walk))
+            Effect.new(kind: :frame, node: node, callee: callee, certain: certain)
           end
         end
 
-        # Without a typing, any writer of that name.
-        def self_write(node, walk)
-          return nil if walk.self_writers.empty? || node.type != :send
-          return nil unless node.children[0].nil? || node.children[0].type == :self
+        # Which writer a call runs, as the checker resolved it. A constant is
+        # written relative to where the call sits — `Module#delegate` calls
+        # `Delegation.generate` from inside `module ActiveSupport` — and only the
+        # typing knows what it names, so the callee is keyed as every call site
+        # is: by its declaration. Without a typing, any writer the spelling
+        # could name.
+        def called_writer(node, walk)
+          return nil if walk.writers.empty? || node.type != :send
+          return spelled_send_keys(node, walk.writers).first unless walk.typing
 
-          if walk.typing
-            key = resolved_send_key(node, walk.typing)
-            key if key && walk.self_writers.include?(key)
-          else
-            name = node.children[1]
-            walk.self_writers.find { |key| key.end_with?(".#{name}", "##{name}") }
-          end
+          key = resolved_send_key(node, walk.typing)
+          key if key && walk.writers.include?(key)
         end
 
-        # What `walk` is asked to read a receiver as. `nil` stands for self —
-        # receiverless or written `self.` — and a Symbol for a parameter of the
-        # def, which only the delegating shape passes.
-        EVAL_ON_SELF = [nil].freeze
-
-        # Self, plus any receiver whose type names one class. The chunk then
-        # carries that class, so the consumer does not have to work out a WHERE
-        # only the receiver knows.
-        EVAL_ON_SELF_OR_NAMED = [nil, :named].freeze
-
-        # What a `class_eval` of a string, a `const_set` or an `include` on a
-        # receiver this walk accepts writes.
+        # What a `class_eval` of a string, a `const_set` or an `include` writes,
+        # on `self` or on a receiver whose type names a class.
         #
         # Receiverless or written `self.class_eval`, it is the SAME call: the
         # implicit receiver of the first IS self, and a macro that spells it out
-        # writes code in exactly the place a macro that does not. What the
-        # consumer does with the answer is why the distinction matters at all —
-        # it places the source in the class whose body holds the macro call, so
-        # an eval that runs anywhere else would be placed somewhere it does not
-        # belong.
+        # writes code in exactly the place a macro that does not.
         #
-        # Every other receiver still declines. A constant names a class this
-        # call site did not choose, and a variable — `owner.module_eval`, the
-        # shape `ActiveSupport::Delegation` uses — names an object only the
-        # frame that passed it can identify, which is felixefelip/steep#171 S5b.
+        # Any other receiver is read by its type, under the arguments the body
+        # is checked with: a constant names its class, and a parameter names
+        # whatever the frame that called this one handed it. One whose type
+        # names no class has no WHERE to record, and declines.
         #
         # A block is `ClassEvalExpander`'s shape and is plain Ruby a reader
         # already sees.
@@ -359,7 +288,7 @@ module Steep
           return nil unless node.type == :send
 
           kind = WRITES[node.children[1]] or return nil
-          return nil unless accepted_receiver?(node, walk.receivers, walk.typing, walk.parameters)
+          return nil unless accepted_receiver?(node, walk.typing)
 
           arguments = node.children.drop(2)
           case kind
@@ -389,51 +318,13 @@ module Steep
         FORWARDED_ARGUMENTS = %i[block_pass splat].freeze
 
         # `typing` is nil for the cheap gate that only asks WHETHER a method
-        # writes code, and that pass takes a named receiver on the syntax alone —
+        # writes code, and that pass takes any receiver on the syntax alone —
         # deciding it needs a type, and the point of the gate is to avoid paying
-        # for one. With a typing, the receiver has to actually name a class:
-        # otherwise there is no WHERE to record, and an eval this cannot place
-        # is one it must not read.
-        def accepted_receiver?(node, receivers, typing, parameters)
-          receiver = node.children[0]
-          return receivers.include?(nil) if receiver.nil? || receiver.type == :self
+        # for one.
+        def accepted_receiver?(node, typing)
+          return true if typing.nil? || on_self?(node)
 
-          # A PARAMETER is the delegating shape's business, whatever its type
-          # says. `generate(owner, name)` writes on an object it was handed, and
-          # which class that is depends on the frame that handed it — so it is
-          # read through that frame, at the call site that passed its own self,
-          # and never as a receiver naming a class of its own.
-          parameter = receiver.type == :lvar && parameters.include?(receiver.children[0])
-          return receivers.include?(receiver.children[0]) if parameter
-
-          receivers.include?(:named) && (typing.nil? || !eval_target(typing, node).nil?)
-        end
-
-        # The class an eval lands on, when its receiver NAMES one exactly.
-        #
-        #   Target.class_eval "…"          # singleton(::Outer::Target)
-        #   target = Target; target.…      # the local keeps it
-        #   self.class_eval "…"            # `self` — a type variable, not a name
-        #   Target.singleton_class.…       # singleton_class(::Target) — a class,
-        #                                  # on the side an entry has no field for
-        #
-        # nil for the first, which is the answer the consumer already has: an
-        # eval on the caller's own self lands on the class whose body holds the
-        # macro call, and only the call site knows which that is. nil for the
-        # last two as well, and those decline: `self` names no class, and since
-        # S2 of #171 a singleton class names one — but on the SINGLETON side,
-        # and an entry records a class rather than a side, so a def written
-        # there would be placed as an instance method
-        # (felixefelip/steep#175).
-        def eval_target(typing, node)
-          receiver = node.children[0]
-          return nil if receiver.nil? || receiver.type == :self
-          return nil unless typing.has_type?(receiver)
-
-          type = typing.type_of(node: receiver)
-          return nil unless type.is_a?(AST::Types::Name::Singleton)
-
-          type.name.to_s
+          !eval_target(typing, node).nil?
         end
 
         # A value not built here is an existing module given a second name,

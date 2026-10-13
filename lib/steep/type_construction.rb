@@ -1489,7 +1489,7 @@ module Steep
       end
 
       typing.add_typing(call.node, call.return_type, nil)
-      typing.add_call(call.node, call, self_type: self_type, keyed_self: Specializations.keyed_self(entered, call), self_ivars: ObjectStates.call_ivars(entered, call), class_states: ObjectStates::ClassStates.of_call(entered, call))
+      typing.add_call(call.node, call, self_type: self_type, exact_self: Specializations.exact_self(entered), keyed_self: Specializations.keyed_self(entered, call), self_ivars: ObjectStates.call_ivars(entered, call), class_states: ObjectStates::ClassStates.of_call(entered, call))
 
       Pair.new(type: call.return_type, constr: self)
     end
@@ -5852,7 +5852,7 @@ module Steep
 
       key = Specializations.method_key(call.method_decls) or return call
       arguments = Specializations::Arguments.at_call(
-        node, typing, call, self_ivars: ObjectStates.call_ivars(self, call), class_states: ObjectStates::ClassStates.of_call(self, call), keyed_self: Specializations.keyed_self(self, call)
+        node, typing, call, self_ivars: ObjectStates.call_ivars(self, call), class_states: ObjectStates::ClassStates.of_call(self, call), keyed_self: Specializations.keyed_self(self, call), exact_self: Specializations.exact_self(self)
       ) or return call
       type = specializations.call_return_type(key, arguments, factory: checker.factory) or return call
 
@@ -9081,7 +9081,7 @@ module Steep
             method_decls: inlined_call.method_decls,
             return_type: inlined_call.return_type
           ),
-          self_type: constr.self_type, keyed_self: Specializations.keyed_self(constr, inlined_call),
+          self_type: constr.self_type, exact_self: Specializations.exact_self(constr), keyed_self: Specializations.keyed_self(constr, inlined_call),
           self_ivars: ObjectStates.call_ivars(constr, inlined_call),
           class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
         )
@@ -9093,7 +9093,7 @@ module Steep
             context: inlined_call.context,
             method_name: method_name
           ),
-          self_type: constr.self_type, keyed_self: Specializations.keyed_self(constr, inlined_call),
+          self_type: constr.self_type, exact_self: Specializations.exact_self(constr), keyed_self: Specializations.keyed_self(constr, inlined_call),
           self_ivars: ObjectStates.call_ivars(constr, inlined_call),
           class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
         )

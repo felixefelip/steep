@@ -1348,7 +1348,7 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
-  def test_a_frame_that_does_not_pass_its_own_self_is_not_read
+  def test_a_class_a_frame_is_handed_by_name_gets_what_it_writes
     in_tmpdir do
       write("sig/base.rbs", DELEGATION_RBS)
       write("app/base.rb", <<~RUBY)
@@ -1369,13 +1369,13 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
-      assert_empty evals_of(setup_project)
+      chunks = chunks_of(setup_project).fetch("app/base.rb:14:2")
+
+      assert_equal [["def content; end", "::Article"]], chunks.map { |chunk| [chunk.source, chunk.target] }
     end
   end
 
-  # One frame, deliberately: two would need the argument threaded through a
-  # chain, and nothing asks for it yet.
-  def test_a_second_frame_is_not_followed
+  def test_a_class_handed_on_through_a_second_frame_is_followed
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
         module Writer
@@ -1417,7 +1417,214 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
-      assert_empty evals_of(setup_project)
+      chunks = chunks_of(setup_project).fetch("app/base.rb:20:2")
+
+      assert_equal [["def content; end", "::Article"]], chunks.map { |chunk| [chunk.source, chunk.target] }
+    end
+  end
+
+  HAS_MANY_RBS = <<~RBS
+    module Builder
+      class HasMany
+        def self.build: (untyped model, Symbol name) -> void
+        def self.define_accessors: (untyped model, Symbol name) -> void
+        def self.define_readers: (untyped mixin, Symbol name) -> void
+      end
+    end
+
+    class Base
+      self.@generated_association_methods: Module?
+      def self.generated_association_methods: () -> Module
+      def self.has_many: (Symbol name) -> untyped
+    end
+
+    class Post < Base
+    end
+
+    module Post::GeneratedAssociationMethods
+    end
+  RBS
+
+  HAS_MANY_RUBY = <<~RUBY
+    module Builder
+      class HasMany
+        def self.build(model, name)
+          define_accessors(model, name)
+        end
+
+        def self.define_accessors(model, name)
+          mixin = model.generated_association_methods
+          define_readers(mixin, name)
+        end
+
+        def self.define_readers(mixin, name)
+          mixin.class_eval "def \#{name}; 1; end"
+        end
+      end
+    end
+
+    class Base
+      def self.generated_association_methods
+        @generated_association_methods ||= begin
+          mod = const_set(:GeneratedAssociationMethods, Module.new)
+          include mod
+          mod
+        end
+      end
+
+      def self.has_many(name)
+        Builder::HasMany.build(self, name)
+      end
+    end
+
+    class Post < Base
+      has_many :comments
+      has_many :tags
+    end
+  RUBY
+
+  def test_a_class_handed_on_through_several_frames_is_followed_to_the_module_it_builds
+    in_tmpdir do
+      write("sig/base.rbs", HAS_MANY_RBS)
+      write("app/base.rb", HAS_MANY_RUBY)
+
+      chunks = chunks_of(setup_project).transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal(
+        [
+          ["module GeneratedAssociationMethods\nend", "::Post"],
+          ["include ::Post::GeneratedAssociationMethods", "::Post"],
+          ["def comments; 1; end", "::Post::GeneratedAssociationMethods"]
+        ],
+        chunks.fetch("app/base.rb:33:2")
+      )
+      assert_equal [nil, nil, ["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:34:2")
+    end
+  end
+
+  # `has_many` returns what it was handed, so the loop runs a second generation
+  # and the class body is re-read with what the first call left the memo
+  # holding. The memo was written through `model`, not on `has_many`'s own
+  # `self`: what its body ends with says nothing about it.
+  def test_a_memo_written_through_a_handed_self_is_not_built_twice
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Builder
+          class HasMany
+            def self.build: (untyped model, Symbol name) -> void
+            def self.define_readers: (untyped mixin, Symbol name) -> void
+          end
+        end
+
+        module Core
+          module ClassMethods
+            def generated_association_methods: () -> untyped
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+          def self.has_many: (Symbol name) -> Symbol
+        end
+
+        class Post < Base
+        end
+
+        module Post::GeneratedAssociationMethods
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Builder
+          class HasMany
+            def self.build(model, name)
+              define_readers(model.generated_association_methods, name)
+            end
+
+            def self.define_readers(mixin, name)
+              mixin.class_eval "def \#{name}; 1; end"
+            end
+          end
+        end
+
+        module Core
+          module ClassMethods
+            def generated_association_methods
+              @generated_association_methods ||= begin
+                mod = const_set(:GeneratedAssociationMethods, Module.new)
+                include mod
+                mod
+              end
+            end
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+
+          def self.has_many(name)
+            Builder::HasMany.build(self, name)
+            name
+          end
+        end
+
+        class Post < Base
+          has_many :comments
+          has_many :tags
+        end
+      RUBY
+
+      project = setup_project
+      write_postconditions(project)
+      chunks = chunks_of(project).transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal 3, chunks.fetch("app/base.rb:35:2").compact.size
+      assert_equal [nil, nil, ["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:36:2")
+    end
+  end
+
+  def test_a_frame_entered_on_an_instance_records_only_what_it_writes
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Store
+          def create!: () -> Store
+          def save: () -> bool
+        end
+
+        class Base
+          def self.save: () -> void
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Store
+          def create!
+            save
+            self
+          end
+
+          def save = true
+        end
+
+        class Base
+          def self.save
+            class_eval "def saved; end"
+          end
+
+          def self.has_rich_text(name)
+            Store.new.create!
+            class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content; end"], evals_of(setup_project).fetch("app/base.rb:22:2")
     end
   end
 
@@ -1540,7 +1747,7 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
-  def test_the_inner_body_is_read_with_only_the_parameter_it_was_handed
+  def test_each_parameter_a_frame_writes_on_lands_on_the_class_it_was_handed
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
         module Writer
@@ -1573,11 +1780,11 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
-      # `other` is `String`, not this class: what it writes belongs to no call
-      # site here, and reading it would attribute it to `Article`.
+      chunks = chunks_of(setup_project).fetch("app/base.rb:15:2")
+
       assert_equal(
-        { "app/base.rb:15:2" => ["def content; end"] },
-        evals_of(setup_project)
+        [["def content; end", "::Article"], ["def content_elsewhere; end", "::String"]],
+        chunks.map { |chunk| [chunk.source, chunk.target] }
       )
     end
   end

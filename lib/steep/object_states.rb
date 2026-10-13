@@ -67,13 +67,13 @@ module Steep
       end
 
       # `self_ivars` for `call`, with the memos whose value the env knows that
-      # its body may read.
+      # its body may read: all of them where it may hand `self` on.
       def call_ivars(constr, call)
         memos = ClassMemos.memo_values(constr)
         return self_ivars(constr) if memos.empty?
 
-        read = ClassStates.reach(constr, call).ivars
-        self_ivars(constr).merge(memos.select { |ivar, _| read.include?(ivar) })
+        reach = ClassStates.reach(constr, call)
+        self_ivars(constr).merge(memos.select { |ivar, _| reach.observes_self || reach.ivars.include?(ivar) })
       end
 
       # A `.new` call whose `initialize` binds an ivar from one of the values
@@ -116,15 +116,15 @@ module Steep
           constr = refine_local(constr, name, left(constr, receiver_type, constr.context.type_env[name], method_name, arguments, node))
         end
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver && on_self?(receiver)
-        constr = self_moved(constr, node) if receiver.nil? || receiver.type == :self
+        constr = self_moved(constr, node) if receiver.nil? || receiver.type == :self || LocalReach.argument_values(arguments).any? { |value| value.type == :self }
         constr = ClassMemos.after_class_call(constr, node)
         constr = ClassStates.after_call(constr)
         handed_on(constr, arguments)
       end
 
-      # A call on `self` from a body checked under its receiver's contents
-      # leaves them as that call's own check left them, and where nothing says
-      # so, keeps only what no call can change.
+      # A call on `self`, or one handed `self`, from a body checked under its
+      # receiver's contents leaves them as that call's own check left them, and
+      # where nothing says so, keeps only what no call can change.
       def self_moved(constr, node)
         def_node = constr.method_context&.node or return constr
         entered = constr.specialization_arguments(def_node)&.self_ivars
