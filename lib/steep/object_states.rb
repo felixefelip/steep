@@ -15,6 +15,10 @@ module Steep
     # `reads_only`: the method only answers an ivar (`attr_reader`, `def x = @x`).
     Effect = Struct.new(:bindings, :writes, :reads_only, keyword_init: true)
 
+    # What a body left its receiver holding (`ivars`), and each class object
+    # it was handed the state of (`classes`).
+    Exit = Struct.new(:ivars, :classes, keyword_init: true)
+
     class << self
       # The locals handed on are settled here, ahead of the callee's
       # postconditions, so a fact one states about them (`unconditional.params`)
@@ -30,13 +34,14 @@ module Steep
       # where it falls off: a `return` leaves from elsewhere.
       def record_exit(constr, def_node, pair)
         arguments = constr.specialization_arguments(def_node) or return
-        return if arguments.self_ivars.empty? || returns_early?(pair_body(def_node))
+        return if !arguments.stateful? || returns_early?(pair_body(def_node))
 
         env = pair.context.type_env
-        exit = arguments.self_ivars.keys.to_h { |ivar| [ivar, env[ivar]] }.select { |_, type| state_value?(type) }
+        ivars = arguments.self_ivars.keys.to_h { |ivar| [ivar, env[ivar]] }.select { |_, type| state_value?(type) }
+        classes = arguments.class_states.keys.to_h { |name| [name, env.class_states.fetch(name, {})] }
         root = constr.typing
         root = root.parent while root.parent
-        root.add_exit_ivars(def_node, exit)
+        root.add_exit_ivars(def_node, Exit.new(ivars: ivars, classes: classes))
       end
 
       def returns_early?(body)
@@ -116,28 +121,58 @@ module Steep
           constr = refine_local(constr, name, left(constr, receiver_type, constr.context.type_env[name], method_name, arguments, node))
         end
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver && on_self?(receiver)
-        constr = self_moved(constr, node) if receiver.nil? || receiver.type == :self || LocalReach.argument_values(arguments).any? { |value| value.type == :self }
-        constr = ClassMemos.after_class_call(constr, node)
+        handed = ClassStates.handed_classes(constr, arguments)
+        on_self = receiver.nil? || receiver.type == :self
+        reaches_self = on_self || hands_self?(constr, arguments, handed)
+        exit = self_exit(constr, node, on_self) if reaches_self
+        constr = self_moved(constr, exit) if reaches_self
+        constr = ClassMemos.after_class_call(constr, exit)
+        constr = ClassStates.moved(constr, node, receiver_type, handed)
         constr = ClassStates.after_call(constr)
         handed_on(constr, arguments)
+      end
+
+      # The ivars of `self` a call's own check left, made on `self` or handed
+      # it, or nil where it was not checked under them.
+      def self_exit(constr, node, on_self)
+        exit = exit_of(constr, node) or return
+        on_self ? exit.ivars : exit.classes[constr.self_type.name]
+      end
+
+      def hands_self?(constr, arguments, handed)
+        singleton = constr.self_type
+        return handed.include?(singleton.name) if singleton.is_a?(AST::Types::Name::Singleton)
+
+        LocalReach.argument_values(arguments).any? do |value|
+          constr.typing.has_type?(value) && constr.typing.type_of(node: value).is_a?(AST::Types::Self)
+        end
       end
 
       # A call on `self`, or one handed `self`, from a body checked under its
       # receiver's contents leaves them as that call's own check left them, and
       # where nothing says so, keeps only what no call can change.
-      def self_moved(constr, node)
+      def self_moved(constr, exit)
         def_node = constr.method_context&.node or return constr
         entered = constr.specialization_arguments(def_node)&.self_ivars
         return constr if entered.nil? || entered.empty?
 
         env = constr.context.type_env
-        exit = exit_of(constr, node) || entered.keys.to_h { |ivar| [ivar, env[ivar]] }.reject do |ivar, type|
-          !type || !fixed?(type) || state_in(type) || (type.is_a?(AST::Types::Nil) && ClassMemos.value_memo?(constr, ivar))
-        end
+        left = moved_ivars(constr, constr.self_type, entered.keys.to_h { |ivar| [ivar, env[ivar]] }, exit)
         constr.update_type_env do |current|
           entered.each_key.reduce(current) do |result, ivar|
-            result.refine_types(instance_variable_types: { ivar => exit.fetch(ivar) { declared_ivar(constr, ivar) } })
+            result.refine_types(instance_variable_types: { ivar => left.fetch(ivar) { declared_ivar(constr, ivar) } })
           end
+        end
+      end
+
+      # What a call that may reach an object holding `ivars` leaves it holding:
+      # what the call's own check left (`exit`), or only what no call can
+      # change.
+      def moved_ivars(constr, self_type, ivars, exit)
+        return exit if exit
+
+        ivars.reject do |ivar, type|
+          !type || !fixed?(type) || state_in(type) || (type.is_a?(AST::Types::Nil) && ClassMemos.value_memo?(constr, self_type, ivar))
         end
       end
 
@@ -148,6 +183,8 @@ module Steep
       # What the body a call reached left its receiver holding, where it was
       # checked under the contents this call's receiver holds.
       def exit_of(constr, node)
+        return unless node.type == :send || node.type == :csend
+
         call = recorded_call(constr, node)
         key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls) or return
         arguments = Specializations::Arguments.recorded(node, constr.typing) or return
@@ -353,7 +390,7 @@ module Steep
       # effect binds, and only the ivars no call can change — an array crosses a
       # call only through a check that followed it.
       def changed(constr, state, method_name, arguments, node)
-        if (exit = exit_of(constr, node))
+        if (exit = exit_of(constr, node)&.ivars)
           kept = exit.select { |ivar, value| !value.is_a?(AST::Types::Tuple) || ClassMemos.collection_confined?(constr, state.back_type, ivar) }
           return kept.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: kept)
         end

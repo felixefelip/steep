@@ -56,7 +56,7 @@ module Steep
 
           receiver = call.is_a?(TypeInference::MethodCall::Typed) ? call.receiver_type : nil
           names = named_classes(constr, call)
-          handed = handed_classes(constr, call)
+          handed = call.node.type == :send || call.node.type == :csend ? handed_classes(constr, call.node.children.drop(2)) : []
           known.select do |name, _|
             (receiver.is_a?(AST::Types::Name::Singleton) && receiver.name == name) || handed.include?(name) || names.include?(name.to_s.delete_prefix("::"))
           end
@@ -95,6 +95,35 @@ module Steep
           constr.update_type_env do |current|
             current.refine_types(instance_variable_types: stale.to_h { |ivar| [ivar, ObjectStates.declared_ivar(constr, ivar)] })
           end
+        end
+
+        # The class objects among `arguments`, `self` included.
+        def handed_classes(constr, arguments)
+          LocalReach.argument_values(arguments).filter_map do |argument|
+            next unless constr.typing.has_type?(argument)
+
+            type = constr.typing.type_of(node: argument)
+            type = constr.self_type if type.is_a?(AST::Types::Self)
+            type.name if type.is_a?(AST::Types::Name::Singleton)
+          end
+        end
+
+        # A call made on a class object whose state the env knows, or handed
+        # one, leaves it holding what the call's own check left it, and where
+        # nothing says so, only what no call can change.
+        def moved(constr, node, receiver_type, handed)
+          states = constr.context.type_env.class_states
+          receiver = receiver_type.name if receiver_type.is_a?(AST::Types::Name::Singleton)
+          reached = states.keys.select { |name| name == receiver || handed.include?(name) }
+          return constr if reached.empty?
+
+          exit = ObjectStates.exit_of(constr, node)
+          left = reached.to_h do |name|
+            ivars = name == receiver ? exit&.ivars : exit&.classes&.[](name)
+            [name, ObjectStates.moved_ivars(constr, AST::Types::Name::Singleton.new(name: name), states[name], ivars)]
+          end
+          states = states.merge(left).reject { |_, ivars| ivars.empty? }
+          constr.update_type_env { |env| env.update(class_states: states) }
         end
 
         # What a call's body may reach on its receiver, following the calls it
@@ -155,21 +184,6 @@ module Steep
 
         def memo_ivars(constr, name)
           ObjectStates.class_side_bodies(constr, AST::Types::Name::Singleton.new(name: name)).filter_map { |_, _, body| body&.memo&.first }.to_set
-        end
-
-        # `self` or a class object, passed as an argument.
-        def handed_classes(constr, call)
-          node = call.node
-          return [] unless node.type == :send || node.type == :csend
-
-          arguments = node.children.drop(2).flat_map { |argument| argument.type == :kwargs ? argument.children.map { |pair| pair.children.last } : [argument] }
-          arguments.filter_map do |argument|
-            next unless constr.typing.has_type?(argument)
-
-            type = constr.typing.type_of(node: argument)
-            type = constr.self_type if type.is_a?(AST::Types::Self)
-            type.name if type.is_a?(AST::Types::Name::Singleton)
-          end
         end
 
         def named_classes(constr, call)

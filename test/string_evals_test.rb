@@ -1498,7 +1498,7 @@ class StringEvalsTest < Minitest::Test
         ],
         chunks.fetch("app/base.rb:33:2")
       )
-      assert_equal [nil, nil, ["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:34:2")
+      assert_equal [["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:34:2")
     end
   end
 
@@ -1579,6 +1579,84 @@ class StringEvalsTest < Minitest::Test
 
       assert_equal 3, chunks.fetch("app/base.rb:35:2").compact.size
       assert_equal [nil, nil, ["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:36:2")
+    end
+  end
+
+  def test_a_memo_a_class_handed_on_through_a_local_writes_is_carried_back
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Builder
+          class HasMany
+            def self.build: (untyped model, Symbol name) -> void
+            def self.define_readers: (untyped mixin, Symbol name) -> void
+          end
+        end
+
+        module Core
+          module ClassMethods
+            @generated_association_methods: Module?
+            def generated_association_methods: () -> untyped
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+          def self.has_many: (Symbol name) -> Symbol
+        end
+
+        class Post < Base
+        end
+
+        module Post::GeneratedAssociationMethods
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Builder
+          class HasMany
+            def self.build(model, name)
+              define_readers(model.generated_association_methods, name)
+            end
+
+            def self.define_readers(mixin, name)
+              mixin.class_eval "def \#{name}; 1; end"
+            end
+          end
+        end
+
+        module Core
+          module ClassMethods
+            def generated_association_methods
+              @generated_association_methods ||= begin
+                mod = const_set(:GeneratedAssociationMethods, Module.new)
+                include mod
+                mod
+              end
+            end
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+
+          def self.has_many(name)
+            klass = self
+            Builder::HasMany.build(klass, name)
+            name
+          end
+        end
+
+        class Post < Base
+          has_many :comments
+          has_many :tags
+        end
+      RUBY
+
+      project = setup_project
+      write_postconditions(project)
+      chunks = chunks_of(project).transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal 3, chunks.fetch("app/base.rb:36:2").compact.size
+      assert_equal [["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:37:2")
     end
   end
 

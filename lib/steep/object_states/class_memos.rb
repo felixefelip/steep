@@ -82,8 +82,7 @@ module Steep
           false
         end
 
-        def value_memo?(constr, ivar)
-          singleton = constr.self_type
+        def value_memo?(constr, singleton, ivar)
           singleton.is_a?(AST::Types::Name::Singleton) && value_memos(constr, singleton).any? { |memo, _, _| memo == ivar }
         end
 
@@ -122,13 +121,13 @@ module Steep
 
         # In a class body, a call may reach a memo still `nil`: it holds what the
         # call's own check left it, or what its declaration says.
-        def after_class_call(constr, node)
+        def after_class_call(constr, exit)
           return constr if constr.method_context
 
           unset = memo_values(constr).select { |_, type| type.is_a?(AST::Types::Nil) }
           return constr if unset.empty?
 
-          exit = ObjectStates.on_self?(node) && ObjectStates.exit_of(constr, node) || {}
+          exit ||= {}
           constr.update_type_env do |env|
             env.refine_types(instance_variable_types: unset.to_h { |ivar, _| [ivar, exit.fetch(ivar) { ObjectStates.declared_ivar(constr, ivar) }] })
           end

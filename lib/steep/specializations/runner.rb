@@ -63,7 +63,7 @@ module Steep
       def initialize(project)
         @project = project
         @evals = {} #: Hash[String, Array[String?]]
-        @exits = {} #: Hash[String, Hash[String, Hash[Symbol, AST::Types::t]]]
+        @exits = {} #: Hash[String, Hash[String, ObjectStates::Exit]]
       end
 
       # What each call site of a code-writing method defines there, by
@@ -117,24 +117,26 @@ module Steep
 
         found = {} #: Hash[String, Hash[String, AST::Types::t]]
         widened = Set[] #: Set[[String, String]]
-        seen = Set[] #: Set[[Hash[String, Hash[String, AST::Types::t]], Hash[String, Set[Arguments]]]]
+        seen = Set[] #: Set[[Hash[String, Hash[String, AST::Types::t]], Hash[String, Set[Arguments]], Hash[String, Hash[String, ObjectStates::Exit]]]]
         generation = 0
 
         loop do
+          exits = @exits.transform_values(&:dup)
           discovered, revealed = specialize(context, store(found), baselines, tuples, definitions)
           discovered = settle(found, discovered, baselines, widened)
           grown = grow(tuples, revealed, generation)
           # Both have to settle, not just the returns: a generation that finds no
           # new return can still fix a tuple inside a body it re-checked, and that
-          # tuple is what the next generation specializes.
-          break if discovered == found && grown == tuples
+          # tuple is what the next generation specializes. So do the exits, which
+          # the caller one frame out reads only in the generation after.
+          break if discovered == found && grown == tuples && @exits == exits
           # A state seen before cannot lead anywhere a later generation has not
           # already been. Widening bounds an entry's literals; this bounds the one
           # shape it says nothing about — a return alternating between two
           # CLASSES, which no amount of widening settles.
-          break unless seen.add?([discovered, grown])
+          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup)])
 
-          paths = affected_paths(callees, changed_keys(found, discovered))
+          paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits))
           found = discovered
           tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers), generation)
           generation += 1
