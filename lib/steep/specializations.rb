@@ -140,8 +140,7 @@ module Steep
         receiver = exact_self if receiver.is_a?(AST::Types::Self)
         return nil unless receiver.is_a?(AST::Types::Name::Singleton)
 
-        method_name = call.method_decls.first.method_name
-        receiver if method_name.is_a?(SingletonMethodName) && method_name.type_name != receiver.name
+        receiver if call.method_decls.first.method_name.type_name != receiver.name
       end
 
       def self.dispatched?(node, typing)

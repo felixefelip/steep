@@ -40,7 +40,7 @@ module Steep
           ancestors = definition.ancestors.ancestors.map { |ancestor| ancestor.name.to_s }
           return constr if ancestors.any? { |name| registry.defines?(name, :inherited, singleton: true) }
 
-          memos = ancestors.flat_map { |name| registry.singleton_method_bodies(name).values.flatten.filter_map { |body| body&.memoizes } }
+          memos = ObjectStates.class_side_bodies(constr, singleton).filter_map { |_, _, body| body&.memoizes }
           return constr if memos.empty?
 
           constr.update_type_env { |env| env.refine_types(instance_variable_types: memos.to_h { |ivar| [ivar, AST::Builtin.nil_type] }) }
@@ -61,8 +61,25 @@ module Steep
             next unless type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Name::Singleton)
             next if type == env.declared_instance_variable_types[ivar]
 
-            [ivar, type] if written_only_by?(constr, singleton, ivar, owner, method_name)
+            [ivar, type] if written_only_through?(constr, singleton, ivar, owner, method_name)
           end.to_h
+        end
+
+        # Whether every method that may write `ivar` does so only by calling
+        # the memo: none but the memo writes it itself, and every other one's
+        # body is readable.
+        def written_only_through?(constr, singleton, ivar, owner, method_name)
+          bodies = ObjectStates.class_side_bodies(constr, singleton).group_by { |name, method, _| [name, method] }
+          constr.checker.factory.definition_builder.build_singleton(singleton.name).ancestors.ancestors.all? do |ancestor|
+            constr.postconditions.may_write_methods(ancestor.name.to_s, ivar).all? do |writer|
+              next true if ancestor.name == owner && writer == method_name
+
+              found = bodies[[ancestor.name, writer]] || []
+              found.size == 1 && found.first[2] && !found.first[2].writes.include?(ivar)
+            end
+          end
+        rescue RBS::BaseError
+          false
         end
 
         def value_memo?(constr, ivar)
@@ -73,14 +90,9 @@ module Steep
         # `[ivar, owner, method name]` for each `def self.m = @ivar ||= value`
         # on the class's ancestors whose value is not a `Klass.new` they follow.
         def value_memos(constr, singleton)
-          registry = constr.constructor_bindings
-          constr.checker.factory.definition_builder.build_singleton(singleton.name).ancestors.ancestors.flat_map do |ancestor|
-            registry.singleton_method_bodies(ancestor.name.to_s).flat_map do |method_name, bodies|
-              bodies.filter_map { |body| [body.memoizes, ancestor.name, method_name] if body&.memoizes && !body.memo }
-            end
+          ObjectStates.class_side_bodies(constr, singleton).filter_map do |owner, method_name, body|
+            [body.memoizes, owner, method_name] if body&.memoizes && !body.memo
           end
-        rescue RBS::BaseError
-          []
         end
 
         # `@x ||= value` where the env knows more of `@x` than its declaration:

@@ -191,11 +191,16 @@ module Steep
       # Whether a method of `class_name` other than `except` may write `ivar`
       # (`effects.may_write`, closed over self-calls). felixefelip/steep#205.
       def may_write?(class_name, ivar, except: nil)
+        may_write_methods(class_name, ivar).any? { |method| method != except }
+      end
+
+      # The methods of `class_name` that may write `ivar`, themselves or
+      # through the calls they make on `self`.
+      def may_write_methods(class_name, ivar)
         @may_write_index ||= @entries.each_with_object({}) do |((klass, method), entry), index| #$ Hash[String, Hash[Symbol, Set[Symbol]]]
           entry.may_write_ivars.each { |name| ((index[klass] ||= {})[name] ||= Set[]) << method }
         end
-        methods = @may_write_index.dig(class_name.to_s.delete_prefix("::"), ivar) or return false
-        methods.any? { |method| method != except }
+        @may_write_index.dig(class_name.to_s.delete_prefix("::"), ivar) || Set[]
       end
 
       # felixefelip/steep#68 item 4: facts holding at `class_name#method_name`'s

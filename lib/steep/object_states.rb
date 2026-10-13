@@ -312,14 +312,38 @@ module Steep
         builder = constr.checker.factory.definition_builder
         definition = singleton ? builder.build_singleton(type.name) : builder.build_instance(type.name)
         owner = definition.methods[method_name]&.implemented_in or return nil
-        ancestors = definition.ancestors.ancestors.map(&:name)
-        index = ancestors.index(owner) or return nil
-        return nil if ancestors.take(index).any? { |name| registry.defines?(name.to_s, method_name, singleton: singleton) }
+        ancestors = definition.ancestors.ancestors
+        index = ancestors.index { |ancestor| ancestor.name == owner } or return nil
+        return nil if ancestors.take(index).any? { |ancestor| ancestor_defines?(registry, ancestor, method_name) }
 
-        body = singleton ? registry.singleton_body_of(owner.to_s, method_name) : registry.body_of(owner.to_s, method_name)
-        body ? [owner, body] : nil
+        body = ancestor_bodies(registry, ancestors[index])[method_name]
+        body&.size == 1 ? [owner, body.first] : nil
       rescue RBS::BaseError
         nil
+      end
+
+      # The bodies an ancestor contributes to the methods of the object it is
+      # an ancestor of: a class's `def self.` methods on a class object's side,
+      # the instance methods of a module it extends, or of a class or module
+      # on an instance's side.
+      def ancestor_bodies(registry, ancestor)
+        name = ancestor.name.to_s
+        ancestor.is_a?(RBS::Definition::Ancestor::Singleton) ? registry.singleton_method_bodies(name) : registry.method_bodies(name)
+      end
+
+      def ancestor_defines?(registry, ancestor, method_name)
+        ancestor_bodies(registry, ancestor).key?(method_name)
+      end
+
+      # `[owner, method name, body]` for every body on the class object's side
+      # of `singleton`'s ancestors.
+      def class_side_bodies(constr, singleton)
+        registry = constr.constructor_bindings
+        constr.checker.factory.definition_builder.build_singleton(singleton.name).ancestors.ancestors.flat_map do |ancestor|
+          ancestor_bodies(registry, ancestor).flat_map { |method_name, bodies| bodies.map { |body| [ancestor.name, method_name, body] } }
+        end
+      rescue RBS::BaseError
+        []
       end
 
       # A method whose body this cannot read leaves only what holds under any
