@@ -64,6 +64,8 @@ module Steep
         @project = project
         @evals = {} #: Hash[String, Array[String?]]
         @exits = {} #: Hash[String, Hash[String, ObjectStates::Exit]]
+        @demand = nil
+        @demanding = false
       end
 
       # What each call site of a code-writing method defines there, by
@@ -106,8 +108,12 @@ module Steep
         context = load_target(target) or return
 
         writers = code_writers(context)
+        definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
+        demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
+        @demand = ->(store, key, arguments) { demand_exit(context, definitions, demanded, store, key, arguments) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, definitions, callees = collect(context, Store.empty, locations, writers)
+        baselines, tuples, collected, callees = collect(context, Store.empty, locations, writers)
+        definitions.merge!(collected)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
@@ -121,6 +127,7 @@ module Steep
         generation = 0
 
         loop do
+          demanded.clear
           exits = @exits.transform_values(&:dup)
           discovered, revealed = specialize(context, store(found), baselines, tuples, definitions)
           discovered = settle(found, discovered, baselines, widened)
@@ -138,6 +145,7 @@ module Steep
 
           paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits))
           found = discovered
+          demanded.clear
           tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers), generation)
           generation += 1
         end
@@ -332,10 +340,34 @@ module Steep
         exit ? (@exits[key] ||= {})[arguments.key] = exit : @exits[key]&.delete(arguments.key)
       end
 
+      # An exit a call needs before any generation has checked its tuple: the
+      # body checked there under it, so a chain of writes to one object
+      # settles in the generation that walks it instead of one generation per
+      # write. Memoized per generation, since `store` changes between them.
+      #
+      # Not from inside such a check: the rest of its file is walked too, under
+      # contents nothing has settled.
+      def demand_exit(context, definitions, demanded, store, key, arguments)
+        return nil if @demanding || !arguments.stateful? || !definitions.key?(key) || widened?(arguments, 0)
+
+        memo = [key, arguments.key] #: [String, String]
+        return demanded[memo] if demanded.key?(memo)
+
+        @demanding = true
+        begin
+          path, def_node = definitions.fetch(key)
+          typing = type_check(context, store, context.sources.fetch(path), { node_key(path, def_node) => arguments })
+          record_exit(key, arguments, typing, def_node)
+        ensure
+          @demanding = false
+        end
+        demanded[memo] = @exits.dig(key, arguments.key)
+      end
+
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) },
-          source: nil, typed: methods, exits: @exits
+          source: nil, typed: methods, exits: @exits, demand: @demand
         )
       end
 

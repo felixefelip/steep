@@ -190,7 +190,7 @@ module Steep
         call = recorded_call(constr, node)
         key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls) or return
         arguments = Specializations::Arguments.recorded(node, constr.typing) or return
-        constr.specializations.exit_ivars(key, arguments.key) if arguments.stateful?
+        constr.specializations.exit_ivars(key, arguments) if arguments.stateful?
       end
 
       # The type an ivar takes after an assignment, or nil to leave it at its
