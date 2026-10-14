@@ -33,7 +33,7 @@ module Steep
       # nothing too.
       def self.each_call_site(typing)
         typing.each_typing do |node, _type|
-          next unless node.type == :send
+          next unless node.type == :send || Arguments::BLOCKS.include?(node.type)
 
           call = begin
                    typing.call_of(node: node)
@@ -94,7 +94,7 @@ module Steep
         result = Set[] #: Set[String]
 
         typing.each_typing do |node, _type|
-          next unless node.type == :send
+          next unless node.type == :send || Arguments::BLOCKS.include?(node.type)
 
           call = begin
                    typing.call_of(node: node)

@@ -132,17 +132,30 @@ module Steep
         end
 
         # In a class body, a call may reach a memo still `nil`: it holds what the
-        # call's own check left it, or what its declaration says.
-        def after_class_call(constr, exit)
+        # call's own check left it, or what its declaration says. So does a memo
+        # whose object a method the call runs (`reached`) yields to a block.
+        def after_class_call(constr, exit, reached)
           return constr if constr.method_context
 
-          unset = memo_values(constr).select { |_, type| type.is_a?(AST::Types::Nil) }
-          return constr if unset.empty?
+          moved = memo_values(constr).select { |_, type| type.is_a?(AST::Types::Nil) }
+          moved = moved.merge(yielded_memos(constr, reached)) if reached
+          return constr if moved.empty?
 
           exit ||= {}
           constr.update_type_env do |env|
-            env.refine_types(instance_variable_types: unset.to_h { |ivar, _| [ivar, exit.fetch(ivar) { ObjectStates.declared_ivar(constr, ivar) }] })
+            env.refine_types(instance_variable_types: moved.to_h { |ivar, _| [ivar, exit.fetch(ivar) { ObjectStates.declared_ivar(constr, ivar) }] })
           end
+        end
+
+        def yielded_memos(constr, reached)
+          singleton = constr.self_type
+          return {} unless singleton.is_a?(AST::Types::Name::Singleton)
+
+          env = constr.context.type_env
+          value_memos(constr, singleton).filter_map do |ivar, _, method_name|
+            yielders = constr.constructor_bindings.uses_of(method_name).filter_map { |use| use.called if use.kind == :yielded }
+            [ivar, env[ivar]] if ObjectStates.state_in(env[ivar]) && reached.intersect?(yielders)
+          end.to_h
         end
 
         # A call made on what a memo answered moves the object its ivar holds.
@@ -154,7 +167,11 @@ module Steep
           return constr unless ivar && instance
 
           state = ObjectStates.state_in(receiver_type) || AST::Types::ObjectState.new(back_type: instance, ivars: {})
-          left = ObjectStates.changed(constr, state, method_name, arguments, node)
+          remembered_as(constr, receiver, ivar, ObjectStates.changed(constr, state, method_name, arguments, node))
+        end
+
+        # The memo `receiver` called left holding `left`.
+        def remembered_as(constr, receiver, ivar, left)
           constr.update_type_env do |env|
             env = env.refine_types(instance_variable_types: { ivar => left })
             # The memo call is pure, and a second one is answered from the cache.
@@ -202,6 +219,7 @@ module Steep
         def confined?(constr, instance, name)
           constr.constructor_bindings.uses_of(name).all? do |use|
             next false if use.kind == :escape
+            next constr.constructor_bindings.replayed_everywhere?(use.called) if use.kind == :yielded
 
             effect = ObjectStates.method_effect(constr, instance, use.called) or next false
             use.kind == :statement || effect.reads_only

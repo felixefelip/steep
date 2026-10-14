@@ -123,6 +123,7 @@ module Steep
       # (`receiver_ivars`), read off the call where it is recorded already and
       # off the checker where it is being typed.
       def self.from_send(node, typing, receiver_ivars:, class_states:, self_type:, exact_self:)
+        block, node = node, node.children[0] if BLOCKS.include?(node.type)
         _receiver, name, *args = node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
         # and the arguments are the rest (`TypeConstruction::SendDispatch`).
@@ -150,7 +151,7 @@ module Steep
           positionals << argument_type(arg, typing, exact_self)
         end
 
-        new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states, self_type: self_type)
+        new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states, self_type: self_type, block: block)
       end
 
       #   class Base
@@ -274,8 +275,9 @@ module Steep
         AST::Builtin::Array.instance_type(type.types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: type.types))
       end
 
-      def initialize(positionals:, keywords:, self_ivars:, class_states:, positional_defaults: {}, keyword_defaults: {}, self_type: nil)
+      def initialize(positionals:, keywords:, self_ivars:, class_states:, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil)
         @positionals = positionals
+        @block = block
         @keywords = keywords
         @positional_defaults = positional_defaults
         @keyword_defaults = keyword_defaults
@@ -312,6 +314,13 @@ module Steep
       # (`ObjectStates::ClassStates`): part of `key` for the same reason.
       attr_reader :class_states
 
+      # The block written at the call: part of `key`, since what the body
+      # leaves depends on it, and what a `yield` checks in place
+      # (`ObjectStates::Yields`).
+      attr_reader :block
+
+      BLOCKS = %i[block numblock itblock].freeze
+
       # The one every class shares is the one a declaration can hold.
       def tuples
         [self, (without_self if self_type)].compact.select(&:literal?)
@@ -329,7 +338,8 @@ module Steep
           keyword_defaults: @keyword_defaults,
           self_type: self_type,
           self_ivars: @self_ivars,
-          class_states: @class_states
+          class_states: @class_states,
+          block: @block
         )
       end
 
@@ -349,7 +359,8 @@ module Steep
           keyword_defaults: @keyword_defaults,
           self_type: @self_type,
           self_ivars: @self_ivars,
-          class_states: @class_states
+          class_states: @class_states,
+          block: @block
         )
       end
 
@@ -369,13 +380,15 @@ module Steep
           keyword_defaults: keywords,
           self_type: @self_type,
           self_ivars: @self_ivars,
-          class_states: @class_states
+          class_states: @class_states,
+          block: @block
         )
       end
 
       def key
         key = arguments_key
         key += "#{SELF_MARKER}#{self_type}" if self_type
+        key += "#{BLOCK_MARKER}#{block_key}" if block
         return key unless stateful?
 
         "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key].join(", ")}}"
@@ -402,8 +415,17 @@ module Steep
 
       SELF_MARKER = " on "
 
+      BLOCK_MARKER = " &"
+
       def self.persistable_key?(key)
-        !key.include?(STATE_MARKER) && !key.include?(SELF_MARKER)
+        !key.include?(STATE_MARKER) && !key.include?(SELF_MARKER) && !key.include?(BLOCK_MARKER)
+      end
+
+      # Where the block is written, which names it as surely as its text and
+      # stays short however long the block is.
+      def block_key
+        expression = block.loc.expression
+        "#{expression.source_buffer.name}:#{expression.begin_pos}"
       end
 
       def stateful?
@@ -502,13 +524,13 @@ module Steep
 
       def ==(other)
         other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords &&
-          other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states
+          other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states && other.block.equal?(block)
       end
 
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash
+        positionals.hash ^ keywords.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash ^ block.object_id.hash
       end
 
       private

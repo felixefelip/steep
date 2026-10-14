@@ -347,6 +347,46 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  YIELD_RBS = RBS.sub("def self.rules:", "def self.inflections: () { (Inflector::Rules) -> void } -> void\n  def self.rules:")
+                 .sub("  def self.has_many_like", "  class Other\n    def self.boot: () -> void\n  end\n  def self.has_many_like")
+
+  YIELD_BLOCK = 'inflections { |inflect| inflect.singular(/posts\z/, "article") }'
+
+  def yielded(inflections: "def self.inflections = yield(rules)", call: YIELD_BLOCK)
+    chunks(source(body: "#{inflections}\n#{call}"), rbs: YIELD_RBS)
+  end
+
+  def test_rules_a_block_writes_through_the_object_a_method_yields
+    {
+      "a yield" => "def self.inflections = yield(rules)",
+      "a yield under block_given?" => "def self.inflections\n  yield rules if block_given?\nend"
+    }.each do |label, inflections|
+      assert_equal [["def article_ids; []; end"], ["def category_ids; []; end"]], yielded(inflections: inflections), label
+    end
+  end
+
+  def test_a_method_that_yields_the_memo_and_is_not_called_leaves_it_followed
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], yielded(call: "")
+  end
+
+  def test_a_block_whose_writes_settle_into_no_one_state_leaves_the_memo_unknown
+    call = 'inflections { |inflect| inflect.singular(/posts\z/, "article") if "x".frozen? }'
+
+    assert_equal [[nil], [nil]], yielded(call: call)
+  end
+
+  def test_declines_a_yielded_memo_whose_block_is_not_followed
+    {
+      "a block reading a local of its own scope" => "replacement = \"article\"\ninflections { |inflect| inflect.singular(/posts\\z/, replacement) }",
+      "a block calling on its own self" => "inflections { |inflect| inflect.singular(/posts\\z/, name.to_s) }",
+      "a block that breaks" => "inflections { |inflect| break }",
+      "a block handed on" => "handed = proc { |inflect| inflect.singular(/posts\\z/, \"article\") }\ninflections(&handed)",
+      "a call from another class" => "class Other\n  def self.boot = Inflector.inflections { |inflect| inflect.singular(/posts\\z/, \"article\") }\nend"
+    }.each do |label, call|
+      assert_equal [[nil], [nil]], yielded(call: call), label
+    end
+  end
+
   def test_a_reopen_that_only_defines_methods_runs_nothing_first
     rbs = RBS.sub("def self.has_many_like", "def extra: () -> Integer\n  def self.has_many_like")
     reopen = "class Inflector\n  def extra = 1\nend\n"

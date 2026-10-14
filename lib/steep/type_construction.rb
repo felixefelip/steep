@@ -2514,7 +2514,7 @@ module Steep
                 constr = type_check_untyped_args(node.children)
               end
 
-              add_typing(node, type: block_type.type.return_type)
+              add_typing(node, type: block_type.type.return_type, constr: ObjectStates::Yields.replayed(constr, node))
             elsif method_type.type.params
               typing.add_error(Diagnostic::Ruby::UnexpectedYield.new(node: node))
               fallback_to_any node

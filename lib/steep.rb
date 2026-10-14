@@ -75,6 +75,7 @@ require "steep/object_states"
 require "steep/object_states/class_memos"
 require "steep/object_states/class_states"
 require "steep/object_states/tap"
+require "steep/object_states/yields"
 
 require "steep/range_extension"
 
