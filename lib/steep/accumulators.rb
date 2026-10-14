@@ -106,6 +106,7 @@ module Steep
     # What the array holds when a closure is WRITTEN is not what it holds when
     # its body runs, so a mention inside one takes the local away.
     CLOSURES = LocalReach::CLOSURES
+    LAMBDA_BODIES = %i[block numblock itblock].freeze
 
     # The pushes one `each` makes on every pass, in the order it makes them.
     # The count is not here: it is the length of the collection, which the
@@ -418,13 +419,10 @@ module Steep
       # inside a lambda leaves only the lambda.
       def each_returns(node, &block)
         return unless node.is_a?(Parser::AST::Node)
-        return if SCOPES.include?(node.type) || (CLOSURES.include?(node.type) && node.children[0].type == :lambda)
+        return if SCOPES.include?(node.type) || (LAMBDA_BODIES.include?(node.type) && node.children[0].type == :lambda)
+        return each_tail(node, &block) if node.type == :return
 
-        node.children.each do |child|
-          next unless child.is_a?(Parser::AST::Node)
-
-          child.type == :return ? each_tail(child, &block) : each_returns(child, &block)
-        end
+        node.children.each { |child| each_returns(child, &block) }
       end
 
       private

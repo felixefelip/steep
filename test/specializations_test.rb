@@ -746,6 +746,8 @@ class SpecializationsTest < Minitest::Test
           def self.nilable: (String word, String? name) -> String
           def self.compared: (String word, String other) -> String
           def self.name: () -> String?
+          def self.only: (String word) -> String
+          def self.lambdas: (String word) -> String
         end
         class GuardedUse
           def self.a: () -> String
@@ -756,6 +758,8 @@ class SpecializationsTest < Minitest::Test
           def self.f: () -> String
           def self.g: () -> String
           def self.h: () -> String
+          def self.i: () -> String
+          def self.j: () -> String
         end
       RBS
       write("app/guarded.rb", <<~'RUBY')
@@ -800,6 +804,16 @@ class SpecializationsTest < Minitest::Test
           end
 
           def self.name = ENV["NAME"]
+
+          def self.only(word)
+            return word
+          end
+
+          def self.lambdas(word)
+            check = -> { return "L" if it.empty? }
+            check.call(word)
+            word
+          end
         end
 
         class GuardedUse
@@ -811,6 +825,8 @@ class SpecializationsTest < Minitest::Test
           def self.f = Guarded.cased("posts")
           def self.g = Guarded.nilable("posts", Guarded.name)
           def self.h = Guarded.compared("posts", Guarded.name.to_s)
+          def self.i = Guarded.only("posts")
+          def self.j = Guarded.lambdas("posts")
         end
       RUBY
 
@@ -822,6 +838,8 @@ class SpecializationsTest < Minitest::Test
       assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.cased"))
       assert_equal(['"posts"'], methods.fetch("Guarded.nilable").values)
       assert_equal(['"posts"'], methods.fetch("Guarded.compared").values)
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.only"))
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.lambdas"))
     end
   end
 
