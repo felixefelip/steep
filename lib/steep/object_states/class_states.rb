@@ -160,13 +160,15 @@ module Steep
         end
 
         # `self`'s ivars a body leaves known: its memos' objects as they stand,
-        # any other with what holds under any name.
+        # or `nil` where none has run yet, and any other with what holds under
+        # any name.
         def held(constr, singleton)
           memos = memo_ivars(constr, singleton.name)
+          unset = ClassMemos.memo_values(constr).select { |_, type| type.is_a?(AST::Types::Nil) }
           ObjectStates.self_ivars(constr).filter_map do |ivar, type|
             value = memos.include?(ivar) ? type : ObjectStates.settled(constr, type)
             [ivar, value] if ObjectStates.state_in(value)
-          end.to_h
+          end.to_h.merge(unset)
         end
 
         def rewritable?(constr, name, ivar)

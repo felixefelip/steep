@@ -41,6 +41,31 @@ module Steep
         receiver if ObjectStates::ClassStates.reach(constr, call).observes_self
       end
 
+      # `call` with the return type recorded for the argument tuple this call site
+      # supplies (felixefelip/rbs_infer#345, stage S4), or `call` unchanged.
+      #
+      # A call that takes a block is left alone: the recorded return was computed
+      # for the arguments only, and a block can decide the return type on its own.
+      def specialized_call(constr, node, call, block:)
+        store = constr.specializations
+        return call if store.empty? || block
+
+        key = method_key(call.method_decls) or return call
+        arguments = call_site_arguments(constr, node, call) or return call
+        type = store.call_return_type(key, arguments, factory: constr.checker.factory) or return call
+
+        call.with_return_type(type)
+      end
+
+      # The arguments `call`, being typed at `node`, is specialized under.
+      def call_site_arguments(constr, node, call)
+        Arguments.at_call(
+          node, constr.typing, call,
+          self_ivars: ObjectStates.call_ivars(constr, call), class_states: ObjectStates::ClassStates.of_call(constr, call),
+          keyed_self: keyed_self(constr, call), exact_self: exact_self(constr)
+        )
+      end
+
       def exact_self(constr)
         type = constr.self_type
         return nil unless type.is_a?(AST::Types::Name::Singleton)

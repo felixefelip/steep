@@ -65,10 +65,12 @@ module Steep
       # - `ivar_uses`: each mention of an ivar it reads, as a
       #   `ClassMemoAnalyzer::Use`;
       # - `returns`: the ivar it returns, when its body is exactly that.
-      # - `memo`: `[ivar, class names]` when its body is exactly
+      # - `memo`: `[ivar, class names, wrappers]` when its body is exactly
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
-      #   it is written. Not a `returns`: while the ivar is unset it answers
-      #   the new object, not what the ivar held.
+      #   it is written; or that `Klass.new` with calls that take a block made
+      #   on it, `wrappers`, innermost first (`Klass.new.tap { … }`). Not a
+      #   `returns`: while the ivar is unset it answers the new object, not
+      #   what the ivar held.
       # - `ivars`: the ivars it reads;
       # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
       # - `empties`: the ivars a statement of the body sets to `[]`;
@@ -539,14 +541,24 @@ module Steep
         return unless body&.type == :or_asgn
 
         target, value = body.children
-        return unless target.type == :ivasgn && value.type == :send
+        return unless target.type == :ivasgn
+
+        wrappers = [] #: Array[Symbol]
+        while value.type == :block
+          wrapper = value.children[0]
+          return unless wrapper.type == :send && wrapper.children[0] && wrapper.children.size == 2
+
+          wrappers.unshift(wrapper.children[1])
+          value = wrapper.children[0]
+        end
+        return unless value.type == :send
 
         klass, method_name, *arguments = value.children
         return unless method_name == :new && arguments.empty? && klass&.type == :const
 
         name = const_to_name(klass) or return
         names = klass.children[0]&.type == :cbase ? [name] : nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
-        [target.children[0], names]
+        [target.children[0], names, wrappers]
       end
 
       # A reader whose body is exactly `@ivar` (normal or endless def) →

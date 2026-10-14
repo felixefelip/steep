@@ -4343,7 +4343,7 @@ module Steep
             declared_return_type = call.return_type
             record_vouched_arguments(arguments)
             nominal = call
-            call = specialized_call(node, call, block_params: block_params, block_body: block_body)
+            call = Specializations.specialized_call(self, node, call, block: block_params || block_body)
             unless block_params || block_body
               call = constr.literal_intrinsic_call(
                 call,
@@ -4361,6 +4361,7 @@ module Steep
               # holds, and what its readers answer.
               call, constr = ObjectStates.answered(constr, call, node: node, receiver_type: receiver_type, arguments: arguments)
             end
+            call = ObjectStates::Tap.answered(constr, call, node: node, receiver_type: receiver_type) if block_params
             record_built_value(node, call, declared_return_type) unless call.equal?(nominal)
 
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
@@ -4779,6 +4780,7 @@ module Steep
         receiver_type, constr = StringMutation.widen_receiver(
           constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
         )
+        receiver_type = ObjectStates::Tap.receiver_type(constr, node, receiver, receiver_type, method_name) if block_params
       end
 
       # Delegation chain narrowing (felixefelip/steep#32). If the
@@ -5840,23 +5842,6 @@ module Steep
       end
 
       nil
-    end
-
-    # `call` with the return type recorded for the argument tuple this call site
-    # supplies (felixefelip/rbs_infer#345, stage S4), or `call` unchanged.
-    #
-    # A call that takes a block is left alone: the recorded return was computed
-    # for the arguments only, and a block can decide the return type on its own.
-    def specialized_call(node, call, block_params:, block_body:)
-      return call if specializations.empty? || block_params || block_body
-
-      key = Specializations.method_key(call.method_decls) or return call
-      arguments = Specializations::Arguments.at_call(
-        node, typing, call, self_ivars: ObjectStates.call_ivars(self, call), class_states: ObjectStates::ClassStates.of_call(self, call), keyed_self: Specializations.keyed_self(self, call), exact_self: Specializations.exact_self(self)
-      ) or return call
-      type = specializations.call_return_type(key, arguments, factory: checker.factory) or return call
-
-      call.with_return_type(type)
     end
 
     # Replaces a successfully-dispatched core call's nominal return with its
@@ -7370,6 +7355,7 @@ module Steep
 
         range = block_body.loc.expression.end_pos..node.loc.end.begin_pos
         typing.cursor_context.set(range, context)
+        typing.add_block_exit(node, context.type_env)
 
         body_type
       else

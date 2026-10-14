@@ -97,6 +97,9 @@ class AccumulatedIvarStateTest < Minitest::Test
       "an element handed to a project method" => { body: "def self.log(text) = text\nrules.singulars.each { |(_, replacement)| log(replacement) }" },
       "the list kept under another name" => { body: "KEPT = rules.singulars" },
       "a method of the class that changes it, called" => { rules: "def clear = @singulars.clear", body: "rules.clear" },
+      "a method of the class that changes an element, called" => {
+        rules: 'def scramble = @singulars.each { |(_, replacement)| replacement << "zz" }', body: "rules.scramble"
+      },
       "a method of the class that changes it, called through a class method" => {
         rules: "def clear = @singulars.clear", body: "def self.reset = rules.clear\nreset"
       },
@@ -122,7 +125,7 @@ class AccumulatedIvarStateTest < Minitest::Test
     }.each do |label, change|
       ruby = change[:reads] ? source(body: change[:body], reads: change[:reads]) : source(body: change[:body] || "")
       ruby = ruby.sub("    def singular(", "    #{change[:rules]}\n\n    def singular(") if change[:rules]
-      rbs = RBS.sub("def singular:", "def clear: () -> Array[untyped]\n    def maybe: (untyped, untyped, untyped) -> untyped\n    def singular:")
+      rbs = RBS.sub("def singular:", "def clear: () -> Array[untyped]\n    def scramble: () -> Array[untyped]\n    def maybe: (untyped, untyped, untyped) -> untyped\n    def singular:")
                  .sub("  def self.rules:", "  def self.reset: () -> untyped\n  class Helper\n    def self.wipe: () -> untyped\n  end\n  def self.rules:")
       assert_equal [[nil], [nil]], chunks(ruby, rbs: rbs), label
     end
@@ -207,6 +210,93 @@ class AccumulatedIvarStateTest < Minitest::Test
     ruby = walked_inside_rules(body: "class ::Array\n  def each = self\nend")
 
     assert_equal [[nil], [nil]], chunks(ruby, rbs: apply_rbs)
+  end
+
+  TAP_MEMO = '@rules ||= Rules.new.tap { |rules| rules.singular(/s\z/, ""); rules.singular(/ies\z/, "y") }'
+
+  def tapped(memo = TAP_MEMO, body: "")
+    source(body: body).sub("@rules ||= Rules.new", memo).sub("  rules.singular(/s\\z/, \"\")\n  rules.singular(/ies\\z/, \"y\")\n", "")
+  end
+
+  def test_rules_pushed_in_a_tap_memo_reach_a_macro_in_the_same_body
+    assert_equal ["def post_ids; []; end"], chunks(tapped).first
+  end
+
+  def test_rules_pushed_after_a_tap_memo_come_first
+    ruby = tapped(body: 'rules.singular(/ories\z/, "orium")')
+
+    assert_equal [["def post_ids; []; end"], ["def categorium_ids; []; end"]], chunks(ruby)
+  end
+
+  def test_declines_a_tap_memo_whose_object_another_name_may_reach
+    {
+      "the block keeps it" => TAP_MEMO.sub("{ |rules| ", "{ |rules| $kept = rules; "),
+      "the block breaks" => TAP_MEMO.sub(" }", "; break rules }"),
+      "the block may leave early" => TAP_MEMO.sub('rules.singular(/ies', 'next if $flag; rules.singular(/ies'),
+      "a call that answers its block" => TAP_MEMO.sub(".tap {", ".then {").sub(" }", "; rules }")
+    }.each do |label, memo|
+      assert_equal [[nil], [nil]], chunks(tapped(memo)), label
+    end
+  end
+
+  def test_declines_a_tap_the_project_replaces
+    replaced = "def tap\n  yield self\n  self.class.new\nend"
+    {
+      "in Kernel" => ["module ::Kernel\n#{replaced.gsub(/^/, '  ')}\nend", RBS],
+      "in the class" => ["class Rules\n#{replaced.gsub(/^/, '  ')}\nend", RBS.sub("def singular:", "def tap: () { (self) -> void } -> self\n    def singular:")]
+    }.each do |label, (body, rbs)|
+      assert_equal [[nil], [nil]], chunks(tapped(body: body), rbs: rbs), label
+    end
+  end
+
+  def test_rules_a_module_builds_with_tap_reach_another_class_through_the_object_that_holds_them
+    rbs = <<~RBS
+      class Rules
+        attr_reader singulars: Array[untyped]
+        def initialize: () -> void
+        def singular: (untyped rule, untyped replacement) -> Array[untyped]
+        def apply: (String word) -> String
+      end
+      module Inflector
+        self.@rules: Rules?
+        def self.rules: () -> Rules
+        def self.singularize: (String word) -> String
+      end
+      class Post
+        def self.has_many_like: (Symbol name) -> untyped
+      end
+    RBS
+    ruby = <<~RUBY
+      class Rules
+        attr_reader :singulars
+
+        def initialize
+          @singulars = []
+        end
+
+        def singular(rule, replacement)
+          @singulars.prepend([rule, replacement])
+        end
+
+      #{APPLY.gsub(/^/, "  ")}end
+
+      module Inflector
+        def self.rules
+          #{TAP_MEMO}
+        end
+
+        def self.singularize(word) = rules.apply(word)
+      end
+
+      class Post
+        def self.has_many_like(name) = class_eval "def \#{Inflector.singularize(name.to_s)}_ids; []; end"
+
+        has_many_like :posts
+        has_many_like :categories
+      end
+    RUBY
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
   end
 
   def test_a_reopen_that_only_defines_methods_runs_nothing_first

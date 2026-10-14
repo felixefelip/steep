@@ -460,6 +460,13 @@ module Steep
         !%i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(argument.type)
       end
 
+      # `Klass.new` resolved to the class's own `initialize`: a `def self.new`
+      # answers whatever it likes.
+      def initialize_call?(call)
+        !call.method_decls.empty? &&
+          call.method_decls.all? { |decl| decl.method_def&.member.respond_to?(:name) && decl.method_def.member.name == :initialize }
+      end
+
       private
 
       def held_value?(constr, node)
@@ -545,13 +552,6 @@ module Steep
 
       def may_write(constr, owner, method_name)
         constr.postconditions.lookup_instance(owner, method_name)&.may_write_ivars || Set[]
-      end
-
-      # `Klass.new` resolved to the class's own `initialize`: a `def self.new`
-      # answers whatever it likes.
-      def initialize_call?(call)
-        !call.method_decls.empty? &&
-          call.method_decls.all? { |decl| decl.method_def&.member.respond_to?(:name) && decl.method_def.member.name == :initialize }
       end
 
       # `@ivar => call-site position` for the object `chain` leaves behind,
