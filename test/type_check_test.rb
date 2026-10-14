@@ -1739,6 +1739,39 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  # Inflector rules, `[rule, replacement]` pairs, as `Inflections#singular`
+  # prepends them. An argument placed among the receiver's elements costs the
+  # separator the receiver's own elements were measured with, and a pair is
+  # one element of the list however many its own are.
+  def test_a_list_of_pairs_grows_by_the_pair_prepended
+    run_type_check_test(
+      signatures: {
+        "rules.rbs" => <<~RBS
+          class Rules
+            def six: () -> Array[Array[String]]
+            def forty: () -> Array[Array[String]]
+            def over_the_bound: () -> Array[Integer]
+          end
+        RBS
+      },
+      code: {
+        "rules.rb" => <<~'RUBY'
+          class Rules
+            def six = [["a", ""], ["b", ""], ["c", ""], ["d", ""], ["e", ""], ["f", ""]].prepend(["z", ""])
+            def forty = [["r0", ""], ["r1", ""], ["r2", ""], ["r3", ""], ["r4", ""], ["r5", ""], ["r6", ""], ["r7", ""], ["r8", ""], ["r9", ""], ["r10", ""], ["r11", ""], ["r12", ""], ["r13", ""], ["r14", ""], ["r15", ""], ["r16", ""], ["r17", ""], ["r18", ""], ["r19", ""], ["r20", ""], ["r21", ""], ["r22", ""], ["r23", ""], ["r24", ""], ["r25", ""], ["r26", ""], ["r27", ""], ["r28", ""], ["r29", ""], ["r30", ""], ["r31", ""], ["r32", ""], ["r33", ""], ["r34", ""], ["r35", ""], ["r36", ""], ["r37", ""], ["r38", ""], ["r39", ""]].prepend(["z", ""])
+            def over_the_bound = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64].prepend(0)
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rules.rb"))
+
+      assert_equal '[["z", ""], ["a", ""], ["b", ""], ["c", ""], ["d", ""], ["e", ""], ["f", ""]]', actual.fetch("six")
+      assert_equal '[["z", ""], ["r0", ""], ["r1", ""], ["r2", ""], ["r3", ""], ["r4", ""], ["r5", ""], ["r6", ""], ["r7", ""], ["r8", ""], ["r9", ""], ["r10", ""], ["r11", ""], ["r12", ""], ["r13", ""], ["r14", ""], ["r15", ""], ["r16", ""], ["r17", ""], ["r18", ""], ["r19", ""], ["r20", ""], ["r21", ""], ["r22", ""], ["r23", ""], ["r24", ""], ["r25", ""], ["r26", ""], ["r27", ""], ["r28", ""], ["r29", ""], ["r30", ""], ["r31", ""], ["r32", ""], ["r33", ""], ["r34", ""], ["r35", ""], ["r36", ""], ["r37", ""], ["r38", ""], ["r39", ""]]', actual.fetch("forty")
+      assert_equal "::Array[::Integer]", actual.fetch("over_the_bound")
+    end
+  end
+
   # `nilable = false … if nilable == false`, from `Delegation.generate`: a
   # local read only as a condition keeps the `true`/`false` it is assigned.
   # Read as anything else, or written in a block, it stays `bool`.
