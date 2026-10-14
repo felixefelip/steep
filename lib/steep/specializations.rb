@@ -613,8 +613,10 @@ module Steep
         @methods.empty? && @active.empty? && @typed.empty? && @exits.empty?
       end
 
-      def exit_ivars(method_key, arguments)
-        @exits.dig(method_key, arguments.key) || @demand&.call(self, method_key, arguments)
+      # `in_checked_body`: whether the call is made in a body this check is
+      # specializing, rather than elsewhere in its file.
+      def exit_ivars(method_key, arguments, in_checked_body:)
+        @exits.dig(method_key, arguments.key) || @demand&.call(self, method_key, arguments, in_checked_body)
       end
 
       # The recorded return type for `method_key` called with `argument_key`, as a

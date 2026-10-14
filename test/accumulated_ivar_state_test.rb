@@ -21,15 +21,7 @@ class AccumulatedIvarStateTest < Minitest::Test
   end
 
   def chunks(ruby, rbs: RBS)
-    in_tmpdir do
-      write("sig/app.rbs", rbs)
-      write("app/app.rb", ruby)
-      postconditions = Steep::Postconditions::Runner.new(setup_project)
-      postconditions.write(postconditions.run)
-      runner = Steep::Specializations::Runner.new(setup_project)
-      runner.run
-      return runner.evals.values.map { |chunks| chunks.map { |chunk| chunk&.source } }
-    end
+    generations(ruby, rbs: rbs)[0]
   end
 
   def generations(ruby, rbs: RBS)
@@ -41,7 +33,14 @@ class AccumulatedIvarStateTest < Minitest::Test
       runner = Steep::Specializations::Runner.new(setup_project)
       count = 0
       runner.singleton_class.prepend(Module.new { define_method(:specialize) { |*args| (count += 1) && super(*args) } })
-      runner.run
+      log = Steep.log_output
+      Steep.log_output = StringIO.new
+      begin
+        runner.run
+        refute_match(/Unexpected error/, Steep.log_output.string)
+      ensure
+        Steep.log_output = log
+      end
       return [runner.evals.values.map { |chunks| chunks.map { |chunk| chunk&.source } }, count]
     end
   end
@@ -320,11 +319,32 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
   end
 
-  def test_a_chain_of_rules_settles_in_as_many_generations_however_long_it_is
-    short, long = [1, 12].map { |count| generations(source(body: (1..count).map { |i| %(rules.singular(/zz#{i}\\z/, "q")) }.join("\n"))) }
+  IRREGULAR_RBS = RBS.sub("def singular:", "def irregular: (untyped, untyped) -> Array[untyped]\n    def singular:")
 
-    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], long[0]
-    assert_equal short[1], long[1]
+  def with_irregular(ruby, body)
+    ruby.sub("    def singular(", "    def irregular(a, b)\n#{body.gsub(/^/, "      ")}\n    end\n\n    def singular(")
+  end
+
+  def test_a_chain_of_rules_settles_in_as_many_generations_however_long_it_is
+    {
+      'rules.singular(/zz%d\\z/, "q")' => "singular(a, b)",
+      'rules.irregular("zz%d", "q")' => "singular(a, b)\nsingular(b, a)"
+    }.each do |push, irregular|
+      short, long = [1, 12].map do |count|
+        generations(with_irregular(source(body: (1..count).map { |i| push % i }.join("\n")), irregular), rbs: IRREGULAR_RBS)
+      end
+
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], long[0], push
+      assert_equal short[1], long[1], push
+    end
+  end
+
+  def test_rules_written_through_a_method_of_the_object_that_calls_another_on_self
+    ["singular(a, b)", "self.singular(a, b)", "singular(a, b)\nsingular(b, a)"].each do |irregular|
+      ruby = with_irregular(source(body: 'rules.irregular("posts", "article")'), irregular)
+
+      assert_equal [["def article_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: IRREGULAR_RBS), irregular
+    end
   end
 
   def test_a_reopen_that_only_defines_methods_runs_nothing_first

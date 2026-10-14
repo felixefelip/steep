@@ -39,7 +39,7 @@ module Steep
         return if !arguments.stateful? || returns_early?(pair_body(def_node))
 
         env = pair.context.type_env
-        ivars = arguments.self_ivars.keys.to_h { |ivar| [ivar, env[ivar]] }.select { |_, type| state_value?(type) }
+        ivars = entered_values(env, arguments)
         classes = arguments.class_states.keys.to_h { |name| [name, env.class_states.fetch(name, {})] }
         root = constr.typing
         root = root.parent while root.parent
@@ -73,14 +73,22 @@ module Steep
         ClassStates.carried(constr, constr.context.type_env.instance_variable_types.select { |_, type| state_in(type) })
       end
 
-      # `self_ivars` for `call`, with the memos whose value the env knows that
-      # its body may read: all of them where it may hand `self` on.
+      # `self_ivars` for `call`, with the ivars the body making it was entered
+      # with, as they stand, and the memos whose value the env knows that its
+      # body may read: all of them where it may hand `self` on.
       def call_ivars(constr, call)
+        def_node = constr.method_context&.node
+        entered = def_node && constr.specialization_arguments(def_node)
+        ivars = entered ? entered_values(constr.context.type_env, entered).merge(self_ivars(constr)) : self_ivars(constr)
         memos = ClassMemos.memo_values(constr)
-        return self_ivars(constr) if memos.empty?
+        return ivars if memos.empty?
 
         reach = ClassStates.reach(constr, call)
-        self_ivars(constr).merge(memos.select { |ivar, _| reach.observes_self || reach.ivars.include?(ivar) })
+        ivars.merge(memos.select { |ivar, _| reach.observes_self || reach.ivars.include?(ivar) })
+      end
+
+      def entered_values(env, arguments)
+        arguments.self_ivars.keys.to_h { |ivar| [ivar, env[ivar]] }.select { |_, type| state_value?(type) }
       end
 
       # A `.new` call whose `initialize` binds an ivar from one of the values
@@ -190,7 +198,13 @@ module Steep
         call = recorded_call(constr, node)
         key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls) or return
         arguments = Specializations::Arguments.recorded(node, constr.typing) or return
-        constr.specializations.exit_ivars(key, arguments) if arguments.stateful?
+        recorded_exit(constr, key, arguments) if arguments.stateful?
+      end
+
+      def recorded_exit(constr, key, arguments)
+        def_node = constr.method_context&.node
+        in_checked_body = def_node ? !constr.specialization_arguments(def_node).nil? : false
+        constr.specializations.exit_ivars(key, arguments, in_checked_body: in_checked_body)
       end
 
       # The type an ivar takes after an assignment, or nil to leave it at its
