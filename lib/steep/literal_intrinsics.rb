@@ -334,6 +334,7 @@ module Steep
       "::String#+" => Entry.new(method: String.instance_method(:+), arity: 1, preflight: STRING_CONCAT),
       "::String#*" => Entry.new(method: String.instance_method(:*), arity: 1, preflight: STRING_REPEAT),
       "::String#length" => Entry.new(method: String.instance_method(:length), arity: 0, preflight: ALWAYS),
+      "::String#empty?" => Entry.new(method: String.instance_method(:empty?), arity: 0, preflight: ALWAYS),
       "::String#to_sym" => Entry.new(method: String.instance_method(:to_sym), arity: 0, preflight: ALWAYS),
       # What an inflector rule is applied with (felixefelip/steep#209). What
       # `sub!` answers is also what its receiver holds after it, unless nil:

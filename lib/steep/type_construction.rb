@@ -2596,7 +2596,7 @@ module Steep
               type = AST::Types::Logic::Env.new(
                 truthy: right_truthy.env,
                 falsy: join_reachable(left_falsy, right_falsy),
-                type: type
+                type: TypeInference::ShortCircuit.and_type(type, left_truthy, left_falsy, right_truthy, right_falsy)
               )
             end
 
@@ -2654,7 +2654,7 @@ module Steep
               type = AST::Types::Logic::Env.new(
                 truthy: join_reachable(left_truthy, right_truthy),
                 falsy: right_falsy.env,
-                type: type
+                type: TypeInference::ShortCircuit.or_type(type, left_truthy, left_falsy, right_truthy, right_falsy)
               )
             end
 

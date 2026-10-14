@@ -735,6 +735,65 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  # `apply_inflections` returns an uncountable word before any rule runs. The
+  # `return` is part of what the method answers, and an arm the condition rules
+  # out is not: `"news"` stays `"news"`, `"posts"` still loses its `s`.
+  def test_runner_records_what_an_early_return_hands_back
+    in_tmpdir do
+      write("sig/guarded.rbs", <<~RBS)
+        class Guarded
+          def self.apply: (String word) -> String
+          def self.both: (String word) -> String
+          def self.either: (String word) -> String
+        end
+        class GuardedUse
+          def self.a: () -> String
+          def self.b: () -> String
+          def self.c: () -> String
+          def self.d: () -> String
+          def self.e: () -> String
+        end
+      RBS
+      write("app/guarded.rb", <<~'RUBY')
+        class Guarded
+          def self.apply(word)
+            result = word.dup
+            return result if word.empty? || ["news"].include?(result)
+
+            [[/s\z/, ""]].each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+            result
+          end
+
+          def self.both(word)
+            return "both" if word == "posts" && word == "x"
+
+            word
+          end
+
+          def self.either(word)
+            return "either" if word == "x" || word == "y"
+
+            word
+          end
+        end
+
+        class GuardedUse
+          def self.a = Guarded.apply("posts")
+          def self.b = Guarded.apply("news")
+          def self.c = Guarded.apply("")
+          def self.d = Guarded.both("posts")
+          def self.e = Guarded.either("posts")
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ '("posts")' => '"post"', '("news")' => '"news"', '("")' => '""' }, methods.fetch("Guarded.apply"))
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.both"))
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.either"))
+    end
+  end
+
   def test_runner_records_nothing_for_a_literal_mutated_by_rules_it_does_not_know
     in_tmpdir do
       write("sig/mutation.rbs", <<~RBS)
