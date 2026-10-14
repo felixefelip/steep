@@ -63,7 +63,7 @@ module Steep
       def initialize(project)
         @project = project
         @evals = {} #: Hash[String, Array[String?]]
-        @exits = {} #: Hash[String, Hash[String, Hash[Symbol, AST::Types::t]]]
+        @exits = {} #: Hash[String, Hash[String, ObjectStates::Exit]]
       end
 
       # What each call site of a code-writing method defines there, by
@@ -105,37 +105,38 @@ module Steep
       def specialize_target(target, methods)
         context = load_target(target) or return
 
-        parameter_writers = eval_parameters(context)
-        writers = code_writers(context, parameter_writers)
+        writers = code_writers(context)
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
         baselines, tuples, definitions, callees = collect(context, Store.empty, locations, writers)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          harvest_evals(context, Store.empty, locations, definitions, parameter_writers, writers)
+          harvest_evals(context, Store.empty, locations, definitions, writers)
           return
         end
 
         found = {} #: Hash[String, Hash[String, AST::Types::t]]
         widened = Set[] #: Set[[String, String]]
-        seen = Set[] #: Set[[Hash[String, Hash[String, AST::Types::t]], Hash[String, Set[Arguments]]]]
+        seen = Set[] #: Set[[Hash[String, Hash[String, AST::Types::t]], Hash[String, Set[Arguments]], Hash[String, Hash[String, ObjectStates::Exit]]]]
         generation = 0
 
         loop do
+          exits = @exits.transform_values(&:dup)
           discovered, revealed = specialize(context, store(found), baselines, tuples, definitions)
           discovered = settle(found, discovered, baselines, widened)
           grown = grow(tuples, revealed, generation)
           # Both have to settle, not just the returns: a generation that finds no
           # new return can still fix a tuple inside a body it re-checked, and that
-          # tuple is what the next generation specializes.
-          break if discovered == found && grown == tuples
+          # tuple is what the next generation specializes. So do the exits, which
+          # the caller one frame out reads only in the generation after.
+          break if discovered == found && grown == tuples && @exits == exits
           # A state seen before cannot lead anywhere a later generation has not
           # already been. Widening bounds an entry's literals; this bounds the one
           # shape it says nothing about — a return alternating between two
           # CLASSES, which no amount of widening settles.
-          break unless seen.add?([discovered, grown])
+          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup)])
 
-          paths = affected_paths(callees, changed_keys(found, discovered))
+          paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits))
           found = discovered
           tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers), generation)
           generation += 1
@@ -146,7 +147,7 @@ module Steep
           (methods[key] ||= {}).merge!(writable.transform_values(&:to_s)) unless writable.empty?
         end
 
-        harvest_evals(context, store(found), locations, definitions, parameter_writers, writers)
+        harvest_evals(context, store(found), locations, definitions, writers)
       end
 
       # `discovered` with every entry that disagrees with the generation before
@@ -216,7 +217,7 @@ module Steep
       #
       # Rounds, like `specialize`: two macros in one file are read by one check,
       # and only two tuples of the SAME macro cost two.
-      def harvest_evals(context, store, locations, definitions, parameter_writers, writers)
+      def harvest_evals(context, store, locations, definitions, writers)
         writing = locations.select { |key, _| definitions.key?(key) }
         return if writing.empty?
 
@@ -229,7 +230,7 @@ module Steep
             path, def_node = definitions.fetch(key)
             typing = typings[path] or next
 
-            sources = eval_sources(context, store, typing, def_node, definitions, parameter_writers, writers, Set[key])
+            sources = eval_sources(context, store, typing, def_node, definitions, writers, Set[key])
             next if sources.empty?
 
             writing.fetch(key).fetch(arguments).each { |site| @evals[site] = sources }
@@ -237,63 +238,46 @@ module Steep
         end
       end
 
-      # What this body writes, in the order it writes it: its own evals, and what
-      # the methods it hands its own `self` to write there. A macro that evals
-      # once and then hands off produces both, and the class gets them in source
-      # order — the order the consumer places them in.
+      # What this body writes, in the order it writes it: its own writes, and
+      # what the writers it calls write. A macro that evals once and then hands
+      # off produces both, and the class gets them in source order — the order
+      # the consumer places them in.
       #
-      # `reading` holds the methods already being read on this self, so a writer
-      # that reaches itself is read once.
-      def eval_sources(context, store, typing, def_node, definitions, parameter_writers, writers, reading)
-        Evals.effects(typing, def_node, parameter_writers, writers).flat_map do |effect|
-          case effect.kind
-          when :delegated, :on_self
-            # Code is written here and this call site does not decide what: a
-            # hole, the same answer an eval it cannot fold gets.
-            next [nil] unless effect.certain
-            next [] if reading.include?(effect.callee)
+      # `reading` holds the methods already being read on this chain, so a
+      # writer that reaches itself is read once.
+      def eval_sources(context, store, typing, def_node, definitions, writers, reading, self_target = nil)
+        Evals.effects(typing, def_node, writers).flat_map do |effect|
+          next [Evals.chunk_of(typing, effect, context.subtyping.factory.env, self_target)] unless effect.kind == :frame
+          # Code is written there and this call site does not decide what: a
+          # hole, the same answer an eval it cannot fold gets.
+          next [nil] unless effect.certain
+          next [] if reading.include?(effect.callee)
 
-            frame_sources(context, store, typing, effect, definitions, parameter_writers, writers, reading)
-          else
-            [Evals.chunk_of(typing, effect, context.subtyping.factory.env)]
-          end
+          frame_sources(context, store, typing, effect, definitions, writers, reading, self_target)
         end
       end
 
-      # Handed as an argument (`Writer.generate(self, name)`), the callee is read
-      # on the ONE parameter that got it: a helper writing on two parameters
-      # writes for two objects, and only one of them is this class.
-      def frame_sources(context, store, typing, effect, definitions, parameter_writers, writers, reading)
+      # The callee is checked under the arguments this call hands it, so a
+      # parameter is typed as what was passed: `Writer.generate(self, name)`
+      # makes `owner` the class whose call site ran the macro, and a module that
+      # class builds and hands on is that module. A write on `self` there lands
+      # on the call's receiver, and is a hole where that names no class.
+      def frame_sources(context, store, typing, effect, definitions, writers, reading, self_target)
         entry = definitions[effect.callee] or return [nil]
         path, callee_node = entry
         arguments = Specializations::Arguments.recorded(effect.node, typing) or return [nil]
         frame_self = typing.self_type_of_call(node: effect.node) or return [nil]
-        arguments = effect.kind == :on_self ? arguments.with_self(frame_self) : arguments.resolve_self(frame_self)
+        arguments = arguments.resolve_self(frame_self)
+        if Evals.on_self?(effect.node)
+          arguments = arguments.with_self(frame_self)
+        else
+          self_target = Evals.eval_target(typing, effect.node) || Evals::UNNAMED_SELF
+        end
         positionals, keywords = Collector.defaults(callee_node)
         arguments = arguments.with_defaults(positionals: positionals, keywords: keywords)
 
         inner = check_definitions(context, store, { effect.callee => arguments }, definitions)[path] or return [nil]
-        return eval_sources(context, store, inner, callee_node, definitions, parameter_writers, writers, reading | [effect.callee]) if effect.kind == :on_self
-
-        receiver = Evals.parameter_names(callee_node)[effect.index] or return [nil]
-        Evals.sources(inner, callee_node, context.subtyping.factory.env, [receiver])
-      end
-
-      # The methods that eval on a PARAMETER, by the position it sits in. Not
-      # writers themselves — they write on an object they were handed, so their
-      # own call site is the wrong place to attribute anything to — but what a
-      # frame handing its own `self` is recognised against.
-      def eval_parameters(context)
-        writers = {} #: Hash[String, Set[Integer]]
-
-        context.sources.each_value do |source|
-          Collector.definitions(source).each do |key, def_node|
-            indices = Evals.eval_parameters(def_node)
-            writers[key] = indices unless indices.empty?
-          end
-        end
-
-        writers
+        eval_sources(context, store, inner, callee_node, definitions, writers, reading | [effect.callee], self_target)
       end
 
       # A call omitting an optional parameter does not leave it open: the body
@@ -357,19 +341,18 @@ module Steep
 
       # The argument tuples the call sites in `paths` supply when read under
       # `store`. Separate from `collect`, which also needs each body's type and so
-      # keeps its own single sweep.
-      # The methods that define methods by evaluating a string, which is the
-      # only thing the eval harvest reads. A pure walk of trees already parsed,
-      # so a project without the idiom pays this and nothing else.
-      # A method that only calls one of them on its own self writes code too,
-      # so the set grows until no call adds one.
-      def code_writers(context, parameter_writers)
+      # The methods that write code — a string eval, a `const_set`, an
+      # `include` — which is the only thing the eval harvest reads. A pure walk
+      # of trees already parsed, so a project without the idiom pays this and
+      # nothing else. A method that calls one of them writes code too, so the
+      # set grows until no call adds one.
+      def code_writers(context)
         writers = Set[] #: Set[String]
         definitions = context.sources.each_value.flat_map { |source| Collector.definitions(source).to_a }
 
         loop do
           grown = definitions.filter_map do |key, def_node|
-            key if !writers.include?(key) && Evals.writes_code?(def_node, parameter_writers, writers)
+            key if !writers.include?(key) && Evals.writes_code?(def_node, writers)
           end
           break if grown.empty?
 

@@ -97,7 +97,7 @@ module Steep
       # `receiver_ivars`: what the receiver's contents are known to be
       # (`receiver_ivars`), read off the call where it is recorded already and
       # off the checker where it is being typed.
-      def self.from_send(node, typing, receiver_ivars:, class_states:, self_type:)
+      def self.from_send(node, typing, receiver_ivars:, class_states:, self_type:, exact_self:)
         _receiver, name, *args = node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
         # and the arguments are the rest (`TypeConstruction::SendDispatch`).
@@ -113,7 +113,7 @@ module Steep
 
             return nil unless typing.has_type?(value)
 
-            keywords[key.children[0]] = argument_type(value, typing)
+            keywords[key.children[0]] = argument_type(value, typing, exact_self)
           end
         end
 
@@ -122,7 +122,7 @@ module Steep
           return nil if arg.type == :splat || arg.type == :block_pass
           return nil unless typing.has_type?(arg)
 
-          positionals << argument_type(arg, typing)
+          positionals << argument_type(arg, typing, exact_self)
         end
 
         new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states, self_type: self_type)
@@ -188,12 +188,12 @@ module Steep
 
       # The arguments of `call`, being typed at `node`, keyed under what the
       # checker knows there.
-      def self.at_call(node, typing, call, self_ivars:, class_states:, keyed_self:)
+      def self.at_call(node, typing, call, self_ivars:, class_states:, keyed_self:, exact_self:)
         from_send(
           node, typing,
           receiver_ivars: receiver_ivars(call.receiver_type, self_ivars, class_states),
           class_states: callee_class_states(call, class_states),
-          self_type: keyed_self
+          self_type: keyed_self, exact_self: exact_self
         )
       end
 
@@ -205,7 +205,7 @@ module Steep
           node, typing,
           receiver_ivars: recorded_receiver_ivars(node, typing),
           class_states: callee_class_states(call, typing.class_states_of_call(node: node)),
-          self_type: typing.keyed_self_of_call(node: node)
+          self_type: typing.keyed_self_of_call(node: node), exact_self: typing.exact_self_of_call(node: node)
         )
       rescue Typing::UnknownNodeError
         nil
@@ -231,9 +231,13 @@ module Steep
       #   # @type var parts: ["a", "b"]
       #   parts.reverse!
       #   fill(parts)          # ["b", "a"] at runtime
-      def self.argument_type(arg, typing)
+      #
+      # `self`, where the call's body is checked for one class (`exact_self`),
+      # is that class: the callee would read `self` as its own receiver.
+      def self.argument_type(arg, typing, exact_self)
         written = written_literal(arg) and return written
         type = typing.type_of(node: arg)
+        type = type.subst(Interface::Substitution.build([], self_type: exact_self)) if exact_self
         vouched = typing.vouched_of(node: arg)
         # A local is vouched for IN PLACE of its declared type; a call only while
         # its type is still the one the checker computed.

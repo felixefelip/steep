@@ -198,6 +198,7 @@ module Steep
     # (`ObjectStates.self_ivars`), only where there were any.
     attr_reader :call_self_ivars
     attr_reader :call_keyed_selves
+    attr_reader :call_exact_selves
     # The states of class objects the env knew at the call that the callee may
     # read (`ObjectStates::ClassStates.of_call`), only where there were any.
     attr_reader :call_class_states
@@ -252,6 +253,7 @@ module Steep
       (@call_self_types = {}).compare_by_identity
       (@call_self_ivars = {}).compare_by_identity
       (@call_keyed_selves = {}).compare_by_identity
+      (@call_exact_selves = {}).compare_by_identity
       (@call_class_states = {}).compare_by_identity
       (@exit_ivars = {}).compare_by_identity
       (@iterations = {}).compare_by_identity
@@ -305,10 +307,11 @@ module Steep
       type
     end
 
-    def add_call(node, call, self_type:, keyed_self:, self_ivars:, class_states:)
+    def add_call(node, call, self_type:, exact_self:, keyed_self:, self_ivars:, class_states:)
       method_calls[node] = call
       call_self_types[node] = self_type
       call_keyed_selves[node] = keyed_self if keyed_self
+      call_exact_selves[node] = exact_self if exact_self
       call_self_ivars[node] = self_ivars unless self_ivars.empty?
       call_class_states[node] = class_states unless class_states.empty?
 
@@ -322,6 +325,11 @@ module Steep
     # `Specializations.keyed_self` at the call.
     def keyed_self_of_call(node:)
       call_keyed_selves.fetch(node) { parent&.keyed_self_of_call(node: node) }
+    end
+
+    # `Specializations.exact_self` where the call is made.
+    def exact_self_of_call(node:)
+      call_exact_selves.fetch(node) { parent&.exact_self_of_call(node: node) }
     end
 
     def class_states_of_call(node:)
@@ -497,6 +505,8 @@ module Steep
 
       parent.method_calls.merge!(method_calls)
       parent.call_self_types.merge!(call_self_types)
+      parent.call_keyed_selves.merge!(call_keyed_selves)
+      parent.call_exact_selves.merge!(call_exact_selves)
       parent.call_self_ivars.merge!(call_self_ivars)
       parent.call_class_states.merge!(call_class_states)
       parent.exit_ivars.merge!(exit_ivars)
