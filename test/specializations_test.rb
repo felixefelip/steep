@@ -735,6 +735,114 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_records_what_an_early_return_hands_back
+    in_tmpdir do
+      write("sig/guarded.rbs", <<~RBS)
+        class Guarded
+          def self.apply: (String word) -> String
+          def self.both: (String word) -> String
+          def self.either: (String word) -> String
+          def self.cased: (String word) -> String
+          def self.nilable: (String word, String? name) -> String
+          def self.compared: (String word, String other) -> String
+          def self.name: () -> String?
+          def self.only: (String word) -> String
+          def self.lambdas: (String word) -> String
+        end
+        class GuardedUse
+          def self.a: () -> String
+          def self.b: () -> String
+          def self.c: () -> String
+          def self.d: () -> String
+          def self.e: () -> String
+          def self.f: () -> String
+          def self.g: () -> String
+          def self.h: () -> String
+          def self.i: () -> String
+          def self.j: () -> String
+        end
+      RBS
+      write("app/guarded.rb", <<~'RUBY')
+        class Guarded
+          def self.apply(word)
+            result = word.dup
+            return result if word.empty? || ["news"].include?(result)
+
+            [[/s\z/, ""]].each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+            result
+          end
+
+          def self.both(word)
+            return "both" if word == "posts" && word == "x"
+
+            word
+          end
+
+          def self.either(word)
+            return "either" if word == "x" || word == "y"
+
+            word
+          end
+
+          def self.cased(word)
+            case word
+            when "news" then return "N"
+            end
+            word
+          end
+
+          def self.nilable(word, name)
+            return "nilable" if name && word == "x"
+
+            word
+          end
+
+          def self.compared(word, other)
+            return "compared" if other == "a" && word == "x"
+
+            word
+          end
+
+          def self.name = ENV["NAME"]
+
+          def self.only(word)
+            return word
+          end
+
+          def self.lambdas(word)
+            check = -> { return "L" if it.empty? }
+            check.call(word)
+            word
+          end
+        end
+
+        class GuardedUse
+          def self.a = Guarded.apply("posts")
+          def self.b = Guarded.apply("news")
+          def self.c = Guarded.apply("")
+          def self.d = Guarded.both("posts")
+          def self.e = Guarded.either("posts")
+          def self.f = Guarded.cased("posts")
+          def self.g = Guarded.nilable("posts", Guarded.name)
+          def self.h = Guarded.compared("posts", Guarded.name.to_s)
+          def self.i = Guarded.only("posts")
+          def self.j = Guarded.lambdas("posts")
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ '("posts")' => '"post"', '("news")' => '"news"', '("")' => '""' }, methods.fetch("Guarded.apply"))
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.both"))
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.either"))
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.cased"))
+      assert_equal(['"posts"'], methods.fetch("Guarded.nilable").values)
+      assert_equal(['"posts"'], methods.fetch("Guarded.compared").values)
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.only"))
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.lambdas"))
+    end
+  end
+
   def test_runner_records_nothing_for_a_literal_mutated_by_rules_it_does_not_know
     in_tmpdir do
       write("sig/mutation.rbs", <<~RBS)

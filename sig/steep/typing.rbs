@@ -75,6 +75,8 @@ module Steep
 
     attr_reader arms: Hash[Parser::AST::Node, arm?]
 
+    attr_reader dead_clauses: Hash[Parser::AST::Node, true]
+
     attr_reader vouched: Hash[Parser::AST::Node, AST::Types::t]
 
     attr_reader nominals: Hash[Parser::AST::Node, AST::Types::t]
@@ -118,6 +120,8 @@ module Steep
     def add_arm: (Parser::AST::Node node, arm? arm) -> void
 
     def arm_of: (node: Parser::AST::Node) -> arm?
+
+    def add_dead_clause: (Parser::AST::Node node) -> void
 
     def add_vouched: (Parser::AST::Node node, AST::Types::t type) -> void
 

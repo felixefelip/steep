@@ -586,12 +586,13 @@ module Steep
         body = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
         return nil unless body && typing.has_type?(body)
 
-        type = typing.type_of(node: body)
-        return nil if type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Bot)
+        values = Returns.values(typing, body) or return nil
+        types = [typing.type_of(node: body), *values].reject { |type| type.is_a?(AST::Types::Bot) }
+        return nil if types.empty? || types.any? { |type| type.is_a?(AST::Types::Any) }
 
         # Every recorded return passes through here, which is why the sidecar's
         # spelling is settled here too rather than at each `to_s` below.
-        Specializations.rbs_writable(type)
+        Specializations.rbs_writable(AST::Types::Union.build(types: types))
       end
     end
   end

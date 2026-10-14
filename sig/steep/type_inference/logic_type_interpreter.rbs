@@ -17,6 +17,8 @@ module Steep
         # Make the instance unreachable, and returns self
         #
         def unreachable!: () -> self
+
+        def self.decided_type: (AST::Types::t, Result truthy, Result falsy) -> AST::Types::t
       end
 
       TRUE: AST::Types::Literal

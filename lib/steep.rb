@@ -200,6 +200,7 @@ require "steep/specializations/collector"
 require "steep/specializations/writer"
 require "steep/specializations/evals"
 require "steep/specializations/evals_writer"
+require "steep/specializations/returns"
 require "steep/specializations/runner"
 require "steep/callbacks"
 

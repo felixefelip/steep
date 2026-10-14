@@ -15,6 +15,15 @@ module Steep
           self.unreachable = true
           self
         end
+
+        # The value of an operand narrowing has decided. `word == "x"` stays a
+        # logic type, which `evaluate_node` reads as either truthy or falsy.
+        def self.decided_type(type, truthy, falsy)
+          return falsy.type if truthy.unreachable && !falsy.unreachable
+          return truthy.type if falsy.unreachable && !truthy.unreachable
+
+          type
+        end
       end
 
       attr_reader :subtyping
