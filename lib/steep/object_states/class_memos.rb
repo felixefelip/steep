@@ -26,7 +26,7 @@ module Steep
 
           key = Specializations.method_key(call.method_decls) or return
           arguments = Specializations.call_site_arguments(constr, node, call) or return
-          ObjectStates.state_in(constr.specializations.exit_ivars(key, arguments)&.ivars&.[](ivar))
+          ObjectStates.state_in(ObjectStates.recorded_exit(constr, key, arguments)&.ivars&.[](ivar))
         end
 
         # What `Klass.new` holds when its `initialize` chain is done: each array

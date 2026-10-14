@@ -65,7 +65,7 @@ module Steep
         @evals = {} #: Hash[String, Array[String?]]
         @exits = {} #: Hash[String, Hash[String, ObjectStates::Exit]]
         @demand = nil
-        @demanding = false
+        @demanding = Set[] #: Set[[String, String]]
       end
 
       # What each call site of a code-writing method defines there, by
@@ -110,7 +110,7 @@ module Steep
         writers = code_writers(context)
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
-        @demand = ->(store, key, arguments) { demand_exit(context, definitions, demanded, store, key, arguments) }
+        @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
         baselines, tuples, collected, callees = collect(context, Store.empty, locations, writers)
         definitions.merge!(collected)
@@ -345,21 +345,24 @@ module Steep
       # settles in the generation that walks it instead of one generation per
       # write. Memoized per generation, since `store` changes between them.
       #
-      # Not from inside such a check: the rest of its file is walked too, under
-      # contents nothing has settled.
-      def demand_exit(context, definitions, demanded, store, key, arguments)
-        return nil if @demanding || !arguments.stateful? || !definitions.key?(key) || widened?(arguments, 0)
+      # Inside such a check, only the body it checks asks: the rest of its file
+      # is walked too, under contents nothing has settled. A body that writes
+      # through another one is what asks there, and a tuple already being
+      # checked further out is not checked again.
+      def demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body)
+        return nil unless @demanding.empty? || in_checked_body
+        return nil if !arguments.stateful? || !definitions.key?(key) || widened?(arguments, 0)
 
         memo = [key, arguments.key] #: [String, String]
         return demanded[memo] if demanded.key?(memo)
+        return nil unless @demanding.add?(memo)
 
-        @demanding = true
         begin
           path, def_node = definitions.fetch(key)
           typing = type_check(context, store, context.sources.fetch(path), { node_key(path, def_node) => arguments })
           record_exit(key, arguments, typing, def_node)
         ensure
-          @demanding = false
+          @demanding.delete(memo)
         end
         demanded[memo] = @exits.dig(key, arguments.key)
       end
