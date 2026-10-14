@@ -206,7 +206,7 @@ module Steep
       # theirs out of tiny operands and stay bounded by MAX_LITERAL_WIDTH. The
       # rule falls out of the operands and needs no per-entry taxonomy.
       def result_budget(receiver, arguments)
-        [MAX_LITERAL_WIDTH, operand_width(receiver) + arguments.sum { |value| operand_width(value) }].max
+        [MAX_LITERAL_WIDTH, operand_width(receiver) + operand_width(arguments)].max
       end
 
       def operand_width(value)
@@ -216,9 +216,7 @@ module Steep
       end
 
       def collection_size(value)
-        return 0 unless collection?(value)
-
-        value.sum { |element| 1 + collection_size(element) }
+        collection?(value) ? value.size : 0
       end
 
       def literal_value?(value)
