@@ -222,6 +222,12 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal ["def post_ids; []; end"], chunks(tapped).first
   end
 
+  def test_a_jump_inside_a_loop_of_the_tap_block_leaves_only_that_loop
+    memo = TAP_MEMO.sub("{ |rules| ", "{ |rules| [1].each { break }; ")
+
+    assert_equal ["def post_ids; []; end"], chunks(tapped(memo)).first
+  end
+
   def test_rules_pushed_after_a_tap_memo_come_first
     ruby = tapped(body: 'rules.singular(/ories\z/, "orium")')
 
@@ -233,6 +239,7 @@ class AccumulatedIvarStateTest < Minitest::Test
       "the block keeps it" => TAP_MEMO.sub("{ |rules| ", "{ |rules| $kept = rules; "),
       "the block breaks" => TAP_MEMO.sub(" }", "; break rules }"),
       "the block may leave early" => TAP_MEMO.sub('rules.singular(/ies', 'next if $flag; rules.singular(/ies'),
+      "the block may run again" => TAP_MEMO.sub(" }", "; redo if $flag }"),
       "a call that answers its block" => TAP_MEMO.sub(".tap {", ".then {").sub(" }", "; rules }")
     }.each do |label, memo|
       assert_equal [[nil], [nil]], chunks(tapped(memo)), label

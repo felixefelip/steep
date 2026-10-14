@@ -208,6 +208,16 @@ module Steep
           end
         end
 
+        # Whether each use only reads the array, and a block handed its
+        # elements only reads them.
+        def reading_uses?(constr, uses)
+          uses.all? { |use| use.kind != :escape && collection_read?(constr, use.called) && reads_elements?(constr, use.element_calls) }
+        end
+
+        def reads_elements?(constr, calls)
+          calls.none? { |name| element_read_replaced?(constr, name) }
+        end
+
         # What a use of an array this vouches for may call on it.
         def collection_read?(constr, method_name)
           return true if CollectionReaders::WHOLE.include?(method_name)
@@ -243,9 +253,7 @@ module Steep
             end
           end
 
-          uses = [ivar, *readers].flat_map { |name| registry.uses_of(name) }
-          uses.all? { |use| use.kind != :escape && collection_read?(constr, use.called) } &&
-            uses.flat_map { |use| use.element_calls.to_a }.none? { |name| element_read_replaced?(constr, name) }
+          reading_uses?(constr, [ivar, *readers].flat_map { |name| registry.uses_of(name) })
         rescue RBS::BaseError
           false
         end

@@ -35,7 +35,8 @@ module Steep
           states = exit.context.type_env.class_states
           singleton = exit.self_type
           if singleton.is_a?(AST::Types::Name::Singleton)
-            ivars = held(exit, singleton)
+            unset = ClassMemos.memo_values(exit).select { |_, type| type.is_a?(AST::Types::Nil) }
+            ivars = held(exit, singleton).merge(unset)
             states = ivars.empty? ? states.except(singleton.name) : states.merge(singleton.name => ivars)
           end
           outer.update_type_env { |env| env.update(class_states: states) }
@@ -160,15 +161,13 @@ module Steep
         end
 
         # `self`'s ivars a body leaves known: its memos' objects as they stand,
-        # or `nil` where none has run yet, and any other with what holds under
-        # any name.
+        # any other with what holds under any name.
         def held(constr, singleton)
           memos = memo_ivars(constr, singleton.name)
-          unset = ClassMemos.memo_values(constr).select { |_, type| type.is_a?(AST::Types::Nil) }
           ObjectStates.self_ivars(constr).filter_map do |ivar, type|
             value = memos.include?(ivar) ? type : ObjectStates.settled(constr, type)
             [ivar, value] if ObjectStates.state_in(value)
-          end.to_h.merge(unset)
+          end.to_h
         end
 
         def rewritable?(constr, name, ivar)

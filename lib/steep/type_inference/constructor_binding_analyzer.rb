@@ -274,7 +274,7 @@ module Steep
 
       def attr_reader_body(name)
         Body.new(
-          bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, returns: :"@#{name}",
+          bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: :"@#{name}",
           empties: Set[], handed: Set[], consts: Set[]
         )
       end
@@ -282,7 +282,7 @@ module Steep
       def attr_writer_body(name)
         ivar = :"@#{name}"
         Body.new(
-          bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, returns: nil,
+          bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: nil,
           empties: Set[], handed: Set[], consts: Set[]
         )
       end

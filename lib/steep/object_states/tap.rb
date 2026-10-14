@@ -24,7 +24,7 @@ module Steep
 
         # Whether `method_name` called on `instance` runs `Kernel#tap`.
         def resolves?(constr, instance, method_name)
-          ObjectStates.method_keys(constr, instance, method_name) == [KEY] && !constr.literal_method_registry.blocked?(KEY)
+          MethodIdentity.keys(constr, instance, method_name, private: false) == [KEY] && !constr.literal_method_registry.blocked?(KEY)
         end
 
         # The receiver to hand the block: the object as its `initialize` chain
@@ -67,7 +67,7 @@ module Steep
           return unless ClassMemos.fresh?(constr, instance)
 
           name = parameter(node)
-          held = TypeInference::HeldLocals.of(node, reassigned: assigned(node.children[2], name))
+          held = TypeInference::HeldLocals.of(node, reassigned: TypeInference::ArgumentFacts.reassigned_parameters(node))
           instance if held.held?(name)
         end
 
@@ -77,15 +77,12 @@ module Steep
           params.first.children[0] if params.size == 1 && %i[arg procarg0].include?(params.first.type) && params.first.children[0].is_a?(Symbol)
         end
 
-        def assigned(body, name)
-          LocalReach.each_node(body) { |node| return Set[name] if node.type == :lvasgn && node.children[0] == name }
-          Set[]
-        end
+        # A jump the block itself takes: a `break` answers its own value, and the
+        # others leave or rerun it before the end.
+        def jumps?(node)
+          return false unless node.is_a?(Parser::AST::Node) && !UnrolledEach::NESTED.include?(node.type)
 
-        # A `break` answers its own value, and a `next` leaves before the end.
-        def jumps?(body)
-          LocalReach.each_node(body) { |node| return true if %i[break next].include?(node.type) }
-          false
+          Accumulators::JUMPS.include?(node.type) || node.children.any? { |child| jumps?(child) }
         end
       end
     end

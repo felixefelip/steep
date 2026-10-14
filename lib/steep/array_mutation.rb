@@ -83,7 +83,7 @@ module Steep
         return false if keys.empty? || !keys.all? { |key| IterationIntrinsics.entry(key, override_registry: registry) }
 
         calls = TypeInference::ClassMemoAnalyzer.element_calls_in(block_params, block_body) or return false
-        calls.none? { |name| ObjectStates::ClassMemos.element_read_replaced?(constr, name) }
+        ObjectStates::ClassMemos.reads_elements?(constr, calls)
       end
 
       def preserves?(constr, keys)
@@ -116,13 +116,7 @@ module Steep
       end
 
       def array_method_keys(constr, method_name, private:)
-        interface = constr.calculate_interface(AST::Builtin::Array.instance_type(AST::Builtin.any_type), private: private) or return []
-        method = interface.methods[method_name] or return []
-
-        method.overloads
-          .flat_map { |overload| overload.method_decls(method_name) }
-          .map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }
-          .uniq
+        MethodIdentity.keys(constr, AST::Builtin::Array.instance_type(AST::Builtin.any_type), method_name, private: private)
       end
     end
   end

@@ -187,13 +187,7 @@ module Steep
       # intrinsic tables are. Empty for one String does not have: nothing vouches
       # for it.
       def string_method_keys(constr, method_name, private:)
-        interface = constr.calculate_interface(AST::Builtin::String.instance_type, private: private) or return []
-        method = interface.methods[method_name] or return []
-
-        method.overloads
-          .flat_map { |overload| overload.method_decls(method_name) }
-          .map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }
-          .uniq
+        MethodIdentity.keys(constr, AST::Builtin::String.instance_type, method_name, private: private)
       end
 
       # Only a local and an ivar name the value itself; any other receiver is a

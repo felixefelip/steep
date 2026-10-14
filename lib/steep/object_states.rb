@@ -14,7 +14,7 @@ module Steep
   module ObjectStates
     # `reads_only`: the method leaves the object as it was. It only answers an
     # ivar (`attr_reader`, `def x = @x`), or writes none and only reads what
-    # they hold (`leaves_ivars?`).
+    # they hold (`ClassMemos.reading_uses?`).
     Effect = Struct.new(:bindings, :writes, :reads_only, keyword_init: true)
 
     # What a body left its receiver holding (`ivars`), and each class object
@@ -331,20 +331,11 @@ module Steep
         variables = constr.checker.factory.definition_builder.build_instance(instance.name).instance_variables
         iterations.all? do |ivar, method_name|
           declared = variables[ivar] or next false
-          keys = method_keys(constr, constr.checker.factory.type(declared.type), method_name)
+          keys = MethodIdentity.keys(constr, constr.checker.factory.type(declared.type), method_name, private: false)
           !keys.empty? && keys.all? { |key| IterationIntrinsics.entry(key, override_registry: constr.literal_method_registry) }
         end
       rescue RBS::BaseError
         false
-      end
-
-      # The methods a call of `method_name` on `type` may resolve to, keyed as
-      # the literal tables key them.
-      def method_keys(constr, type, method_name)
-        interface = constr.calculate_interface(type, private: false) or return []
-        method = interface.methods[method_name] or return []
-
-        method.overloads.flat_map { |overload| overload.method_decls(method_name) }.map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }.uniq
       end
 
       # What `method_name` does to an instance of `instance`: the ivars it may
@@ -361,20 +352,9 @@ module Steep
 
         rewritten = callee_writes(constr, instance, body, [method_name])
         writes = may_write(constr, owner, method_name) | rewritten
-        reads_only = writes.empty? && body.self_sends.empty? && (!body.returns.nil? || leaves_ivars?(constr, body))
+        reads_only = writes.empty? && body.self_sends.empty? &&
+                     (!body.returns.nil? || ClassMemos.reading_uses?(constr, body.ivar_uses.values.flatten(1)))
         Effect.new(bindings: body.bindings.reject { |ivar, _| rewritten.include?(ivar) }, writes: writes, reads_only: reads_only)
-      end
-
-      # Whether every mention of an ivar in `body` only reads the collection
-      # it holds, and a block handed its elements only reads them, as a use of
-      # a class's memo must (`ClassMemos.collection_confined?`).
-      def leaves_ivars?(constr, body)
-        body.ivar_uses.each_value.all? do |uses|
-          uses.all? do |use|
-            use.kind != :escape && ClassMemos.collection_read?(constr, use.called) &&
-              use.element_calls.none? { |name| ClassMemos.element_read_replaced?(constr, name) }
-          end
-        end
       end
 
       # `[owner, body]` for the `method_name` an instance of `type` runs, or
