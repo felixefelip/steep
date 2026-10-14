@@ -735,9 +735,6 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
-  # `apply_inflections` returns an uncountable word before any rule runs. The
-  # `return` is part of what the method answers, and an arm the condition rules
-  # out is not: `"news"` stays `"news"`, `"posts"` still loses its `s`.
   def test_runner_records_what_an_early_return_hands_back
     in_tmpdir do
       write("sig/guarded.rbs", <<~RBS)
@@ -745,6 +742,10 @@ class SpecializationsTest < Minitest::Test
           def self.apply: (String word) -> String
           def self.both: (String word) -> String
           def self.either: (String word) -> String
+          def self.cased: (String word) -> String
+          def self.nilable: (String word, String? name) -> String
+          def self.compared: (String word, String other) -> String
+          def self.name: () -> String?
         end
         class GuardedUse
           def self.a: () -> String
@@ -752,6 +753,9 @@ class SpecializationsTest < Minitest::Test
           def self.c: () -> String
           def self.d: () -> String
           def self.e: () -> String
+          def self.f: () -> String
+          def self.g: () -> String
+          def self.h: () -> String
         end
       RBS
       write("app/guarded.rb", <<~'RUBY')
@@ -775,6 +779,27 @@ class SpecializationsTest < Minitest::Test
 
             word
           end
+
+          def self.cased(word)
+            case word
+            when "news" then return "N"
+            end
+            word
+          end
+
+          def self.nilable(word, name)
+            return "nilable" if name && word == "x"
+
+            word
+          end
+
+          def self.compared(word, other)
+            return "compared" if other == "a" && word == "x"
+
+            word
+          end
+
+          def self.name = ENV["NAME"]
         end
 
         class GuardedUse
@@ -783,6 +808,9 @@ class SpecializationsTest < Minitest::Test
           def self.c = Guarded.apply("")
           def self.d = Guarded.both("posts")
           def self.e = Guarded.either("posts")
+          def self.f = Guarded.cased("posts")
+          def self.g = Guarded.nilable("posts", Guarded.name)
+          def self.h = Guarded.compared("posts", Guarded.name.to_s)
         end
       RUBY
 
@@ -791,6 +819,9 @@ class SpecializationsTest < Minitest::Test
       assert_equal({ '("posts")' => '"post"', '("news")' => '"news"', '("")' => '""' }, methods.fetch("Guarded.apply"))
       assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.both"))
       assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.either"))
+      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.cased"))
+      assert_equal(['"posts"'], methods.fetch("Guarded.nilable").values)
+      assert_equal(['"posts"'], methods.fetch("Guarded.compared").values)
     end
   end
 

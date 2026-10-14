@@ -383,6 +383,50 @@ module Steep
         Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches, at_args: at_args)
       end
 
+      # The ends of one body: the statement it finishes on, and — because a body
+      # that finishes on an `if` finishes on whichever arm ran — the ends inside
+      # that. `return` is the same thing written earlier, so it is followed from
+      # wherever it appears, through a block (which returns from the method
+      # around it) but not into a body of its own.
+      def each_tail(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        return if SCOPES.include?(node.type)
+
+        case node.type
+        when :begin, :kwbegin
+          each_tail(node.children.last, &block)
+        when :if
+          each_tail(node.children[1], &block)
+          each_tail(node.children[2], &block)
+        when :case, :case_match
+          node.children.drop(1).each do |branch|
+            next unless branch.is_a?(Parser::AST::Node)
+
+            arm = branch.type == :when || branch.type == :in_pattern ? branch.children.last : branch
+            each_tail(arm, &block)
+          end
+        when :return
+          # Bare, or a list: the `return` itself is what holds the value.
+          node.children.size == 1 ? each_tail(node.children[0], &block) : yield(node)
+        else
+          yield node
+        end
+      end
+
+      # `return` written anywhere but the end — inside an `if` that guards, in a
+      # block, wherever. The value leaves from there just the same; a `return`
+      # inside a lambda leaves only the lambda.
+      def each_returns(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        return if SCOPES.include?(node.type) || (CLOSURES.include?(node.type) && node.children[0].type == :lambda)
+
+        node.children.each do |child|
+          next unless child.is_a?(Parser::AST::Node)
+
+          child.type == :return ? each_tail(child, &block) : each_returns(child, &block)
+        end
+      end
+
       private
 
       # A value a local can be born from as a `Built`: a call, with or without
@@ -469,48 +513,6 @@ module Steep
 
         each_tail(body, &literal)
         each_returns(body, &literal)
-      end
-
-      # The ends of one body: the statement it finishes on, and — because a body
-      # that finishes on an `if` finishes on whichever arm ran — the ends inside
-      # that. `return` is the same thing written earlier, so it is followed from
-      # wherever it appears, through a block (which returns from the method
-      # around it) but not into a body of its own.
-      def each_tail(node, &block)
-        return unless node.is_a?(Parser::AST::Node)
-        return if SCOPES.include?(node.type)
-
-        case node.type
-        when :begin, :kwbegin
-          each_tail(node.children.last, &block)
-        when :if
-          each_tail(node.children[1], &block)
-          each_tail(node.children[2], &block)
-        when :case, :case_match
-          node.children.drop(1).each do |branch|
-            next unless branch.is_a?(Parser::AST::Node)
-
-            arm = branch.type == :when || branch.type == :in_pattern ? branch.children.last : branch
-            each_tail(arm, &block)
-          end
-        when :return
-          each_tail(node.children[0], &block)
-        else
-          yield node
-        end
-      end
-
-      # `return` written anywhere but the end — inside an `if` that guards, in a
-      # block, wherever. The value leaves from there just the same.
-      def each_returns(node, &block)
-        return unless node.is_a?(Parser::AST::Node)
-        return if SCOPES.include?(node.type)
-
-        node.children.each do |child|
-          next unless child.is_a?(Parser::AST::Node)
-
-          child.type == :return ? each_tail(child, &block) : each_returns(child, &block)
-        end
       end
 
       # Every `def` with the `class`/`module`/`sclass` node it is written in, or

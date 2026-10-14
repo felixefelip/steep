@@ -421,6 +421,13 @@ module Steep
           end
         end
 
+        def dead?(node)
+          return false unless node
+
+          range = node.loc&.expression or return false
+          @dead.any? { |other| other.begin_pos <= range.begin_pos && range.end_pos <= other.end_pos }
+        end
+
         private
 
         ARM_STATES = { then: :certain, else: :dead }.freeze
@@ -497,19 +504,13 @@ module Steep
           @typing.type_of(node: node)
         end
 
-        def dead?(node)
-          return false unless node
-
-          range = node.loc&.expression or return false
-          @dead.any? { |other| other.begin_pos <= range.begin_pos && range.end_pos <= other.end_pos }
-        end
-
         def unreachable_ranges(typing)
-          typing.errors.filter_map do |error|
+          reported = typing.errors.filter_map do |error|
             next unless UNREACHABLE.any? { |klass| error.is_a?(klass) }
 
             error.node&.loc&.expression
           end
+          reported + typing.dead_clauses.each_key.filter_map { |clause| clause.loc&.expression }
         end
       end
     end

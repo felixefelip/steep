@@ -2577,15 +2577,15 @@ module Steep
             when left_falsy.unreachable
               # Always left_truthy ==> right
               env = right_context.type_env
-              type = right_type
+              type = TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy)
             when right_truthy.unreachable && right_falsy.unreachable
               env = left_falsy.env
               type = left_falsy.type
             else
               env = context.type_env.join(left_falsy.env, right_context.type_env)
-              type = union_type(left_falsy.type, right_type)
+              type = union_type(left_falsy.type, TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy))
 
-              unless type.is_a?(AST::Types::Any)
+              unless type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Literal)
                 if check_relation(sub_type: type, super_type: AST::Types::Boolean.instance).success?
                   type = AST::Types::Boolean.instance
                 end
@@ -2596,7 +2596,7 @@ module Steep
               type = AST::Types::Logic::Env.new(
                 truthy: right_truthy.env,
                 falsy: join_reachable(left_falsy, right_falsy),
-                type: TypeInference::ShortCircuit.and_type(type, left_truthy, left_falsy, right_truthy, right_falsy)
+                type: type
               )
             end
 
@@ -2635,15 +2635,15 @@ module Steep
             when left_truthy.unreachable
               # Always left_falsy ==> right
               env = right_context.type_env
-              type = right_type
+              type = TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy)
             when right_truthy.unreachable && right_falsy.unreachable
               env = left_truthy.env
               type = left_truthy.type
             else
               env = context.type_env.join(left_truthy.env, right_context.type_env)
-              type = union_type(left_truthy.type, right_type)
+              type = union_type(left_truthy.type, TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy))
 
-              unless type.is_a?(AST::Types::Any)
+              unless type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Literal)
                 if check_relation(sub_type: type, super_type: AST::Types::Boolean.instance).success?
                   type = AST::Types::Boolean.instance
                 end
@@ -2654,7 +2654,7 @@ module Steep
               type = AST::Types::Logic::Env.new(
                 truthy: join_reachable(left_truthy, right_truthy),
                 falsy: right_falsy.env,
-                type: TypeInference::ShortCircuit.or_type(type, left_truthy, left_falsy, right_truthy, right_falsy)
+                type: type
               )
             end
 
@@ -2866,6 +2866,7 @@ module Steep
                 branch_results << branch_result
 
                 unless branch_reachable
+                  typing.add_dead_clause(when_clause)
                   unless branch_result.type.is_a?(AST::Types::Bot)
                     typing.add_error(
                       Diagnostic::Ruby::UnreachableValueBranch.new(

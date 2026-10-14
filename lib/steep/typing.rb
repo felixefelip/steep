@@ -232,6 +232,9 @@ module Steep
     attr_reader :unwidened, :break_envs
     # The env each block body ends with, by the block (`ObjectStates::Tap`).
     attr_reader :block_exits
+    # The `case` clauses the check left unreachable. `UnreachableValueBranch`
+    # is not reported for one whose body never finishes.
+    attr_reader :dead_clauses
     attr_reader :source_index
     attr_reader :cursor_context
 
@@ -265,6 +268,7 @@ module Steep
       (@unwidened = {}).compare_by_identity
       (@break_envs = {}).compare_by_identity
       (@block_exits = {}).compare_by_identity
+      (@dead_clauses = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -359,6 +363,10 @@ module Steep
 
     def add_arm(node, arm)
       arms[node] = arm
+    end
+
+    def add_dead_clause(node)
+      dead_clauses[node] = true
     end
 
     def arm_of(node:)
@@ -527,6 +535,7 @@ module Steep
       parent.nominals.merge!(nominals)
       parent.branch_envs.merge!(branch_envs)
       parent.block_exits.merge!(block_exits)
+      parent.dead_clauses.merge!(dead_clauses)
 
       errors.each do |error|
         parent.add_error error
