@@ -230,6 +230,8 @@ module Steep
     # `StringMutation` widened them, by the body; and the env each `break` was
     # reached with. What `UnrolledEach` runs an `each` from and stops it with.
     attr_reader :unwidened, :break_envs
+    # The env each block body ends with, by the block (`ObjectStates::Tap`).
+    attr_reader :block_exits
     attr_reader :source_index
     attr_reader :cursor_context
 
@@ -262,6 +264,7 @@ module Steep
       (@nominals = {}).compare_by_identity
       (@unwidened = {}).compare_by_identity
       (@break_envs = {}).compare_by_identity
+      (@block_exits = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -368,6 +371,14 @@ module Steep
 
     def unwidened_of(node:)
       unwidened.fetch(node) { parent&.unwidened_of(node: node) }
+    end
+
+    def add_block_exit(node, env)
+      block_exits[node] = env
+    end
+
+    def block_exit_of(node:)
+      block_exits.fetch(node) { parent&.block_exit_of(node: node) }
     end
 
     def add_break_env(node, env)
@@ -515,6 +526,7 @@ module Steep
       parent.vouched.merge!(vouched)
       parent.nominals.merge!(nominals)
       parent.branch_envs.merge!(branch_envs)
+      parent.block_exits.merge!(block_exits)
 
       errors.each do |error|
         parent.add_error error

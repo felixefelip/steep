@@ -48,12 +48,14 @@ module Steep
       # against, and `constr` with the variable `receiver` reads typed that way
       # from here on. Dispatched against `::String` where the call may change
       # the value, so a `self` return (`sub!`) is not the old value either.
-      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block:)
+      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
         if receiver_type.is_a?(AST::Types::Tuple)
-          return ArrayMutation.widen_receiver(constr, receiver, receiver_type, method_name, private: private, block: block)
+          return ArrayMutation.widen_receiver(
+            constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
+          )
         end
 
-        widened = mutated_type(constr, receiver_type, method_name, private: private, block: block)
+        widened = mutated_type(constr, receiver_type, method_name, private: private, block: block_params || block_body)
         return [receiver_type, constr] unless widened
 
         [widened, refine(constr, receiver, widened)]
@@ -185,13 +187,7 @@ module Steep
       # intrinsic tables are. Empty for one String does not have: nothing vouches
       # for it.
       def string_method_keys(constr, method_name, private:)
-        interface = constr.calculate_interface(AST::Builtin::String.instance_type, private: private) or return []
-        method = interface.methods[method_name] or return []
-
-        method.overloads
-          .flat_map { |overload| overload.method_decls(method_name) }
-          .map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }
-          .uniq
+        MethodIdentity.keys(constr, AST::Builtin::String.instance_type, method_name, private: private)
       end
 
       # Only a local and an ivar name the value itself; any other receiver is a

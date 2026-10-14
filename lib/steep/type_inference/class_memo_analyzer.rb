@@ -36,6 +36,11 @@ module Steep
         new(names).uses(node)
       end
 
+      # `element_calls` for a block given by its parameters and body.
+      def self.element_calls_in(params, body)
+        new(Set[]).element_calls_in(params, body)
+      end
+
       def initialize(names)
         @names = names
         @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[Use]]
@@ -45,6 +50,15 @@ module Steep
       def uses(node)
         walk(node, nil, statement: false, in_statement: false, on_class: true) if node.is_a?(::Parser::AST::Node)
         @uses
+      end
+
+      def element_calls_in(params, body)
+        names = Set[] #: Set[Symbol]
+        params.is_a?(Integer) ? names.merge((1..params).map { |index| :"_#{index}" }) : each_param(params) { |name| names << name }
+        each_mention(body, nil, names).each_with_object(Set[]) do |(mention, parent), calls|
+          read = element_read(mention, parent) or return
+          calls << read if read.is_a?(Symbol)
+        end
       end
 
       private
@@ -118,12 +132,7 @@ module Steep
         return unless block && %i[block numblock].include?(block.type) && block.children[0].equal?(call)
 
         _, params, body = block.children
-        names = Set[] #: Set[Symbol]
-        each_param(params) { |name| names << name }
-        each_mention(body, nil, names).each_with_object(Set[]) do |(mention, parent), calls|
-          read = element_read(mention, parent) or return
-          calls << read if read.is_a?(Symbol)
-        end
+        element_calls_in(params, body)
       end
 
       # The method `mention` is handed to, or true inside an interpolation.

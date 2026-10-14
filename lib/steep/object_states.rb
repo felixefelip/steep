@@ -12,7 +12,9 @@ module Steep
   # method writes holds only while a single local owns the object
   # (`TypeInference::HeldLocals`), and each call made through it moves it.
   module ObjectStates
-    # `reads_only`: the method only answers an ivar (`attr_reader`, `def x = @x`).
+    # `reads_only`: the method leaves the object as it was. It only answers an
+    # ivar (`attr_reader`, `def x = @x`), or writes none and only reads what
+    # they hold (`ClassMemos.reading_uses?`).
     Effect = Struct.new(:bindings, :writes, :reads_only, keyword_init: true)
 
     # What a body left its receiver holding (`ivars`), and each class object
@@ -310,7 +312,7 @@ module Steep
       # method this calls on `self`. One with no body to read may: `itself`,
       # `tap` and `define_singleton_method` hand it on.
       def exposes_self?(constr, instance, body, visiting)
-        return true if body.exposes_self
+        return true if body.exposes_self && !core_iterations?(constr, instance, body.iterations)
 
         body.self_sends.any? do |name|
           next false if visiting.include?(name)
@@ -318,6 +320,22 @@ module Steep
           _, callee = resolved_body(constr, instance, name)
           callee.nil? || exposes_self?(constr, instance, callee, [*visiting, name])
         end
+      end
+
+      # Whether each `[ivar, method]` is, on the type `instance` declares the
+      # ivar with, an iteration of the core's, which runs its block and keeps
+      # nothing of it.
+      def core_iterations?(constr, instance, iterations)
+        return false if iterations.nil? || iterations.empty? || !instance.is_a?(AST::Types::Name::Instance)
+
+        variables = constr.checker.factory.definition_builder.build_instance(instance.name).instance_variables
+        iterations.all? do |ivar, method_name|
+          declared = variables[ivar] or next false
+          keys = MethodIdentity.keys(constr, constr.checker.factory.type(declared.type), method_name, private: false)
+          !keys.empty? && keys.all? { |key| IterationIntrinsics.entry(key, override_registry: constr.literal_method_registry) }
+        end
+      rescue RBS::BaseError
+        false
       end
 
       # What `method_name` does to an instance of `instance`: the ivars it may
@@ -334,7 +352,8 @@ module Steep
 
         rewritten = callee_writes(constr, instance, body, [method_name])
         writes = may_write(constr, owner, method_name) | rewritten
-        reads_only = !body.returns.nil? && body.self_sends.empty? && writes.empty?
+        reads_only = writes.empty? && body.self_sends.empty? &&
+                     (!body.returns.nil? || ClassMemos.reading_uses?(constr, body.ivar_uses.values.flatten(1)))
         Effect.new(bindings: body.bindings.reject { |ivar, _| rewritten.include?(ivar) }, writes: writes, reads_only: reads_only)
       end
 
@@ -419,6 +438,13 @@ module Steep
       # lands where.
       def plain_argument?(argument)
         !%i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(argument.type)
+      end
+
+      # `Klass.new` resolved to the class's own `initialize`: a `def self.new`
+      # answers whatever it likes.
+      def initialize_call?(call)
+        !call.method_decls.empty? &&
+          call.method_decls.all? { |decl| decl.method_def&.member.respond_to?(:name) && decl.method_def.member.name == :initialize }
       end
 
       private
@@ -506,13 +532,6 @@ module Steep
 
       def may_write(constr, owner, method_name)
         constr.postconditions.lookup_instance(owner, method_name)&.may_write_ivars || Set[]
-      end
-
-      # `Klass.new` resolved to the class's own `initialize`: a `def self.new`
-      # answers whatever it likes.
-      def initialize_call?(call)
-        !call.method_decls.empty? &&
-          call.method_decls.all? { |decl| decl.method_def&.member.respond_to?(:name) && decl.method_def.member.name == :initialize }
       end
 
       # `@ivar => call-site position` for the object `chain` leaves behind,

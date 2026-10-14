@@ -12,10 +12,21 @@ module Steep
         def remembered(constr, call, node)
           return [nil, constr] unless ObjectStates.on_self?(node)
 
-          ivar, instance = tracked_memo(constr, call)
+          ivar, instance, wrappers = tracked_memo(constr, call)
           current = ivar && constr.context.type_env[ivar]
-          state = ObjectStates.state_in(current) || (current.is_a?(AST::Types::Nil) && fresh_state(constr, instance)) or return [nil, constr]
+          state = ObjectStates.state_in(current) || (current.is_a?(AST::Types::Nil) && built(constr, call, node, ivar, instance, wrappers)) or return [nil, constr]
           [call.with_return_type(state), constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => state }) }]
+        end
+
+        # What a memo still `nil` builds: the object `Klass.new` does, or, where
+        # calls are made on it first, what the memo's own check, entered with
+        # the ivar `nil`, left the ivar holding.
+        def built(constr, call, node, ivar, instance, wrappers)
+          return fresh_state(constr, instance) if wrappers.empty?
+
+          key = Specializations.method_key(call.method_decls) or return
+          arguments = Specializations.call_site_arguments(constr, node, call) or return
+          ObjectStates.state_in(constr.specializations.exit_ivars(key, arguments.key)&.ivars&.[](ivar))
         end
 
         # What `Klass.new` holds when its `initialize` chain is done: each array
@@ -87,10 +98,11 @@ module Steep
         end
 
         # `[ivar, owner, method name]` for each `def self.m = @ivar ||= value`
-        # on the class's ancestors whose value is not a `Klass.new` they follow.
+        # on the class's ancestors. One whose `Klass.new` they follow holds no
+        # object state only while it is `nil`.
         def value_memos(constr, singleton)
           ObjectStates.class_side_bodies(constr, singleton).filter_map do |owner, method_name, body|
-            [body.memoizes, owner, method_name] if body&.memoizes && !body.memo
+            [body.memoizes, owner, method_name] if body&.memoizes
           end
         end
 
@@ -161,14 +173,15 @@ module Steep
           return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
 
           owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
-          ivar, classes = body&.memo
+          ivar, classes, wrappers = body&.memo
           instance = constr.typing.nominal_of(node: call.node) || call.return_type
           instance = ObjectStates.state_in(instance)&.back_type || instance
           return unless ivar && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
           return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, call.method_name)
           return unless [call.method_name, ivar].all? { |used| confined?(constr, instance, used) }
+          return unless wrappers.all? { |name| Tap.resolves?(constr, instance, name) }
 
-          [ivar, instance]
+          [ivar, instance, wrappers]
         end
 
         # `Klass.new` hands back an object nothing else holds.
@@ -193,6 +206,16 @@ module Steep
             effect = ObjectStates.method_effect(constr, instance, use.called) or next false
             use.kind == :statement || effect.reads_only
           end
+        end
+
+        # Whether each use only reads the array, and a block handed its
+        # elements only reads them.
+        def reading_uses?(constr, uses)
+          uses.all? { |use| use.kind != :escape && collection_read?(constr, use.called) && reads_elements?(constr, use.element_calls) }
+        end
+
+        def reads_elements?(constr, calls)
+          calls.none? { |name| element_read_replaced?(constr, name) }
         end
 
         # What a use of an array this vouches for may call on it.
@@ -230,9 +253,7 @@ module Steep
             end
           end
 
-          uses = [ivar, *readers].flat_map { |name| registry.uses_of(name) }
-          uses.all? { |use| use.kind != :escape && collection_read?(constr, use.called) } &&
-            uses.flat_map { |use| use.element_calls.to_a }.none? { |name| element_read_replaced?(constr, name) }
+          reading_uses?(constr, [ivar, *readers].flat_map { |name| registry.uses_of(name) })
         rescue RBS::BaseError
           false
         end

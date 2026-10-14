@@ -13,6 +13,15 @@ module Steep
       normalize(names.first)
     end
 
+    # Every method a call of `method_name` on `type` may resolve to, keyed this
+    # way. Empty for one `type` does not have.
+    def self.keys(constr, type, method_name, private:)
+      interface = constr.calculate_interface(type, private: private) or return []
+      method = interface.methods[method_name] or return []
+
+      method.overloads.flat_map { |overload| overload.method_decls(method_name) }.map { |decl| normalize(decl.method_name.to_s) }.uniq
+    end
+
     def self.normalize(name)
       string = name.to_s
       string.start_with?("::") ? string : "::#{string}"

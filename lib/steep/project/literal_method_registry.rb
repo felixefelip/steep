@@ -33,7 +33,7 @@ module Steep
 
       # Every table is keyed the same way and blocked the same way, so one
       # registry watches them all.
-      TABLES = [LiteralIntrinsics, ReflectionIntrinsics, IterationIntrinsics, StringMutation, ArrayMutation, ElementReads].freeze
+      TABLES = [LiteralIntrinsics, ReflectionIntrinsics, IterationIntrinsics, StringMutation, ArrayMutation, ElementReads, ObjectStates::Tap].freeze
       # Only `prepend` shadows every entry by LOOKUP. A module inserted by
       # `include` sits below the class in the chain, so a method the core class
       # defines itself always wins:

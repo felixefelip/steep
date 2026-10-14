@@ -60,11 +60,17 @@ module Steep
       # - `self_sends`: the methods it calls on `self`;
       # - `exposes_self`: whether `self` may reach anything but those calls,
       #   a block included (felixefelip/steep#205, stage 2);
+      # - `iterations`: where the only blocks that may are each handed to an
+      #   iteration over an ivar, those as `[ivar, method]`; nil otherwise;
+      # - `ivar_uses`: each mention of an ivar it reads, as a
+      #   `ClassMemoAnalyzer::Use`;
       # - `returns`: the ivar it returns, when its body is exactly that.
-      # - `memo`: `[ivar, class names]` when its body is exactly
+      # - `memo`: `[ivar, class names, wrappers]` when its body is exactly
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
-      #   it is written. Not a `returns`: while the ivar is unset it answers
-      #   the new object, not what the ivar held.
+      #   it is written; or that `Klass.new` with calls that take a block made
+      #   on it, `wrappers`, innermost first (`Klass.new.tap { … }`). Not a
+      #   `returns`: while the ivar is unset it answers the new object, not
+      #   what the ivar held.
       # - `ivars`: the ivars it reads;
       # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
       # - `empties`: the ivars a statement of the body sets to `[]`;
@@ -73,7 +79,8 @@ module Steep
       #   returns as a reader (`returns`).
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
-        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :returns, :memo, :memoizes, :empties, :handed, :consts,
+        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes,
+        :empties, :handed, :consts,
         keyword_init: true
       )
 
@@ -267,7 +274,7 @@ module Steep
 
       def attr_reader_body(name)
         Body.new(
-          bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, returns: :"@#{name}",
+          bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: :"@#{name}",
           empties: Set[], handed: Set[], consts: Set[]
         )
       end
@@ -275,7 +282,7 @@ module Steep
       def attr_writer_body(name)
         ivar = :"@#{name}"
         Body.new(
-          bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, returns: nil,
+          bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: nil,
           empties: Set[], handed: Set[], consts: Set[]
         )
       end
@@ -300,6 +307,8 @@ module Steep
           super_args: super_args(args_node, body),
           self_sends: self_sends,
           exposes_self: exposes_self?(body),
+          iterations: self_iterations(body),
+          ivar_uses: ClassMemoAnalyzer.uses(body, names: ivars).to_h,
           returns: single_ivar_reader(body),
           memo: nesting && memo_of(body, nesting),
           memoizes: memoized_ivar(body),
@@ -315,6 +324,23 @@ module Steep
         return true if node.type == :self && !(parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node))
 
         node.children.any? { |child| exposes_self?(child, node) }
+      end
+
+      # `[ivar, method]` for each block handed to an iteration over an ivar,
+      # where those are the only way `self` may reach anything but a call made
+      # on it.
+      def self_iterations(node, parent = nil, found = [])
+        return found unless node.is_a?(::Parser::AST::Node)
+        return if node.type == :self && !(parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node))
+
+        if %i[block numblock].include?(node.type)
+          receiver, method_name = node.children[0].children
+          return unless node.children[0].type == :send && receiver&.type == :ivar && CollectionReaders::ITERATIONS.include?(method_name)
+
+          found << [receiver.children[0], method_name]
+        end
+        node.children.each { |child| return unless self_iterations(child, node, found) }
+        found
       end
 
       # Where each argument of this method's `super` comes from, by call-site
@@ -515,14 +541,24 @@ module Steep
         return unless body&.type == :or_asgn
 
         target, value = body.children
-        return unless target.type == :ivasgn && value.type == :send
+        return unless target.type == :ivasgn
+
+        wrappers = [] #: Array[Symbol]
+        while value.type == :block
+          wrapper = value.children[0]
+          return unless wrapper.type == :send && wrapper.children[0] && wrapper.children.size == 2
+
+          wrappers.unshift(wrapper.children[1])
+          value = wrapper.children[0]
+        end
+        return unless value.type == :send
 
         klass, method_name, *arguments = value.children
         return unless method_name == :new && arguments.empty? && klass&.type == :const
 
         name = const_to_name(klass) or return
         names = klass.children[0]&.type == :cbase ? [name] : nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
-        [target.children[0], names]
+        [target.children[0], names, wrappers]
       end
 
       # A reader whose body is exactly `@ivar` (normal or endless def) →

@@ -57,6 +57,19 @@ class ObjectStateHeldTest < Minitest::Test
       def self.take: (untyped) -> void
       def self.take_renamed: (Reflection & Reflection::AfterRename) -> void
     end
+    class Hooks
+      def each: () { (Symbol) -> void } -> void
+    end
+    class Walker
+      @name: Symbol
+      @tags: Array[Symbol]
+      @hooks: Hooks
+      attr_reader name: Symbol
+      def initialize: (Symbol name) -> void
+      def rename: (Symbol to) -> Symbol
+      def over_tags: () -> void
+      def over_hooks: () -> void
+    end
     class Probe
       def run: () -> untyped
     end
@@ -115,6 +128,20 @@ class ObjectStateHeldTest < Minitest::Test
       end
       def normalize = @name = :normal
     end
+    class Hooks
+      def each(&block) = @kept = block
+    end
+    class Walker
+      attr_reader :name
+      def initialize(name)
+        @name = name
+        @tags = []
+        @hooks = Hooks.new
+      end
+      def rename(to) = @name = to
+      def over_tags = @tags.each { |tag| tag.to_s }
+      def over_hooks = @hooks.each { |tag| tag.to_s }
+    end
   RUBY
 
   SIDECAR = [
@@ -132,7 +159,11 @@ class ObjectStateHeldTest < Minitest::Test
     ["Base", "rename", "@name"],
     ["Child", "touch", "@label"],
     ["Norm", "initialize", "@name"],
-    ["Norm", "normalize", "@name"]
+    ["Norm", "normalize", "@name"],
+    ["Walker", "initialize", "@name"],
+    ["Walker", "initialize", "@tags"],
+    ["Walker", "initialize", "@hooks"],
+    ["Walker", "rename", "@name"]
   ].freeze
 
   def postconditions(unconditional = {})
@@ -292,6 +323,22 @@ class ObjectStateHeldTest < Minitest::Test
       r = Reflection.new(:posts)
       r.register
       r.name
+    RUBY
+  end
+
+  def test_a_block_a_core_iteration_runs_hands_nothing_on
+    assert_equal ":posts", last_value(<<~RUBY)
+      w = Walker.new(:posts)
+      w.over_tags
+      w.name
+    RUBY
+  end
+
+  def test_a_block_the_project_s_iteration_runs_may_be_kept
+    assert_equal "::Symbol", last_value(<<~RUBY)
+      w = Walker.new(:posts)
+      w.over_hooks
+      w.name
     RUBY
   end
 

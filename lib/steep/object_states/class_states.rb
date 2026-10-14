@@ -35,7 +35,8 @@ module Steep
           states = exit.context.type_env.class_states
           singleton = exit.self_type
           if singleton.is_a?(AST::Types::Name::Singleton)
-            ivars = held(exit, singleton)
+            unset = ClassMemos.memo_values(exit).select { |_, type| type.is_a?(AST::Types::Nil) }
+            ivars = held(exit, singleton).merge(unset)
             states = ivars.empty? ? states.except(singleton.name) : states.merge(singleton.name => ivars)
           end
           outer.update_type_env { |env| env.update(class_states: states) }
