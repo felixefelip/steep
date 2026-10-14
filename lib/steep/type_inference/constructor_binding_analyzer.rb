@@ -60,6 +60,10 @@ module Steep
       # - `self_sends`: the methods it calls on `self`;
       # - `exposes_self`: whether `self` may reach anything but those calls,
       #   a block included (felixefelip/steep#205, stage 2);
+      # - `iterations`: where the only blocks that may are each handed to an
+      #   iteration over an ivar, those as `[ivar, method]`; nil otherwise;
+      # - `ivar_uses`: each mention of an ivar it reads, as a
+      #   `ClassMemoAnalyzer::Use`;
       # - `returns`: the ivar it returns, when its body is exactly that.
       # - `memo`: `[ivar, class names]` when its body is exactly
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
@@ -73,7 +77,8 @@ module Steep
       #   returns as a reader (`returns`).
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
-        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :returns, :memo, :memoizes, :empties, :handed, :consts,
+        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes,
+        :empties, :handed, :consts,
         keyword_init: true
       )
 
@@ -300,6 +305,8 @@ module Steep
           super_args: super_args(args_node, body),
           self_sends: self_sends,
           exposes_self: exposes_self?(body),
+          iterations: self_iterations(body),
+          ivar_uses: ClassMemoAnalyzer.uses(body, names: ivars).to_h,
           returns: single_ivar_reader(body),
           memo: nesting && memo_of(body, nesting),
           memoizes: memoized_ivar(body),
@@ -315,6 +322,23 @@ module Steep
         return true if node.type == :self && !(parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node))
 
         node.children.any? { |child| exposes_self?(child, node) }
+      end
+
+      # `[ivar, method]` for each block handed to an iteration over an ivar,
+      # where those are the only way `self` may reach anything but a call made
+      # on it.
+      def self_iterations(node, parent = nil, found = [])
+        return found unless node.is_a?(::Parser::AST::Node)
+        return if node.type == :self && !(parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node))
+
+        if %i[block numblock].include?(node.type)
+          receiver, method_name = node.children[0].children
+          return unless node.children[0].type == :send && receiver&.type == :ivar && CollectionReaders::ITERATIONS.include?(method_name)
+
+          found << [receiver.children[0], method_name]
+        end
+        node.children.each { |child| return unless self_iterations(child, node, found) }
+        found
       end
 
       # Where each argument of this method's `super` comes from, by call-site

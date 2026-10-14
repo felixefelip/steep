@@ -4777,7 +4777,7 @@ module Steep
       if receiver
         unwidened_receiver_type = receiver_type
         receiver_type, constr = StringMutation.widen_receiver(
-          constr, receiver, receiver_type, method_name, private: private, block: block_params || block_body
+          constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
         )
       end
 
@@ -5952,6 +5952,7 @@ module Steep
       # with — which is the difference `built_here_only` is about, and
       # `record_built_value` is where the checker says which one it is.
       return inferred_type if (node.type == :send || node.type == :block) && built_value?(node, inferred_type)
+      return inferred_type if inferred_type.is_a?(AST::Types::Tuple) && ArrayMutation.entered_with?(self, node)
 
       # Parentheses are a node of their own, and what is inside them is the
       # value — a collection as much as a literal. The `:begin` arm further down

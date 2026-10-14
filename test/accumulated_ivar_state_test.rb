@@ -173,6 +173,42 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
   end
 
+  APPLY = <<~'RUBY'
+    def apply(word)
+      result = word.dup
+      @singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+      result
+    end
+  RUBY
+
+  def walked_inside_rules(apply = APPLY, body: "")
+    source(body: body, reads: "result = rules.apply(result)")
+      .sub("    def singular(", "#{apply.gsub(/^/, '    ')}\n    def singular(")
+  end
+
+  def apply_rbs = RBS.sub("def singular:", "def apply: (String word) -> String\n    def singular:")
+
+  def test_rules_walked_inside_the_object_that_holds_them_are_applied
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(walked_inside_rules, rbs: apply_rbs)
+  end
+
+  def test_declines_a_walk_inside_the_object_that_may_change_it
+    {
+      "it empties the list" => APPLY.sub("  result\nend", "  @singulars.clear\n  result\nend"),
+      "its block changes an element" => APPLY.sub("{ |(rule, replacement)| ", '{ |(rule, replacement)| replacement << "zz"; '),
+      "its block keeps an element" => APPLY.sub("{ |(rule, replacement)| ", "{ |(rule, replacement)| $kept = replacement; "),
+      "its block hands self on" => APPLY.sub("{ |(rule, replacement)| ", "{ |(rule, replacement)| $kept = self; ")
+    }.each do |label, apply|
+      assert_equal [[nil], [nil]], chunks(walked_inside_rules(apply), rbs: apply_rbs), label
+    end
+  end
+
+  def test_declines_a_walk_inside_the_object_with_an_iteration_the_project_replaced
+    ruby = walked_inside_rules(body: "class ::Array\n  def each = self\nend")
+
+    assert_equal [[nil], [nil]], chunks(ruby, rbs: apply_rbs)
+  end
+
   def test_a_reopen_that_only_defines_methods_runs_nothing_first
     rbs = RBS.sub("def self.has_many_like", "def extra: () -> Integer\n  def self.has_many_like")
     reopen = "class Inflector\n  def extra = 1\nend\n"

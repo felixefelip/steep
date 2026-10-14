@@ -27,11 +27,15 @@ module Steep
       # Before a call on `receiver`: the type to dispatch it against, and the
       # ivar it reads holding an array whose contents are not known, where the
       # call may change them and is no push this can follow.
-      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block:)
+      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
         return [receiver_type, constr] unless receiver_type.is_a?(AST::Types::Tuple) && entered_with?(constr, receiver)
 
         keys = array_method_keys(constr, method_name, private: private)
-        return [receiver_type, constr] if !block && (preserves?(constr, keys) || foldable?(constr, keys))
+        if block_params || block_body
+          return [receiver_type, constr] if reading_iteration?(constr, keys, block_params, block_body)
+        elsif preserves?(constr, keys) || foldable?(constr, keys)
+          return [receiver_type, constr]
+        end
 
         widened = AST::Builtin::Array.instance_type(element_type(receiver_type))
         [widened, refine(constr, receiver, widened)]
@@ -60,13 +64,26 @@ module Steep
         watched_keys.select { |key| key.start_with?(prefix) }
       end
 
-      private
-
+      # Whether `receiver` reads an ivar whose contents the body was entered
+      # with. Its tuple is then what it holds: every call that may change it
+      # widens it or folds onto it here.
       def entered_with?(constr, receiver)
         return false unless receiver.type == :ivar
 
         def_node = constr.method_context&.node or return false
         constr.specialization_arguments(def_node)&.self_ivars&.key?(receiver.children[0]) || false
+      end
+
+      private
+
+      # An iteration of the core's whose block only reads the elements it is
+      # handed, as a use of a class's memo must (`ClassMemoAnalyzer::Use`).
+      def reading_iteration?(constr, keys, block_params, block_body)
+        registry = constr.literal_method_registry
+        return false if keys.empty? || !keys.all? { |key| IterationIntrinsics.entry(key, override_registry: registry) }
+
+        calls = TypeInference::ClassMemoAnalyzer.element_calls_in(block_params, block_body) or return false
+        calls.none? { |name| ObjectStates::ClassMemos.element_read_replaced?(constr, name) }
       end
 
       def preserves?(constr, keys)

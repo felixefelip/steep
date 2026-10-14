@@ -48,12 +48,14 @@ module Steep
       # against, and `constr` with the variable `receiver` reads typed that way
       # from here on. Dispatched against `::String` where the call may change
       # the value, so a `self` return (`sub!`) is not the old value either.
-      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block:)
+      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
         if receiver_type.is_a?(AST::Types::Tuple)
-          return ArrayMutation.widen_receiver(constr, receiver, receiver_type, method_name, private: private, block: block)
+          return ArrayMutation.widen_receiver(
+            constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
+          )
         end
 
-        widened = mutated_type(constr, receiver_type, method_name, private: private, block: block)
+        widened = mutated_type(constr, receiver_type, method_name, private: private, block: block_params || block_body)
         return [receiver_type, constr] unless widened
 
         [widened, refine(constr, receiver, widened)]
