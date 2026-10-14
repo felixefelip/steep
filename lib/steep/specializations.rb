@@ -599,20 +599,22 @@ module Steep
       # `typed`: returns a run computed, as types, read ahead of `methods`.
       # `exits`: the ivars a body left its receiver holding, under a key that
       # names what it held on entry (`Arguments#stateful?`).
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {})
+      # `demand`: checks the body for an exit not recorded yet, there and then.
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil)
         @methods = methods
         @source = source
         @active = active
         @typed = typed
         @exits = exits
+        @demand = demand
       end
 
       def empty?
         @methods.empty? && @active.empty? && @typed.empty? && @exits.empty?
       end
 
-      def exit_ivars(method_key, argument_key)
-        @exits.dig(method_key, argument_key)
+      def exit_ivars(method_key, arguments)
+        @exits.dig(method_key, arguments.key) || @demand&.call(self, method_key, arguments)
       end
 
       # The recorded return type for `method_key` called with `argument_key`, as a
@@ -647,7 +649,7 @@ module Steep
       end
 
       def with_active(active)
-        Store.new(methods: @methods, source: @source, active: active, typed: @typed, exits: @exits)
+        Store.new(methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand)
       end
     end
   end

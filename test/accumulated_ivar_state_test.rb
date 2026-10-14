@@ -32,6 +32,20 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def generations(ruby, rbs: RBS)
+    in_tmpdir do
+      write("sig/app.rbs", rbs)
+      write("app/app.rb", ruby)
+      postconditions = Steep::Postconditions::Runner.new(setup_project)
+      postconditions.write(postconditions.run)
+      runner = Steep::Specializations::Runner.new(setup_project)
+      count = 0
+      runner.singleton_class.prepend(Module.new { define_method(:specialize) { |*args| (count += 1) && super(*args) } })
+      runner.run
+      return [runner.evals.values.map { |chunks| chunks.map { |chunk| chunk&.source } }, count]
+    end
+  end
+
   RBS = <<~RBS
     class Inflector
       class Rules
@@ -304,6 +318,13 @@ class AccumulatedIvarStateTest < Minitest::Test
     RUBY
 
     assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
+  end
+
+  def test_a_chain_of_rules_settles_in_as_many_generations_however_long_it_is
+    short, long = [1, 12].map { |count| generations(source(body: (1..count).map { |i| %(rules.singular(/zz#{i}\\z/, "q")) }.join("\n"))) }
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], long[0]
+    assert_equal short[1], long[1]
   end
 
   def test_a_reopen_that_only_defines_methods_runs_nothing_first
