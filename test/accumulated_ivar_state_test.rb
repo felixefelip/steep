@@ -375,6 +375,18 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [[nil], [nil]], yielded(call: call)
   end
 
+  def test_declines_a_memo_yielded_alongside_another_value
+    rbs = YIELD_RBS.sub("{ (Inflector::Rules) -> void }", "{ (Inflector::Rules, Integer) -> void }")
+
+    assert_equal [[nil], [nil]], chunks(source(body: "def self.inflections = yield(rules, 1)\n#{YIELD_BLOCK}"), rbs: rbs)
+  end
+
+  def test_a_block_given_the_project_replaces_is_not_decided
+    replaced = "module ::Kernel\n  def block_given? = false\nend\n"
+
+    assert_equal [[nil], [nil]], chunks(replaced + source(body: "def self.inflections\n  yield rules if block_given?\nend\n#{YIELD_BLOCK}"), rbs: YIELD_RBS)
+  end
+
   def test_declines_a_yielded_memo_whose_block_is_not_followed
     {
       "a block reading a local of its own scope" => "replacement = \"article\"\ninflections { |inflect| inflect.singular(/posts\\z/, replacement) }",

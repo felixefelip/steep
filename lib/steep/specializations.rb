@@ -123,7 +123,7 @@ module Steep
       # (`receiver_ivars`), read off the call where it is recorded already and
       # off the checker where it is being typed.
       def self.from_send(node, typing, receiver_ivars:, class_states:, self_type:, exact_self:)
-        block, node = node, node.children[0] if BLOCKS.include?(node.type)
+        block, node = node, node.children[0] if Accumulators::LAMBDA_BODIES.include?(node.type)
         _receiver, name, *args = node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
         # and the arguments are the rest (`TypeConstruction::SendDispatch`).
@@ -319,8 +319,6 @@ module Steep
       # (`ObjectStates::Yields`).
       attr_reader :block
 
-      BLOCKS = %i[block numblock itblock].freeze
-
       # The one every class shares is the one a declaration can hold.
       def tuples
         [self, (without_self if self_type)].compact.select(&:literal?)
@@ -421,8 +419,6 @@ module Steep
         !key.include?(STATE_MARKER) && !key.include?(SELF_MARKER) && !key.include?(BLOCK_MARKER)
       end
 
-      # Where the block is written, which names it as surely as its text and
-      # stays short however long the block is.
       def block_key
         expression = block.loc.expression
         "#{expression.source_buffer.name}:#{expression.begin_pos}"

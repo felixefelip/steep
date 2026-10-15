@@ -7,15 +7,35 @@ module Steep
     #   def self.inflections = yield(rules)
     #   inflections { |inflect| inflect.singular(/s\z/, "") }   # writes the memo's object
     #
-    # Only a block that reads nothing of the scope it is written in is checked
-    # there, since that scope is not where it runs: its one parameter, what it
-    # assigns itself, literals and absolute constants. And only one yielded a
-    # memo's object (`ClassMemos#tracked_memo`), which nothing else holds, so
-    # what the block leaves its parameter holding is what the memo holds.
+    # Only a block that reads nothing of the scope it is written in: its one
+    # parameter, what it assigns itself, literals and absolute constants. And
+    # only one yielded a memo's object (`ClassMemos#tracked_memo`), which
+    # nothing else holds, so what the block leaves its parameter holding is
+    # what the memo holds.
     module Yields
       FOREIGN = %i[self ivar ivasgn cvar cvasgn gvar gvasgn super zsuper yield block_pass def defs class module sclass].freeze
 
+      # Core methods that read the calling frame and nothing of `self`.
+      ENTRIES = { "::Kernel#block_given?" => true }.freeze
+
       class << self
+        def watched_keys
+          @watched_keys ||= Set.new(ENTRIES.keys)
+        end
+
+        def method_keys_for(class_name)
+          watched_keys.select { |key| key.start_with?("::#{class_name}#") }
+        end
+
+        # The `ENTRIES` key a call on `self` without a receiver runs, unless the
+        # project replaced it.
+        def frame_reader(constr, node)
+          return unless node.type == :send && node.children[0].nil?
+
+          keys = MethodIdentity.keys(constr, constr.self_type, node.children[1], private: true)
+          keys.first if keys.size == 1 && ENTRIES.key?(keys.first) && !constr.literal_method_registry.blocked?(keys.first)
+        end
+
         def replayable?(block)
           name = block.type == :block && Tap.parameter(block) or return false
           body = block.children[2] or return true
@@ -62,16 +82,10 @@ module Steep
           ClassMemos.remembered_as(constr.update_type_env { |env| env.update(instance_variable_types: inner.context.type_env.instance_variable_types, class_states: inner.context.type_env.class_states) }, value, ivar, left)
         end
 
-        # `Kernel#block_given?`, which reads the frame and nothing of `self`.
-        def block_given?(constr, node)
-          node.type == :send && node.children[0].nil? && node.children[1] == :block_given? &&
-            MethodIdentity.keys(constr, constr.self_type, :block_given?, private: true) == ["::Kernel#block_given?"]
-        end
-
         # `block_given?` in a body checked under a call, which says whether it
         # wrote one.
         def block_given(constr, call, node)
-          return call unless block_given?(constr, node)
+          return call unless frame_reader(constr, node) == "::Kernel#block_given?"
 
           def_node = constr.method_context&.node or return call
           arguments = constr.specialization_arguments(def_node) or return call

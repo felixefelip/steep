@@ -15,8 +15,8 @@ module Steep
     class ClassMemoAnalyzer
       # `kind`: `:statement` for the receiver of a call that is itself a
       # statement of a class body, made on `self`; `:receiver` for the receiver
-      # of any other call; `:yielded` for a memo called on `self` and yielded,
-      # with `called` the method that yields it; `:escape` for anything else — a value stored,
+      # of any other call; `:yielded` for a memo called on `self` and yielded
+      # alone, with `called` the method that yields it; `:escape` for anything else — a value stored,
       # handed on or returned, or a name given to a call that reaches a method
       # or an ivar by it. `called` is the method called on it, and
       # `element_calls` the methods an iteration's block hands it elements to.
@@ -44,7 +44,7 @@ module Steep
       def self.block_calls(node, names:, found: Hash.new { |hash, name| hash[name] = [] })
         return found unless node.is_a?(::Parser::AST::Node)
 
-        if %i[block numblock itblock].include?(node.type) && names.include?(node.children[0].children[1])
+        if Accumulators::LAMBDA_BODIES.include?(node.type) && names.include?(node.children[0].children[1])
           send = node.children[0]
           on_self = send.children[0].nil? || send.children[0].type == :self
           found[send.children[1]] << (on_self && ObjectStates::Yields.replayable?(node) ? :replayed : :other)
@@ -139,7 +139,7 @@ module Steep
         return unless @names.include?(name)
 
         @uses[name] <<
-          if parent&.type == :yield && node.type == :send && (node.children[0].nil? || node.children[0].type == :self) && (method = enclosing_method(parent))
+          if parent&.type == :yield && parent.children.size == 1 && node.type == :send && (node.children[0].nil? || node.children[0].type == :self) && (method = enclosing_method(parent))
             Use.new(:yielded, method, Set[])
           elsif parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
             element_calls = CollectionReaders::ITERATIONS.include?(parent.children[1]) ? element_calls(parent) : Set[]
