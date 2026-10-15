@@ -381,6 +381,10 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [[nil], [nil]], chunks(source(body: "def self.inflections = yield(rules, 1)\n#{YIELD_BLOCK}"), rbs: rbs)
   end
 
+  def test_declines_a_memo_yielded_from_inside_a_block
+    assert_equal [[nil], [nil]], yielded(inflections: "def self.inflections = [1].each { yield rules }")
+  end
+
   def test_a_block_given_the_project_replaces_is_not_decided
     replaced = "module ::Kernel\n  def block_given? = false\nend\n"
 

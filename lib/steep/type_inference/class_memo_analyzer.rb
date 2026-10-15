@@ -197,9 +197,14 @@ module Steep
         found
       end
 
+      # The method a `yield` runs in, or nil inside a block, whose `yield`
+      # the replay does not reach.
       def enclosing_method(node)
-        node = @parents[node] while node && !%i[def defs].include?(node.type)
-        node && (node.type == :def ? node.children[0] : node.children[1])
+        node = @parents[node] while node && !%i[def defs].include?(node.type) && !Accumulators::LAMBDA_BODIES.include?(node.type)
+        case node&.type
+        when :def then node.children[0]
+        when :defs then node.children[1]
+        end
       end
 
       def named?(node)
