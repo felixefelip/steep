@@ -419,6 +419,9 @@ module Steep
       # arguments: what a macro writes can depend on which class it runs in, and
       # one inherited by a subclass runs in the subclass.
       def record_location(locations, key, arguments, path, node, typing)
+        # Calls made with a block are not harvested yet (felixefelip/steep#272).
+        return unless node.type == :send
+
         expression = node.loc.expression or return
         site = "#{@project.relative_path(path)}:#{expression.line}:#{expression.column}"
         arguments = arguments.with_self(callee_self(typing, node))

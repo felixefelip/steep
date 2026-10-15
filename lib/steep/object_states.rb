@@ -28,6 +28,7 @@ module Steep
       def answered(constr, call, node:, receiver_type:, arguments:)
         memo, constr = ClassMemos.remembered(constr, call, node)
         call = read(constr, memo || built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
+        call = Yields.block_given(constr, call, node)
         [call, handed_on(constr, arguments)]
       end
 
@@ -132,11 +133,11 @@ module Steep
         end
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver && on_self?(receiver)
         handed = ClassStates.handed_classes(constr, arguments)
-        on_self = receiver.nil? || receiver.type == :self
+        on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
         reaches_self = on_self || hands_self?(constr, arguments, handed)
         exit = self_exit(constr, node, on_self) if reaches_self
         constr = self_moved(constr, exit) if reaches_self
-        constr = ClassMemos.after_class_call(constr, exit)
+        constr = ClassMemos.after_class_call(constr, exit, (ClassStates.reach(constr, recorded_call(constr, node)).methods if reaches_self))
         constr = ClassStates.moved(constr, node, receiver_type, handed)
         constr = ClassStates.after_call(constr)
         handed_on(constr, arguments)
@@ -193,7 +194,7 @@ module Steep
       # What the body a call reached left its receiver holding, where it was
       # checked under the contents this call's receiver holds.
       def exit_of(constr, node)
-        return unless node.type == :send || node.type == :csend
+        return unless %i[send csend].include?(node.type) || Accumulators::LAMBDA_BODIES.include?(node.type)
 
         call = recorded_call(constr, node)
         key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls) or return

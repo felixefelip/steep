@@ -15,7 +15,8 @@ module Steep
     class ClassMemoAnalyzer
       # `kind`: `:statement` for the receiver of a call that is itself a
       # statement of a class body, made on `self`; `:receiver` for the receiver
-      # of any other call; `:escape` for anything else — a value stored,
+      # of any other call; `:yielded` for a memo called on `self` and yielded
+      # alone, with `called` the method that yields it; `:escape` for anything else — a value stored,
       # handed on or returned, or a name given to a call that reaches a method
       # or an ivar by it. `called` is the method called on it, and
       # `element_calls` the methods an iteration's block hands it elements to.
@@ -34,6 +35,31 @@ module Steep
 
       def self.uses(node, names:)
         new(names).uses(node)
+      end
+
+      # How each call of one of `names` in `node` is made: `:replayed` on
+      # `self` with a block a `yield` can check in place
+      # (`ObjectStates::Yields`), `:blockless` with no block at all, `:other`
+      # for any other call or mention.
+      def self.block_calls(node, names:, found: Hash.new { |hash, name| hash[name] = [] })
+        return found unless node.is_a?(::Parser::AST::Node)
+
+        if Accumulators::LAMBDA_BODIES.include?(node.type) && names.include?(node.children[0].children[1])
+          send = node.children[0]
+          on_self = send.children[0].nil? || send.children[0].type == :self
+          found[send.children[1]] << (on_self && ObjectStates::Yields.replayable?(node) ? :replayed : :other)
+          send.children.drop(2).each { |child| block_calls(child, names: names, found: found) }
+          node.children.drop(1).each { |child| block_calls(child, names: names, found: found) }
+          return found
+        end
+
+        if %i[send csend].include?(node.type) && names.include?(node.children[1])
+          found[node.children[1]] << (node.children.drop(2).any? { |argument| argument.type == :block_pass } ? :other : :blockless)
+        elsif %i[sym str].include?(node.type) && names.include?(node.children[0].to_s.to_sym)
+          found[node.children[0].to_s.to_sym] << :other
+        end
+        node.children.each { |child| block_calls(child, names: names, found: found) }
+        found
       end
 
       # `element_calls` for a block given by its parameters and body.
@@ -113,7 +139,9 @@ module Steep
         return unless @names.include?(name)
 
         @uses[name] <<
-          if parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
+          if parent&.type == :yield && parent.children.size == 1 && node.type == :send && (node.children[0].nil? || node.children[0].type == :self) && (method = enclosing_method(parent))
+            Use.new(:yielded, method, Set[])
+          elsif parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
             element_calls = CollectionReaders::ITERATIONS.include?(parent.children[1]) ? element_calls(parent) : Set[]
             return @uses[name] << ESCAPE unless element_calls
 
@@ -167,6 +195,16 @@ module Steep
         found << [node, parent] if %i[lvar lvasgn].include?(node.type) && names.include?(node.children[0])
         node.children.each { |child| each_mention(child, node, names, found) }
         found
+      end
+
+      # The method a `yield` runs in, or nil inside a block, whose `yield`
+      # the replay does not reach.
+      def enclosing_method(node)
+        node = @parents[node] while node && !%i[def defs].include?(node.type) && !Accumulators::LAMBDA_BODIES.include?(node.type)
+        case node&.type
+        when :def then node.children[0]
+        when :defs then node.children[1]
+        end
       end
 
       def named?(node)

@@ -25,6 +25,7 @@ module Steep
         @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
         @declared = Set[] #: Set[String]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
+        @block_calls = {} #: Hash[Symbol, Array[Symbol]]
       end
 
       # @return self
@@ -130,6 +131,14 @@ module Steep
         @uses.fetch(name.to_sym, [])
       end
 
+      # Whether every call of `method_name`, a method that yields a memo, hands
+      # it a block a `yield` checks in place, or none
+      # (`ClassMemoAnalyzer.block_calls`).
+      def replayed_everywhere?(method_name)
+        index_uses unless @uses
+        @block_calls.fetch(method_name.to_sym, []).all? { |kind| kind != :other }
+      end
+
       # Whether the project may define `method_name` in `class_name` at all, on
       # its instances or, with `singleton`, on the class object.
       def defines?(class_name, method_name, singleton: false)
@@ -189,6 +198,11 @@ module Steep
         @uses = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (@uses[name] ||= []).concat(uses) }
+        end
+        yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
+        @block_calls = {}
+        @nodes.each do |node|
+          TypeInference::ClassMemoAnalyzer.block_calls(node, names: yielders).each { |name, kinds| (@block_calls[name] ||= []).concat(kinds) }
         end
       end
 

@@ -128,22 +128,23 @@ module Steep
         end
 
         # What a call's body may reach on its receiver, following the calls it
-        # makes on `self`: the ivars it names, and whether it observes which
-        # class it runs on — by handing `self` on, or by calling on it a method
-        # the project does not write (`const_set`, `name`).
-        Reach = Struct.new(:ivars, :observes_self)
+        # makes on `self`: the ivars it names, whether it observes which class
+        # it runs on — by handing `self` on, or by calling on it a method the
+        # project does not write (`const_set`, `name`) — and the methods it runs.
+        Reach = Struct.new(:ivars, :observes_self, :methods)
 
         # Each method is the one the receiver's ancestry runs (`resolved_body`).
         def reach(constr, call)
-          reach = Reach.new(Set[], false)
+          reach = Reach.new(Set[], false, Set[])
           return reach unless call.is_a?(TypeInference::MethodCall::Typed)
 
           receiver = call.receiver_type
           receiver = constr.self_type if receiver.is_a?(AST::Types::Self)
           return reach unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
 
+          reach.methods << call.method_name
           _, body = ObjectStates.resolved_body(constr, receiver, call.method_name)
-          visit_reach(constr, receiver, body, reach, Set[call.method_name]) if body
+          visit_reach(constr, receiver, body, reach, reach.methods) if body
           reach
         end
 

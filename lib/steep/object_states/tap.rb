@@ -53,6 +53,20 @@ module Steep
           call.with_return_type(state)
         end
 
+        # The block's one parameter, `|object|`.
+        def parameter(node)
+          params = node.children[1].children
+          params.first.children[0] if params.size == 1 && %i[arg procarg0].include?(params.first.type) && params.first.children[0].is_a?(Symbol)
+        end
+
+        # A jump the block itself takes: a `break` answers its own value, and the
+        # others leave or rerun it before the end.
+        def jumps?(node)
+          return false unless node.is_a?(Parser::AST::Node) && !UnrolledEach::NESTED.include?(node.type)
+
+          Accumulators::JUMPS.include?(node.type) || node.children.any? { |child| jumps?(child) }
+        end
+
         private
 
         def fresh_receiver(constr, node, receiver, receiver_type, method_name)
@@ -71,19 +85,6 @@ module Steep
           instance if held.held?(name)
         end
 
-        # The block's one parameter, `|object|`.
-        def parameter(node)
-          params = node.children[1].children
-          params.first.children[0] if params.size == 1 && %i[arg procarg0].include?(params.first.type) && params.first.children[0].is_a?(Symbol)
-        end
-
-        # A jump the block itself takes: a `break` answers its own value, and the
-        # others leave or rerun it before the end.
-        def jumps?(node)
-          return false unless node.is_a?(Parser::AST::Node) && !UnrolledEach::NESTED.include?(node.type)
-
-          Accumulators::JUMPS.include?(node.type) || node.children.any? { |child| jumps?(child) }
-        end
       end
     end
   end

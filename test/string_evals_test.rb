@@ -334,6 +334,34 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_a_call_passing_a_block_is_not_read_as_one_without
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.macro: () ?{ () -> void } -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.macro
+            class_eval(block_given? ? "def with_block; end" : "def without_block; end")
+          end
+        end
+
+        class Article < Base
+          handler = -> { }
+          macro(&handler)
+          macro
+        end
+      RUBY
+
+      assert_equal({ "app/base.rb:10:2" => ["def without_block; end"] }, evals_of(setup_project))
+    end
+  end
+
   def test_module_eval_is_read_the_same_way
     in_tmpdir do
       write("sig/base.rbs", MACRO_RBS)
