@@ -154,6 +154,16 @@ module Steep
           type.name.to_s
         end
 
+        # A string eval whose text only defines methods: running it changes
+        # nothing any object holds.
+        def defines_only?(typing, node)
+          return false unless written_kind(node, Walk.new(writers: Set[], typing: typing)) == :eval
+
+          source = source_of(typing, node) or return false
+          parsed = Prism.parse(source)
+          parsed.errors.empty? && parsed.value.statements.body.all?(Prism::DefNode)
+        end
+
         private
 
         def resolved_send_key(node, typing)

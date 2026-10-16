@@ -143,9 +143,9 @@ module Steep
         handed = ClassStates.handed_classes(constr, arguments)
         on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
         reaches_self = on_self || hands_self?(constr, arguments, handed)
-        exit = self_exit(constr, node, on_self) || (constr.context.type_env.instance_variable_types if DefinitionEvals.defines_only?(constr, node)) if reaches_self
+        exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
         constr = self_moved(constr, exit) if reaches_self
-        unless !reaches_self && ClassMemos.builds_only?(constr, recorded_call(constr, node))
+        unless !reaches_self && ClassMemos.builds_only?(constr, node, recorded_call(constr, node))
           constr = ClassMemos.after_class_call(constr, exit, (ClassStates.reach(constr, recorded_call(constr, node)).methods if reaches_self))
         end
         constr = ClassStates.moved(constr, node, receiver_type, handed)
@@ -158,6 +158,15 @@ module Steep
       def self_exit(constr, node, on_self)
         exit = exit_of(constr, node) or return
         on_self ? exit.ivars : exit.classes[constr.self_type.name]
+      end
+
+      # `self_exit`, or every ivar as it stands where the call evaluates a
+      # string that only defines methods.
+      def self_exit_or_unchanged(constr, node, on_self)
+        exit = self_exit(constr, node, on_self)
+        return exit if exit
+
+        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node)
       end
 
       def hands_self?(constr, arguments, handed)

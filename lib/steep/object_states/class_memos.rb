@@ -176,9 +176,10 @@ module Steep
           end
         end
 
-        # `Klass.new` whose `initialize` chain names no constant and calls
-        # nothing on the object: it reaches no class's memo.
-        def builds_only?(constr, call)
+        # `Klass.new` handed no block, whose `initialize` chain names no
+        # constant and calls nothing on the object: it reaches no class's memo.
+        def builds_only?(constr, node, call)
+          return false if Accumulators::LAMBDA_BODIES.include?(node.type) || node.children.drop(2).any? { |argument| argument.type == :block_pass }
           return false unless call.is_a?(TypeInference::MethodCall::Typed) && ObjectStates.initialize_call?(call)
 
           instance = call.return_type

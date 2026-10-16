@@ -129,4 +129,18 @@ class HashMemoStateTest < Minitest::Test
 
     assert_equal [nil], chunks(ruby, rbs: rbs)["app/app.rb:28:2"]
   end
+
+  def test_a_read_under_a_key_the_hash_does_not_hold_answers_no_other_value
+    ruby = RUBY.sub("  register :seat, :bench\n  define_named :seat\n", "  register :seat, :bench\n  define_named :seat\n  define_named :wheel\n")
+
+    assert_equal [nil], chunks(ruby)["app/app.rb:29:2"]
+  end
+
+  def test_an_object_built_with_a_block_may_reach_the_class
+    rbs = RBS.sub("class Car < Base", "class Maker\n  def initialize: () { () -> void } -> void\nend\nclass Car < Base")
+    ruby = RUBY.sub("class Car < Base", "class Maker\n  def initialize = yield\nend\n\nclass Car < Base")
+               .sub("  register :seat, :soft\n", "  register :seat, :soft\n  Maker.new { register :wheel, :flat }\n")
+
+    assert_equal [nil], chunks(ruby, rbs: rbs)["app/app.rb:27:2"]
+  end
 end
