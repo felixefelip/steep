@@ -113,10 +113,11 @@ module Steep
           asgn, rhs = node.children
           env = constr.context.type_env
           current = env[asgn.children[0]]
-          arm = or_arm(current, env.declared_instance_variable_types[asgn.children[0]]) if node.type == :or_asgn
+          declared = env.declared_instance_variable_types[asgn.children[0]]
+          arm = or_arm(current, declared) if node.type == :or_asgn
           constr.typing.add_arm(node, arm)
 
-          type, after = constr.synthesize(rhs, hint: hint)
+          type, after = constr.synthesize(rhs, hint: declared || hint)
           return [current, constr] if arm == :else
 
           after.ivasgn(asgn, type)

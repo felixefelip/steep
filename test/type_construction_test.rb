@@ -2149,6 +2149,22 @@ src = (_ = nil)
     end
   end
 
+  def test_ivar_or_asgn_types_the_value_by_the_declared_type
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Hash[:a, Integer]?
+@x ||= {}
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Hash[:a, ::Integer]"), typing.type_of(node: source.node.children[1])
+      end
+    end
+  end
+
   def test_ivar_non_union_declared_keeps_declared_type_on_assign
     # Control: declared type is not a union, so the env keeps the declared
     # type after assignment. Existing intersection-attr-write narrowing
