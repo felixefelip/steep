@@ -192,6 +192,7 @@ module Steep
         @singleton_methods.each_value do |methods|
           methods.each do |name, bodies|
             bodies.each { |body| names << name << body.memo[0] if body&.memo }
+            bodies.each { |body| names << name << body.memoized_hash if body&.memoized_hash }
           end
         end
         @methods.each_value { |methods| names.merge(accumulated_names(methods)) }

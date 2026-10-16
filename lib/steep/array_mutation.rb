@@ -15,10 +15,7 @@ module Steep
       # change it through. And only what `Array` defines itself, as the
       # registry keys it.
       %w[<=> == all? any? count empty? eql? hash include? inspect intersect? join length none? size to_s]
-        .map { |name| "::Array##{name}" } +
-      %w[!~ class clone dup frozen? instance_of? is_a? itself kind_of? nil? object_id respond_to?]
-        .map { |name| "::Kernel##{name}" } +
-      %w[! != equal? __id__].map { |name| "::BasicObject##{name}" }
+        .map { |name| "::Array##{name}" } + CollectionMutation::OBJECT_READS
     ).to_h { |key| [key, true] }.freeze
 
     IN_PLACE = Set["::Array#prepend", "::Array#unshift", "::Array#push", "::Array#<<"].freeze
@@ -87,7 +84,7 @@ module Steep
       end
 
       def preserves?(constr, keys)
-        !keys.empty? && keys.all? { |key| ENTRIES.key?(key) && !constr.literal_method_registry.blocked?(key) }
+        CollectionMutation.only?(constr, keys, ENTRIES)
       end
 
       def foldable?(constr, keys)
@@ -95,11 +92,7 @@ module Steep
       end
 
       def fold(constr, key, receiver_type, arguments)
-        argument_types = arguments.map do |argument|
-          return nil unless constr.typing.has_type?(argument)
-
-          constr.literal_operand_type(argument, constr.typing.type_of(node: argument))
-        end
+        argument_types = CollectionMutation.operand_types(constr, arguments) or return nil
         LiteralIntrinsics.fold_key(
           key: key, receiver_type: receiver_type, argument_types: argument_types,
           override_registry: constr.literal_method_registry

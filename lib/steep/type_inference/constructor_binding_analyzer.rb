@@ -73,13 +73,15 @@ module Steep
       #   what the ivar held.
       # - `ivars`: the ivars it reads;
       # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
+      # - `memoized_hash`: the ivar, when that value is `{}`;
+      # - `calls`: whether it makes a call or a `yield`, a `super` aside;
       # - `empties`: the ivars a statement of the body sets to `[]`;
       # - `handed`: the ivars whose object it lets out, naming one other than as
       #   the receiver of a call, the target of an assignment or the value it
       #   returns as a reader (`returns`).
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
-        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes,
+        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
         :empties, :handed, :consts,
         keyword_init: true
       )
@@ -275,7 +277,7 @@ module Steep
       def attr_reader_body(name)
         Body.new(
           bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: :"@#{name}",
-          empties: Set[], handed: Set[], consts: Set[]
+          empties: Set[], handed: Set[], consts: Set[], calls: false
         )
       end
 
@@ -283,7 +285,7 @@ module Steep
         ivar = :"@#{name}"
         Body.new(
           bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: nil,
-          empties: Set[], handed: Set[], consts: Set[]
+          empties: Set[], handed: Set[], consts: Set[], calls: false
         )
       end
 
@@ -292,7 +294,9 @@ module Steep
         ivars = Set[] #: Set[Symbol]
         self_sends = Set[] #: Set[Symbol]
         consts = Set[] #: Set[String]
+        calls = false
         each_node(body) do |node|
+          calls ||= CALLS.include?(node.type)
           writes << node.children[0] if node.type == :ivasgn
           ivars << node.children[0] if node.type == :ivar
           consts.merge(referenced_names(node, nesting || [])) if node.type == :const
@@ -312,6 +316,8 @@ module Steep
           returns: single_ivar_reader(body),
           memo: nesting && memo_of(body, nesting),
           memoizes: memoized_ivar(body),
+          memoized_hash: memoized_hash(body),
+          calls: calls,
           consts: consts
         )
       end
@@ -535,6 +541,13 @@ module Steep
 
       def memoized_ivar(body)
         body.children[0].children[0] if body&.type == :or_asgn && body.children[0].type == :ivasgn
+      end
+
+      CALLS = %i[send csend yield].freeze
+
+      def memoized_hash(body)
+        value = body.children[1] if memoized_ivar(body)
+        memoized_ivar(body) if value&.type == :hash && value.children.empty?
       end
 
       def memo_of(body, nesting)

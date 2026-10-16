@@ -11,11 +11,39 @@ module Steep
         # where the ivar is still `nil`, the one it builds.
         def remembered(constr, call, node)
           return [nil, constr] unless ObjectStates.on_self?(node)
+          hash_ivar = tracked_hash(constr, call)
+          return remembered_hash(constr, call, hash_ivar) if hash_ivar
 
           ivar, instance, wrappers = tracked_memo(constr, call)
           current = ivar && constr.context.type_env[ivar]
           state = ObjectStates.state_in(current) || (current.is_a?(AST::Types::Nil) && built(constr, call, node, ivar, instance, wrappers)) or return [nil, constr]
           [call.with_return_type(state), constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => state }) }]
+        end
+
+        # A memo of a hash answers what the env knows it holds, or, where the
+        # ivar is still `nil`, the empty hash it stores there.
+        def remembered_hash(constr, call, ivar)
+          current = constr.context.type_env[ivar]
+          state = current.is_a?(AST::Types::Nil) ? AST::Types::Record.new(elements: {}, required_keys: Set[]) : current
+          return [nil, constr] unless state.is_a?(AST::Types::Record)
+
+          [call.with_return_type(state), constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => state }) }]
+        end
+
+        # The ivar of a call on `self` to a memo of an empty hash
+        # (`Body#memoized_hash`) only the memo writes, and whose hash, and the
+        # memo answering it, the project only stores into or reads from
+        # (`HashMutation.confined_use?`).
+        def tracked_hash(constr, call)
+          singleton = constr.self_type
+          return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
+
+          owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
+          ivar = body&.memoized_hash or return
+          return unless written_only_by?(constr, singleton, ivar, owner, call.method_name)
+          return unless [call.method_name, ivar].all? { |name| constr.constructor_bindings.uses_of(name).all? { |use| HashMutation.confined_use?(constr, use) } }
+
+          ivar
         end
 
         # What a memo still `nil` builds: the object `Klass.new` does, or, where
@@ -69,7 +97,7 @@ module Steep
           env = constr.context.type_env
           value_memos(constr, singleton).filter_map do |ivar, owner, method_name|
             type = env[ivar]
-            next unless type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Name::Singleton)
+            next unless type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Name::Singleton) || type.is_a?(AST::Types::Record)
             next if type == env.declared_instance_variable_types[ivar]
 
             [ivar, type] if written_only_through?(constr, singleton, ivar, owner, method_name)
@@ -138,7 +166,7 @@ module Steep
         def after_class_call(constr, exit, reached)
           return constr if constr.method_context
 
-          moved = memo_values(constr).select { |_, type| type.is_a?(AST::Types::Nil) }
+          moved = memo_values(constr).select { |_, type| type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Record) }
           moved = moved.merge(yielded_memos(constr, reached)) if reached
           return constr if moved.empty?
 
@@ -146,6 +174,20 @@ module Steep
           constr.update_type_env do |env|
             env.refine_types(instance_variable_types: moved.to_h { |ivar, _| [ivar, exit.fetch(ivar) { ObjectStates.declared_ivar(constr, ivar) }] })
           end
+        end
+
+        # `Klass.new` whose `initialize` chain only binds or stores what it is
+        # handed, making no call and no `yield`: it reaches no class's memo,
+        # whatever block or callable it was given.
+        def builds_only?(constr, call)
+          return false unless call.is_a?(TypeInference::MethodCall::Typed) && ObjectStates.initialize_call?(call)
+
+          instance = call.return_type
+          instance = ObjectStates.state_in(instance)&.back_type || instance
+          return false unless instance.is_a?(AST::Types::Name::Instance)
+
+          chain = ObjectStates.initialize_chain(constr, instance) or return false
+          chain.all? { |_, body| body.nil? || !body.calls }
         end
 
         def yielded_memos(constr, reached)

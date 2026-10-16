@@ -59,7 +59,15 @@ module Steep
       # A value a state may hold: one nothing can change, or the contents of an
       # array, kept only where nothing else reaches it (`collection_confined?`).
       def state_value?(type)
-        fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton)
+        fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton) ||
+          (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| record_value?(value) })
+      end
+
+      # What a hash a state follows may hold under a key: a value a state may
+      # hold, or an object of a class, which stays of that class whatever is
+      # done to it.
+      def record_value?(type)
+        state_value?(type) || type.is_a?(AST::Types::Name::Instance)
       end
 
       # A method runs whenever it is called, not where it is written: nothing
@@ -135,9 +143,11 @@ module Steep
         handed = ClassStates.handed_classes(constr, arguments)
         on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
         reaches_self = on_self || hands_self?(constr, arguments, handed)
-        exit = self_exit(constr, node, on_self) if reaches_self
+        exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
         constr = self_moved(constr, exit) if reaches_self
-        constr = ClassMemos.after_class_call(constr, exit, (ClassStates.reach(constr, recorded_call(constr, node)).methods if reaches_self))
+        unless !reaches_self && ClassMemos.builds_only?(constr, recorded_call(constr, node))
+          constr = ClassMemos.after_class_call(constr, exit, (ClassStates.reach(constr, recorded_call(constr, node)).methods if reaches_self))
+        end
         constr = ClassStates.moved(constr, node, receiver_type, handed)
         constr = ClassStates.after_call(constr)
         handed_on(constr, arguments)
@@ -148,6 +158,15 @@ module Steep
       def self_exit(constr, node, on_self)
         exit = exit_of(constr, node) or return
         on_self ? exit.ivars : exit.classes[constr.self_type.name]
+      end
+
+      # `self_exit`, or every ivar as it stands where the call evaluates a
+      # string that only defines methods.
+      def self_exit_or_unchanged(constr, node, on_self)
+        exit = self_exit(constr, node, on_self)
+        return exit if exit
+
+        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node)
       end
 
       def hands_self?(constr, arguments, handed)
