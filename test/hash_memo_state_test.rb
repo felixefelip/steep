@@ -143,4 +143,19 @@ class HashMemoStateTest < Minitest::Test
 
     assert_equal [nil], chunks(ruby, rbs: rbs)["app/app.rb:27:2"]
   end
+
+  def test_an_object_built_with_a_callable_it_runs_may_reach_the_class
+    rbs = RBS.sub("class Car < Base", "class Maker\n  def initialize: (^() -> void) -> void\nend\nclass Car < Base")
+    ruby = RUBY.sub("class Car < Base", "class Maker\n  def initialize(f) = f.call\nend\n\nclass Car < Base")
+
+    {
+      "an inline lambda" => "  Maker.new(-> { register :wheel, :flat })\n",
+      "a lambda held in a local" => "  later = -> { register :wheel, :flat }\n  Maker.new(later)\n"
+    }.each do |shape, call|
+      source = ruby.sub("  register :seat, :soft\n", "  register :seat, :soft\n#{call}")
+      line = source.lines.index { |text| text.include?("define_named :wheel") } + 1
+
+      assert_equal [nil], chunks(source, rbs: rbs)["app/app.rb:#{line}:2"], shape
+    end
+  end
 end

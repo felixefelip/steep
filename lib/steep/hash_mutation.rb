@@ -15,7 +15,7 @@ module Steep
   module HashMutation
     READS = (
       %w[[] key? has_key? include? member? size length empty? any? none? count keys values == eql? hash inspect to_s]
-        .map { |name| "::Hash##{name}" } + ArrayMutation::OBJECT_READS
+        .map { |name| "::Hash##{name}" } + CollectionMutation::OBJECT_READS
     ).to_set.freeze
 
     KEY_READ = Set["::Hash#[]"].freeze
@@ -28,10 +28,10 @@ module Steep
 
         keys = hash_method_keys(constr, method_name, private: private)
         block = block_params || block_body
-        return [receiver_type, constr] if !block && ArrayMutation.only?(constr, keys, READS)
+        return [receiver_type, constr] if !block && CollectionMutation.only?(constr, keys, READS)
 
         declared = declared_hash(constr, ivar)
-        return [declared, constr] if !block && ArrayMutation.only?(constr, keys, STORES)
+        return [declared, constr] if !block && CollectionMutation.only?(constr, keys, STORES)
 
         [declared, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, declared)]
       end
@@ -40,11 +40,11 @@ module Steep
         ivar = held_ivar(constr, receiver, receiver_type) or return [type, constr]
 
         keys = hash_method_keys(constr, method_name, private: private)
-        if ArrayMutation.only?(constr, keys, KEY_READ)
+        if CollectionMutation.only?(constr, keys, KEY_READ)
           read = read(constr, receiver_type, ivar, arguments) or return [type, constr]
           return [read, constr.add_typing(node, type: read).constr]
         end
-        return [type, constr] unless ArrayMutation.only?(constr, keys, STORES)
+        return [type, constr] unless CollectionMutation.only?(constr, keys, STORES)
 
         stored = stored(constr, receiver_type, arguments) || declared_hash(constr, ivar)
         [type, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, stored)]
@@ -68,7 +68,7 @@ module Steep
       # What `[]` answers where the record cannot: `nil` under a literal key it
       # does not hold, and the declared value under a key that is no literal.
       def read(constr, record, ivar, arguments)
-        key, = ArrayMutation.operand_types(constr, arguments)
+        key, = CollectionMutation.operand_types(constr, arguments)
         return if literal_key?(key) && record.elements.key?(key.value)
         return AST::Builtin.nil_type if literal_key?(key)
 
@@ -77,7 +77,7 @@ module Steep
       end
 
       def stored(constr, record, arguments)
-        key, value = ArrayMutation.operand_types(constr, arguments)
+        key, value = CollectionMutation.operand_types(constr, arguments)
         return unless arguments.size == 2 && literal_key?(key) && value && ObjectStates.record_value?(value)
 
         AST::Types::Record.new(elements: record.elements.merge(key.value => value), required_keys: record.required_keys | [key.value])

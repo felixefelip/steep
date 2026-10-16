@@ -145,7 +145,7 @@ module Steep
         reaches_self = on_self || hands_self?(constr, arguments, handed)
         exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
         constr = self_moved(constr, exit) if reaches_self
-        unless !reaches_self && ClassMemos.builds_only?(constr, node, recorded_call(constr, node))
+        unless !reaches_self && ClassMemos.builds_only?(constr, recorded_call(constr, node))
           constr = ClassMemos.after_class_call(constr, exit, (ClassStates.reach(constr, recorded_call(constr, node)).methods if reaches_self))
         end
         constr = ClassStates.moved(constr, node, receiver_type, handed)

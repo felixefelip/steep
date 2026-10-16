@@ -176,10 +176,10 @@ module Steep
           end
         end
 
-        # `Klass.new` handed no block, whose `initialize` chain names no
-        # constant and calls nothing on the object: it reaches no class's memo.
-        def builds_only?(constr, node, call)
-          return false if Accumulators::LAMBDA_BODIES.include?(node.type) || node.children.drop(2).any? { |argument| argument.type == :block_pass }
+        # `Klass.new` whose `initialize` chain only binds or stores what it is
+        # handed, making no call and no `yield`: it reaches no class's memo,
+        # whatever block or callable it was given.
+        def builds_only?(constr, call)
           return false unless call.is_a?(TypeInference::MethodCall::Typed) && ObjectStates.initialize_call?(call)
 
           instance = call.return_type
@@ -187,7 +187,7 @@ module Steep
           return false unless instance.is_a?(AST::Types::Name::Instance)
 
           chain = ObjectStates.initialize_chain(constr, instance) or return false
-          chain.all? { |_, body| body.nil? || (body.consts.empty? && body.self_sends.empty?) }
+          chain.all? { |_, body| body.nil? || !body.calls }
         end
 
         def yielded_memos(constr, reached)
