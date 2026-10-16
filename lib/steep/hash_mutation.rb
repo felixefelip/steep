@@ -50,14 +50,20 @@ module Steep
         [type, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, stored)]
       end
 
-      def confined_use?(constr, use)
-        return false if use.kind == :escape || !use.element_calls.empty?
-
-        names = [*READS, *STORES].select { |key| key.end_with?("##{use.called}") }
-        !names.empty? && names.none? { |key| constr.literal_method_registry.blocked?(key) }
+      # Whether every use the project makes of `names`, a memo of a hash and
+      # its ivar, only reads the hash or stores into it.
+      def confined?(constructor_bindings, literal_methods, names)
+        names.all? { |name| constructor_bindings.uses_of(name).all? { |use| confined_use?(literal_methods, use) } }
       end
 
       private
+
+      def confined_use?(literal_methods, use)
+        return false if use.kind == :escape || !use.element_calls.empty?
+
+        names = [*READS, *STORES].select { |key| key.end_with?("##{use.called}") }
+        !names.empty? && names.none? { |key| literal_methods.blocked?(key) }
+      end
 
       def held_ivar(constr, receiver, receiver_type)
         return unless receiver_type.is_a?(AST::Types::Record) && ObjectStates.on_self?(receiver)
