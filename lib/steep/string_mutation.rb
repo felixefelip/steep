@@ -54,6 +54,11 @@ module Steep
             constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
           )
         end
+        if receiver_type.is_a?(AST::Types::Record)
+          return HashMutation.widen_receiver(
+            constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
+          )
+        end
 
         widened = mutated_type(constr, receiver_type, method_name, private: private, block: block_params || block_body)
         return [receiver_type, constr] unless widened
@@ -135,6 +140,9 @@ module Steep
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         if receiver_type.is_a?(AST::Types::Tuple)
           return ArrayMutation.fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type: type, private: private)
+        end
+        if receiver_type.is_a?(AST::Types::Record)
+          return HashMutation.fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type: type, private: private)
         end
 
         return [type, constr] unless receiver_type.is_a?(AST::Types::Literal) && receiver_type.value.is_a?(::String)

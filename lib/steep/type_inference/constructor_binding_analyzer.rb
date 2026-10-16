@@ -73,13 +73,14 @@ module Steep
       #   what the ivar held.
       # - `ivars`: the ivars it reads;
       # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
+      # - `memoized_hash`: the ivar, when that value is `{}`;
       # - `empties`: the ivars a statement of the body sets to `[]`;
       # - `handed`: the ivars whose object it lets out, naming one other than as
       #   the receiver of a call, the target of an assignment or the value it
       #   returns as a reader (`returns`).
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
-        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes,
+        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash,
         :empties, :handed, :consts,
         keyword_init: true
       )
@@ -312,6 +313,7 @@ module Steep
           returns: single_ivar_reader(body),
           memo: nesting && memo_of(body, nesting),
           memoizes: memoized_ivar(body),
+          memoized_hash: memoized_hash(body),
           consts: consts
         )
       end
@@ -535,6 +537,11 @@ module Steep
 
       def memoized_ivar(body)
         body.children[0].children[0] if body&.type == :or_asgn && body.children[0].type == :ivasgn
+      end
+
+      def memoized_hash(body)
+        value = body.children[1] if memoized_ivar(body)
+        memoized_ivar(body) if value&.type == :hash && value.children.empty?
       end
 
       def memo_of(body, nesting)
