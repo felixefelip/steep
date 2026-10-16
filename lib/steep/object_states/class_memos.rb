@@ -33,7 +33,7 @@ module Steep
         # The ivar of a call on `self` to a memo of an empty hash
         # (`Body#memoized_hash`) only the memo writes, and whose hash, and the
         # memo answering it, the project only stores into or reads from
-        # (`HashMutation.confined_use?`).
+        # (`HashMutation.confined?`).
         def tracked_hash(constr, call)
           singleton = constr.self_type
           return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
@@ -41,7 +41,7 @@ module Steep
           owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
           ivar = body&.memoized_hash or return
           return unless written_only_by?(constr, singleton, ivar, owner, call.method_name)
-          return unless [call.method_name, ivar].all? { |name| constr.constructor_bindings.uses_of(name).all? { |use| HashMutation.confined_use?(constr, use) } }
+          return unless HashMutation.confined?(constr.constructor_bindings, constr.literal_method_registry, [call.method_name, ivar])
 
           ivar
         end

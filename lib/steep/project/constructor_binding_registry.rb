@@ -15,6 +15,12 @@ module Steep
         new.tap { |r| r.build(project) }
       end
 
+      def self.from_paths(paths)
+        new.tap do |registry|
+          paths.each { |path| registry.ingest(Pathname(path)) }
+        end
+      end
+
       def initialize
         @entries = {} #: Hash[String, Hash[Symbol, Integer]]
         @initializers = {} #: Hash[String, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]
@@ -33,10 +39,7 @@ module Steep
         loader = Services::FileLoader.new(base_dir: project.base_dir)
         project.targets.each do |target|
           loader.each_path_in_target(target) do |relative_path|
-            absolute = project.absolute_path(relative_path)
-            next unless absolute.file?
-            next unless ruby_source?(absolute)
-            ingest(absolute)
+            ingest(project.absolute_path(relative_path))
           end
         end
         @entries.freeze
@@ -154,6 +157,10 @@ module Steep
         @entries
       end
 
+      def ingest(absolute_path)
+        ingest_source(absolute_path.read, path_name: absolute_path.to_s) if absolute_path.file? && ruby_source?(absolute_path)
+      end
+
       def ingest_source(content, path_name:)
         node = parse(content, path_name)
         return unless node
@@ -223,10 +230,6 @@ module Steep
       def ruby_source?(path)
         ext = path.extname
         ext == ".rb" || ext == ".rake"
-      end
-
-      def ingest(absolute_path)
-        ingest_source(absolute_path.read, path_name: absolute_path.to_s)
       end
 
       def parse(content, path_name)

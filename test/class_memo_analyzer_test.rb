@@ -47,6 +47,20 @@ class ClassMemoAnalyzerTest < Minitest::Test
     RUBY
   end
 
+  def test_an_operator_assignment_counts_its_writer_too
+    assert_equal [[:receiver, :[]=], [:receiver, :[]], [:receiver, :name=], [:receiver, :name], [:receiver, :[]=], [:receiver, :[]]],
+                 uses(<<~RUBY, :settings) + uses(<<~RUBY, :@settings)
+                   class Article < Base
+                     settings[:a] ||= 1
+                     settings.name += "x"
+                   end
+                 RUBY
+                   class Base
+                     def self.fill = @settings[:a] &&= 2
+                   end
+                 RUBY
+  end
+
   def test_an_ivar_counts_only_where_self_may_be_a_class
     assert_equal [[:escape, nil], [:receiver, :name]], uses(<<~RUBY, :@settings)
       class Base

@@ -32,6 +32,8 @@ module Steep
       # Calls that run a string as code where the class's `self` may be.
       STRING_EVALS = %i[eval instance_eval class_eval module_eval class_exec].freeze
 
+      OP_ASSIGNS = %i[op_asgn or_asgn and_asgn].freeze
+
 
       def self.uses(node, names:)
         new(names).uses(node)
@@ -146,10 +148,18 @@ module Steep
             return @uses[name] << ESCAPE unless element_calls
 
             on_self = node.type == :ivar || node.children[0].nil? || node.children[0].type == :self
-            Use.new(in_statement && on_self ? :statement : :receiver, parent.children[1], element_calls)
+            use = Use.new(in_statement && on_self ? :statement : :receiver, parent.children[1], element_calls)
+            @uses[name] << Use.new(use.kind, :"#{use.called}=", Set[]) if op_assigned?(parent)
+            use
           else
             ESCAPE
           end
+      end
+
+      # `call op= value` calls the writer of what `call` reads, too.
+      def op_assigned?(call)
+        assignment = @parents.fetch(call, nil)
+        !assignment.nil? && OP_ASSIGNS.include?(assignment.type) && assignment.children[0].equal?(call)
       end
 
       # The methods an iteration's block hands each element to, when it names
