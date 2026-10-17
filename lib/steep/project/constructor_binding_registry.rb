@@ -32,6 +32,7 @@ module Steep
         @declared = Set[] #: Set[String]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
+        @stored_by_class_bodies = {} #: Hash[[Symbol, Symbol], bool]
       end
 
       # @return self
@@ -134,6 +135,13 @@ module Steep
         @uses.fetch(name.to_sym, [])
       end
 
+      # Whether every store into the hash `memo` keeps in `ivar` is made by a
+      # class body on its own class (`TypeInference::HashStoreSites`).
+      def stored_by_class_bodies?(memo, ivar)
+        index_uses unless @uses
+        @stored_by_class_bodies.fetch([memo.to_sym, ivar.to_sym], false)
+      end
+
       # Whether every call of `method_name`, a method that yields a memo, hands
       # it a block a `yield` checks in place, or none
       # (`ClassMemoAnalyzer.block_calls`).
@@ -196,12 +204,15 @@ module Steep
       # source read before the one that defines it.
       def index_uses
         names = Set[] #: Set[Symbol]
+        hashes = Set[] #: Set[[Symbol, Symbol]]
         @singleton_methods.each_value do |methods|
           methods.each do |name, bodies|
             bodies.each { |body| names << name << body.memo[0] if body&.memo }
-            bodies.each { |body| names << name << body.memoized_hash if body&.memoized_hash }
+            bodies.each { |body| hashes << [name, body.memoized_hash] if body&.memoized_hash }
           end
         end
+        hashes.each { |name, ivar| names << name << ivar }
+        index_hash_stores(hashes)
         @methods.each_value { |methods| names.merge(accumulated_names(methods)) }
         @uses = {}
         @nodes.each do |node|
@@ -211,6 +222,12 @@ module Steep
         @block_calls = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.block_calls(node, names: yielders).each { |name, kinds| (@block_calls[name] ||= []).concat(kinds) }
+        end
+      end
+
+      def index_hash_stores(hashes)
+        @stored_by_class_bodies = hashes.to_h do |name, ivar|
+          [[name, ivar], TypeInference::HashStoreSites.new(@nodes, memo: name, ivar: ivar).class_bodies_only?]
         end
       end
 

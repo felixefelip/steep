@@ -66,6 +66,7 @@ module Steep
         @exits = {} #: Hash[String, Hash[String, ObjectStates::Exit]]
         @demand = nil
         @demanding = Set[] #: Set[[String, String]]
+        @class_exits = {} #: Hash[RBS::TypeName, Hash[Symbol, AST::Types::t]]
       end
 
       # What each call site of a code-writing method defines there, by
@@ -76,6 +77,7 @@ module Steep
         methods = {} #: Hash[String, Hash[String, String]]
         @evals = {}
         @exits = {}
+        @class_exits = {}
         @project.targets.each { |target| specialize_target(target, methods) }
         methods
       end
@@ -123,12 +125,13 @@ module Steep
 
         found = {} #: Hash[String, Hash[String, AST::Types::t]]
         widened = Set[] #: Set[[String, String]]
-        seen = Set[] #: Set[[Hash[String, Hash[String, AST::Types::t]], Hash[String, Set[Arguments]], Hash[String, Hash[String, ObjectStates::Exit]]]]
+        seen = Set[] #: Set[[Hash[String, Hash[String, AST::Types::t]], Hash[String, Set[Arguments]], Hash[String, Hash[String, ObjectStates::Exit]], Hash[RBS::TypeName, Hash[Symbol, AST::Types::t]]]]
         generation = 0
 
         loop do
           demanded.clear
           exits = @exits.transform_values(&:dup)
+          class_exits = @class_exits.dup
           discovered, revealed = specialize(context, store(found), baselines, tuples, definitions)
           discovered = settle(found, discovered, baselines, widened)
           grown = grow(tuples, revealed, generation)
@@ -136,12 +139,12 @@ module Steep
           # new return can still fix a tuple inside a body it re-checked, and that
           # tuple is what the next generation specializes. So do the exits, which
           # the caller one frame out reads only in the generation after.
-          break if discovered == found && grown == tuples && @exits == exits
+          break if discovered == found && grown == tuples && @exits == exits && @class_exits == class_exits
           # A state seen before cannot lead anywhere a later generation has not
           # already been. Widening bounds an entry's literals; this bounds the one
           # shape it says nothing about — a return alternating between two
           # CLASSES, which no amount of widening settles.
-          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup)])
+          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup), @class_exits.dup])
 
           paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits))
           found = discovered
@@ -370,7 +373,7 @@ module Steep
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) },
-          source: nil, typed: methods, exits: @exits, demand: @demand
+          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits
         )
       end
 
@@ -402,7 +405,7 @@ module Steep
 
         paths.each do |path|
           source = context.sources[path] or next
-          typing = type_check(context, store, source, {})
+          typing = file_check(context, store, source, {})
 
           Collector.each_call_site(typing) do |key, arguments, node|
             next unless definitions.key?(key)
@@ -546,7 +549,7 @@ module Steep
         callees = {} #: Hash[Pathname, Set[String]]
 
         context.sources.each do |path, source|
-          typing = type_check(context, store, source, {})
+          typing = file_check(context, store, source, {})
 
           Collector.definitions(source).each do |key, def_node|
             definitions[key] = [path, def_node]
@@ -587,7 +590,7 @@ module Steep
         end
 
         paths.to_h do |path|
-          [path, type_check(context, store, context.sources.fetch(path), by_node)]
+          [path, file_check(context, store, context.sources.fetch(path), by_node)]
         end
       end
 
@@ -595,6 +598,15 @@ module Steep
       # the self type is not always the name this pass keys the body under.
       def node_key(path, def_node)
         [path.to_s, def_node.loc.expression.begin_pos]
+      end
+
+      # A check of a whole file at this run's top level, not one a demanded
+      # exit nests in another, which is the one that leaves its class bodies
+      # settled as far as `store` lets them.
+      def file_check(context, store, source, active)
+        type_check(context, store, source, active).tap do |typing|
+          @class_exits.merge!(typing.class_exits) if typing
+        end
       end
 
       # `store` is always one this run computed, never the sidecar on disk:
