@@ -3985,6 +3985,42 @@ EOF
     end
   end
 
+  def test_dstr_folds_each_literal_a_part_admits
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: :admin | :guest
+kind = (_ = nil)
+# @type var level: 1 | 2
+level = (_ = nil)
+x = "role_#{kind}_#{level}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"role_admin_1" | "role_admin_2" | "role_guest_1" | "role_guest_2"'), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_dstr_stays_a_string_when_a_member_is_not_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: :admin | String
+kind = (_ = nil)
+x = "role_#{kind}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::String"), pair.context.type_env[:x]
+      end
+    end
+  end
+
   def test_dstr_stays_a_string_when_a_part_is_not_literal
     with_checker do |checker|
       source = parse_ruby(<<'EOF')
@@ -9140,6 +9176,9 @@ RUBY
         # @type var name: String
         name = (_ = nil)
         g = EvalTarget.class_eval "def #{name}; end"
+        # @type var which: :first | :second
+        which = (_ = nil)
+        h = EvalTarget.class_eval "def #{which} = 1"
 
         class EvalBody
           class_eval "def undeclared = 2"
@@ -9157,6 +9196,7 @@ RUBY
         assert_equal parse_type("nil"), pair.context.type_env[:e]
         assert_equal parse_type("untyped"), pair.context.type_env[:f]
         assert_equal parse_type("untyped"), pair.context.type_env[:g]
+        assert_equal parse_type(":first | :second"), pair.context.type_env[:h]
         assert_equal parse_type(":undeclared"), typing.type_of(node: source.node.children.last.children[2])
       end
     end

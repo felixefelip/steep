@@ -7671,25 +7671,19 @@ module Steep
     end
 
     def folded_string_literal(node)
-      text = +""
+      texts = node.children.inject([""]) do |prefixes, child|
+        pieces = child.type == :str ? [child.children[0]] : interpolated_pieces(typing.type_of(node: child))
+        return nil unless pieces&.all?(String)
 
-      node.children.each do |child|
-        piece =
-          if child.type == :str
-            child.children[0]
-          else
-            type = typing.type_of(node: child)
-            return nil unless type.is_a?(AST::Types::Literal)
-
-            type.value.to_s
-          end
-
-        return nil unless piece.is_a?(String)
-
-        text << piece
+        prefixes.product(pieces).map(&:join)
       end
 
-      AST::Types::Literal.new(value: text)
+      AST::Types::Union.build(types: texts.uniq.map { |text| AST::Types::Literal.new(value: text) })
+    end
+
+    def interpolated_pieces(type)
+      members = type.is_a?(AST::Types::Union) ? type.types : [type]
+      members.map { |member| member.is_a?(AST::Types::Literal) ? member.value.to_s : (return nil) }
     end
 
     def test_literal_type(literal, hint)

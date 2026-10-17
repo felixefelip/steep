@@ -5,8 +5,9 @@ module Steep
   # body of that reopening, in a typing of its own whose diagnostics are
   # dropped, and only the type of its last statement is kept.
   #
-  # Only for a source the call site fixes: a string that does not fold is code
-  # nobody here can read, and the call keeps its declared `untyped`.
+  # Only for a source the call site fixes, or a union of sources: a string
+  # that does not fold is code nobody here can read, and the call keeps its
+  # declared `untyped`.
   module StringEvalIntrinsics
     KEYS = Set["::Module#module_eval", "::Module#class_eval"].freeze
 
@@ -17,10 +18,15 @@ module Steep
         receiver_type = Specializations.exact_self(constr) || constr.self_type if receiver_type.is_a?(AST::Types::Self)
         return nil unless receiver_type.is_a?(AST::Types::Name::Singleton)
 
-        text = argument_types.first
-        return nil unless text.is_a?(AST::Types::Literal) && text.value.is_a?(String)
+        texts = argument_types.first
+        texts = texts.is_a?(AST::Types::Union) ? texts.types : [texts]
+        types = texts.map do |text|
+          return nil unless text.is_a?(AST::Types::Literal) && text.value.is_a?(String)
 
-        last_statement_type(constr, receiver_type.name, text.value)
+          last_statement_type(constr, receiver_type.name, text.value) or return nil
+        end
+
+        AST::Types::Union.build(types: types)
       end
 
       private
