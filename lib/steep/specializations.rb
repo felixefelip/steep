@@ -329,6 +329,26 @@ module Steep
         with_self(nil)
       end
 
+      # One `Arguments` per choice a union of literals leaves open: a call
+      # passing `(:posts | :categories)` passes one of `(:posts)`, `(:categories)`.
+      def alternatives
+        choices = [*positionals, *keywords.values].map { |type| LiteralIntrinsics.alternatives(type) }
+        choices.empty? ? [self] : choices.first.product(*choices.drop(1)).map { |values| with_values(values) }
+      end
+
+      def with_values(values)
+        Arguments.new(
+          positionals: values.take(positionals.size),
+          keywords: keywords.keys.zip(values.drop(positionals.size)).to_h,
+          positional_defaults: @positional_defaults,
+          keyword_defaults: @keyword_defaults,
+          self_type: @self_type,
+          self_ivars: @self_ivars,
+          class_states: @class_states,
+          block: @block
+        )
+      end
+
       def with_self(self_type)
         Arguments.new(
           positionals: @positionals,
@@ -598,6 +618,9 @@ module Steep
         new(methods: {}, source: nil)
       end
 
+      # `declarations`: what each method answers across all its calls
+      # (`CallSiteUnions`), as RBS.
+
       def self.from_hash(raw, source:)
         version = raw && raw["version"]
         if version && version != SCHEMA_VERSION
@@ -612,7 +635,9 @@ module Steep
           methods[method_key] = entries.select { |key, type| key.is_a?(String) && type.is_a?(String) }
         end
 
-        new(methods: methods, source: source)
+        declarations = ((raw && raw["declarations"]) || {}).select { |key, type| key.is_a?(String) && type.is_a?(String) }
+
+        new(methods: methods, source: source, declarations: declarations)
       end
 
       # `typed`: returns a run computed, as types, read ahead of `methods`.
@@ -621,8 +646,9 @@ module Steep
       # `demand`: checks the body for an exit not recorded yet, there and then.
       # `class_exits`: the hash memos each class body left holding
       # (`Typing#class_exits`).
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {})
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {})
         @methods = methods
+        @declarations = declarations
         @source = source
         @active = active
         @typed = typed
@@ -632,7 +658,7 @@ module Steep
       end
 
       def empty?
-        @methods.empty? && @active.empty? && @typed.empty? && @exits.empty?
+        @methods.empty? && @active.empty? && @typed.empty? && @exits.empty? && @declarations.empty?
       end
 
       # `in_checked_body`: whether the call is made in a body this check is
@@ -654,7 +680,15 @@ module Steep
 
       def return_type(method_key, argument_key, factory:)
         typed = @typed.dig(method_key, argument_key) and return typed
-        raw = @methods.dig(method_key, argument_key) or return nil
+        parse(method_key, @methods.dig(method_key, argument_key), factory: factory)
+      end
+
+      def declaration_type(method_key, factory:)
+        parse(method_key, @declarations[method_key], factory: factory)
+      end
+
+      def parse(method_key, raw, factory:)
+        return nil unless raw
 
         factory.type(RBS::Parser.parse_type(raw).map_type_name { |name, _, _| name.absolute! })
       rescue RBS::ParsingError, RBS::BaseError => exn
@@ -677,7 +711,10 @@ module Steep
       end
 
       def with_active(active)
-        Store.new(methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand, class_exits: @class_exits)
+        Store.new(
+          methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
+          class_exits: @class_exits, declarations: @declarations
+        )
       end
     end
   end

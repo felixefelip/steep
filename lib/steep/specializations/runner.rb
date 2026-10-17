@@ -67,17 +67,23 @@ module Steep
         @demand = nil
         @demanding = Set[] #: Set[[String, String]]
         @class_exits = {} #: Hash[RBS::TypeName, Hash[Symbol, AST::Types::t]]
+        @declarations = {} #: Hash[String, String]
       end
 
       # What each call site of a code-writing method defines there, by
       # `path:line:column`. Filled by `run` alongside the return types.
       attr_reader :evals
 
+      # What each method returns across all its calls (`CallSiteUnions`), by
+      # method. Filled by `run`.
+      attr_reader :declarations
+
       def run
         methods = {} #: Hash[String, Hash[String, String]]
         @evals = {}
         @exits = {}
         @class_exits = {}
+        @declarations = {}
         @project.targets.each { |target| specialize_target(target, methods) }
         methods
       end
@@ -91,10 +97,10 @@ module Steep
       end
 
       def write(methods)
-        if methods.empty?
+        if methods.empty? && @declarations.empty?
           output_path.delete if output_path.file?
         else
-          Writer.write(output_path, methods)
+          Writer.write(output_path, methods, @declarations)
         end
 
         if @evals.empty?
@@ -157,6 +163,7 @@ module Steep
           writable = entries.select { |argument_key, _| Arguments.persistable_key?(argument_key) }
           (methods[key] ||= {}).merge!(writable.transform_values(&:to_s)) unless writable.empty?
         end
+        @declarations.merge!(call_site_unions(context, store(found), found, baselines, callees))
 
         harvest_evals(context, store(found), locations, definitions, writers)
       end
@@ -499,6 +506,26 @@ module Steep
 
         prefix = constant_name(parent) or return nil
         "#{prefix}::#{name}"
+      end
+
+      # The union of what each call returned, for each method in `found` whose
+      # every call is answered. Read under the settled findings, which is what
+      # the calls pass once every inner call has specialized.
+      def call_site_unions(context, store, found, baselines, callees)
+        keys = found.keys.to_set
+        answers = Hash.new { |hash, key| hash[key] = [] } #: Hash[String, Array[AST::Types::t?]]
+
+        affected_paths(callees, keys).each do |path|
+          typing = type_check(context, store, context.sources.fetch(path), {})
+          CallSiteUnions.each_answer(typing, keys, store, context.subtyping.factory) { |key, type| answers[key] << type }
+        end
+
+        answers.filter_map do |key, types|
+          next if types.include?(nil)
+
+          union = AST::Types::Union.build(types: types.compact)
+          [key, union.to_s] unless union.to_s == baselines[key]
+        end.to_h
       end
 
       # The methods whose entries this generation changed.

@@ -1791,33 +1791,7 @@ module Steep
               new = new.synthesize_children(args_node)
 
               body_pair = if body_node
-                            return_type = expand_alias(new.method_context!.return_type)
-                            if !return_type.is_a?(AST::Types::Void)
-                              new.check(body_node, return_type) do |_, actual_type, result|
-                                if new.method_context!.attribute_setter?
-                                  typing.add_error(
-                                    Diagnostic::Ruby::SetterBodyTypeMismatch.new(
-                                      node: node,
-                                      expected: new.method_context!.return_type,
-                                      actual: actual_type,
-                                      result: result,
-                                      method_name: new.method_context!.name
-                                    )
-                                  )
-                                else
-                                  typing.add_error(
-                                    Diagnostic::Ruby::MethodBodyTypeMismatch.new(
-                                      node: node,
-                                      expected: new.method_context!.return_type,
-                                      actual: actual_type,
-                                      result: result
-                                    )
-                                  )
-                                end
-                              end
-                            else
-                              new.synthesize(body_node)
-                            end
+                            MethodBody.check(new, node, body_node, setters: true)
                           else
                             return_type = expand_alias(new.method_context!.return_type)
                             if !return_type.is_a?(AST::Types::Void)
@@ -1915,20 +1889,7 @@ module Steep
             end
 
             if node.children[3]
-              body_pair = if !(return_type = expand_alias(new.method_context!.return_type)).is_a?(AST::Types::Void)
-                new.check(node.children[3], return_type) do |return_type, actual_type, result|
-                  typing.add_error(
-                    Diagnostic::Ruby::MethodBodyTypeMismatch.new(
-                      node: node,
-                      expected: return_type,
-                      actual: actual_type,
-                      result: result
-                    )
-                  )
-                end
-              else
-                new.synthesize(node.children[3])
-              end
+              body_pair = MethodBody.check(new, node, node.children[3], setters: false)
               ObjectStates.record_exit(new, node, body_pair)
             end
           end
@@ -1960,7 +1921,7 @@ module Steep
             end
 
             if method_return_type
-              unless method_context.nil? || method_return_type.is_a?(AST::Types::Void)
+              unless method_context.nil? || method_return_type.is_a?(AST::Types::Void) || Specializations::CallSiteUnions.body_answer(self, method_context.node)
                 result = constr.check_relation(sub_type: value_type, super_type: method_return_type)
 
                 if result.failure?
