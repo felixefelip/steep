@@ -99,6 +99,35 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_records_what_a_string_eval_returns_at_each_call_site
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.stamp_target: (Symbol name) -> untyped
+        end
+        class Target
+        end
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.stamp_target(name)
+            Target.class_eval "def \#{name}_on_target = 1"
+          end
+        end
+
+        class Article < Base
+          stamp_target :published
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(:published)" => ":published_on_target" }, methods.fetch("Base.stamp_target"))
+    end
+  end
+
   def test_runner_records_an_inherited_class_method_called_on_a_subclass
     in_tmpdir do
       write("sig/base.rbs", "class Base\n  def self.label: (Symbol name) -> Symbol\nend\nclass Widget < Base\nend\n")

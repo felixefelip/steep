@@ -9111,6 +9111,57 @@ RUBY
     end
   end
 
+  def test_string_class_eval_is_its_last_statement
+    with_checker(<<~RBS) do |checker|
+      class Module
+        def module_eval: (String code) -> untyped
+        alias class_eval module_eval
+      end
+
+      class EvalTarget
+        def first: () -> Integer
+        def second: () -> Integer
+      end
+
+      module EvalModule
+        def in_module: () -> Integer
+      end
+
+      class EvalBody
+      end
+    RBS
+      source = parse_ruby(<<~'RUBY')
+        a = EvalTarget.class_eval "def first; 1; end"
+        b = EvalTarget.module_eval "def first = 1; def second = 2"
+        c = EvalModule.module_eval "def in_module = 1"
+        d = EvalTarget.class_eval "42"
+        e = EvalTarget.class_eval ""
+        f = EvalTarget.class_eval "def ("
+        # @type var name: String
+        name = (_ = nil)
+        g = EvalTarget.class_eval "def #{name}; end"
+
+        class EvalBody
+          class_eval "def undeclared = 2"
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type(":first"), pair.context.type_env[:a]
+        assert_equal parse_type(":second"), pair.context.type_env[:b]
+        assert_equal parse_type(":in_module"), pair.context.type_env[:c]
+        assert_equal parse_type("42"), pair.context.type_env[:d]
+        assert_equal parse_type("nil"), pair.context.type_env[:e]
+        assert_equal parse_type("untyped"), pair.context.type_env[:f]
+        assert_equal parse_type("untyped"), pair.context.type_env[:g]
+        assert_equal parse_type(":undeclared"), typing.type_of(node: source.node.children.last.children[2])
+      end
+    end
+  end
+
   def test_case_when_arg
     with_checker() do |checker|
       source = parse_ruby(<<'RUBY')
