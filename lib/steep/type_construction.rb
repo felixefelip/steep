@@ -1864,7 +1864,7 @@ module Steep
                 module_context.defined_instance_methods << node.children[0]
               end
 
-              add_typing(node, type: AST::Builtin::Symbol.instance_type)
+              add_typing(node, type: test_literal_type(name, hint) || AST::Builtin::Symbol.instance_type)
             end
           end
 
@@ -1937,7 +1937,7 @@ module Steep
             module_context.defined_module_methods << node.children[1]
           end
 
-          add_typing(node, type: AST::Builtin::Symbol.instance_type)
+          add_typing(node, type: test_literal_type(node.children[1], hint) || AST::Builtin::Symbol.instance_type)
 
         when :return
           yield_self do

@@ -9049,6 +9049,68 @@ RUBY
     end
   end
 
+  def test_def_is_the_literal_of_its_name
+    with_checker(<<~RBS) do |checker|
+      class DefLiteral
+        def define_inner: () -> :inner
+        def inner: () -> Integer
+        def self.define_singleton: () -> :singleton
+        def self.singleton: () -> Integer
+        def define_wrong: () -> :nope
+        def other: () -> Integer
+      end
+    RBS
+      source = parse_ruby(<<~RUBY)
+        class DefLiteral
+          def define_inner
+            def inner = 1
+          end
+
+          def self.define_singleton
+            def self.singleton = 1
+          end
+
+          def define_wrong
+            def other = 1
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) do |error|
+            assert_instance_of Diagnostic::Ruby::MethodBodyTypeMismatch, error
+            assert_equal :define_wrong, error.node.children[0]
+          end
+        end
+      end
+    end
+  end
+
+  def test_def_without_a_literal_hint_is_a_symbol
+    with_checker(<<~RBS) do |checker|
+      class DefSymbol
+        def foo: () -> Integer
+      end
+    RBS
+      source = parse_ruby(<<~RUBY)
+        class DefSymbol
+          def foo = 1
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        def_node = source.node.children[2]
+
+        assert_no_error typing
+        assert_equal parse_type("::Symbol"), typing.type_of(node: def_node)
+      end
+    end
+  end
+
   def test_case_when_arg
     with_checker() do |checker|
       source = parse_ruby(<<'RUBY')
