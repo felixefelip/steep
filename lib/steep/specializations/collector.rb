@@ -31,22 +31,38 @@ module Steep
       # consumer that has to point back at the source needs to know which call it
       # was, and one that reads a body's control flow needs the calls that fix
       # nothing too.
-      def self.each_call_site(typing)
+      #
+      # `every_call`: also yield, with nil arguments, each project method a call
+      # reaches that no tuple describes — through a receiver resolving to
+      # several methods, with an error, or in a shape `Arguments` declines.
+      def self.each_call_site(typing, every_call: false)
+        each_call(typing, every_call) do |node, call|
+          key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls)
+          arguments = key && call_node?(node) && Arguments.recorded(node, typing)
+          next yield key, arguments, node if arguments
+          next unless every_call && call.respond_to?(:method_decls)
+
+          call.method_decls.map { |decl| decl.method_name.to_s.delete_prefix("::") }.uniq.each { |called| yield called, nil, node }
+        end
+      end
+
+      def self.each_call(typing, every_call)
+        return typing.method_calls.each { |node, call| yield node, call } if every_call
+
         typing.each_typing do |node, _type|
-          next unless node.type == :send || Accumulators::LAMBDA_BODIES.include?(node.type)
+          next unless call_node?(node)
 
           call = begin
                    typing.call_of(node: node)
                  rescue Typing::UnknownNodeError
                    next
                  end
-          next unless call.is_a?(TypeInference::MethodCall::Typed)
-
-          key = Specializations.method_key(call.method_decls) or next
-          arguments = Arguments.recorded(node, typing) or next
-
-          yield key, arguments, node
+          yield node, call
         end
+      end
+
+      def self.call_node?(node)
+        node.type == :send || Accumulators::LAMBDA_BODIES.include?(node.type)
       end
 
       # The values a definition gives the parameters a call may leave out, by
@@ -185,7 +201,7 @@ module Steep
         "#{prefix}::#{node.children[1]}"
       end
 
-      private_class_method :walk_defs, :walk_block_defs, :implemented_modules, :walk_sclass_defs,
+      private_class_method :each_call, :call_node?, :walk_defs, :walk_block_defs, :implemented_modules, :walk_sclass_defs,
                            :const_name, :default_type
     end
   end

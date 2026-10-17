@@ -332,7 +332,7 @@ module Steep
       # One `Arguments` per choice a union of literals leaves open: a call
       # passing `(:posts | :categories)` passes one of `(:posts)`, `(:categories)`.
       def alternatives
-        choices = [*positionals, *keywords.values].map { |type| LiteralIntrinsics.alternatives(type) }
+        choices = [*positionals, *keywords.values].map { |type| LiteralIntrinsics.literal_union?(type) ? type.types : [type] }
         choices.empty? ? [self] : choices.first.product(*choices.drop(1)).map { |values| with_values(values) }
       end
 
@@ -618,9 +618,6 @@ module Steep
         new(methods: {}, source: nil)
       end
 
-      # `declarations`: what each method answers across all its calls
-      # (`CallSiteUnions`), as RBS.
-
       def self.from_hash(raw, source:)
         version = raw && raw["version"]
         if version && version != SCHEMA_VERSION
@@ -646,9 +643,12 @@ module Steep
       # `demand`: checks the body for an exit not recorded yet, there and then.
       # `class_exits`: the hash memos each class body left holding
       # (`Typing#class_exits`).
+      # `declarations`: what each method answers across all its calls
+      # (`CallSiteUnions`), as RBS.
       def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {})
         @methods = methods
         @declarations = declarations
+        @memo = {}.compare_by_identity
         @source = source
         @active = active
         @typed = typed
@@ -673,9 +673,17 @@ module Steep
 
       # The recorded return type for `method_key` called with `argument_key`, as a
       # Steep type, or nil when nothing was recorded or the entry no longer parses.
+      #
+      # A union of literals passed in an argument is one of its members at run
+      # time, so the call returns what one of those returned.
       def call_return_type(method_key, arguments, factory:)
-        return_type(method_key, arguments.key, factory: factory) ||
-          (arguments.self_type && return_type(method_key, arguments.without_self.key, factory: factory))
+        types = arguments.alternatives.map do |alternative|
+          return_type(method_key, alternative.key, factory: factory) ||
+            (alternative.self_type && return_type(method_key, alternative.without_self.key, factory: factory)) ||
+            (return nil)
+        end
+
+        AST::Types::Union.build(types: types)
       end
 
       def return_type(method_key, argument_key, factory:)
@@ -685,6 +693,14 @@ module Steep
 
       def declaration_type(method_key, factory:)
         parse(method_key, @declarations[method_key], factory: factory)
+      end
+
+      # `yield`, computed once per `object` for as long as this store is the
+      # one being checked under.
+      def memoize(object)
+        return @memo[object] if @memo.key?(object)
+
+        @memo[object] = yield
       end
 
       def parse(method_key, raw, factory:)

@@ -10,11 +10,6 @@ module Steep
     #   has_many_like :posts         # :post_ids
     #   has_many_like :categories    # :category_ids
     #
-    # The body checked under its declaration cannot say that: what
-    # `singularize` answers depends on what the rules hold when the call is
-    # made, and only the call knows. Every call is one of those two, so the
-    # method returns `:post_ids | :category_ids`.
-    #
     # Only where every call was answered. One left out — a call fixing no
     # value, one whose return was not specialized, one made through a receiver
     # that may be another class — can return anything the declaration allows.
@@ -23,50 +18,34 @@ module Steep
         # Yields each project method in `keys` that a call in `typing` makes,
         # with what that call returns, or nil where `store` does not say.
         def each_answer(typing, keys, store, factory)
-          typing.method_calls.each do |node, call|
-            next unless call.respond_to?(:method_decls)
+          Collector.each_call_site(typing, every_call: true) do |key, arguments, _node|
+            next unless keys.include?(key)
 
-            called = call.method_decls.map { |decl| decl.method_name.to_s.delete_prefix("::") }.uniq & keys.to_a
-            next if called.empty?
-
-            answer = answer(node, typing, call, called, store, factory)
-            called.each { |key| yield key, answer }
+            yield key, arguments && store.call_return_type(key, arguments, factory: factory)
           end
         end
 
         # What the body of `def_node` answers in place of its own type, where
         # it is checked under its declaration rather than for one call.
+        #
+        # Keyed by this `def`, not by the declaration it is checked under: an
+        # override with no signature of its own shares its parent's.
         def body_answer(constr, def_node)
           store = constr.specializations
           return nil if store.empty? || constr.specialization_arguments(def_node)
 
-          context = constr.method_context or return nil
-          method = context.method or return nil
-          store.declaration_type(key(context.name, method), factory: constr.checker.factory)
+          store.memoize(def_node) do
+            key = definition_keys(store, constr.source)[def_node]
+            key && store.declaration_type(key, factory: constr.checker.factory)
+          end
         end
 
         private
 
-        # A union of literals passed in an argument is one of its members at
-        # run time, so the call returns what one of those returned.
-        def answer(node, typing, call, called, store, factory)
-          return nil unless call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.size == 1 && called.size == 1
-          return nil unless node.type == :send || Accumulators::LAMBDA_BODIES.include?(node.type)
-
-          arguments = Arguments.recorded(node, typing) or return nil
-          types = arguments.alternatives.map do |alternative|
-            store.call_return_type(called.first, alternative, factory: factory) or return nil
+        def definition_keys(store, source)
+          store.memoize(source) do
+            Collector.definitions(source).each_with_object({}.compare_by_identity) { |(key, node), keys| keys[node] = key }
           end
-
-          AST::Types::Union.build(types: types)
-        end
-
-        # The key a call resolving to `method` is recorded under
-        # (`Specializations.method_key`), spelled from the definition.
-        def key(name, method)
-          member = method.members.first
-          separator = member.is_a?(RBS::AST::Members::Base) && member.kind == :singleton ? "." : "#"
-          "#{method.defined_in.to_s.delete_prefix("::")}#{separator}#{name}"
         end
       end
     end

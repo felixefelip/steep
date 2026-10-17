@@ -1,10 +1,7 @@
 module Steep
-  # A method body checked against the return its declaration states.
-  #
-  # Where every call of the method was checked for what it passes, the body
-  # answers what those calls returned (`Specializations::CallSiteUnions`), and
-  # that is what has to fit the declaration: the body checked once for any
-  # caller can be wider than every caller sees.
+  # A method body checked against the return its declaration states, or —
+  # where every call of the method was answered — what those calls returned
+  # (`Specializations::CallSiteUnions`) checked against it in its place.
   module MethodBody
     class << self
       # `setters`: report a setter's mismatch as one, which only an instance

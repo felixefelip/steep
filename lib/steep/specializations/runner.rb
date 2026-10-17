@@ -523,7 +523,7 @@ module Steep
         answers.filter_map do |key, types|
           next if types.include?(nil)
 
-          union = AST::Types::Union.build(types: types.compact)
+          union = AST::Types::Union.build(types: types)
           [key, union.to_s] unless union.to_s == baselines[key]
         end.to_h
       end

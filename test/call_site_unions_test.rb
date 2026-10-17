@@ -183,6 +183,56 @@ class CallSiteUnionsTest < Minitest::Test
     end
   end
 
+  def test_an_override_with_no_signature_of_its_own_is_not_answered_by_its_parents_calls
+    rbs = "class Base\n  def self.tag: (Symbol name) -> String\nend\nclass Child < Base\nend\n"
+    ruby = "class Base\n  def self.tag(name) = \"\#{name}!\"\nend\nclass Child < Base\n  def self.tag(name) = 42\nend\n"
+
+    with_checker(rbs, with_stdlib: true) do |checker|
+      source = parse_ruby(ruby)
+      store = Steep::Specializations::Store.from_hash({ "declarations" => { "Base.tag" => '("a!" | "b!")' } }, source: nil)
+      with_standard_construction(checker, source, specializations: store) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) do |error|
+            assert_instance_of Steep::Diagnostic::Ruby::MethodBodyTypeMismatch, error
+            assert_equal parse_type("::Integer"), error.actual
+          end
+        end
+      end
+    end
+  end
+
+  def test_a_call_passing_a_union_of_literals_is_typed_by_what_each_member_returned
+    rbs = "class Tags\n  def self.tag: (Symbol name) -> String\n  def self.pick: () -> (:a | :b)\nend\n"
+    entries = { "methods" => { "Tags.tag" => { "(:a)" => '"a!"', "(:b)" => '"b!"' } } }
+
+    with_checker(rbs, with_stdlib: true) do |checker|
+      source = parse_ruby("Tags.tag(Tags.pick)\n")
+      store = Steep::Specializations::Store.from_hash(entries, source: nil)
+      with_standard_construction(checker, source, specializations: store) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type('"a!" | "b!"'), typing.type_of(node: source.node)
+      end
+    end
+  end
+
+  def test_a_union_that_is_not_of_literals_is_looked_up_whole
+    rbs = "class Tags\n  def self.tag: (untyped name) -> String\n  def self.pick: () -> (String | Integer)\nend\n"
+    entries = { "methods" => { "Tags.tag" => { "((::String | ::Integer))" => '"either"' } } }
+
+    with_checker(rbs, with_stdlib: true) do |checker|
+      source = parse_ruby("Tags.tag(Tags.pick)\n")
+      store = Steep::Specializations::Store.from_hash(entries, source: nil)
+      with_standard_construction(checker, source, specializations: store) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type('"either"'), typing.type_of(node: source.node)
+      end
+    end
+  end
+
   def test_the_sidecar_carries_the_declarations
     in_tmpdir do
       path = current_dir + "specializations.yml"
