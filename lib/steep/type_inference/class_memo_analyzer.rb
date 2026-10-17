@@ -31,7 +31,7 @@ module Steep
 
       # Calls that reach a method or an ivar by a name given as a value.
       REFLECTIVE = %i[
-        send __send__ public_send method public_method singleton_method define_singleton_method
+        send __send__ public_send method public_method singleton_method define_singleton_method alias_method
         instance_variable_get instance_variable_set instance_variable_defined? remove_instance_variable
       ].freeze
 
@@ -118,6 +118,8 @@ module Steep
           @calls ? record_call(node, statement) : record_send(node, parent, in_statement)
         when :ivar
           record(node.children[0], node, parent, in_statement) if on_class && !@calls
+        when :alias
+          node.children.each { |name| @uses[name.children[0].to_sym] << ESCAPE if named?(name) }
         end
 
         walk_children(node, statement: statement, on_class: on_class)

@@ -37,7 +37,8 @@ module Steep
 
         # What the hash holds in a method body run on one class, where every
         # store into it is made by a class body on its own class
-        # (`ConstructorBindingRegistry#stored_by_class_bodies?`): under each
+        # (`ConstructorBindingRegistry#class_body_storing`) and no storing
+        # method is one the runtime may call by itself: under each
         # key, what the bodies of the class and of each subclass left there. A
         # key some of them never store is optional, since a subclass's hash is
         # its own.
@@ -45,7 +46,8 @@ module Steep
           return unless constr.method_context
 
           singleton = Specializations.exact_self(constr) or return
-          return unless constr.constructor_bindings.stored_by_class_bodies?(call.method_name, ivar)
+          storing = constr.constructor_bindings.class_body_storing(call.method_name, ivar) or return
+          return if overrides_class_method?(constr, storing)
 
           descendants = constr.checker.factory.descendant_index.descendants(singleton.name, limit: ReflectionIntrinsics::MAX_DESCENDANTS) or return
           records = [singleton.name, *descendants].map do |name|
@@ -58,6 +60,13 @@ module Steep
             left
           end
           merged_records(records)
+        end
+
+        # Every method the runtime calls on a class object by itself (a hook,
+        # an operator, `const_missing`, ...) is one `Class` already has.
+        def overrides_class_method?(constr, names)
+          class_methods = constr.checker.factory.definition_builder.build_instance(AST::Builtin::Class.module_name).methods
+          names.any? { |name| class_methods.key?(name) }
         end
 
         def merged_records(records)

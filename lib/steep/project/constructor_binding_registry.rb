@@ -32,7 +32,7 @@ module Steep
         @declared = Set[] #: Set[String]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
-        @stored_by_class_bodies = {} #: Hash[[Symbol, Symbol], bool]
+        @class_body_storing = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
       end
 
       # @return self
@@ -135,11 +135,12 @@ module Steep
         @uses.fetch(name.to_sym, [])
       end
 
-      # Whether every store into the hash `memo` keeps in `ivar` is made by a
-      # class body on its own class (`stores_made_by_class_bodies?`).
-      def stored_by_class_bodies?(memo, ivar)
+      # The class methods that store into the hash `memo` keeps in `ivar`,
+      # where every store is made by a class body on its own class
+      # (`class_body_storing_methods`); nil otherwise.
+      def class_body_storing(memo, ivar)
         index_uses unless @uses
-        @stored_by_class_bodies.fetch([memo.to_sym, ivar.to_sym], false)
+        @class_body_storing[[memo.to_sym, ivar.to_sym]]
       end
 
       # Whether every call of `method_name`, a method that yields a memo, hands
@@ -217,7 +218,7 @@ module Steep
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (@uses[name] ||= []).concat(uses) }
         end
-        @stored_by_class_bodies = hashes.to_h { |memo, ivar| [[memo, ivar], stores_made_by_class_bodies?(memo, ivar)] }
+        @class_body_storing = hashes.to_h { |memo, ivar| [[memo, ivar], class_body_storing_methods(memo, ivar)] }
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
@@ -225,29 +226,20 @@ module Steep
         end
       end
 
-      # Hooks the runtime calls on a class object by itself, so a store one of
-      # them makes is not made by any call a class body shows.
-      RUNTIME_HOOKS = Set[
-        :inherited, :method_added, :method_removed, :method_undefined, :singleton_method_added,
-        :singleton_method_removed, :singleton_method_undefined, :const_added
-      ].freeze
-
       # Each store into the hash is a use of the memo or its ivar on `self`
       # (`ClassMemoAnalyzer::Use`), made by a class body or by a class method
-      # that stores; each call of a storing method is one too. A storing
-      # method the runtime calls by itself is not.
-      def stores_made_by_class_bodies?(memo, ivar)
+      # that stores; each call of a storing method is one too, by its name.
+      def class_body_storing_methods(memo, ivar)
         stores = [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| HASH_STORES.include?(use.called) }
-        return false unless stores.all? { |use| use.kind == :statement || use.within }
+        return unless stores.all? { |use| use.kind == :statement || use.within }
 
         storing = storing_methods(stores.filter_map(&:within).to_set)
-        return false if storing.any? { |name| RUNTIME_HOOKS.include?(name) || LiteralMethodRegistry::MIXIN_HOOKS.include?(name) }
-
-        @nodes.all? do |node|
+        called_by_class_bodies = @nodes.all? do |node|
           TypeInference::ClassMemoAnalyzer.calls(node, names: storing).each_value.all? do |calls|
             calls.all? { |call| call.kind == :statement || storing.include?(call.within) }
           end
         end
+        storing if called_by_class_bodies
       end
 
       HASH_STORES = HashMutation::STORES.to_set { |key| key.split("#").last.to_sym }.freeze

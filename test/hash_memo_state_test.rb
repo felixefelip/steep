@@ -195,10 +195,14 @@ class HashMemoStateTest < Minitest::Test
       "a store made inside a block" => ["  def self.add_all(names) = names.each { |name| register(name, :flat) }\n", ""],
       "a store reached by name" => ["", "  def refit = self.class.send(:register, :wheel, :flat)\n"],
       "a hook the runtime calls in a class body" => ["  def self.method_added(name)\n    super\n    register(:wheel, :added)\n  end\n", ""],
-      "a store made through a safe navigation" => ["", "  def refit = self.class.registry&.store(:wheel, :flat)\n"]
+      "a store made through a safe navigation" => ["", "  def refit = self.class.registry&.store(:wheel, :flat)\n"],
+      "a storing method called by an alias" => ["  class << self\n    alias add register\n  end\n", "  def refit = self.class.add(:wheel, :flat)\n"],
+      "a storing method aliased by a call" => ["  singleton_class.alias_method :add, :register\n", "  def refit = self.class.add(:wheel, :flat)\n"],
+      "an operator the runtime calls" => ["  def self.===(other)\n    register(:wheel, :flat)\n    super\n  end\n", "  def refit\n    case 1\n    when Car then 1\n    end\n  end\n"],
+      "a hook the runtime calls in a method" => ["  def self.const_missing(name) = register(:wheel, :flat)\n", "  def refit = Car::Missing\n"]
     }.each do |shape, (class_method, method)|
       ruby = READERS.sub("  def self.lookup(name)", "#{class_method}  def self.lookup(name)").sub("  def wheel =", "#{method}  def wheel =")
-      rbs = READERS_RBS.sub("    def self.lookup:", "    def self.add_door: () -> untyped\n    def self.add_all: (Array[Symbol]) -> untyped\n    def self.lookup:")
+      rbs = READERS_RBS.sub("    def self.lookup:", "    def self.add_door: () -> untyped\n    def self.add_all: (Array[Symbol]) -> untyped\n    def self.add: (Symbol, Symbol) -> untyped\n    def self.lookup:")
                        .sub("  def wheel: () -> Symbol", "  def refit: () -> untyped\n  def wheel: () -> Symbol")
 
       assert_nil returns(ruby, rbs: rbs)&.dig("Base.lookup", "(:wheel) on singleton(::Car)"), shape
