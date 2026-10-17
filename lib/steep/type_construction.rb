@@ -5899,7 +5899,7 @@ module Steep
         argument_types: argument_types,
         factory: checker.factory,
         override_registry: literal_method_registry
-      ) or return call
+      ) || StringEvalIntrinsics.fold(self, call: call, receiver_type: receiver_type, argument_types: argument_types) or return call
 
       return call unless check_relation(sub_type: type, super_type: declared_return_type).success?
 
@@ -5995,8 +5995,8 @@ module Steep
 
       value =
         case node.type
-        when :int, :str, :sym
-          node.children[0]
+        when :int, :str, :sym, :def then node.children[0]
+        when :defs then node.children[1]
         when :true
           true
         when :false
