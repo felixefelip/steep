@@ -92,6 +92,7 @@ class CallSiteUnionsTest < Minitest::Test
     assert_equal(
       {
         "Post.has_many_like" => "(:post_ids | :category_ids)",
+        "Inflector.singularize" => '("post" | "category")',
         "Rules#singular" => '([[::Regexp, ""]] | [[::Regexp, "y"], [::Regexp, ""]])'
       },
       declarations(RULES_RBS, rules_ruby)
@@ -122,6 +123,51 @@ class CallSiteUnionsTest < Minitest::Test
     RUBY
 
     assert_equal({ "Tags.tag" => '("a!" | "b!")', "Tags.both" => '("a!" | "b!")' }, declarations(rbs, ruby))
+  end
+
+  WRITER_RBS = <<~RBS
+    module Writer
+      def self.generate: (singleton(Peel) owner, (:human_name | :nick) method) -> untyped
+    end
+    class Peel
+      def self.human_name: (String index) -> String
+      def self.banana_delegate: ((:human_name | :nick) method) -> untyped
+    end
+    class Rind < Peel
+      def self.nick: (String name) -> String
+    end
+  RBS
+
+  WRITER_RUBY = <<~'RUBY'
+    module Writer
+      def self.generate(owner, method)
+        argument = owner.singleton_class.public_instance_method(method).parameters[0][1]
+        owner.class_eval ["def #{method}(#{argument})", "  self.class.#{method}(#{argument})", "end"].join(";")
+      end
+    end
+    class Peel
+      def self.human_name(index) = index.upcase
+      def self.banana_delegate(method) = Writer.generate(self, method)
+      banana_delegate :human_name
+    end
+    class Rind < Peel
+      def self.nick(name) = name
+      banana_delegate :nick
+    end
+  RUBY
+
+  def test_a_call_inside_a_body_is_read_under_each_call_of_that_body
+    declarations = declarations(WRITER_RBS, WRITER_RUBY)
+
+    assert_equal "(:human_name | :nick)", declarations["Writer.generate"]
+    assert_equal "(:human_name | :nick)", declarations["Peel.banana_delegate"]
+  end
+
+  def test_a_call_inside_a_method_nothing_calls_is_read_under_its_declaration
+    ruby = WRITER_RUBY.sub("  banana_delegate :human_name\n", "  def self.later = Writer.generate(self, :human_name)\n  banana_delegate :human_name\n")
+    rbs = WRITER_RBS.sub("  def self.banana_delegate", "  def self.later: () -> untyped\n  def self.banana_delegate")
+
+    refute_includes declarations(rbs, ruby).keys, "Writer.generate"
   end
 
   BODY_RBS = <<~RBS
