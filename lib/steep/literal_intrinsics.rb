@@ -71,10 +71,35 @@ module Steep
     ).freeze
 
     class << self
+      # An operand that is a union of literals is each of them in turn: the call
+      # folds once per combination of alternatives, and is the union of the
+      # results, or declines when any one of them does.
       def fold(call:, receiver_type:, argument_types:, override_registry:)
         key = MethodIdentity.key(call) or return nil
 
-        fold_key(key: key, receiver_type: receiver_type, argument_types: argument_types, override_registry: override_registry)
+        receivers, *arguments = [receiver_type, *argument_types].map { |type| alternatives(type) }
+        results = receivers.product(*arguments).map do |receiver, *values|
+          fold_key(key: key, receiver_type: receiver, argument_types: values, override_registry: override_registry) or return nil
+        end
+        AST::Types::Union.build(types: results)
+      end
+
+      def literal_union?(type)
+        type.is_a?(AST::Types::Union) && type.types.all?(AST::Types::Literal)
+      end
+
+      # The values `type` may be, one type each: a tuple holding a union is one
+      # tuple per choice of its elements.
+      def alternatives(type)
+        case type
+        when AST::Types::Union then type.types.flat_map { |member| alternatives(member) }
+        when AST::Types::Tuple
+          choices = type.types.map { |element| alternatives(element) }
+          return [type] if choices.empty?
+
+          choices.first.product(*choices.drop(1)).map { |elements| AST::Types::Tuple.new(types: elements) }
+        else [type]
+        end
       end
 
       # `fold` for a method already known by its key: an in-place one
