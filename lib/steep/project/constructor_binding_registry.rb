@@ -32,6 +32,7 @@ module Steep
         @declared = Set[] #: Set[String]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
+        @class_body_storing = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
       end
 
       # @return self
@@ -134,6 +135,14 @@ module Steep
         @uses.fetch(name.to_sym, [])
       end
 
+      # The class methods that store into the hash `memo` keeps in `ivar`,
+      # where every store is made by a class body on its own class
+      # (`class_body_storing_methods`); nil otherwise.
+      def class_body_storing(memo, ivar)
+        index_uses unless @uses
+        @class_body_storing[[memo.to_sym, ivar.to_sym]]
+      end
+
       # Whether every call of `method_name`, a method that yields a memo, hands
       # it a block a `yield` checks in place, or none
       # (`ClassMemoAnalyzer.block_calls`).
@@ -196,21 +205,54 @@ module Steep
       # source read before the one that defines it.
       def index_uses
         names = Set[] #: Set[Symbol]
+        hashes = Set[] #: Set[[Symbol, Symbol]]
         @singleton_methods.each_value do |methods|
           methods.each do |name, bodies|
             bodies.each { |body| names << name << body.memo[0] if body&.memo }
-            bodies.each { |body| names << name << body.memoized_hash if body&.memoized_hash }
+            bodies.each { |body| hashes << [name, body.memoized_hash] if body&.memoized_hash }
           end
         end
+        hashes.each { |name, ivar| names << name << ivar }
         @methods.each_value { |methods| names.merge(accumulated_names(methods)) }
         @uses = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (@uses[name] ||= []).concat(uses) }
         end
+        @class_body_storing = hashes.to_h { |memo, ivar| [[memo, ivar], class_body_storing_methods(memo, ivar)] }
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.block_calls(node, names: yielders).each { |name, kinds| (@block_calls[name] ||= []).concat(kinds) }
+        end
+      end
+
+      # Each store into the hash is a use of the memo or its ivar on `self`
+      # (`ClassMemoAnalyzer::Use`), made by a class body or by a class method
+      # that stores; each call of a storing method is one too, by its name.
+      def class_body_storing_methods(memo, ivar)
+        stores = [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| HASH_STORES.include?(use.called) }
+        return unless stores.all? { |use| use.kind == :statement || use.within }
+
+        storing = storing_methods(stores.filter_map(&:within).to_set)
+        called_by_class_bodies = @nodes.all? do |node|
+          TypeInference::ClassMemoAnalyzer.calls(node, names: storing).each_value.all? do |calls|
+            calls.all? { |call| call.kind == :statement || storing.include?(call.within) }
+          end
+        end
+        storing if called_by_class_bodies
+      end
+
+      HASH_STORES = HashMutation::STORES.to_set { |key| key.split("#").last.to_sym }.freeze
+
+      # `storing` with every class method that calls one of them on `self`.
+      def storing_methods(storing)
+        loop do
+          grown = @singleton_methods.each_value.flat_map do |methods|
+            methods.filter_map { |name, bodies| name if !storing.include?(name) && bodies.any? { |body| body&.self_sends&.intersect?(storing) } }
+          end
+          return storing if grown.empty?
+
+          storing |= grown
         end
       end
 

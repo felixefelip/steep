@@ -5,6 +5,8 @@ module Steep
     # the class body that sets them up (felixefelip/steep#205, stage 3), and the
     # arrays such an object starts empty and only pushes onto.
     module ClassMemos
+      EMPTY_HASH = AST::Types::Record.new(elements: {}, required_keys: Set[])
+
       class << self
         # A memo called on `self` hands back the object its ivar holds, as the
         # state the env knows it in (`TypeInference::ClassMemoAnalyzer`); or,
@@ -21,13 +23,70 @@ module Steep
         end
 
         # A memo of a hash answers what the env knows it holds, or, where the
-        # ivar is still `nil`, the empty hash it stores there.
+        # ivar is still `nil`, the empty hash it stores there. A method keyed on
+        # one class reads what that class's body, and its subclasses' bodies,
+        # left it holding (`stored_by_class_bodies`).
         def remembered_hash(constr, call, ivar)
           current = constr.context.type_env[ivar]
-          state = current.is_a?(AST::Types::Nil) ? AST::Types::Record.new(elements: {}, required_keys: Set[]) : current
+          state = current.is_a?(AST::Types::Nil) ? EMPTY_HASH : current
+          state = stored_by_class_bodies(constr, call, ivar) || state unless state.is_a?(AST::Types::Record)
           return [nil, constr] unless state.is_a?(AST::Types::Record)
 
           [call.with_return_type(state), constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => state }) }]
+        end
+
+        # What the hash holds in a method body run on one class, where every
+        # store into it is made by a class body on its own class
+        # (`ConstructorBindingRegistry#class_body_storing`) and no storing
+        # method is one the runtime may call by itself: under each
+        # key, what the bodies of the class and of each subclass left there. A
+        # key some of them never store is optional, since a subclass's hash is
+        # its own.
+        def stored_by_class_bodies(constr, call, ivar)
+          return unless constr.method_context
+
+          singleton = Specializations.exact_self(constr) or return
+          storing = constr.constructor_bindings.class_body_storing(call.method_name, ivar) or return
+          return if overrides_class_method?(constr, storing)
+
+          descendants = constr.checker.factory.descendant_index.descendants(singleton.name, limit: ReflectionIntrinsics::MAX_DESCENDANTS) or return
+          records = [singleton.name, *descendants].map do |name|
+            return unless constr.constructor_bindings.class_bodies(name.to_s) <= 1
+
+            left = constr.specializations.class_exit(name, ivar)
+            left = EMPTY_HASH if left.nil? || left.is_a?(AST::Types::Nil)
+            return unless left.is_a?(AST::Types::Record)
+
+            left
+          end
+          merged_records(records)
+        end
+
+        # Every method the runtime calls on a class object by itself (a hook,
+        # an operator, `const_missing`, ...) is one `Class` already has.
+        def overrides_class_method?(constr, names)
+          class_methods = constr.checker.factory.definition_builder.build_instance(AST::Builtin::Class.module_name).methods
+          names.any? { |name| class_methods.key?(name) }
+        end
+
+        def merged_records(records)
+          keys = records.flat_map { |record| record.elements.keys }.uniq
+          elements = keys.to_h { |key| [key, AST::Types::Union.build(types: records.filter_map { |record| record.elements[key] })] }
+          required = keys.select { |key| records.all? { |record| record.required_keys.include?(key) } }
+          AST::Types::Record.new(elements: elements, required_keys: required.to_set)
+        end
+
+        # What each hash memo of the class holds where its body ends, for a
+        # method run after it.
+        def record_hash_exits(exit)
+          singleton = exit.self_type
+          return unless singleton.is_a?(AST::Types::Name::Singleton)
+
+          ivars = ObjectStates.class_side_bodies(exit, singleton).filter_map { |_, _, body| body&.memoized_hash }.uniq
+          return if ivars.empty?
+
+          env = exit.context.type_env
+          exit.typing.add_class_exit(singleton.name, ivars.to_h { |ivar| [ivar, env[ivar]] })
         end
 
         # The ivar of a call on `self` to a memo of an empty hash

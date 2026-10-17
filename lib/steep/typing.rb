@@ -203,6 +203,9 @@ module Steep
     # read (`ObjectStates::ClassStates.of_call`), only where there were any.
     attr_reader :call_class_states
     attr_reader :exit_ivars
+    # The hash memos each class body left holding, by class name
+    # (`ObjectStates::ClassStates.left`).
+    attr_reader :class_exits
     # What one `each` pushes on each pass: `{ block node => [{ value node =>
     # type }, …] }`, one hash per element of the collection, or nil for a loop
     # that could not be expanded. Each pass is checked in a typing of its own
@@ -261,6 +264,7 @@ module Steep
       (@call_exact_selves = {}).compare_by_identity
       (@call_class_states = {}).compare_by_identity
       (@exit_ivars = {}).compare_by_identity
+      @class_exits = {}
       (@iterations = {}).compare_by_identity
       (@arms = {}).compare_by_identity
       (@vouched = {}).compare_by_identity
@@ -351,6 +355,10 @@ module Steep
 
     def exit_ivars_of(node:)
       exit_ivars.fetch(node) { parent&.exit_ivars_of(node: node) }
+    end
+
+    def add_class_exit(name, ivars)
+      class_exits[name] = ivars
     end
 
     def add_iterations(node, passes)
@@ -529,6 +537,7 @@ module Steep
       parent.call_self_ivars.merge!(call_self_ivars)
       parent.call_class_states.merge!(call_class_states)
       parent.exit_ivars.merge!(exit_ivars)
+      parent.class_exits.merge!(class_exits)
       parent.iterations.merge!(iterations)
       parent.arms.merge!(arms)
       parent.vouched.merge!(vouched)

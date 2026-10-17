@@ -35,10 +35,12 @@ module Steep
       # its declaration rather than for one call site.
       # The class a call is specialized for: the one an inherited singleton
       # method runs on (`Arguments.inherited_self`), where its body may observe
-      # which one that is (`ClassStates.reach`).
+      # which one that is, or reaches an ivar of the class object, which is
+      # that class's own (`ClassStates.reach`).
       def keyed_self(constr, call)
         receiver = Arguments.inherited_self(call, exact_self(constr)) or return nil
-        receiver if ObjectStates::ClassStates.reach(constr, call).observes_self
+        reach = ObjectStates::ClassStates.reach(constr, call)
+        receiver if reach.observes_self || !reach.ivars.empty?
       end
 
       # `call` with the return type recorded for the argument tuple this call site
@@ -300,8 +302,7 @@ module Steep
       # arguments from two classes run the body twice.
       #
       # It is part of `key` too, so a return recorded under it is read back only
-      # by a call on that class (`inherited_self`). No declaration can say
-      # that, so such a key stays out of the sidecar, as a stateful one does.
+      # by a call on that class (`inherited_self`).
       attr_reader :self_type
 
       # The ivars of the receiver whose contents the caller knew
@@ -416,7 +417,7 @@ module Steep
       BLOCK_MARKER = " &"
 
       def self.persistable_key?(key)
-        !key.include?(STATE_MARKER) && !key.include?(SELF_MARKER) && !key.include?(BLOCK_MARKER)
+        !key.include?(STATE_MARKER) && !key.include?(BLOCK_MARKER)
       end
 
       def block_key
@@ -618,13 +619,16 @@ module Steep
       # `exits`: the ivars a body left its receiver holding, under a key that
       # names what it held on entry (`Arguments#stateful?`).
       # `demand`: checks the body for an exit not recorded yet, there and then.
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil)
+      # `class_exits`: the hash memos each class body left holding
+      # (`Typing#class_exits`).
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {})
         @methods = methods
         @source = source
         @active = active
         @typed = typed
         @exits = exits
         @demand = demand
+        @class_exits = class_exits
       end
 
       def empty?
@@ -635,6 +639,10 @@ module Steep
       # specializing, rather than elsewhere in its file.
       def exit_ivars(method_key, arguments, in_checked_body:)
         @exits.dig(method_key, arguments.key) || @demand&.call(self, method_key, arguments, in_checked_body)
+      end
+
+      def class_exit(name, ivar)
+        @class_exits.dig(name, ivar)
       end
 
       # The recorded return type for `method_key` called with `argument_key`, as a
@@ -669,7 +677,7 @@ module Steep
       end
 
       def with_active(active)
-        Store.new(methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand)
+        Store.new(methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand, class_exits: @class_exits)
       end
     end
   end

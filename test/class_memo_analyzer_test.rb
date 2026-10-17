@@ -100,4 +100,35 @@ class ClassMemoAnalyzerTest < Minitest::Test
     assert_equal [[:receiver, :each], [:receiver, :map], [:escape, nil], [:escape, nil], [:escape, nil], [:receiver, :size]],
                  found.fetch(:singulars).map { |use| [use.kind, use.called] }
   end
+
+  def test_a_use_on_self_names_the_class_method_making_it
+    source = <<~RUBY
+      class Base
+        def self.register(name, value) = settings[name] = value
+        def self.each_register(names) = names.each { |name| settings[name] = 1 }
+        def other = settings[:a] = 1
+
+        class << self
+          def nested(name) = settings&.store(name, 1)
+        end
+      end
+    RUBY
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(source), names: Set[:settings]).fetch(:settings)
+
+    assert_equal [[:[]=, :register], [:[]=, nil], [:[]=, nil], [:store, :nested]], found.map { |use| [use.called, use.within] }
+  end
+
+  def test_each_call_of_a_method_by_where_it_is_made
+    source = <<~RUBY
+      class Car < Base
+        register :wheel, 1
+        Truck.register :spare, 1
+        def self.refit = register(:door, 1)
+        def fit = self.class.send(:register, :seat, 1)
+      end
+    RUBY
+    found = Steep::TypeInference::ClassMemoAnalyzer.calls(parse(source), names: Set[:register]).fetch(:register)
+
+    assert_equal [[:statement, nil], [:call, nil], [:call, :refit], [:escape, nil]], found.map { |use| [use.kind, use.within] }
+  end
 end

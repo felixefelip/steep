@@ -32,6 +32,7 @@ module Steep
         def left(outer, exit)
           return outer unless exit
 
+          ClassMemos.record_hash_exits(exit)
           states = exit.context.type_env.class_states
           singleton = exit.self_type
           if singleton.is_a?(AST::Types::Name::Singleton)

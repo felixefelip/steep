@@ -32,6 +32,16 @@ class HashMemoStateTest < Minitest::Test
     end
   end
 
+  def returns(ruby, rbs:)
+    in_tmpdir do
+      write("sig/app.rbs", rbs)
+      write("app/app.rb", ruby)
+      postconditions = Steep::Postconditions::Runner.new(setup_project)
+      postconditions.write(postconditions.run)
+      return Steep::Specializations::Runner.new(setup_project).run
+    end
+  end
+
   RBS = <<~RBS
     class Base
       self.@registry: Hash[Symbol, Symbol]?
@@ -77,6 +87,12 @@ class HashMemoStateTest < Minitest::Test
       define_named :seat
     end
   RUBY
+
+  READERS_RBS = RBS.sub("class Car < Base\nend", "class Car < Base\n  def wheel: () -> Symbol\n  def seat: () -> Symbol\nend")
+                   .sub("class Truck < Base\nend", "class Truck < Base\n  def seat: () -> Symbol\nend")
+
+  READERS = RUBY.sub("  define_named :seat\nend", "  define_named :seat\n\n  def wheel = self.class.lookup(:wheel)\n  def seat = self.class.lookup(:seat)\nend")
+                .sub("  define_named :seat\nend\n", "  define_named :seat\n\n  def seat = self.class.lookup(:seat)\nend\n")
 
   def test_a_read_by_literal_key_answers_what_this_class_stored
     assert_equal(
@@ -157,5 +173,45 @@ class HashMemoStateTest < Minitest::Test
 
       assert_equal [nil], chunks(source, rbs: rbs)["app/app.rb:#{line}:2"], shape
     end
+  end
+
+  def test_a_method_reads_what_its_class_body_stored
+    assert_equal(
+      { "(:wheel) on singleton(::Car)" => ":round", "(:seat) on singleton(::Car)" => ":soft", "(:seat) on singleton(::Truck)" => ":bench" },
+      returns(READERS, rbs: READERS_RBS)["Base.lookup"]
+    )
+  end
+
+  def test_a_subclass_that_stores_nothing_adds_nil
+    ruby = READERS + "\nclass SportsCar < Car\nend\n"
+    rbs = READERS_RBS + "class SportsCar < Car\nend\n"
+
+    assert_equal "(:round | nil)", returns(ruby, rbs: rbs)["Base.lookup"]["(:wheel) on singleton(::Car)"]
+  end
+
+  def test_declines_a_hash_a_store_may_reach_after_the_class_bodies
+    {
+      "a class method called from a method" => ["  def self.add_door = register(:wheel, :flat)\n", "  def refit = self.class.add_door\n"],
+      "a store made inside a block" => ["  def self.add_all(names) = names.each { |name| register(name, :flat) }\n", ""],
+      "a store reached by name" => ["", "  def refit = self.class.send(:register, :wheel, :flat)\n"],
+      "a hook the runtime calls in a class body" => ["  def self.method_added(name)\n    super\n    register(:wheel, :added)\n  end\n", ""],
+      "a store made through a safe navigation" => ["", "  def refit = self.class.registry&.store(:wheel, :flat)\n"],
+      "a storing method called by an alias" => ["  class << self\n    alias add register\n  end\n", "  def refit = self.class.add(:wheel, :flat)\n"],
+      "a storing method aliased by a call" => ["  singleton_class.alias_method :add, :register\n", "  def refit = self.class.add(:wheel, :flat)\n"],
+      "an operator the runtime calls" => ["  def self.===(other)\n    register(:wheel, :flat)\n    super\n  end\n", "  def refit\n    case 1\n    when Car then 1\n    end\n  end\n"],
+      "a hook the runtime calls in a method" => ["  def self.const_missing(name) = register(:wheel, :flat)\n", "  def refit = Car::Missing\n"]
+    }.each do |shape, (class_method, method)|
+      ruby = READERS.sub("  def self.lookup(name)", "#{class_method}  def self.lookup(name)").sub("  def wheel =", "#{method}  def wheel =")
+      rbs = READERS_RBS.sub("    def self.lookup:", "    def self.add_door: () -> untyped\n    def self.add_all: (Array[Symbol]) -> untyped\n    def self.add: (Symbol, Symbol) -> untyped\n    def self.lookup:")
+                       .sub("  def wheel: () -> Symbol", "  def refit: () -> untyped\n  def wheel: () -> Symbol")
+
+      assert_nil returns(ruby, rbs: rbs)&.dig("Base.lookup", "(:wheel) on singleton(::Car)"), shape
+    end
+  end
+
+  def test_declines_a_class_whose_body_is_written_twice
+    ruby = READERS + "\nclass Car\n  register :door, :sliding\nend\n"
+
+    assert_nil returns(ruby, rbs: READERS_RBS)&.dig("Base.lookup", "(:wheel) on singleton(::Car)")
   end
 end
