@@ -20,7 +20,13 @@ module Steep
       # handed on or returned, or a name given to a call that reaches a method
       # or an ivar by it. `called` is the method called on it, and
       # `element_calls` the methods an iteration's block hands it elements to.
-      Use = Struct.new(:kind, :called, :element_calls)
+      # `within`: the class method whose body makes the use on `self`, outside
+      # any block.
+      #
+      # Of a call of one of `names` (`calls`): `:statement` for a statement of
+      # a class body made on `self`, `:call` for any other, `:escape` for a
+      # name given as a value; `called` is the method called.
+      Use = Struct.new(:kind, :called, :element_calls, :within)
       ESCAPE = Use.new(:escape, nil, Set[].freeze).freeze
 
       # Calls that reach a method or an ivar by a name given as a value.
@@ -37,6 +43,10 @@ module Steep
 
       def self.uses(node, names:)
         new(names).uses(node)
+      end
+
+      def self.calls(node, names:)
+        new(names, calls: true).uses(node)
       end
 
       # How each call of one of `names` in `node` is made: `:replayed` on
@@ -69,8 +79,9 @@ module Steep
         new(Set[]).element_calls_in(params, body)
       end
 
-      def initialize(names)
+      def initialize(names, calls: false)
         @names = names
+        @calls = calls
         @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[Use]]
         @parents = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node?]
       end
@@ -104,9 +115,9 @@ module Steep
         when :def, :block, :numblock
           return walk_children(node, statement: false, on_class: node.type != :def || singleton_defs)
         when :send, :csend
-          record_send(node, parent, in_statement)
+          @calls ? record_call(node, statement) : record_send(node, parent, in_statement)
         when :ivar
-          record(node.children[0], node, parent, in_statement) if on_class
+          record(node.children[0], node, parent, in_statement) if on_class && !@calls
         end
 
         walk_children(node, statement: statement, on_class: on_class)
@@ -130,6 +141,19 @@ module Steep
       def record_send(node, parent, in_statement)
         _, name, *arguments = node.children
         record(name, node, parent, in_statement) if arguments.empty?
+        record_named(name, arguments)
+      end
+
+      def record_call(node, statement)
+        receiver, name, *arguments = node.children
+        if @names.include?(name)
+          on_self = receiver.nil? || receiver.type == :self
+          @uses[name] << Use.new(statement && on_self ? :statement : :call, name, Set[], on_self ? class_method_of(node) : nil)
+        end
+        record_named(name, arguments)
+      end
+
+      def record_named(name, arguments)
         if REFLECTIVE.include?(name)
           arguments.each { |argument| @uses[argument.children[0].to_sym] << ESCAPE if named?(argument) }
         elsif STRING_EVALS.include?(name)
@@ -148,8 +172,9 @@ module Steep
             return @uses[name] << ESCAPE unless element_calls
 
             on_self = node.type == :ivar || node.children[0].nil? || node.children[0].type == :self
-            use = Use.new(in_statement && on_self ? :statement : :receiver, parent.children[1], element_calls)
-            @uses[name] << Use.new(use.kind, :"#{use.called}=", Set[]) if op_assigned?(parent)
+            within = on_self ? class_method_of(parent) : nil
+            use = Use.new(in_statement && on_self ? :statement : :receiver, parent.children[1], element_calls, within)
+            @uses[name] << Use.new(use.kind, :"#{use.called}=", Set[], within) if op_assigned?(parent)
             use
           else
             ESCAPE
@@ -215,6 +240,13 @@ module Steep
         when :def then node.children[0]
         when :defs then node.children[1]
         end
+      end
+
+      def class_method_of(node)
+        name = enclosing_method(node) or return
+        node = @parents[node] until %i[def defs].include?(node.type)
+        parent = @parents[node]
+        name if node.type == :defs ? node.children[0].type == :self : parent&.type == :sclass && parent.children[0].type == :self
       end
 
       def named?(node)

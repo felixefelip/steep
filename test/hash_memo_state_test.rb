@@ -193,7 +193,9 @@ class HashMemoStateTest < Minitest::Test
     {
       "a class method called from a method" => ["  def self.add_door = register(:wheel, :flat)\n", "  def refit = self.class.add_door\n"],
       "a store made inside a block" => ["  def self.add_all(names) = names.each { |name| register(name, :flat) }\n", ""],
-      "a store reached by name" => ["", "  def refit = self.class.send(:register, :wheel, :flat)\n"]
+      "a store reached by name" => ["", "  def refit = self.class.send(:register, :wheel, :flat)\n"],
+      "a hook the runtime calls in a class body" => ["  def self.method_added(name)\n    super\n    register(:wheel, :added)\n  end\n", ""],
+      "a store made through a safe navigation" => ["", "  def refit = self.class.registry&.store(:wheel, :flat)\n"]
     }.each do |shape, (class_method, method)|
       ruby = READERS.sub("  def self.lookup(name)", "#{class_method}  def self.lookup(name)").sub("  def wheel =", "#{method}  def wheel =")
       rbs = READERS_RBS.sub("    def self.lookup:", "    def self.add_door: () -> untyped\n    def self.add_all: (Array[Symbol]) -> untyped\n    def self.lookup:")

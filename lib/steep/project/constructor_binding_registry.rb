@@ -136,7 +136,7 @@ module Steep
       end
 
       # Whether every store into the hash `memo` keeps in `ivar` is made by a
-      # class body on its own class (`TypeInference::HashStoreSites`).
+      # class body on its own class (`stores_made_by_class_bodies?`).
       def stored_by_class_bodies?(memo, ivar)
         index_uses unless @uses
         @stored_by_class_bodies.fetch([memo.to_sym, ivar.to_sym], false)
@@ -212,12 +212,12 @@ module Steep
           end
         end
         hashes.each { |name, ivar| names << name << ivar }
-        index_hash_stores(hashes)
         @methods.each_value { |methods| names.merge(accumulated_names(methods)) }
         @uses = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (@uses[name] ||= []).concat(uses) }
         end
+        @stored_by_class_bodies = hashes.to_h { |memo, ivar| [[memo, ivar], stores_made_by_class_bodies?(memo, ivar)] }
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
@@ -225,9 +225,42 @@ module Steep
         end
       end
 
-      def index_hash_stores(hashes)
-        @stored_by_class_bodies = hashes.to_h do |name, ivar|
-          [[name, ivar], TypeInference::HashStoreSites.new(@nodes, memo: name, ivar: ivar).class_bodies_only?]
+      # Hooks the runtime calls on a class object by itself, so a store one of
+      # them makes is not made by any call a class body shows.
+      RUNTIME_HOOKS = Set[
+        :inherited, :method_added, :method_removed, :method_undefined, :singleton_method_added,
+        :singleton_method_removed, :singleton_method_undefined, :const_added
+      ].freeze
+
+      # Each store into the hash is a use of the memo or its ivar on `self`
+      # (`ClassMemoAnalyzer::Use`), made by a class body or by a class method
+      # that stores; each call of a storing method is one too. A storing
+      # method the runtime calls by itself is not.
+      def stores_made_by_class_bodies?(memo, ivar)
+        stores = [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| HASH_STORES.include?(use.called) }
+        return false unless stores.all? { |use| use.kind == :statement || use.within }
+
+        storing = storing_methods(stores.filter_map(&:within).to_set)
+        return false if storing.any? { |name| RUNTIME_HOOKS.include?(name) || LiteralMethodRegistry::MIXIN_HOOKS.include?(name) }
+
+        @nodes.all? do |node|
+          TypeInference::ClassMemoAnalyzer.calls(node, names: storing).each_value.all? do |calls|
+            calls.all? { |call| call.kind == :statement || storing.include?(call.within) }
+          end
+        end
+      end
+
+      HASH_STORES = HashMutation::STORES.to_set { |key| key.split("#").last.to_sym }.freeze
+
+      # `storing` with every class method that calls one of them on `self`.
+      def storing_methods(storing)
+        loop do
+          grown = @singleton_methods.each_value.flat_map do |methods|
+            methods.filter_map { |name, bodies| name if !storing.include?(name) && bodies.any? { |body| body&.self_sends&.intersect?(storing) } }
+          end
+          return storing if grown.empty?
+
+          storing |= grown
         end
       end
 

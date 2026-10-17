@@ -47,7 +47,8 @@ module Steep
           singleton = Specializations.exact_self(constr) or return
           return unless constr.constructor_bindings.stored_by_class_bodies?(call.method_name, ivar)
 
-          records = class_and_subclasses(constr, singleton.name).map do |name|
+          descendants = constr.checker.factory.descendant_index.descendants(singleton.name, limit: ReflectionIntrinsics::MAX_DESCENDANTS) or return
+          records = [singleton.name, *descendants].map do |name|
             return unless constr.constructor_bindings.class_bodies(name.to_s) <= 1
 
             left = constr.specializations.class_exit(name, ivar)
@@ -57,17 +58,6 @@ module Steep
             left
           end
           merged_records(records)
-        end
-
-        # `name` and every class the signatures declare under it.
-        def class_and_subclasses(constr, name)
-          builder = constr.checker.factory.definition_builder.ancestor_builder
-          subclasses = constr.checker.factory.env.class_decls.each_key.select do |candidate|
-            candidate != name && builder.instance_ancestors(candidate).ancestors.any? { |ancestor| ancestor.name == name }
-          rescue RBS::BaseError
-            false
-          end
-          [name, *subclasses]
         end
 
         def merged_records(records)
@@ -87,9 +77,7 @@ module Steep
           return if ivars.empty?
 
           env = exit.context.type_env
-          root = exit.typing
-          root = root.parent while root.parent
-          root.add_class_exit(singleton.name, ivars.to_h { |ivar| [ivar, env[ivar]] })
+          exit.typing.add_class_exit(singleton.name, ivars.to_h { |ivar| [ivar, env[ivar]] })
         end
 
         # The ivar of a call on `self` to a memo of an empty hash
