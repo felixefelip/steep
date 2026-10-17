@@ -108,21 +108,7 @@ module Steep
       # call specializes, so what file to re-read is decided from this.
       def self.callees(typing)
         result = Set[] #: Set[String]
-
-        typing.each_typing do |node, _type|
-          next unless node.type == :send || Accumulators::LAMBDA_BODIES.include?(node.type)
-
-          call = begin
-                   typing.call_of(node: node)
-                 rescue Typing::UnknownNodeError
-                   next
-                 end
-          next unless call.is_a?(TypeInference::MethodCall::Typed)
-
-          key = Specializations.method_key(call.method_decls) or next
-          result << key
-        end
-
+        each_call_site(typing, every_call: true) { |key, _arguments, _node| result << key }
         result
       end
 

@@ -19,6 +19,12 @@ class SpecializationsTest < Minitest::Test
     path
   end
 
+  # The entries every class shares, without the ones keyed by the class a
+  # call was made on.
+  def unkeyed(entries)
+    entries.reject { |key, _| key.include?(Specializations::Arguments::SELF_MARKER) }
+  end
+
   def setup_project(steepfile: STEEPFILE)
     write("Steepfile", steepfile)
     project = Project.new(steepfile_path: current_dir + "Steepfile")
@@ -760,7 +766,13 @@ class SpecializationsTest < Minitest::Test
 
       methods = Specializations::Runner.run(setup_project)
 
-      assert_equal({ '("posts")' => '"post"', '("categories")' => '"category"' }, methods.fetch("Mutation.apply"))
+      assert_equal(
+        {
+          '("posts")' => '"post"', '("posts") on singleton(::Mutation)' => '"post"',
+          '("categories")' => '"category"', '("categories") on singleton(::Mutation)' => '"category"'
+        },
+        methods.fetch("Mutation.apply")
+      )
     end
   end
 
@@ -861,14 +873,14 @@ class SpecializationsTest < Minitest::Test
 
       methods = Specializations::Runner.run(setup_project)
 
-      assert_equal({ '("posts")' => '"post"', '("news")' => '"news"', '("")' => '""' }, methods.fetch("Guarded.apply"))
-      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.both"))
-      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.either"))
-      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.cased"))
-      assert_equal(['"posts"'], methods.fetch("Guarded.nilable").values)
-      assert_equal(['"posts"'], methods.fetch("Guarded.compared").values)
-      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.only"))
-      assert_equal({ '("posts")' => '"posts"' }, methods.fetch("Guarded.lambdas"))
+      assert_equal({ '("posts")' => '"post"', '("news")' => '"news"', '("")' => '""' }, unkeyed(methods.fetch("Guarded.apply")))
+      assert_equal({ '("posts")' => '"posts"' }, unkeyed(methods.fetch("Guarded.both")))
+      assert_equal({ '("posts")' => '"posts"' }, unkeyed(methods.fetch("Guarded.either")))
+      assert_equal({ '("posts")' => '"posts"' }, unkeyed(methods.fetch("Guarded.cased")))
+      assert_equal(['"posts"'], unkeyed(methods.fetch("Guarded.nilable")).values)
+      assert_equal(['"posts"'], unkeyed(methods.fetch("Guarded.compared")).values)
+      assert_equal({ '("posts")' => '"posts"' }, unkeyed(methods.fetch("Guarded.only")))
+      assert_equal({ '("posts")' => '"posts"' }, unkeyed(methods.fetch("Guarded.lambdas")))
     end
   end
 
@@ -961,7 +973,7 @@ class SpecializationsTest < Minitest::Test
         store.methods.fetch("Example::Foo#call").fetch("(flag_name: true)")
       )
 
-      runner.write({})
+      Specializations::Runner.new(project).write({})
       refute_predicate runner.output_path, :file?
     end
   end

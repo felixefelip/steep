@@ -163,7 +163,7 @@ module Steep
           writable = entries.select { |argument_key, _| Arguments.persistable_key?(argument_key) }
           (methods[key] ||= {}).merge!(writable.transform_values(&:to_s)) unless writable.empty?
         end
-        @declarations.merge!(call_site_unions(context, store(found), found, baselines, callees))
+        @declarations.merge!(call_site_unions(context, store(found), found, baselines, callees, definitions))
 
         harvest_evals(context, store(found), locations, definitions, writers)
       end
@@ -511,21 +511,37 @@ module Steep
       # The union of what each call returned, for each method in `found` whose
       # every call is answered. Read under the settled findings, which is what
       # the calls pass once every inner call has specialized.
-      def call_site_unions(context, store, found, baselines, callees)
-        keys = found.keys.to_set
-        answers = Hash.new { |hash, key| hash[key] = [] } #: Hash[String, Array[AST::Types::t?]]
+      def call_site_unions(context, store, found, baselines, callees, definitions)
+        reader = CallSiteUnions::Reader.new(
+          store: store, factory: context.subtyping.factory, definitions: definitions,
+          sites: call_site_reader(context, store, callees), check: body_checker(context, store, definitions)
+        )
 
-        affected_paths(callees, keys).each do |path|
-          typing = type_check(context, store, context.sources.fetch(path), {})
-          CallSiteUnions.each_answer(typing, keys, store, context.subtyping.factory) { |key, type| answers[key] << type }
-        end
-
-        answers.filter_map do |key, types|
-          next if types.include?(nil)
-
-          union = AST::Types::Union.build(types: types)
+        found.each_key.filter_map do |key|
+          union = reader.union(key) or next
           [key, union.to_s] unless union.to_s == baselines[key]
         end.to_h
+      end
+
+      def call_site_reader(context, store, callees)
+        by_path = Hash.new do |hash, path|
+          sites = Hash.new { |by_key, key| by_key[key] = [] } #: Hash[String, Array[untyped]]
+          typing = type_check(context, store, context.sources.fetch(path), {})
+          Collector.each_call_site(typing, every_call: true) { |key, arguments, node| sites[key] << [path, node, arguments] }
+          hash[path] = sites
+        end
+
+        ->(key) { affected_paths(callees, Set[key]).flat_map { |path| by_path[path].fetch(key, []) } }
+      end
+
+      def body_checker(context, store, definitions)
+        checked = {} #: Hash[[String, Arguments], Typing]
+        lambda do |key, arguments|
+          checked[[key, arguments]] ||= begin
+            path, def_node = definitions.fetch(key)
+            type_check(context, store, context.sources.fetch(path), { node_key(path, def_node) => arguments })
+          end
+        end
       end
 
       # The methods whose entries this generation changed.

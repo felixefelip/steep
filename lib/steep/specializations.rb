@@ -33,12 +33,12 @@ module Steep
 
       # nil where `self` may be any subclass: in a class method checked under
       # its declaration rather than for one call site.
-      # The class a call is specialized for: the one an inherited singleton
-      # method runs on (`Arguments.inherited_self`), where its body may observe
+      # The class a call is specialized for: the one a singleton method runs
+      # on (`Arguments.receiver_self`), where its body may observe
       # which one that is, or reaches an ivar of the class object, which is
       # that class's own (`ClassStates.reach`).
       def keyed_self(constr, call)
-        receiver = Arguments.inherited_self(call, exact_self(constr)) or return nil
+        receiver = Arguments.receiver_self(call, exact_self(constr)) or return nil
         reach = ObjectStates::ClassStates.reach(constr, call)
         receiver if reach.observes_self || !reach.ivars.empty?
       end
@@ -156,19 +156,22 @@ module Steep
         new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states, self_type: self_type, block: block)
       end
 
+      # The class a call's receiver is, where it names exactly one:
+      #
       #   class Base
       #     def self.generated_methods = const_set(:GeneratedMethods, Module.new)
       #   end
       #
       #   Widget.generated_methods   # Widget::GeneratedMethods, not Base's
-      def self.inherited_self(call, exact_self)
+      #   Base.generated_methods     # Base::GeneratedMethods
+      def self.receiver_self(call, exact_self)
         return nil unless call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.size == 1
 
         receiver = call.receiver_type
         receiver = exact_self if receiver.is_a?(AST::Types::Self)
         return nil unless receiver.is_a?(AST::Types::Name::Singleton)
 
-        receiver if call.method_decls.first.method_name.type_name != receiver.name
+        receiver
       end
 
       def self.dispatched?(node, typing)
@@ -302,7 +305,7 @@ module Steep
       # arguments from two classes run the body twice.
       #
       # It is part of `key` too, so a return recorded under it is read back only
-      # by a call on that class (`inherited_self`).
+      # by a call on that class (`receiver_self`).
       attr_reader :self_type
 
       # The ivars of the receiver whose contents the caller knew
