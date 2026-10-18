@@ -113,7 +113,9 @@ module Steep
 
       def type_case_select: (AST::Types::t `type`, RBS::TypeName klass) -> [AST::Types::t?, AST::Types::t?]
 
-      def type_case_select0: (AST::Types::t `type`, RBS::TypeName klass) -> [Array[AST::Types::t], Array[AST::Types::t]]
+      def type_case_select0: (AST::Types::t `type`, AST::Types::t instance_type) -> [Array[AST::Types::t], Array[AST::Types::t]]
+
+      def includable?: (*AST::Types::t types) -> bool
 
       def try_convert: (AST::Types::t, Symbol) -> AST::Types::t?
 

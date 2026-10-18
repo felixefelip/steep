@@ -100,7 +100,7 @@ module Steep
           owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
           ivar = body&.memoized_hash or return
           return unless written_only_by?(constr, singleton, ivar, owner, call.method_name)
-          return unless HashMutation.confined?(constr.constructor_bindings, constr.literal_method_registry, [call.method_name, ivar])
+          return unless HashMutation.confined?(constr, singleton, [call.method_name, ivar])
 
           ivar
         end
@@ -297,7 +297,7 @@ module Steep
           instance = ObjectStates.state_in(instance)&.back_type || instance
           return unless ivar && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
           return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, call.method_name)
-          return unless [call.method_name, ivar].all? { |used| confined?(constr, instance, used) }
+          return unless [call.method_name, ivar].all? { |used| confined?(constr, singleton, instance, used) }
           return unless wrappers.all? { |name| Tap.resolves?(constr, instance, name) }
 
           [ivar, instance, wrappers]
@@ -318,8 +318,8 @@ module Steep
           false
         end
 
-        def confined?(constr, instance, name)
-          constr.constructor_bindings.uses_of(name).all? do |use|
+        def confined?(constr, singleton, instance, name)
+          Specializations::Receivers.uses_on(constr, name, singleton).all? do |use|
             next false if use.kind == :escape
             next constr.constructor_bindings.replayed_everywhere?(use.called) if use.kind == :yielded
 
@@ -373,7 +373,7 @@ module Steep
             end
           end
 
-          reading_uses?(constr, [ivar, *readers].flat_map { |name| registry.uses_of(name) })
+          reading_uses?(constr, [ivar, *readers].flat_map { |name| Specializations::Receivers.uses_on(constr, name, instance) })
         rescue RBS::BaseError
           false
         end

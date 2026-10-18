@@ -630,15 +630,10 @@ module Steep
         [baselines, tuples, definitions, callees]
       end
 
-      # A site read by two targets keeps what both may type it as.
       def record_receivers(typing, source)
         return unless typing && source.node
 
-        Receivers.collect(typing, source.node, @project.constructor_binding_registry.used_names).each do |site, classes|
-          @unknown_receivers << site unless classes
-          @receivers[site] = (@receivers.fetch(site, []) | classes) if classes
-        end
-        @receivers.reject! { |site, _| @unknown_receivers.include?(site) }
+        Receivers.record(@receivers, @unknown_receivers, Receivers.collect(typing, source.node, @project.constructor_binding_registry.used_names))
       end
 
       # One round per tuple position, so a method with two tuples costs two

@@ -722,8 +722,8 @@ module Steep
         end
 
         declarations = ((raw && raw["declarations"]) || {}).select { |key, type| key.is_a?(String) && type.is_a?(String) }
-        receivers = ((raw && raw["receivers"]) || {}).filter_map do |site, classes|
-          [File.expand_path(site, base_dir.to_s), classes] if site.is_a?(String) && classes.is_a?(Array) && classes.all?(String)
+        receivers = ((raw && raw["receivers"]) || {}).filter_map do |site, types|
+          [File.expand_path(site, base_dir.to_s), types] if site.is_a?(String) && types.is_a?(Array) && types.all?(String)
         end.to_h
 
         new(methods: methods, source: source, declarations: declarations, receivers: receivers)
@@ -739,8 +739,8 @@ module Steep
       # (`CallSiteUnions`), as RBS.
       # `definitions`: the methods the project defines in source, in a run that
       # read the source (`Overrides`).
-      # `receivers`: the classes the receiver of each call naming a reader may
-      # be (`Receivers`), by site.
+      # `receivers`: the types the receiver of each call naming a reader was
+      # given (`Receivers`), as RBS, by site.
       def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, definitions: Set[], receivers:)
         @methods = methods
         @receivers = receivers
@@ -765,8 +765,9 @@ module Steep
         @exits.dig(method_key, arguments.key) || @demand&.call(self, method_key, arguments, in_checked_body)
       end
 
-      def receiver_classes(site)
-        @receivers[site]
+      def receiver_type(site, factory:)
+        types = @receivers[site] or return nil
+        AST::Types::Union.build(types: types.map { |raw| parse(site, raw, factory: factory) or return nil })
       end
 
       def class_exit(name, ivar)

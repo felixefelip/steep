@@ -140,12 +140,12 @@ module Steep
 
             bodies.each do |body|
               return false unless body
-              next if body.returns == ivar && reading_uses?(constr, instance, name)
+              next if body.returns == ivar && reading_uses?(constr, Specializations::Receivers.uses_on(constr, name, instance), name)
               return false if body.returns == ivar || body.handed.include?(ivar) || body.writes.include?(ivar)
 
               own = body.ivar_uses.fetch(ivar, [])
               return false unless own.all? { |use| use.kind != :yielded && use_within?(literal_methods, use, own_calls) }
-              return false if body.exposes_self && !own.all? { |use| reading_use?(constr, instance, use) }
+              return false if body.exposes_self && !own.all? { |use| reading_use?(constr, use) }
             end
           end
         end
@@ -163,10 +163,10 @@ module Steep
         watched_keys.select { |key| key.start_with?(prefix) }
       end
 
-      # Whether every use the project makes of `names`, a memo of a hash and
-      # its ivar, only reads the hash or stores into it.
-      def confined?(constructor_bindings, literal_methods, names)
-        names.all? { |name| constructor_bindings.uses_of(name).all? { |use| confined_use?(literal_methods, use) } }
+      # Whether every use the project makes of `names`, a memo of a hash on
+      # `singleton` and its ivar, only reads the hash or stores into it.
+      def confined?(constr, singleton, names)
+        names.all? { |name| Specializations::Receivers.uses_on(constr, name, singleton).all? { |use| confined_use?(constr.literal_method_registry, use) } }
       end
 
       private
@@ -177,26 +177,19 @@ module Steep
 
       # What a block is handed out of a hash a state follows is a value nothing
       # can change the class of (`record_value?`).
-      def reading_use?(constr, instance, use, forwarders = Set[])
-        return true if elsewhere?(constr, instance, use)
-        return reading_uses?(constr, instance, use.forwarded_by, forwarders) if use.forwarded_by
+      def reading_use?(constr, use, forwarders = Set[])
+        return reading_uses?(constr, constr.constructor_bindings.uses_of(use.forwarded_by), use.forwarded_by, forwarders) if use.forwarded_by
 
         use.kind != :yielded && use_within?(constr.literal_method_registry, use, READS, elements: true)
       end
 
-      # A method that answers what a reader does is a reader too. One already
-      # being checked has its other uses checked there.
-      def reading_uses?(constr, instance, name, forwarders = Set[])
+      # A method that answers what a reader does is a reader too, whatever
+      # class it is on. One already being checked has its other uses checked
+      # there.
+      def reading_uses?(constr, uses, name, forwarders = Set[])
         return true if forwarders.include?(name)
 
-        constr.constructor_bindings.uses_of(name).all? { |use| reading_use?(constr, instance, use, forwarders | [name]) }
-      end
-
-      # Whether the checker typed the use's receiver as something no instance
-      # of `instance`'s class can be.
-      def elsewhere?(constr, instance, use)
-        classes = use.at && constr.specializations.receiver_classes(use.at) or return false
-        !Specializations::Receivers.may_be?(constr.checker.factory.definition_builder, classes, instance.name)
+        uses.all? { |use| reading_use?(constr, use, forwarders | [name]) }
       end
 
       def use_within?(literal_methods, use, allowed, elements: false)

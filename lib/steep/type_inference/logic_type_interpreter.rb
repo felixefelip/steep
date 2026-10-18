@@ -843,7 +843,7 @@ module Steep
       end
 
       def type_case_select(type, klass)
-        truth_types, false_types = type_case_select0(type, klass)
+        truth_types, false_types = type_case_select0(type, factory.instance_type(klass))
 
         [
           truth_types.empty? ? nil : AST::Types::Union.build(types: truth_types),
@@ -851,16 +851,14 @@ module Steep
         ]
       end
 
-      def type_case_select0(type, klass)
-        instance_type = factory.instance_type(klass)
-
+      def type_case_select0(type, instance_type)
         case type
         when AST::Types::Union
           truthy_types = [] # :Array[AST::Types::t]
           falsy_types = [] #: Array[AST::Types::t]
 
           type.types.each do |ty|
-            truths, falses = type_case_select0(ty, klass)
+            truths, falses = type_case_select0(ty, instance_type)
 
             if truths.empty?
               falsy_types.push(ty)
@@ -877,16 +875,10 @@ module Steep
           if ty == type
             [[type], [type]]
           else
-            type_case_select0(ty, klass)
+            type_case_select0(ty, instance_type)
           end
 
-        when AST::Types::Any, AST::Types::Top, AST::Types::Var
-          [
-            [instance_type],
-            [type]
-          ]
-
-        when AST::Types::Name::Interface
+        when AST::Types::Any, AST::Types::Top, AST::Types::Var, AST::Types::Name::Interface
           [
             [instance_type],
             [type]
@@ -906,6 +898,9 @@ module Steep
           # 2. T <: K           (example: T = Integer, K = Numeric)
           # 3. K <: T           (example: T = Numeric, K = Integer)
           # 4. none of the above (example: T = String, K = Integer)
+          #
+          # In 4, where one of them is a module, a class including it may be
+          # both (example: T = Comparable, K = Pathname).
 
           if subtyping?(sub_type: type, super_type: instance_type)
             # 1 or 2. Satisfies the condition, no narrowing because `type` is already more specific than/equals to `instance_type`
@@ -920,6 +915,11 @@ module Steep
                 [instance_type],
                 [type]
               ]
+            elsif includable?(type, instance_type)
+              [
+                [AST::Types::Intersection.build(types: [type, instance_type])],
+                [type]
+              ]
             else
               # 4
               [
@@ -930,6 +930,8 @@ module Steep
           end
         end
       end
+
+      def includable?(*types) = types.all?(AST::Types::Name::Instance) && types.any? { |type| factory.module_name?(type.name) }
 
       def no_subtyping?(sub_type:, super_type:)
         relation = Subtyping::Relation.new(sub_type: sub_type, super_type: super_type)

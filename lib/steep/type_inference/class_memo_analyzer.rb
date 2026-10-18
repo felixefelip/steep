@@ -180,7 +180,7 @@ module Steep
         return unless @names.include?(name)
 
         uses = value_uses(node, parent, in_statement) || [ESCAPE]
-        at = node.type == :send && node.children[0] && node.children[0].type != :self && ClassMemoAnalyzer.site(node)
+        at = %i[send csend].include?(node.type) && node.children[0] && node.children[0].type != :self && ClassMemoAnalyzer.site(node)
         @uses[name].concat(at ? uses.map { |use| use.dup.tap { |sited| sited.at = at } } : uses)
       end
 

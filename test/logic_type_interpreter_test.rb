@@ -577,6 +577,24 @@ end
     end
   end
 
+  def test_type_case_select_module
+    with_checker(<<-RBS) do |checker|
+module TestTagged end
+class TestPlain end
+    RBS
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: nil, config: config)
+
+      assert_equal [parse_type("::TestTagged & ::TestPlain"), parse_type("::TestTagged")],
+                   interpreter.type_case_select(parse_type("::TestTagged"), RBS::TypeName.parse("::TestPlain"))
+
+      assert_equal [parse_type("::TestPlain & ::TestTagged"), parse_type("::TestPlain")],
+                   interpreter.type_case_select(parse_type("::TestPlain"), RBS::TypeName.parse("::TestTagged"))
+
+      assert_equal [nil, parse_type("::String")],
+                   interpreter.type_case_select(parse_type("::String"), RBS::TypeName.parse("::TestPlain"))
+    end
+  end
+
   def test_type_case_select_alias
     with_checker(<<-RBS) do |checker|
 class M end

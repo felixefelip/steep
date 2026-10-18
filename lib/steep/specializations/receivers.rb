@@ -1,65 +1,66 @@
 module Steep
   module Specializations
-    # The classes the receiver of each call naming a reader may be, as the
-    # checker typed it, by the call's site (`ClassMemoAnalyzer.site`). A use of
-    # a reader whose receiver can be no instance of a class says nothing of
-    # the hash an instance of it keeps (felixefelip/steep#300).
+    # The type the checker gave the receiver of each call naming a reader, by
+    # the call's site (`ClassMemoAnalyzer.site`). A use of a reader whose
+    # receiver can be no value of a type says nothing of the object of that
+    # type.
     module Receivers
-      SINGLETON = /\Asingleton\((.+)\)\z/
+      SENDS = %i[send csend].freeze
 
       class << self
-        # Each call in `node` naming one of `names` on a receiver it can type.
-        # A site whose receiver it cannot is nil: none of its classes is known.
+        # Each call in `node` naming one of `names` on an explicit receiver,
+        # with the receiver's type as RBS. A site whose receiver the checker
+        # did not type, or typed relative to where it is, is nil.
         def collect(typing, node, names, found = {})
           return found unless node.is_a?(::Parser::AST::Node)
 
           receiver = node.children[0]
-          if node.type == :send && names.include?(node.children[1]) && receiver.is_a?(::Parser::AST::Node) && receiver.type != :self
+          if SENDS.include?(node.type) && names.include?(node.children[1]) && receiver.is_a?(::Parser::AST::Node) && receiver.type != :self
             site = TypeInference::ClassMemoAnalyzer.site(node)
-            found[site] = typing.has_type?(receiver) ? classes(typing.type_of(node: receiver)) : nil if site
+            found[site] = typing.has_type?(receiver) ? written(typing.type_of(node: receiver)) : nil if site
           end
           node.children.each { |child| collect(typing, child, names, found) }
           found
         end
 
-        def classes(type)
-          case type
-          when AST::Types::Name::Instance then [type.name.to_s]
-          when AST::Types::Name::Singleton then ["singleton(#{type.name})"]
-          when AST::Types::ObjectState then classes(type.back_type)
-          when AST::Types::Union then type.types.flat_map { |member| classes(member) or return nil }.uniq
-          when AST::Types::Nil then ["::NilClass"]
-          when AST::Types::Boolean then ["::TrueClass", "::FalseClass"]
-          when AST::Types::Record then ["::Hash"]
-          when AST::Types::Tuple then ["::Array"]
-          when AST::Types::Literal then ["::#{type.value.class}"]
+        # Adds what `collect` found to `receivers`: a site read by two targets
+        # keeps what both typed it as, and one a target could not type is
+        # dropped for good (`unknown`).
+        def record(receivers, unknown, found)
+          found.each do |site, type|
+            if type.nil? || unknown.include?(site)
+              unknown << site
+              receivers.delete(site)
+            else
+              receivers[site] = receivers.fetch(site, []) | [type]
+            end
           end
         end
 
-        # Whether a receiver of one of `classes` may be an instance of
-        # `instance_name`: one of its ancestors, or of its descendants. A
-        # module may be included anywhere.
-        def may_be?(builder, classes, instance_name)
-          classes.any? do |klass|
-            if (singleton = klass[SINGLETON, 1])
-              ancestor_names(builder.build_singleton(RBS::TypeName.parse(singleton))).include?(instance_name)
-            else
-              name = RBS::TypeName.parse(klass)
-              name == instance_name || !builder.env.class_decl?(name) ||
-                ancestor_names(builder.build_instance(name)).include?(instance_name) ||
-                ancestor_names(builder.build_instance(instance_name)).include?(name)
-            end
-          end
-        rescue RBS::BaseError
-          true
+        # The uses of `name` whose receiver may be a value of `target`.
+        def uses_on(constr, name, target)
+          constr.constructor_bindings.uses_of(name).reject { |use| elsewhere?(constr, use, target) }
         end
 
         private
 
-        # A class object's ancestors name its own class, `Reflection` for
-        # `singleton(Reflection)`, as singleton ancestors.
-        def ancestor_names(definition)
-          definition.ancestors.ancestors.filter_map { |ancestor| ancestor.name if ancestor.is_a?(RBS::Definition::Ancestor::Instance) }
+        def written(type)
+          type = Specializations.rbs_writable(readable(type))
+          type.to_s if type.free_variables.empty?
+        end
+
+        def readable(type)
+          type.is_a?(AST::Types::Logic::Base) ? AST::Builtin.bool_type : type.map_type { |child| readable(child) }
+        end
+
+        def elsewhere?(constr, use, target)
+          factory = constr.checker.factory
+          type = use.at && constr.specializations.receiver_type(use.at, factory: factory) or return false
+          target = factory.instance_type(target.name) if target.is_a?(AST::Types::Name::Instance)
+          interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: constr.checker, typing: constr.typing, config: constr.builder_config)
+          interpreter.type_case_select0(type, target)[0].empty?
+        rescue RBS::BaseError
+          false
         end
       end
     end

@@ -26,7 +26,7 @@ module Steep
           "methods" => @methods.keys.sort.to_h { |key| [key, @methods[key].sort.to_h] }
         } #: Hash[String, untyped]
         payload["declarations"] = @declarations.sort.to_h unless @declarations.empty?
-        payload["receivers"] = @receivers.sort.to_h { |site, classes| [site, classes.sort] } unless @receivers.empty?
+        payload["receivers"] = @receivers.sort.to_h { |site, types| [site, types.sort] } unless @receivers.empty?
         payload
       end
     end
