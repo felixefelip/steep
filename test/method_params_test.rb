@@ -25,7 +25,7 @@ class MethodParamsTest < Minitest::Test
       node = def_node("def foo() end")
       method_type = parse_method_type("() -> void")
 
-      params = MethodParams.build(node: node, method_type: method_type)
+      params = MethodParams.build(node: node, method_type: method_type, keyword_rest: nil)
 
       assert_equal 0, params.size
     end
@@ -35,7 +35,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(x); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -46,7 +46,7 @@ class MethodParamsTest < Minitest::Test
         assert_empty params.errors
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -59,7 +59,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(*Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(*Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -72,7 +72,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -91,7 +91,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(x = 1); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -104,7 +104,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -115,7 +115,7 @@ class MethodParamsTest < Minitest::Test
         assert_empty params.errors
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(*Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(*Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -128,7 +128,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -147,7 +147,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(*x); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -161,7 +161,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -176,7 +176,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(*Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(*Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -187,7 +187,7 @@ class MethodParamsTest < Minitest::Test
         assert_equal parse_type("::Array[Integer]"), params[:x].var_type
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -204,7 +204,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 0, params.size
 
         assert_any!(params.errors, size: 1) do |error|
@@ -212,7 +212,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 0, params.size
 
         assert_any!(params.errors, size: 1) do |error|
@@ -220,7 +220,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(*Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(*Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 0, params.size
 
         assert_any!(params.errors, size: 1) do |error|
@@ -228,7 +228,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 0, params.size
         assert_empty params.errors
       end
@@ -239,7 +239,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(foo:); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(foo: String) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(foo: String) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -250,7 +250,7 @@ class MethodParamsTest < Minitest::Test
         assert_empty params.errors
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?foo: String) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?foo: String) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -263,7 +263,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(**String) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(**String) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -276,7 +276,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -295,7 +295,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(foo: ''); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(foo: String) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(foo: String) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -308,7 +308,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?foo: String) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?foo: String) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -319,7 +319,7 @@ class MethodParamsTest < Minitest::Test
         assert_empty params.errors
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(**String) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(**String) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -332,7 +332,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -351,7 +351,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(**foo); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(foo: String, bar: Integer, **Symbol) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(foo: String, bar: Integer, **Symbol) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -370,7 +370,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?foo: String) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?foo: String) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -387,7 +387,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(**Symbol) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(**Symbol) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -404,7 +404,7 @@ class MethodParamsTest < Minitest::Test
         assert_empty(params.errors)
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -425,7 +425,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(foo: String) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(foo: String) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 0, params.size
 
         assert_any!(params.errors, size: 1) do |error|
@@ -433,7 +433,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?foo: Symbol) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?foo: Symbol) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 0, params.size
 
         assert_any!(params.errors, size: 1) do |error|
@@ -441,7 +441,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(**Symbol) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(**Symbol) -> void"), keyword_rest: nil).tap do |params|
         assert_equal 0, params.size
 
         assert_any!(params.errors, size: 1) do |error|
@@ -449,7 +449,7 @@ class MethodParamsTest < Minitest::Test
         end
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 0, params.size
         assert_empty params.errors
       end
@@ -460,7 +460,7 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(&block); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("() { () -> void } -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() { () -> void } -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -479,7 +479,7 @@ class MethodParamsTest < Minitest::Test
         assert_empty params.errors
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() { () [self: self] -> void } -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() { () [self: self] -> void } -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -498,7 +498,7 @@ class MethodParamsTest < Minitest::Test
         assert_empty params.errors
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() ?{ () -> void } -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() ?{ () -> void } -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -517,7 +517,7 @@ class MethodParamsTest < Minitest::Test
         assert_empty params.errors
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() -> void"), keyword_rest: nil).tap do |params|
         assert_equal 1, params.size
 
         assert_equal(
@@ -542,22 +542,22 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(...); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal "(Integer)", params.forward_arg_type[0].to_s
         assert_nil params.forward_arg_type[1]
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(A, ?B, *C, x: D, ?y: E, **F) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(A, ?B, *C, x: D, ?y: E, **F) -> void"), keyword_rest: nil).tap do |params|
         assert_equal "(A, ?B, *C, x: D, ?y: E, **F)", params.forward_arg_type[0].to_s
         assert_nil params.forward_arg_type[1]
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("() { () -> void } -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("() { () -> void } -> void"), keyword_rest: nil).tap do |params|
         assert_equal "()", params.forward_arg_type[0].to_s
         assert_equal "{ () -> void }", params.forward_arg_type[1].to_s
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(?) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(?) -> void"), keyword_rest: nil).tap do |params|
         assert_equal true, params.forward_arg_type
       end
     end
@@ -567,17 +567,17 @@ class MethodParamsTest < Minitest::Test
     with_factory do
       node = def_node("def foo(x, ...); end")
 
-      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(Integer) -> void"), keyword_rest: nil).tap do |params|
         assert_equal "()", params.forward_arg_type[0].to_s
         assert_nil params.forward_arg_type[1]
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(A, ?B, *C, x: D, ?y: E, **F) -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(A, ?B, *C, x: D, ?y: E, **F) -> void"), keyword_rest: nil).tap do |params|
         assert_equal "(?B, *C, x: D, ?y: E, **F)", params.forward_arg_type[0].to_s
         assert_nil params.forward_arg_type[1]
       end
 
-      MethodParams.build(node: node, method_type: parse_method_type("(untyped) { () -> void } -> void")).tap do |params|
+      MethodParams.build(node: node, method_type: parse_method_type("(untyped) { () -> void } -> void"), keyword_rest: nil).tap do |params|
         assert_equal "()", params.forward_arg_type[0].to_s
         assert_equal "{ () -> void }", params.forward_arg_type[1].to_s
       end

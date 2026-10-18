@@ -121,6 +121,12 @@ module Steep
     class Arguments
       attr_reader :positionals, :keywords
 
+      # What a keyword rest parameter collects at this call: the keywords no
+      # other parameter names, as the record they build — `{  }` where the
+      # call passes none, since the body then holds exactly that. nil where
+      # the method takes no keyword rest.
+      attr_reader :keyword_rest
+
       # The argument types of `node`, or nil when the call has a shape no tuple
       # describes: a splat, a block pass, a non-symbol keyword.
       #
@@ -132,7 +138,7 @@ module Steep
       # `receiver_ivars`: what the receiver's contents are known to be
       # (`receiver_ivars`), read off the call where it is recorded already and
       # off the checker where it is being typed.
-      def self.from_send(node, typing, receiver_ivars:, class_states:, self_type:, exact_self:)
+      def self.from_send(node, typing, call:, receiver_ivars:, class_states:, self_type:, exact_self:)
         block, node = node, node.children[0] if Accumulators::LAMBDA_BODIES.include?(node.type)
         _receiver, name, *args = node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
@@ -161,7 +167,16 @@ module Steep
           positionals << argument_type(arg, typing, exact_self)
         end
 
-        new(positionals: positionals, keywords: keywords, self_ivars: receiver_ivars, class_states: class_states, self_type: self_type, block: block)
+        new(positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, class_states: class_states, self_type: self_type, block: block)
+      end
+
+      def self.split_keyword_rest(call, keywords)
+        method_type = call.is_a?(TypeInference::MethodCall::Typed) ? call.actual_method_type : nil
+        params = method_type&.type&.params&.keyword_params
+        return { keywords: keywords } unless params&.rest
+
+        named, rest = keywords.partition { |name, _| params.requireds.key?(name) || params.optionals.key?(name) }.map(&:to_h)
+        { keywords: named, keyword_rest: AST::Types::Record.new(elements: rest, required_keys: rest.keys.to_set) }
       end
 
       # The class a call's receiver is, where it names exactly one:
@@ -229,7 +244,7 @@ module Steep
       # checker knows there.
       def self.at_call(node, typing, call, self_ivars:, class_states:, keyed_self:, exact_self:)
         from_send(
-          node, typing,
+          node, typing, call: call,
           receiver_ivars: receiver_ivars(call.receiver_type, self_ivars, class_states),
           class_states: callee_class_states(call, class_states),
           self_type: keyed_self, exact_self: exact_self
@@ -241,7 +256,7 @@ module Steep
       def self.recorded(node, typing)
         call = typing.call_of(node: node)
         from_send(
-          node, typing,
+          node, typing, call: call,
           receiver_ivars: recorded_receiver_ivars(node, typing),
           class_states: callee_class_states(call, typing.class_states_of_call(node: node)),
           self_type: typing.keyed_self_of_call(node: node), exact_self: typing.exact_self_of_call(node: node)
@@ -318,10 +333,11 @@ module Steep
         AST::Types::Record.new(elements: elements, required_keys: elements.keys.to_set)
       end
 
-      def initialize(positionals:, keywords:, self_ivars:, class_states:, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil)
+      def initialize(positionals:, keywords:, self_ivars:, class_states:, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil)
         @positionals = positionals
         @block = block
         @keywords = keywords
+        @keyword_rest = keyword_rest
         @positional_defaults = positional_defaults
         @keyword_defaults = keyword_defaults
         @self_type = self_type
@@ -381,6 +397,7 @@ module Steep
         Arguments.new(
           positionals: values.take(positionals.size),
           keywords: keywords.keys.zip(values.drop(positionals.size)).to_h,
+          keyword_rest: @keyword_rest,
           positional_defaults: @positional_defaults,
           keyword_defaults: @keyword_defaults,
           self_type: @self_type,
@@ -394,6 +411,7 @@ module Steep
         Arguments.new(
           positionals: @positionals,
           keywords: @keywords,
+          keyword_rest: @keyword_rest,
           positional_defaults: @positional_defaults,
           keyword_defaults: @keyword_defaults,
           self_type: self_type,
@@ -415,6 +433,7 @@ module Steep
         Arguments.new(
           positionals: @positionals.map { |type| type.subst(substitution) },
           keywords: @keywords.transform_values { |type| type.subst(substitution) },
+          keyword_rest: @keyword_rest&.subst(substitution),
           positional_defaults: @positional_defaults,
           keyword_defaults: @keyword_defaults,
           self_type: @self_type,
@@ -436,6 +455,7 @@ module Steep
         Arguments.new(
           positionals: @positionals,
           keywords: @keywords,
+          keyword_rest: @keyword_rest,
           positional_defaults: positionals,
           keyword_defaults: keywords,
           self_type: @self_type,
@@ -457,6 +477,7 @@ module Steep
       def arguments_key
         parts = positionals.map(&:to_s)
         parts.concat(keywords.keys.sort.map { |name| "#{name}: #{keywords[name]}" })
+        parts << "**#{keyword_rest}" if keyword_rest
         "(#{parts.join(", ")})"
       end
 
@@ -495,7 +516,7 @@ module Steep
       end
 
       def fixes_a_value?
-        positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
+        !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
       end
 
       def empty?
@@ -581,14 +602,14 @@ module Steep
       end
 
       def ==(other)
-        other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords &&
+        other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords && other.keyword_rest == keyword_rest &&
           other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states && other.block.equal?(block)
       end
 
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash ^ block.object_id.hash
+        positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash ^ block.object_id.hash
       end
 
       private
