@@ -163,10 +163,10 @@ module Steep
         watched_keys.select { |key| key.start_with?(prefix) }
       end
 
-      # Whether every use the project makes of `names`, a memo of a hash on
-      # `singleton` and its ivar, only reads the hash or stores into it.
-      def confined?(constr, singleton, names)
-        names.all? { |name| Specializations::Receivers.uses_on(constr, name, singleton).all? { |use| confined_use?(constr.literal_method_registry, use) } }
+      # Whether each of `uses`, of a memo of a hash and of its ivar, only
+      # reads the hash or stores into it.
+      def confined?(literal_methods, uses)
+        uses.all? { |use| confined_use?(literal_methods, use) }
       end
 
       private

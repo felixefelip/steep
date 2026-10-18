@@ -100,7 +100,8 @@ module Steep
           owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
           ivar = body&.memoized_hash or return
           return unless written_only_by?(constr, singleton, ivar, owner, call.method_name)
-          return unless HashMutation.confined?(constr, singleton, [call.method_name, ivar])
+          uses = [call.method_name, ivar].flat_map { |name| Specializations::Receivers.uses_on(constr, name, singleton) }
+          return unless HashMutation.confined?(constr.literal_method_registry, uses)
 
           ivar
         end
