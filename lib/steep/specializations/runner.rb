@@ -107,10 +107,11 @@ module Steep
       end
 
       def write(methods)
-        if methods.empty? && @declarations.empty? && @receivers.empty?
+        exits = @exits.transform_values { |by_key| by_key.transform_values { |exit| Specializations.sidecar_exit(exit) } }.reject { |_, by_key| by_key.empty? }
+        if methods.empty? && @declarations.empty? && @receivers.empty? && exits.empty?
           output_path.delete if output_path.file?
         else
-          Writer.write(output_path, methods, @declarations, @receivers.transform_keys { |site| @project.relative_path(Pathname(site)).to_s })
+          Writer.write(output_path, methods, @declarations, @receivers.transform_keys { |site| @project.relative_path(Pathname(site)).to_s }, exits)
         end
 
         if @evals.empty?

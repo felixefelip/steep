@@ -282,7 +282,7 @@ class CallSiteUnionsTest < Minitest::Test
   def test_the_sidecar_carries_the_declarations
     in_tmpdir do
       path = current_dir + "specializations.yml"
-      Steep::Specializations::Writer.write(path, {}, { "Tags.tag" => '("a!" | "b!")' }, {})
+      Steep::Specializations::Writer.write(path, {}, { "Tags.tag" => '("a!" | "b!")' }, {}, {})
       store = Steep::Specializations.load(current_dir, path: "specializations.yml")
 
       with_checker do |checker|

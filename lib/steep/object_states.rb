@@ -130,16 +130,15 @@ module Steep
       # a block; this covers a block, an untyped receiver and the correlated
       # paths.
       def after_call(constr, node:, method_name:, receiver:, receiver_type:, arguments:)
-        if receiver&.type == :lvar && holds_state?(receiver_type)
-          name = receiver.children[0]
-          constr = refine_local(constr, name, left(constr, receiver_type, constr.context.type_env[name], method_name, arguments, node))
+        if (variable = receiver && HeldIvar.variable(constr, receiver)) && holds_state?(receiver_type)
+          constr = HeldIvar.refine_variable(constr, receiver, left(constr, receiver_type, constr.context.type_env[variable], method_name, arguments, node))
         end
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver && on_self?(receiver)
         handed = ClassStates.handed_classes(constr, arguments)
         on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
         reaches_self = on_self || hands_self?(constr, arguments, handed)
         exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
-        constr = self_moved(constr, exit) if reaches_self
+        constr = HeldIvar.moved(self_moved(constr, exit), exit) if reaches_self
         unless !reaches_self && ClassMemos.builds_only?(constr, recorded_call(constr, node))
           constr = ClassMemos.after_class_call(constr, exit, (ClassStates.reach(constr, recorded_call(constr, node)).methods if reaches_self))
         end
@@ -223,16 +222,17 @@ module Steep
       def recorded_exit(constr, key, arguments)
         def_node = constr.method_context&.node
         in_checked_body = def_node ? !constr.specialization_arguments(def_node).nil? : false
-        constr.specializations.exit_ivars(key, arguments, in_checked_body: in_checked_body)
+        constr.specializations.exit_ivars(key, arguments, in_checked_body: in_checked_body, factory: constr.checker.factory)
       end
 
       # The type an ivar takes after an assignment, or nil to leave it at its
       # declaration: the value assigned where the declaration is a union (the
-      # branch it selects, felixefelip/steep#16) or where the env held a
-      # refined view — a state's contents are no longer what it holds.
+      # branch it selects, felixefelip/steep#16), where the value is a state,
+      # or where the env held a refined view — a state's contents are no
+      # longer what it holds.
       def assigned_ivar(current, declared_type, rhs_type, passed:)
         refined = declared_type && current != declared_type
-        return rhs_type if passed && (declared_type.is_a?(AST::Types::Union) || refined)
+        return rhs_type if passed && (declared_type.is_a?(AST::Types::Union) || refined || state_in(rhs_type))
 
         declared_type if refined
       end
@@ -270,13 +270,16 @@ module Steep
       end
 
       # A reader called on an object whose ivar is known, answering what the
-      # object holds. `call` unchanged for any other call.
+      # object holds. `call` unchanged for any other call. An object it holds
+      # comes out with what holds under any name: only `self`'s are followed
+      # (`HeldIvars`), and a second name for one would not be.
       def read(constr, call, receiver_type:, arguments:)
-        state = state_in(receiver_type) || EnteredSelf.state(constr, receiver_type, call)
+        state = (held = state_in(receiver_type)) || EnteredSelf.state(constr, receiver_type, call)
         return call unless state && arguments.empty?
 
         ivar = reader_ivar(constr, state, call)
         value = ivar && state.ivar_type(ivar) or return call
+        value = settled(constr, value) if held
         # The checker cannot bind a block's parameters to the elements of `[]`.
         return call if value.is_a?(AST::Types::Tuple) && value.types.empty?
         return call unless constr.check_relation(sub_type: value, super_type: call.return_type).success?
@@ -495,7 +498,7 @@ module Steep
       private
 
       def held_value?(constr, node)
-        constr.method_context&.held_locals&.held_value?(node) || false
+        constr.method_context&.held_locals&.held_value?(node) || HeldIvar.held_ivars(constr)&.held_value?(node) || false
       end
 
       def bound_values(constr, instance, bindings, arguments, followed:)
