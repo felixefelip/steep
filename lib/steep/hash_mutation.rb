@@ -22,13 +22,17 @@ module Steep
 
     STORES = Set["::Hash#[]=", "::Hash#store"].freeze
 
+    # What a local holding a record follows: a store, or `delete` of a key.
+    WRITES = (STORES | ["::Hash#delete"]).freeze
+
     class << self
       def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
-        ivar = held_ivar(constr, receiver, receiver_type) or return [receiver_type, constr]
-
         keys = hash_method_keys(constr, method_name, private: private)
         block = block_params || block_body
         return [receiver_type, constr] if !block && CollectionMutation.only?(constr, keys, READS)
+        return local_widened(constr, receiver, followed: !block && CollectionMutation.only?(constr, keys, WRITES)) if receiver&.type == :lvar
+
+        ivar = held_ivar(constr, receiver, receiver_type) or return [receiver_type, constr]
 
         declared = declared_hash(constr, ivar)
         return [declared, constr] if !block && CollectionMutation.only?(constr, keys, STORES)
@@ -37,8 +41,12 @@ module Steep
       end
 
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
-        ivar = held_ivar(constr, receiver, receiver_type)
         keys = hash_method_keys(constr, method_name, private: private)
+        if receiver&.type == :lvar && CollectionMutation.only?(constr, keys, WRITES)
+          return local_written(constr, node, receiver, receiver_type, keys, arguments, type: type)
+        end
+
+        ivar = held_ivar(constr, receiver, receiver_type)
         if CollectionMutation.only?(constr, keys, KEY_READ)
           read = read(constr, receiver_type, ivar, arguments) or return [type, constr]
           return [read, constr.add_typing(node, type: read).constr]
@@ -60,6 +68,21 @@ module Steep
           when :lvar then held_local_record(constr, argument)
           end
         record if record && held?(constr, instance, ivar, record)
+      end
+
+      # Vouches for each local handed to a call that holds a record the checker
+      # computed and follows: one nothing else names, in a body checked for
+      # one call's arguments. A record a local is only declared to hold says
+      # nothing of what the hash holds now (`Arguments.argument_type`).
+      def vouch_held_records(constr, arguments)
+        def_node = constr.method_context&.node
+        return unless def_node && constr.specialization_arguments(def_node)
+
+        arguments.each do |argument|
+          next unless argument.type == :lvar
+
+          record = held_local_record(constr, argument) and constr.typing.add_vouched(argument, record)
+        end
       end
 
       def held?(constr, instance, ivar, record)
@@ -112,6 +135,39 @@ module Steep
 
         names = allowed.select { |key| key.end_with?("##{use.called}") }
         !names.empty? && names.none? { |key| literal_methods.blocked?(key) }
+      end
+
+      # A call on a local holding a record, dispatched against a plain hash:
+      # one `local_written` follows leaves the local for it to move; any other
+      # leaves it the hash.
+      def local_widened(constr, receiver, followed:)
+        hash = AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type)
+        [hash, followed ? constr : ObjectStates.refine_local(constr, receiver.children[0], hash)]
+      end
+
+      # A literal-key write on a local holding a record moves the record; the
+      # call answers what `delete` removed, `nil` for a key the record did not
+      # hold. Any other write leaves the local the hash.
+      def local_written(constr, node, receiver, record, keys, arguments, type:)
+        moved, answer =
+          if CollectionMutation.only?(constr, keys, STORES)
+            [stored(constr, record, arguments), nil]
+          else
+            deleted(constr, record, arguments)
+          end
+        hash = AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type)
+        constr = ObjectStates.refine_local(constr, receiver.children[0], moved || hash)
+        answer ? [answer, constr.add_typing(node, type: answer).constr] : [type, constr]
+      end
+
+      def deleted(constr, record, arguments)
+        key, = CollectionMutation.operand_types(constr, arguments)
+        return [nil, nil] unless arguments.size == 1 && literal_key?(key)
+
+        elements = record.elements.except(key.value)
+        answer = record.elements.fetch(key.value) { AST::Builtin.nil_type }
+        answer = AST::Types::Union.build(types: [answer, AST::Builtin.nil_type]) unless record.required_keys.include?(key.value) || answer.is_a?(AST::Types::Nil)
+        [AST::Types::Record.new(elements: elements, required_keys: record.required_keys - [key.value]), answer]
       end
 
       def held_local_record(constr, node)

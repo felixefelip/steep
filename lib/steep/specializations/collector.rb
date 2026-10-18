@@ -5,11 +5,23 @@ module Steep
     # project defines elsewhere.
     class Collector
       # `{ "Foo#bar" => def node }` for every method defined in `source`.
+      # A class's `initialize` is also keyed as its `.new`, which runs it: what
+      # the object holds once built is that body's to say
+      # (`ObjectStates::Constructed`).
       def self.definitions(source)
         result = {} #: Hash[String, Parser::AST::Node]
         node = source.node
         walk_defs(node, [], source) { |key, def_node| result[key] = def_node } if node
+        result.to_a.each { |key, def_node| result[constructor_key(key)] ||= def_node if key.end_with?("#initialize") }
         result
+      end
+
+      def self.constructor_key(initializer_key)
+        "#{initializer_key.delete_suffix("#initialize")}.new"
+      end
+
+      def self.constructor?(key, def_node)
+        def_node.type == :def && def_node.children[0] == :initialize && key.end_with?(".new")
       end
 
       # `{ "Foo#bar" => Set[Arguments] }` for the call sites in `typing` that

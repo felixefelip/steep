@@ -213,7 +213,7 @@ module Steep
           active.each do |key, arguments|
             path, def_node = definitions.fetch(key)
             record_exit(key, arguments, typings[path], def_node)
-            type = body_type(typings[path], def_node) or next
+            type = returned_type(typings[path], def_node, key) or next
             next if type.to_s == baselines[key]
 
             (found[key] ||= {})[arguments.key] = type
@@ -522,6 +522,8 @@ module Steep
         )
 
         found.each_key.filter_map do |key|
+          next if Collector.constructor?(key, definitions.fetch(key)[1])
+
           union = reader.union(key) or next
           union = Specializations.rbs_writable(union)
           [key, union.to_s] unless union.to_s == baselines[key]
@@ -676,6 +678,10 @@ module Steep
           return_forwarding: @project.return_forwarding_registry,
           return_alias: @project.return_alias_registry
         )
+      end
+
+      def returned_type(typing, def_node, key)
+        Collector.constructor?(key, def_node) ? ObjectStates::Constructed.state(typing, def_node, key) : body_type(typing, def_node)
       end
 
       def body_type(typing, def_node)
