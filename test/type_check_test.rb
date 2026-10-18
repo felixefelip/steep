@@ -2413,6 +2413,46 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  def test_a_record_read_under_a_literal_key_it_does_not_hold_is_nil
+    run_type_check_test(
+      signatures: {
+        "records.rbs" => <<~RBS
+          class Records
+            def self.absent: ({ a: 1 } options) -> untyped
+            def self.empty: ({ } options) -> untyped
+            def self.present: ({ a: 1 } options) -> untyped
+            def self.optional: ({ ?a: 1 } options) -> untyped
+            def self.open_key: ({ a: 1 } options, Symbol key) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "records.rb" => <<~'RUBY'
+          class Records
+            def self.absent(options) = options[:b]
+            def self.empty(options) = options[:b]
+            def self.present(options) = options[:a]
+            def self.optional(options) = options[:a]
+            def self.open_key(options, key) = options[key]
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("records.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :defs && node.children[3]
+
+        actual[node.children[1].to_s] = typing.type_of(node: node.children[3]).to_s
+      end
+
+      assert_equal(
+        { "absent" => "nil", "empty" => "nil", "present" => "1", "optional" => "(1 | nil)", "open_key" => "(1 | nil)" },
+        actual
+      )
+    end
+  end
+
   def test_const_get_of_a_literal_is_the_constant_it_names
     run_type_check_test(
       signatures: {

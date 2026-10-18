@@ -37,14 +37,13 @@ module Steep
       end
 
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
-        ivar = held_ivar(constr, receiver, receiver_type) or return [type, constr]
-
+        ivar = held_ivar(constr, receiver, receiver_type)
         keys = hash_method_keys(constr, method_name, private: private)
         if CollectionMutation.only?(constr, keys, KEY_READ)
           read = read(constr, receiver_type, ivar, arguments) or return [type, constr]
           return [read, constr.add_typing(node, type: read).constr]
         end
-        return [type, constr] unless CollectionMutation.only?(constr, keys, STORES)
+        return [type, constr] unless ivar && CollectionMutation.only?(constr, keys, STORES)
 
         stored = stored(constr, receiver_type, arguments) || declared_hash(constr, ivar)
         [type, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, stored)]
@@ -72,11 +71,14 @@ module Steep
       end
 
       # What `[]` answers where the record cannot: `nil` under a literal key it
-      # does not hold, and the declared value under a key that is no literal.
+      # does not hold, on any record, and, on a memo's, the declared value under
+      # a key that is no literal.
       def read(constr, record, ivar, arguments)
         key, = CollectionMutation.operand_types(constr, arguments)
-        return if literal_key?(key) && record.elements.key?(key.value)
-        return AST::Builtin.nil_type if literal_key?(key)
+        if arguments.size == 1 && key.is_a?(AST::Types::Literal)
+          return record.elements.key?(key.value) ? nil : AST::Builtin.nil_type
+        end
+        return unless ivar
 
         declared = declared_hash(constr, ivar)
         declared.args[1] if declared.is_a?(AST::Types::Name::Instance) && declared.args.size == 2
