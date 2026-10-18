@@ -47,6 +47,45 @@ class ClassMemoAnalyzerTest < Minitest::Test
     RUBY
   end
 
+  def test_a_local_assigned_once_is_used_where_it_is
+    assert_equal [[:receiver, :fetch], [:receiver, :name], [:escape, nil], [:escape, nil], [:escape, nil]], uses(<<~RUBY, :settings)
+      class Article < Base
+        def self.read
+          local = settings
+          local.fetch(:through)
+          [1].each { local.name }
+        end
+        def self.reassigned
+          local = settings
+          local = nil
+          local&.name
+        end
+        def self.handed
+          local = settings
+          Kernel.p(local)
+        end
+        def self.returned
+          local = settings
+          local
+        end
+      end
+    RUBY
+  end
+
+  def test_a_method_whose_body_is_the_use_forwards_it
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings)
+      class Article < Base
+        def source_settings = source.settings
+        def self.wrapped
+          source.settings
+          nil
+        end
+      end
+    RUBY
+
+    assert_equal [[:escape, :source_settings], [:escape, nil]], found.map { |use| [use.kind, use.forwarded_by] }
+  end
+
   def test_an_operator_assignment_counts_its_writer_too
     assert_equal [[:receiver, :[]=], [:receiver, :[]], [:receiver, :name=], [:receiver, :name], [:receiver, :[]=], [:receiver, :[]]],
                  uses(<<~RUBY, :settings) + uses(<<~RUBY, :@settings)

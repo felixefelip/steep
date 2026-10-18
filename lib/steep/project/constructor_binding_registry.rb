@@ -194,6 +194,21 @@ module Steep
 
       private
 
+      # A method a use forwards (`ClassMemoAnalyzer::Use#forwarded_by`) is
+      # used where it is called.
+      def uses_by_name(names)
+        found = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
+        indexed = Set[] #: Set[Symbol]
+        until names.empty?
+          indexed.merge(names)
+          @nodes.each do |node|
+            TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (found[name] ||= []).concat(uses) }
+          end
+          names = found.each_value.flat_map { |uses| uses.filter_map(&:forwarded_by) }.to_set - indexed
+        end
+        found
+      end
+
       def merge_bodies(index, scanned)
         scanned.each do |class_name, methods|
           entry = (index[class_name] ||= {})
@@ -214,10 +229,7 @@ module Steep
         end
         hashes.each { |name, ivar| names << name << ivar }
         @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
-        @uses = {}
-        @nodes.each do |node|
-          TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (@uses[name] ||= []).concat(uses) }
-        end
+        @uses = uses_by_name(names)
         @class_body_storing = hashes.to_h { |memo, ivar| [[memo, ivar], class_body_storing_methods(memo, ivar)] }
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}

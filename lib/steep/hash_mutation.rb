@@ -140,7 +140,7 @@ module Steep
 
             bodies.each do |body|
               return false unless body
-              next if body.returns == ivar && registry.uses_of(name).all? { |use| reading_use?(constr, use) }
+              next if body.returns == ivar && reading_uses?(constr, name)
               return false if body.returns == ivar || body.handed.include?(ivar) || body.writes.include?(ivar)
 
               own = body.ivar_uses.fetch(ivar, [])
@@ -177,8 +177,18 @@ module Steep
 
       # What a block is handed out of a hash a state follows is a value nothing
       # can change the class of (`record_value?`).
-      def reading_use?(constr, use)
+      def reading_use?(constr, use, forwarders = Set[])
+        return reading_uses?(constr, use.forwarded_by, forwarders) if use.forwarded_by
+
         use.kind != :yielded && use_within?(constr.literal_method_registry, use, READS, elements: true)
+      end
+
+      # A method that answers what a reader does is a reader too. One already
+      # being checked has its other uses checked there.
+      def reading_uses?(constr, name, forwarders = Set[])
+        return true if forwarders.include?(name)
+
+        constr.constructor_bindings.uses_of(name).all? { |use| reading_use?(constr, use, forwarders | [name]) }
       end
 
       def use_within?(literal_methods, use, allowed, elements: false)

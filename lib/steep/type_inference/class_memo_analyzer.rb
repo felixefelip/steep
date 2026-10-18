@@ -26,7 +26,10 @@ module Steep
       # Of a call of one of `names` (`calls`): `:statement` for a statement of
       # a class body made on `self`, `:call` for any other, `:escape` for a
       # name given as a value; `called` is the method called.
-      Use = Struct.new(:kind, :called, :element_calls, :within)
+      #
+      # `forwarded_by`: on an escape, the method whose whole body is the use,
+      # which answers what it does.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by)
       ESCAPE = Use.new(:escape, nil, Set[].freeze).freeze
 
       # Calls that reach a method or an ivar by a name given as a value.
@@ -39,6 +42,8 @@ module Steep
       STRING_EVALS = %i[eval instance_eval class_eval module_eval class_exec].freeze
 
       OP_ASSIGNS = %i[op_asgn or_asgn and_asgn].freeze
+
+      LOCAL_SCOPES = %i[def defs class module sclass].freeze
 
 
       def self.uses(node, names:)
@@ -166,21 +171,49 @@ module Steep
       def record(name, node, parent, in_statement)
         return unless @names.include?(name)
 
-        @uses[name] <<
-          if parent&.type == :yield && parent.children.size == 1 && node.type == :send && (node.children[0].nil? || node.children[0].type == :self) && (method = enclosing_method(parent))
-            Use.new(:yielded, method, Set[])
-          elsif parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
-            element_calls = CollectionReaders::ITERATIONS.include?(parent.children[1]) ? element_calls(parent) : Set[]
-            return @uses[name] << ESCAPE unless element_calls
+        @uses[name].concat(value_uses(node, parent, in_statement) || [ESCAPE])
+      end
 
-            on_self = node.type == :ivar || node.children[0].nil? || node.children[0].type == :self
-            within = on_self ? class_method_of(parent) : nil
-            use = Use.new(in_statement && on_self ? :statement : :receiver, parent.children[1], element_calls, within)
-            @uses[name] << Use.new(use.kind, :"#{use.called}=", Set[], within) if op_assigned?(parent)
-            use
-          else
-            ESCAPE
-          end
+      def value_uses(node, parent, in_statement)
+        if parent&.type == :yield && parent.children.size == 1 && node.type == :send && (node.children[0].nil? || node.children[0].type == :self) && (method = enclosing_method(parent))
+          [Use.new(:yielded, method, Set[])]
+        elsif parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
+          receiver_uses(node, parent, in_statement)
+        elsif parent&.type == :lvasgn
+          local_uses(parent)
+        elsif (method = forwarding_method(node, parent))
+          [Use.new(:escape, nil, Set[], nil, method)]
+        end
+      end
+
+      def receiver_uses(node, call, in_statement)
+        element_calls = CollectionReaders::ITERATIONS.include?(call.children[1]) ? element_calls(call) : Set[]
+        return unless element_calls
+
+        on_self = node.type == :ivar || (node.type == :send && (node.children[0].nil? || node.children[0].type == :self))
+        within = on_self ? class_method_of(call) : nil
+        use = Use.new(in_statement && on_self ? :statement : :receiver, call.children[1], element_calls, within)
+        op_assigned?(call) ? [Use.new(use.kind, :"#{use.called}=", Set[], within), use] : [use]
+      end
+
+      # What a local is given here is used where the local is, when every
+      # other mention of it, another assignment included, is the receiver of a
+      # call.
+      def local_uses(assignment)
+        scope = assignment
+        scope = @parents[scope] while @parents[scope] && !LOCAL_SCOPES.include?(scope.type)
+        each_mention(scope, @parents[scope], Set[assignment.children[0]]).flat_map do |mention, parent|
+          next [] if mention.equal?(assignment)
+
+          (parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(mention) && receiver_uses(mention, parent, false)) or return
+        end
+      end
+
+      def forwarding_method(node, parent)
+        case parent&.type
+        when :def then parent.children[0] if parent.children[2].equal?(node)
+        when :defs then parent.children[1] if parent.children[3].equal?(node)
+        end
       end
 
       # `call op= value` calls the writer of what `call` reads, too.
