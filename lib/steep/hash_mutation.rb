@@ -13,10 +13,20 @@ module Steep
   # literal and its value one a record may hold. Any other call leaves the
   # contents unknown.
   module HashMutation
+    # What a value handed out holds is a value a record holds (`record_value?`),
+    # and a call answering a new hash shares only those. `to_h` is not one: on
+    # a `Hash` it answers the receiver.
     READS = (
-      %w[[] key? has_key? include? member? size length empty? any? none? count keys values == eql? hash inspect to_s]
-        .map { |name| "::Hash##{name}" } + CollectionMutation::OBJECT_READS
+      %w[
+        [] key? has_key? include? member? size length empty? any? keys values == eql? hash inspect to_s
+        fetch dig values_at fetch_values key to_a merge except slice compact select reject transform_values
+      ].map { |name| "::Hash##{name}" } +
+      %w[count none? all? find map filter_map].map { |name| "::Enumerable##{name}" } +
+      CollectionMutation::OBJECT_READS
     ).to_set.freeze
+
+    # What `Enumerable` runs to walk a hash.
+    EACH = "::Hash#each"
 
     KEY_READ = Set["::Hash#[]"].freeze
 
@@ -25,11 +35,13 @@ module Steep
     # What a local holding a record follows: a store, or `delete` of a key.
     WRITES = (STORES | ["::Hash#delete"]).freeze
 
+    ENTRIES = (READS | WRITES).to_h { |key| [key, true] }.freeze
+
     class << self
       def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
         keys = hash_method_keys(constr, method_name, private: private)
         block = block_params || block_body
-        return [receiver_type, constr] if !block && CollectionMutation.only?(constr, keys, READS)
+        return [receiver_type, constr] if reads?(constr.literal_method_registry, keys) && (!block || reading_block?(constr, block_params, block_body))
         if receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)
           return widened(constr, receiver, followed: !block && CollectionMutation.only?(constr, keys, WRITES))
         end
@@ -128,18 +140,27 @@ module Steep
 
             bodies.each do |body|
               return false unless body
-              next if body.returns == ivar && registry.uses_of(name).all? { |use| reading_use?(literal_methods, use) }
+              next if body.returns == ivar && registry.uses_of(name).all? { |use| reading_use?(constr, use) }
               return false if body.returns == ivar || body.handed.include?(ivar) || body.writes.include?(ivar)
 
               own = body.ivar_uses.fetch(ivar, [])
               return false unless own.all? { |use| use.kind != :yielded && use_within?(literal_methods, use, own_calls) }
-              return false if body.exposes_self && !own.all? { |use| reading_use?(literal_methods, use) }
+              return false if body.exposes_self && !own.all? { |use| reading_use?(constr, use) }
             end
           end
         end
         true
       rescue RBS::BaseError
         false
+      end
+
+      def watched_keys
+        @watched_keys ||= Set.new(ENTRIES.keys) | [EACH]
+      end
+
+      def method_keys_for(class_name)
+        prefix = "::#{class_name}#"
+        watched_keys.select { |key| key.start_with?(prefix) }
       end
 
       # Whether every use the project makes of `names`, a memo of a hash and
@@ -154,15 +175,30 @@ module Steep
         use_within?(literal_methods, use, [*READS, *STORES])
       end
 
-      def reading_use?(literal_methods, use)
-        use.kind != :yielded && use_within?(literal_methods, use, READS)
+      # What a block is handed out of a hash a state follows is a value nothing
+      # can change the class of (`record_value?`).
+      def reading_use?(constr, use)
+        use.kind != :yielded && use_within?(constr.literal_method_registry, use, READS, elements: true)
       end
 
-      def use_within?(literal_methods, use, allowed)
-        return false if use.kind == :escape || !use.element_calls.empty?
+      def use_within?(literal_methods, use, allowed, elements: false)
+        return false if use.kind == :escape || (!elements && !use.element_calls.empty?)
 
         names = allowed.select { |key| key.end_with?("##{use.called}") }
-        !names.empty? && names.none? { |key| literal_methods.blocked?(key) }
+        !names.empty? && names.none? { |key| blocked?(literal_methods, key) }
+      end
+
+      def reads?(literal_methods, keys)
+        !keys.empty? && keys.all? { |key| READS.include?(key) && !blocked?(literal_methods, key) }
+      end
+
+      def blocked?(literal_methods, key)
+        literal_methods.blocked?(key) || (key.start_with?("::Enumerable#") && literal_methods.blocked?(EACH))
+      end
+
+      def reading_block?(constr, block_params, block_body)
+        calls = TypeInference::ClassMemoAnalyzer.element_calls_in(block_params, block_body) or return false
+        ObjectStates::ClassMemos.reads_elements?(constr, calls)
       end
 
       # A call on a local, or an ivar the body was entered with, holding a

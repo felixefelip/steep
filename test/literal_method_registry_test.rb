@@ -49,6 +49,17 @@ class LiteralMethodRegistryTest < Minitest::Test
     refute registry.blocked?("::Array#first")
   end
 
+  def test_records_a_reopened_hash
+    registry = registry_for(<<~RUBY)
+      class Hash
+        def fetch(*) = clear
+      end
+    RUBY
+
+    assert registry.blocked?("::Hash#fetch")
+    refute registry.blocked?("::Hash#dig")
+  end
+
   def test_a_mixin_hook_taints_what_it_is_mixed_into
     registry = registry_for(<<~RUBY)
       module Sneaky
