@@ -183,15 +183,73 @@ class ReflectionIntrinsicsTest < Minitest::Test
     assert_nil const_set_fold("::Module", name: :Missing)
   end
 
+  CONSTANTS = {
+    "constants.rbs" => <<~RBS
+      class Post
+      end
+      class Lookup
+        class X
+        end
+        LIMIT: Integer
+      end
+      class LookupSub < Lookup
+      end
+      module Holder
+        module Inner
+        end
+      end
+      class Bare < BasicObject
+      end
+    RBS
+  }
+
+  def const_get_fold(receiver, *arguments)
+    with_factory(CONSTANTS, nostdlib: false) do |factory|
+      argument_types = arguments.map { |argument| [::Symbol, ::String, true, false].any? { |kind| kind === argument } ? Steep::AST::Types::Literal.new(value: argument) : argument }
+      return fold("::Module#const_get", singleton(receiver), Registry.new, factory, argument_types: argument_types)
+    end
+  end
+
+  def test_const_get_answers_the_constant_a_literal_names
+    assert_equal singleton("::Post"), const_get_fold("::Object", "Post")
+    assert_equal singleton("::Post"), const_get_fold("::Object", :Post)
+    assert_equal singleton("::Lookup::X"), const_get_fold("::Object", "Lookup::X")
+    assert_equal singleton("::Post"), const_get_fold("::Lookup", "::Post")
+    assert_equal "::Integer", const_get_fold("::Lookup", :LIMIT).to_s
+  end
+
+  def test_const_get_reads_ancestors_and_the_toplevel_unless_inherit_is_false
+    assert_equal singleton("::Lookup::X"), const_get_fold("::LookupSub", :X)
+    assert_equal singleton("::Post"), const_get_fold("::Holder", :Post)
+    assert_nil const_get_fold("::LookupSub", :X, false)
+    assert_nil const_get_fold("::Holder", :Post, Steep::AST::Types::Nil.instance)
+    assert_equal singleton("::Holder::Inner"), const_get_fold("::Holder", :Inner, false)
+    assert_equal singleton("::Holder::Inner"), const_get_fold("::Holder", :Inner, Steep::AST::Types::Boolean.instance)
+    assert_nil const_get_fold("::LookupSub", :X, Steep::AST::Types::Boolean.instance)
+  end
+
+  def test_const_get_does_not_reach_the_toplevel_past_the_first_segment_or_from_a_basic_object
+    assert_nil const_get_fold("::Object", "Lookup::Post")
+    assert_nil const_get_fold("::Bare", :Post)
+  end
+
+  def test_const_get_declines_a_name_nothing_declares_or_ruby_rejects
+    assert_nil const_get_fold("::Object", "Missing")
+    assert_nil const_get_fold("::Object", :"Lookup::X")
+    assert_nil const_get_fold("::Object", "post")
+    assert_nil const_get_fold("::Object", "Lookup::")
+    assert_nil const_get_fold("::Object", "Lookup::LIMIT::X")
+  end
+
   def test_watched_keys_and_dispatched_names
     assert_equal(
       ["::Kernel#method", "::Kernel#respond_to?", "::Kernel#singleton_class", "::Method#parameters",
-       "::Module#const_set", "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::UnboundMethod#parameters"],
+       "::Module#const_get", "::Module#const_set", "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::UnboundMethod#parameters"],
       Steep::ReflectionIntrinsics.watched_keys.to_a.sort
     )
     assert_equal ["::Method#parameters"], Steep::ReflectionIntrinsics.method_keys_for("Method")
     assert_equal(
-      [:const_set, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
+      [:const_get, :const_set, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
        :singleton_class],
       Steep::ReflectionIntrinsics.dispatched_names.to_a.sort
     )
