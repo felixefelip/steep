@@ -199,6 +199,40 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_specializes_on_the_keywords_a_keyword_rest_collects
+    in_tmpdir do
+      write("sig/pick.rbs", <<~RBS)
+        class P7Plain
+        end
+        class P7Through
+        end
+        class P7Pick
+          def self.association_class: (Symbol name, ?scope: Symbol, **untyped) -> untyped
+        end
+      RBS
+      write("app/pick.rb", <<~RUBY)
+        class P7Pick
+          def self.association_class(name, scope: :all, **options)
+            options[:through] ? P7Through : P7Plain
+          end
+        end
+
+        P7Pick.association_class(:posts, through: :taggings)
+        P7Pick.association_class(:tags, scope: :recent)
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal(
+        {
+          "(:posts, **{ :through => :taggings })" => "singleton(::P7Through)",
+          "(:tags, scope: :recent, **{  })" => "singleton(::P7Plain)"
+        },
+        methods.fetch("P7Pick.association_class")
+      )
+    end
+  end
+
   def test_runner_specializes_on_a_hash_literal_argument
     in_tmpdir do
       write("sig/pick.rbs", <<~RBS)
@@ -1123,6 +1157,48 @@ class SpecializationsTest < Minitest::Test
       assert_equal '"name_delete"', types.fetch("call_name_action")
       assert_equal '"delete"', types.fetch("call_action")
       assert_equal "::String", types.fetch("call_unknown")
+    end
+  end
+
+  def test_a_call_site_passing_keywords_to_a_keyword_rest_reads_back_its_branch
+    in_tmpdir do
+      write("sig/pick.rbs", <<~RBS)
+        class P7Plain
+        end
+        class P7Through
+        end
+        class P7Pick
+          def self.association_class: (**untyped) -> untyped
+        end
+        class P7Use
+          def through: () -> untyped
+          def plain: () -> untyped
+          def other: () -> untyped
+        end
+      RBS
+      write("app/pick.rb", <<~RUBY)
+        class P7Pick
+          def self.association_class(**options)
+            options[:through] ? P7Through : P7Plain
+          end
+        end
+
+        class P7Use
+          def through = P7Pick.association_class(through: :taggings)
+          def plain = P7Pick.association_class
+          def other = P7Pick.association_class(dependent: :destroy)
+        end
+      RUBY
+      project = setup_project
+      runner = Specializations::Runner.new(project)
+      runner.write(runner.run)
+      project.reload_specializations!
+
+      types = body_types(project, current_dir + "app/pick.rb")
+
+      assert_equal "singleton(::P7Through)", types.fetch("through")
+      assert_equal "singleton(::P7Plain)", types.fetch("plain")
+      assert_equal "singleton(::P7Plain)", types.fetch("other")
     end
   end
 
