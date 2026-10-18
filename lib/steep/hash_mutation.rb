@@ -30,7 +30,9 @@ module Steep
         keys = hash_method_keys(constr, method_name, private: private)
         block = block_params || block_body
         return [receiver_type, constr] if !block && CollectionMutation.only?(constr, keys, READS)
-        return local_widened(constr, receiver, followed: !block && CollectionMutation.only?(constr, keys, WRITES)) if receiver&.type == :lvar
+        if receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)
+          return widened(constr, receiver, followed: !block && CollectionMutation.only?(constr, keys, WRITES))
+        end
 
         ivar = held_ivar(constr, receiver, receiver_type) or return [receiver_type, constr]
 
@@ -42,8 +44,8 @@ module Steep
 
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         keys = hash_method_keys(constr, method_name, private: private)
-        if receiver&.type == :lvar && CollectionMutation.only?(constr, keys, WRITES)
-          return local_written(constr, node, receiver, receiver_type, keys, arguments, type: type)
+        if (receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)) && CollectionMutation.only?(constr, keys, WRITES)
+          return written(constr, node, receiver, receiver_type, keys, arguments, type: type)
         end
 
         ivar = held_ivar(constr, receiver, receiver_type)
@@ -59,15 +61,15 @@ module Steep
 
       # The record a hash handed to `Klass.new` is, where `initialize` keeps it
       # in `ivar` and nothing but the object can change it: written at the
-      # call, or held by a local nothing else names, and only ever read once
-      # stored (`read_only?`).
-      def held_record(constr, instance, ivar, argument)
+      # call, or held by a local nothing else names, and once stored only ever
+      # changed the way `held?` follows.
+      def held_record(constr, instance, ivar, argument, followed:)
         record =
           case argument.type
           when :hash then Specializations::Arguments.written_record(argument, constr.typing, nil)
           when :lvar then held_local_record(constr, argument)
           end
-        record if record && held?(constr, instance, ivar, record)
+        record if record && held?(constr, instance, ivar, record, followed: followed)
       end
 
       # Vouches for each local handed to a call that holds a record the checker
@@ -85,31 +87,38 @@ module Steep
         end
       end
 
-      def held?(constr, instance, ivar, record)
+      # `followed`: the object is held by a local nothing else names, so each
+      # call made through it moves its state, and a method of its own may also
+      # write the hash by literal key (`autosave=`).
+      def held?(constr, instance, ivar, record, followed:)
         record.is_a?(AST::Types::Record) && record.elements.each_value.all? { |value| ObjectStates.record_value?(value) } &&
-          read_only?(constr, instance, ivar)
+          only_changed_by?(constr, instance, ivar, followed ? [*READS, *WRITES] : READS)
       end
 
-      # Whether no method of `instance` but `initialize` writes `ivar` or lets
-      # its hash out, and every use the project makes of it and of the
-      # readers that answer it only reads the hash.
-      def read_only?(constr, instance, ivar)
+      # Whether no method of `instance` but `initialize` assigns `ivar` or lets
+      # its hash out, every use its own methods make of the ivar is one of
+      # `own_calls`, and every use the project makes of the readers that
+      # answer it only reads the hash. A write from a body with a block may
+      # land where the body's exit does not see it.
+      def only_changed_by?(constr, instance, ivar, own_calls)
         registry = constr.constructor_bindings
-        uses = [] #: Array[TypeInference::ClassMemoAnalyzer::Use]
+        literal_methods = constr.literal_method_registry
         constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.each do |ancestor|
           registry.method_bodies(ancestor.name.to_s).each do |name, bodies|
             next if name == :initialize
 
             bodies.each do |body|
               return false unless body
-              next uses.concat(registry.uses_of(name)) if body.returns == ivar
-              return false if body.handed.include?(ivar) || body.writes.include?(ivar)
+              next if body.returns == ivar && registry.uses_of(name).all? { |use| reading_use?(literal_methods, use) }
+              return false if body.returns == ivar || body.handed.include?(ivar) || body.writes.include?(ivar)
 
-              uses.concat(body.ivar_uses.fetch(ivar, []))
+              own = body.ivar_uses.fetch(ivar, [])
+              return false unless own.all? { |use| use.kind != :yielded && use_within?(literal_methods, use, own_calls) }
+              return false if body.exposes_self && !own.all? { |use| reading_use?(literal_methods, use) }
             end
           end
         end
-        uses.all? { |use| reading_use?(constr.literal_method_registry, use) }
+        true
       rescue RBS::BaseError
         false
       end
@@ -137,27 +146,39 @@ module Steep
         !names.empty? && names.none? { |key| literal_methods.blocked?(key) }
       end
 
-      # A call on a local holding a record, dispatched against a plain hash:
-      # one `local_written` follows leaves the local for it to move; any other
-      # leaves it the hash.
-      def local_widened(constr, receiver, followed:)
-        hash = AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type)
-        [hash, followed ? constr : ObjectStates.refine_local(constr, receiver.children[0], hash)]
+      # A call on a local, or an ivar the body was entered with, holding a
+      # record, dispatched against a hash: one `written` follows leaves the
+      # variable for it to move; any other leaves it the hash.
+      def widened(constr, receiver, followed:)
+        hash = unknown_contents(constr, receiver)
+        [hash, followed ? constr : refined(constr, receiver, hash)]
       end
 
-      # A literal-key write on a local holding a record moves the record; the
-      # call answers what `delete` removed, `nil` for a key the record did not
-      # hold. Any other write leaves the local the hash.
-      def local_written(constr, node, receiver, record, keys, arguments, type:)
+      # A literal-key write on a variable holding a record moves the record;
+      # the call answers what `delete` removed, `nil` for a key the record did
+      # not hold. Any other write leaves the variable the hash.
+      def written(constr, node, receiver, record, keys, arguments, type:)
         moved, answer =
           if CollectionMutation.only?(constr, keys, STORES)
             [stored(constr, record, arguments), nil]
           else
             deleted(constr, record, arguments)
           end
-        hash = AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type)
-        constr = ObjectStates.refine_local(constr, receiver.children[0], moved || hash)
+        constr = refined(constr, receiver, moved || unknown_contents(constr, receiver))
         answer ? [answer, constr.add_typing(node, type: answer).constr] : [type, constr]
+      end
+
+      def unknown_contents(constr, receiver)
+        return declared_hash(constr, receiver.children[0]) if receiver.type == :ivar
+
+        AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type)
+      end
+
+      def refined(constr, receiver, type)
+        name = receiver.children[0] #: Symbol
+        return ObjectStates.refine_local(constr, name, type) if receiver.type == :lvar
+
+        constr.update_type_env { |env| env.refine_types(instance_variable_types: { name => type }) }
       end
 
       def deleted(constr, record, arguments)

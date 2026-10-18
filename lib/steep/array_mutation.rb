@@ -25,7 +25,7 @@ module Steep
       # ivar it reads holding an array whose contents are not known, where the
       # call may change them and is no push this can follow.
       def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
-        return [receiver_type, constr] unless receiver_type.is_a?(AST::Types::Tuple) && entered_with?(constr, receiver)
+        return [receiver_type, constr] unless receiver_type.is_a?(AST::Types::Tuple) && CollectionMutation.entered_with?(constr, receiver)
 
         keys = array_method_keys(constr, method_name, private: private)
         if block_params || block_body
@@ -42,7 +42,7 @@ module Steep
       # push leaves, where every operand is known; holding an array whose
       # contents are not known otherwise.
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
-        return [type, constr] unless receiver_type.is_a?(AST::Types::Tuple) && entered_with?(constr, receiver)
+        return [type, constr] unless receiver_type.is_a?(AST::Types::Tuple) && CollectionMutation.entered_with?(constr, receiver)
 
         keys = array_method_keys(constr, method_name, private: private)
         return [type, constr] unless foldable?(constr, keys)
@@ -59,16 +59,6 @@ module Steep
       def method_keys_for(class_name)
         prefix = "::#{class_name}#"
         watched_keys.select { |key| key.start_with?(prefix) }
-      end
-
-      # Whether `receiver` reads an ivar whose contents the body was entered
-      # with. Its tuple is then what it holds: every call that may change it
-      # widens it or folds onto it here.
-      def entered_with?(constr, receiver)
-        return false unless receiver.type == :ivar
-
-        def_node = constr.method_context&.node or return false
-        constr.specialization_arguments(def_node)&.self_ivars&.key?(receiver.children[0]) || false
       end
 
       private

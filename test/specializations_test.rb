@@ -1,23 +1,13 @@
 require_relative "test_helper"
+require_relative "specializations_project_helper"
 require "timeout"
 
 class SpecializationsTest < Minitest::Test
   include TestHelper
   include ShellHelper
+  include SpecializationsProjectHelper
 
   Specializations = Steep::Specializations
-  Project = Steep::Project
-
-  def dirs
-    @dirs ||= []
-  end
-
-  def write(relative, content)
-    path = current_dir + relative
-    path.parent.mkpath
-    path.write(content)
-    path
-  end
 
   # The entries every class shares, without the ones keyed by the class a
   # call was made on.
@@ -25,19 +15,6 @@ class SpecializationsTest < Minitest::Test
     entries.reject { |key, _| key.include?(Specializations::Arguments::SELF_MARKER) }
   end
 
-  def setup_project(steepfile: STEEPFILE)
-    write("Steepfile", steepfile)
-    project = Project.new(steepfile_path: current_dir + "Steepfile")
-    Project::DSL.parse(project, steepfile, filename: (current_dir + "Steepfile").to_s)
-    project
-  end
-
-  STEEPFILE = <<~STEEPFILE
-    target :app do
-      signature "sig"
-      check "app"
-    end
-  STEEPFILE
 
   FIXTURE_RBS = <<~RBS
     module Example
@@ -1160,220 +1137,6 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
-  def test_a_hash_kept_in_an_object_reads_back_its_branch
-    in_tmpdir do
-      write("sig/pick.rbs", <<~RBS)
-        class P8Plain
-        end
-        class P8Through
-        end
-        class P8Reflection
-          @options: Hash[Symbol, untyped]
-          attr_reader options: Hash[Symbol, untyped]
-          def initialize: (Hash[Symbol, untyped] options) -> void
-          def kind: () -> (singleton(P8Through) | singleton(P8Plain))
-        end
-        class P8Picker
-          def self.pick: (P8Reflection reflection) -> (singleton(P8Through) | singleton(P8Plain))
-        end
-        class P8Builder
-          def self.stored: (Hash[Symbol, untyped] options) -> P8Reflection
-          def self.keywords: (**untyped) -> P8Reflection
-        end
-        class P8Use
-          def a_through: () -> untyped
-          def a_plain: () -> untyped
-          def b_through: () -> untyped
-          def b_plain: () -> untyped
-          def c_through: () -> untyped
-          def c_plain: () -> untyped
-          def d_through: () -> untyped
-          def d_plain: () -> untyped
-        end
-      RBS
-      write("app/pick.rb", <<~RUBY)
-        class P8Reflection
-          attr_reader :options
-
-          def initialize(options)
-            @options = options
-          end
-
-          def kind
-            options[:through] ? P8Through : P8Plain
-          end
-        end
-
-        class P8Picker
-          def self.pick(reflection)
-            reflection.options[:through] ? P8Through : P8Plain
-          end
-        end
-
-        class P8Builder
-          def self.stored(options) = P8Reflection.new(options)
-          def self.keywords(**options) = P8Reflection.new(options)
-        end
-
-        class P8Use
-          def a_through = P8Reflection.new({ through: :taggings }).kind
-          def a_plain = P8Reflection.new({}).kind
-          def b_through = P8Picker.pick(P8Reflection.new({ through: :taggings }))
-          def b_plain = P8Picker.pick(P8Reflection.new({}))
-          def c_through = P8Builder.stored({ through: :taggings }).kind
-          def c_plain = P8Builder.stored({}).kind
-          def d_through = P8Builder.keywords(through: :taggings).kind
-          def d_plain = P8Builder.keywords.kind
-        end
-      RUBY
-      project = setup_project
-      postconditions = Steep::Postconditions::Runner.new(project)
-      postconditions.write(postconditions.run)
-      project = setup_project
-      runner = Specializations::Runner.new(project)
-      runner.write(runner.run)
-      project.reload_specializations!
-
-      types = body_types(project, current_dir + "app/pick.rb")
-
-      %w[a b c d].each do |caller|
-        assert_equal "singleton(::P8Through)", types.fetch("#{caller}_through"), caller
-        assert_equal "singleton(::P8Plain)", types.fetch("#{caller}_plain"), caller
-      end
-    end
-  end
-
-  def test_a_hash_written_before_initialize_stores_it_reads_back_its_branch
-    in_tmpdir do
-      write("sig/pick.rbs", <<~RBS)
-        class P9Plain
-        end
-        class P9Through
-        end
-        class P9Reflection
-          @options: Hash[Symbol, untyped]
-          attr_reader options: Hash[Symbol, untyped]
-          def initialize: (Hash[Symbol, untyped] options) -> void
-          def kind: () -> (singleton(P9Through) | singleton(P9Plain))
-          private
-          def normalized: (Hash[Symbol, untyped] options) -> Hash[Symbol, untyped]
-        end
-        class P9Builder
-          def self.build: (**untyped) -> P9Reflection
-        end
-        class P9Use
-          def through: () -> untyped
-          def plain: () -> untyped
-          def direct_through: () -> untyped
-          def direct_plain: () -> untyped
-        end
-      RBS
-      write("app/pick.rb", <<~RUBY)
-        class P9Reflection
-          attr_reader :options
-
-          def initialize(options)
-            @options = normalized(options)
-          end
-
-          def kind
-            options[:through] ? P9Through : P9Plain
-          end
-
-          private
-
-          def normalized(options)
-            options.delete(:counter_cache)
-            options
-          end
-        end
-
-        class P9Builder
-          def self.build(**options) = P9Reflection.new(options)
-        end
-
-        class P9Use
-          def through = P9Builder.build(through: :taggings).kind
-          def plain = P9Builder.build(counter_cache: true).kind
-          def direct_through = P9Reflection.new({ through: :taggings, counter_cache: true }).kind
-          def direct_plain = P9Reflection.new({ counter_cache: true }).kind
-        end
-      RUBY
-      project = setup_project
-      postconditions = Steep::Postconditions::Runner.new(project)
-      postconditions.write(postconditions.run)
-      project = setup_project
-      runner = Specializations::Runner.new(project)
-      runner.write(runner.run)
-      project.reload_specializations!
-
-      types = body_types(project, current_dir + "app/pick.rb")
-
-      assert_equal "singleton(::P9Through)", types.fetch("through")
-      assert_equal "singleton(::P9Plain)", types.fetch("plain")
-      assert_equal "singleton(::P9Through)", types.fetch("direct_through")
-      assert_equal "singleton(::P9Plain)", types.fetch("direct_plain")
-    end
-  end
-
-  def test_a_subclass_new_running_an_inherited_initialize_is_its_own_class
-    in_tmpdir do
-      write("sig/pick.rbs", <<~RBS)
-        class P10Base
-          @options: Hash[Symbol, untyped]
-          attr_reader options: Hash[Symbol, untyped]
-          def initialize: (Hash[Symbol, untyped] options) -> void
-          private
-          def normalized: (Hash[Symbol, untyped] options) -> Hash[Symbol, untyped]
-        end
-        class P10Sub < P10Base
-          def sub_only: () -> :sub
-        end
-        class P10Use
-          def built: () -> untyped
-          def through: () -> untyped
-        end
-      RBS
-      write("app/pick.rb", <<~RUBY)
-        class P10Base
-          attr_reader :options
-
-          def initialize(options)
-            @options = normalized(options)
-          end
-
-          private
-
-          def normalized(options)
-            options.delete(:counter_cache)
-            options
-          end
-        end
-
-        class P10Sub < P10Base
-          def sub_only = :sub
-        end
-
-        class P10Use
-          def built = P10Sub.new({ through: :taggings })
-          def through = P10Sub.new({ through: :taggings }).options[:through]
-        end
-      RUBY
-      project = setup_project
-      postconditions = Steep::Postconditions::Runner.new(project)
-      postconditions.write(postconditions.run)
-      project = setup_project
-      runner = Specializations::Runner.new(project)
-      runner.write(runner.run)
-      project.reload_specializations!
-
-      types = body_types(project, current_dir + "app/pick.rb")
-
-      assert_match(/\A::P10Sub\b/, types.fetch("built"))
-      assert_equal ":taggings", types.fetch("through")
-    end
-  end
-
   def test_a_call_site_passing_keywords_to_a_keyword_rest_reads_back_its_branch
     in_tmpdir do
       write("sig/pick.rbs", <<~RBS)
@@ -1467,46 +1230,5 @@ class SpecializationsTest < Minitest::Test
 
       assert_equal "::String", types.fetch("call_name_action")
     end
-  end
-
-  private
-
-  # `{ "method name" => type }` for every `def` in `path`, as an ordinary check
-  # of the project sees them.
-  def body_types(project, path)
-    target = project.targets.first or raise
-    loader = Project::Target.construct_env_loader(options: target.options, project: project)
-    file_loader = Steep::Services::FileLoader.new(base_dir: project.base_dir)
-    file_loader.each_path_in_patterns(target.signature_pattern) do |sig|
-      absolute = project.absolute_path(sig)
-      loader.add(path: absolute) if absolute.file?
-    end
-
-    status = Steep::Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts).status
-    source = Steep::Source.parse(path.read, path: path, factory: status.subtyping.factory)
-    typing = Steep::Services::TypeCheckService.type_check(
-      source: source,
-      subtyping: status.subtyping,
-      constant_resolver: status.constant_resolver,
-      cursor: nil,
-      contracts: project.contracts,
-      postconditions: project.postconditions,
-      callbacks: project.callbacks,
-      specializations: project.specializations,
-      literal_method_registry: project.literal_method_registry,
-      delegation_registry: project.delegation_registry,
-      constructor_bindings: project.constructor_binding_registry,
-      return_forwarding: project.return_forwarding_registry,
-      return_alias: project.return_alias_registry
-    )
-
-    result = {}
-    typing.each_typing do |node, _|
-      next unless node.type == :def
-
-      body = node.children[2] or next
-      result[node.children[0].to_s] = typing.type_of(node: body).to_s
-    end
-    result
   end
 end
