@@ -37,7 +37,8 @@ module Steep
       # where it falls off: a `return` leaves from elsewhere.
       def record_exit(constr, def_node, pair)
         arguments = constr.specialization_arguments(def_node) or return
-        return if !arguments.stateful? || returns_early?(pair_body(def_node))
+        return if returns_early?(pair_body(def_node))
+        return Constructed.record(constr, def_node, pair) unless arguments.stateful?
 
         env = pair.context.type_env
         ivars = entered_values(env, arguments)
@@ -111,7 +112,8 @@ module Steep
         end
         return call unless arguments.all? { |argument| plain_argument?(argument) }
 
-        instance = call.return_type
+        constructed = state_in(call.return_type)
+        instance = constructed&.back_type || call.return_type
         return call unless instance.is_a?(AST::Types::Name::Instance)
 
         chain = initialize_chain(constr, instance) or return call
@@ -120,7 +122,7 @@ module Steep
         bindings = compose(chain).select do |ivar, _|
           held ? declared?(constr, instance, ivar) && !rewritten.include?(ivar) : never_rewritten?(constr, instance, ivar)
         end
-        ivars = bound_values(constr, instance, bindings, arguments)
+        ivars = bound_values(constr, instance, bindings, arguments).merge(constructed&.ivars || {})
         return call if ivars.empty?
 
         call.with_return_type(AST::Types::ObjectState.new(back_type: instance, ivars: ivars))
@@ -485,6 +487,14 @@ module Steep
           call.method_decls.all? { |decl| decl.method_def&.member.respond_to?(:name) && decl.method_def.member.name == :initialize }
       end
 
+      def refine_local(constr, name, type)
+        return constr if constr.context.type_env[name] == type
+
+        constr.update_type_env do |env|
+          env.invalidate_pure_node(::Parser::AST::Node.new(:lvar, [name])).refine_types(local_variable_types: { name => type })
+        end
+      end
+
       private
 
       def held_value?(constr, node)
@@ -540,14 +550,6 @@ module Steep
         return [] unless current.is_a?(AST::Types::Intersection)
 
         current.types.reject { |member| member.is_a?(AST::Types::ObjectState) || member == state.back_type }
-      end
-
-      def refine_local(constr, name, type)
-        return constr if constr.context.type_env[name] == type
-
-        constr.update_type_env do |env|
-          env.invalidate_pure_node(::Parser::AST::Node.new(:lvar, [name])).refine_types(local_variable_types: { name => type })
-        end
       end
 
       def handed_locals(arguments)

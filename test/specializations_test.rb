@@ -1243,6 +1243,137 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_a_hash_written_before_initialize_stores_it_reads_back_its_branch
+    in_tmpdir do
+      write("sig/pick.rbs", <<~RBS)
+        class P9Plain
+        end
+        class P9Through
+        end
+        class P9Reflection
+          @options: Hash[Symbol, untyped]
+          attr_reader options: Hash[Symbol, untyped]
+          def initialize: (Hash[Symbol, untyped] options) -> void
+          def kind: () -> (singleton(P9Through) | singleton(P9Plain))
+          private
+          def normalized: (Hash[Symbol, untyped] options) -> Hash[Symbol, untyped]
+        end
+        class P9Builder
+          def self.build: (**untyped) -> P9Reflection
+        end
+        class P9Use
+          def through: () -> untyped
+          def plain: () -> untyped
+          def direct_through: () -> untyped
+          def direct_plain: () -> untyped
+        end
+      RBS
+      write("app/pick.rb", <<~RUBY)
+        class P9Reflection
+          attr_reader :options
+
+          def initialize(options)
+            @options = normalized(options)
+          end
+
+          def kind
+            options[:through] ? P9Through : P9Plain
+          end
+
+          private
+
+          def normalized(options)
+            options.delete(:counter_cache)
+            options
+          end
+        end
+
+        class P9Builder
+          def self.build(**options) = P9Reflection.new(options)
+        end
+
+        class P9Use
+          def through = P9Builder.build(through: :taggings).kind
+          def plain = P9Builder.build(counter_cache: true).kind
+          def direct_through = P9Reflection.new({ through: :taggings, counter_cache: true }).kind
+          def direct_plain = P9Reflection.new({ counter_cache: true }).kind
+        end
+      RUBY
+      project = setup_project
+      postconditions = Steep::Postconditions::Runner.new(project)
+      postconditions.write(postconditions.run)
+      project = setup_project
+      runner = Specializations::Runner.new(project)
+      runner.write(runner.run)
+      project.reload_specializations!
+
+      types = body_types(project, current_dir + "app/pick.rb")
+
+      assert_equal "singleton(::P9Through)", types.fetch("through")
+      assert_equal "singleton(::P9Plain)", types.fetch("plain")
+      assert_equal "singleton(::P9Through)", types.fetch("direct_through")
+      assert_equal "singleton(::P9Plain)", types.fetch("direct_plain")
+    end
+  end
+
+  def test_a_subclass_new_running_an_inherited_initialize_is_its_own_class
+    in_tmpdir do
+      write("sig/pick.rbs", <<~RBS)
+        class P10Base
+          @options: Hash[Symbol, untyped]
+          attr_reader options: Hash[Symbol, untyped]
+          def initialize: (Hash[Symbol, untyped] options) -> void
+          private
+          def normalized: (Hash[Symbol, untyped] options) -> Hash[Symbol, untyped]
+        end
+        class P10Sub < P10Base
+          def sub_only: () -> :sub
+        end
+        class P10Use
+          def built: () -> untyped
+          def through: () -> untyped
+        end
+      RBS
+      write("app/pick.rb", <<~RUBY)
+        class P10Base
+          attr_reader :options
+
+          def initialize(options)
+            @options = normalized(options)
+          end
+
+          private
+
+          def normalized(options)
+            options.delete(:counter_cache)
+            options
+          end
+        end
+
+        class P10Sub < P10Base
+          def sub_only = :sub
+        end
+
+        class P10Use
+          def built = P10Sub.new({ through: :taggings })
+          def through = P10Sub.new({ through: :taggings }).options[:through]
+        end
+      RUBY
+      project = setup_project
+      postconditions = Steep::Postconditions::Runner.new(project)
+      postconditions.write(postconditions.run)
+      project = setup_project
+      runner = Specializations::Runner.new(project)
+      runner.write(runner.run)
+      project.reload_specializations!
+
+      types = body_types(project, current_dir + "app/pick.rb")
+
+      assert_match(/\A::P10Sub\b/, types.fetch("built"))
+      assert_equal ":taggings", types.fetch("through")
+    end
+  end
+
   def test_a_call_site_passing_keywords_to_a_keyword_rest_reads_back_its_branch
     in_tmpdir do
       write("sig/pick.rbs", <<~RBS)

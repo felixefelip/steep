@@ -57,7 +57,17 @@ module Steep
         type = store.call_return_type(key, arguments, factory: constr.checker.factory) or return call
         return call unless body_key(constr, call, node)
 
-        call.with_return_type(type)
+        call.with_return_type(ObjectStates.initialize_call?(call) ? constructed(constr, type, call.return_type) : type)
+      end
+
+      # What a `Klass.new` recorded under the class whose `initialize` it runs
+      # answers for the class it builds: a subclass inherits the body, and
+      # its own methods may change what the body left.
+      def constructed(constr, type, built)
+        state = ObjectStates.state_in(type)
+        return type unless state && built.is_a?(AST::Types::Name::Instance)
+
+        ObjectStates.settled(constr, AST::Types::ObjectState.new(back_type: built, ivars: state.ivars))
       end
 
       # The key of the body `call` runs, or nil where it may run another

@@ -139,4 +139,42 @@ class ObjectStateRecordTest < Minitest::Test
       assert_equal parse_type("::Handed"), pair.context.type_env[:handed]
     end
   end
+
+  def test_a_literal_key_written_to_a_record_local_moves_it
+    check(<<~'RUBY') do |pair|
+      # @type var options: { through: :taggings, counter_cache: true }
+      options = _ = nil
+      deleted = options.delete(:counter_cache)
+      missing = options.delete(:dependent)
+      after_delete = options
+      options[:autosave] = true
+      after_store = options
+    RUBY
+      env = pair.context.type_env
+      assert_equal parse_type("true"), env[:deleted]
+      assert_equal parse_type("nil"), env[:missing]
+      assert_equal parse_type("{ through: :taggings }"), env[:after_delete]
+      assert_equal parse_type("{ through: :taggings, autosave: true }"), env[:after_store]
+    end
+  end
+
+  # A call that may change the hash some other way leaves no record to follow.
+  def test_any_other_change_to_a_record_local_leaves_a_hash
+    check(<<~'RUBY') do |pair|
+      # @type var options: { through: :taggings }
+      options = _ = nil
+      options.merge!({ autosave: true })
+      merged = options
+      # @type var keyed: { through: :taggings }
+      keyed = _ = nil
+      # @type var key: Symbol
+      key = _ = :x
+      keyed[key] = true
+      after_open_key = keyed
+    RUBY
+      env = pair.context.type_env
+      refute_kind_of Steep::AST::Types::Record, env[:merged]
+      refute_kind_of Steep::AST::Types::Record, env[:after_open_key]
+    end
+  end
 end

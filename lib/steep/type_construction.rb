@@ -607,6 +607,7 @@ module Steep
     # parameter arrives holding, and what the call site's specialization is
     # keyed on (`Specializations::Arguments.from_send`).
     def record_vouched_arguments(arguments)
+      HashMutation.vouch_held_records(self, arguments)
       handed = source.accumulators.at_args
       return if handed.empty?
 
@@ -614,8 +615,7 @@ module Steep
         values = argument.type == :kwargs ? argument.children.filter_map { |pair| pair.children[1] if pair.type == :pair } : [argument]
 
         values.each do |value|
-          elements = handed[value] or next
-          types = accumulated_element_types(elements) or next
+          types = handed[value]&.then { |elements| accumulated_element_types(elements) } or next
 
           typing.add_vouched(value, AST::Types::Tuple.new(types: types))
         end
