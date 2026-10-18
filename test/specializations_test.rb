@@ -199,6 +199,37 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_specializes_on_a_hash_literal_argument
+    in_tmpdir do
+      write("sig/pick.rbs", <<~RBS)
+        class P6Plain
+        end
+        class P6Through
+        end
+        class P6Pick
+          def self.association_class: (untyped options) -> untyped
+        end
+      RBS
+      write("app/pick.rb", <<~RUBY)
+        class P6Pick
+          def self.association_class(options)
+            options[:through] ? P6Through : P6Plain
+          end
+        end
+
+        P6Pick.association_class({ through: :posts })
+        P6Pick.association_class({})
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal(
+        { "({ :through => :posts })" => "singleton(::P6Through)", "({  })" => "singleton(::P6Plain)" },
+        methods.fetch("P6Pick.association_class")
+      )
+    end
+  end
+
   def test_runner_keeps_an_inherited_call_beside_a_memo_it_does_not_read
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
@@ -1092,6 +1123,48 @@ class SpecializationsTest < Minitest::Test
       assert_equal '"name_delete"', types.fetch("call_name_action")
       assert_equal '"delete"', types.fetch("call_action")
       assert_equal "::String", types.fetch("call_unknown")
+    end
+  end
+
+  def test_a_call_site_passing_a_hash_literal_reads_back_its_branch
+    in_tmpdir do
+      write("sig/pick.rbs", <<~RBS)
+        class P6Plain
+        end
+        class P6Through
+        end
+        class P6Pick
+          def self.association_class: (untyped options) -> untyped
+        end
+        class P6Use
+          def through: () -> untyped
+          def plain: () -> untyped
+          def other: () -> untyped
+        end
+      RBS
+      write("app/pick.rb", <<~RUBY)
+        class P6Pick
+          def self.association_class(options)
+            options[:through] ? P6Through : P6Plain
+          end
+        end
+
+        class P6Use
+          def through = P6Pick.association_class({ through: :posts })
+          def plain = P6Pick.association_class({})
+          def other = P6Pick.association_class({ dependent: :destroy })
+        end
+      RUBY
+      project = setup_project
+      runner = Specializations::Runner.new(project)
+      runner.write(runner.run)
+      project.reload_specializations!
+
+      types = body_types(project, current_dir + "app/pick.rb")
+
+      assert_equal "singleton(::P6Through)", types.fetch("through")
+      assert_equal "singleton(::P6Plain)", types.fetch("plain")
+      assert_equal "singleton(::P6Plain)", types.fetch("other")
     end
   end
 

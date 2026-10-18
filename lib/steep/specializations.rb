@@ -274,7 +274,7 @@ module Steep
       # `self`, where the call's body is checked for one class (`exact_self`),
       # is that class: the callee would read `self` as its own receiver.
       def self.argument_type(arg, typing, exact_self)
-        written = written_literal(arg) and return written
+        written = written_literal(arg) || written_record(arg, typing, exact_self) and return written
         type = typing.type_of(node: arg)
         type = type.subst(Interface::Substitution.build([], self_type: exact_self)) if exact_self
         vouched = typing.vouched_of(node: arg)
@@ -282,10 +282,40 @@ module Steep
         # its type is still the one the checker computed.
         return vouched if vouched && (arg.type == :lvar || vouched == type)
 
-        return type unless type.is_a?(AST::Types::Tuple)
-        return type if arg.type == :array
+        case type
+        when AST::Types::Tuple
+          return type if arg.type == :array
 
-        AST::Builtin::Array.instance_type(type.types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: type.types))
+          AST::Builtin::Array.instance_type(union_or_untyped(type.types))
+        when AST::Types::Record
+          keys = type.elements.keys.map { |key| AST::Types::Literal.new(value: key) }
+          AST::Builtin::Hash.instance_type(union_or_untyped(keys), union_or_untyped(type.elements.values))
+        else
+          type
+        end
+      end
+
+      def self.union_or_untyped(types)
+        types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: types)
+      end
+
+      # A hash written at the argument, as the record it is: every key it has,
+      # and no other. The checker types `{ through: :posts }` as a record only
+      # where the parameter asks for one, and `{}` as `Hash[untyped, untyped]`.
+      def self.written_record(arg, typing, exact_self)
+        return nil unless arg.type == :hash
+
+        elements = {} #: Hash[AST::Types::Record::key, AST::Types::t]
+        arg.children.each do |pair|
+          return nil unless pair.type == :pair
+
+          key, value = pair.children
+          return nil unless %i[sym str int].include?(key.type) && typing.has_type?(value)
+
+          elements[key.children[0]] = argument_type(value, typing, exact_self)
+        end
+
+        AST::Types::Record.new(elements: elements, required_keys: elements.keys.to_set)
       end
 
       def initialize(positionals:, keywords:, self_ivars:, class_states:, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil)
@@ -563,10 +593,10 @@ module Steep
 
       private
 
-      # A tuple fixes an argument as surely as a literal does — it is only ever
-      # one whose contents are known (`argument_type`).
+      # A tuple or a record fixes an argument as surely as a literal does — it
+      # is only ever one whose contents are known (`argument_type`).
       def literal_type?(type)
-        type.is_a?(AST::Types::Literal) || type.is_a?(AST::Types::Tuple)
+        type.is_a?(AST::Types::Literal) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::Record)
       end
 
       # A positional index names one parameter only up to the first rest
