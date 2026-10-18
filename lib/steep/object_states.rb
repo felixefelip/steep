@@ -275,14 +275,18 @@ module Steep
         state = state_in(receiver_type) || EnteredSelf.state(constr, receiver_type, call)
         return call unless state && arguments.empty?
 
-        ivar = constr.attr_method_backing_ivar(call.method_decls) ||
-               bound_reader_ivar(constr, state, call)
+        ivar = reader_ivar(constr, state, call)
         value = ivar && state.ivar_type(ivar) or return call
         # The checker cannot bind a block's parameters to the elements of `[]`.
         return call if value.is_a?(AST::Types::Tuple) && value.types.empty?
         return call unless constr.check_relation(sub_type: value, super_type: call.return_type).success?
 
         call.with_return_type(value)
+      end
+
+      # The ivar `call`, a reader on an object in `state`, answers.
+      def reader_ivar(constr, state, call)
+        constr.attr_method_backing_ivar(call.method_decls) || bound_reader_ivar(constr, state, call)
       end
 
       # The state `type` is, alone or met with the markers a postcondition

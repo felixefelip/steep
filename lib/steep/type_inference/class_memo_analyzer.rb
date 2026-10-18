@@ -29,8 +29,10 @@ module Steep
       #
       # `forwarded_by`: on an escape, the method whose whole body is the use,
       # which answers what it does. `at`: the call naming it, on an explicit
-      # receiver (`site`).
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at)
+      # receiver (`site`). `direct`: the call is made on the value as written,
+      # not on a local it was read into, and is no `op=` or target of a
+      # multiple assignment.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct)
       ESCAPE = Use.new(:escape, nil, Set[].freeze).freeze
 
       # Calls that reach a method or an ivar by a name given as a value.
@@ -188,7 +190,7 @@ module Steep
         if parent&.type == :yield && parent.children.size == 1 && node.type == :send && (node.children[0].nil? || node.children[0].type == :self) && (method = enclosing_method(parent))
           [Use.new(:yielded, method, Set[])]
         elsif parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
-          receiver_uses(node, parent, in_statement)
+          receiver_uses(node, parent, in_statement, direct: true)
         elsif parent&.type == :lvasgn
           local_uses(parent)
         elsif (method = forwarding_method(node, parent))
@@ -196,14 +198,16 @@ module Steep
         end
       end
 
-      def receiver_uses(node, call, in_statement)
+      def receiver_uses(node, call, in_statement, direct: false)
         element_calls = CollectionReaders::ITERATIONS.include?(call.children[1]) ? element_calls(call) : Set[]
         return unless element_calls
 
         on_self = node.type == :ivar || (node.type == :send && (node.children[0].nil? || node.children[0].type == :self))
         within = on_self ? class_method_of(call) : nil
-        use = Use.new(in_statement && on_self ? :statement : :receiver, call.children[1], element_calls, within)
-        op_assigned?(call) ? [Use.new(use.kind, :"#{use.called}=", Set[], within), use] : [use]
+        op_assigned = op_assigned?(call)
+        direct &&= !op_assigned && @parents.fetch(call, nil)&.type != :mlhs
+        use = Use.new(in_statement && on_self ? :statement : :receiver, call.children[1], element_calls, within, nil, nil, direct)
+        op_assigned ? [Use.new(use.kind, :"#{use.called}=", Set[], within), use] : [use]
       end
 
       # What a local is given here is used where the local is, when every

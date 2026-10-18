@@ -434,6 +434,131 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  # `P14Tweaker` stores through the reader of an object no local of these
+  # bodies holds. A store made through the reader off a local nothing else
+  # names moves what that local holds; one made off any other name, through
+  # a local it was read into, or not by literal key, leaves the hash unknown.
+  def test_a_store_made_through_the_reader_moves_the_object_a_local_holds
+    in_tmpdir do
+      write("sig/box.rbs", <<~RBS)
+        class P14Box
+          @options: Hash[Symbol, untyped]
+          attr_reader options: Hash[Symbol, untyped]
+          def initialize: (Hash[Symbol, untyped] options) -> void
+        end
+        class P14Aliased
+          @options: Hash[Symbol, untyped]
+          attr_reader options: Hash[Symbol, untyped]
+          def initialize: (Hash[Symbol, untyped] options) -> void
+        end
+        class P14Tweaker
+          def self.tweak: (P14Box box) -> void
+        end
+        class P14Use
+          def stored: () -> untyped
+          def kept: () -> untyped
+          def deleted: () -> untyped
+          def safe: () -> untyped
+          def other: () -> untyped
+          def open_key: (Symbol key) -> untyped
+          def looped: () -> untyped
+          def tapped: () -> untyped
+          def aliased: () -> untyped
+        end
+      RBS
+      write("app/box.rb", <<~RUBY)
+        class P14Box
+          attr_reader :options
+
+          def initialize(options)
+            @options = options
+          end
+        end
+
+        class P14Aliased
+          attr_reader :options
+
+          def initialize(options)
+            @options = options
+          end
+        end
+
+        class P14Tweaker
+          def self.tweak(box) = box.options[:tweaked] = true
+        end
+
+        class P14Use
+          def stored
+            box = P14Box.new({ through: :taggings })
+            box.options[:autosave] = true
+            box.options[:autosave]
+          end
+
+          def kept
+            box = P14Box.new({ through: :taggings })
+            box.options[:autosave] = true
+            box.options[:through]
+          end
+
+          def deleted
+            box = P14Box.new({ through: :taggings })
+            box.options.delete(:through)
+            box.options[:through]
+          end
+
+          def safe
+            box = P14Box.new({ through: :taggings })
+            box&.options[:through] = :tags
+            box.options[:through]
+          end
+
+          def other
+            box = P14Box.new({ through: :taggings })
+            other = P14Box.new({ through: :taggings })
+            other.options[:through] = :tags
+            box.options[:through]
+          end
+
+          def open_key(key)
+            box = P14Box.new({ through: :taggings })
+            box.options[key] = :tags
+            box.options[:through]
+          end
+
+          def looped
+            box = P14Box.new({ through: :taggings })
+            [1].each { box.options[:through] = :tags }
+            box.options[:through]
+          end
+
+          def tapped
+            box = P14Box.new({ through: :taggings })
+            box.tap { |tapped| tapped.options[:through] = :tags }
+            box.options[:through]
+          end
+
+          def aliased
+            box = P14Aliased.new({ through: :taggings })
+            options = box.options
+            options[:through] = :tags
+            box.options[:through]
+          end
+        end
+      RUBY
+      types = specialized_body_types("app/box.rb")
+
+      assert_equal "true", types.fetch("stored")
+      assert_equal ":taggings", types.fetch("kept")
+      assert_equal "nil", types.fetch("deleted")
+      assert_equal ":tags", types.fetch("safe")
+      assert_equal ":taggings", types.fetch("other")
+      assert_equal "untyped", types.fetch("open_key")
+      assert_equal "untyped", types.fetch("looped")
+      assert_equal "untyped", types.fetch("tapped")
+      assert_equal "untyped", types.fetch("aliased")
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)

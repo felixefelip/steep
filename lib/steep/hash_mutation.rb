@@ -45,6 +45,9 @@ module Steep
         if receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)
           return widened(constr, receiver, followed: !block && CollectionMutation.only?(constr, keys, WRITES))
         end
+        if !block && CollectionMutation.only?(constr, keys, WRITES) && (state, ivar = read_off_state(constr, receiver))
+          return [declared_on(constr, state.back_type, ivar), constr]
+        end
 
         ivar = held_ivar(constr, receiver, receiver_type) or return [receiver_type, constr]
 
@@ -58,6 +61,9 @@ module Steep
         keys = hash_method_keys(constr, method_name, private: private)
         if (receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)) && CollectionMutation.only?(constr, keys, WRITES)
           return written(constr, node, receiver, receiver_type, keys, arguments, type: type)
+        end
+        if CollectionMutation.only?(constr, keys, WRITES) && (state, ivar = read_off_state(constr, receiver))
+          return written_through(constr, node, receiver.children[0], state, ivar, receiver_type, keys, arguments, type: type)
         end
 
         ivar = held_ivar(constr, receiver, receiver_type)
@@ -140,7 +146,7 @@ module Steep
 
             bodies.each do |body|
               return false unless body
-              next if body.returns == ivar && reading_uses?(constr, Specializations::Receivers.uses_on(constr, name, instance), name)
+              next if body.returns == ivar && reader_uses?(constr, Specializations::Receivers.uses_on(constr, name, instance), name, own_calls)
               return false if body.returns == ivar || body.handed.include?(ivar) || body.writes.include?(ivar)
 
               own = body.ivar_uses.fetch(ivar, [])
@@ -181,6 +187,15 @@ module Steep
         return reading_uses?(constr, constr.constructor_bindings.uses_of(use.forwarded_by), use.forwarded_by, forwarders) if use.forwarded_by
 
         use.kind != :yielded && use_within?(constr.literal_method_registry, use, READS, elements: true)
+      end
+
+      # Where the object is followed (`own_calls` writes), a write made on what
+      # a reader answers is one too: on the local that holds the object,
+      # `written_through` moves its state, and on any other object it leaves
+      # this one alone.
+      def reader_uses?(constr, uses, name, own_calls)
+        writes = uses.select { |use| use.at && use.direct && use_within?(constr.literal_method_registry, use, own_calls) }
+        reading_uses?(constr, uses - writes, name)
       end
 
       # A method that answers what a reader does is a reader too, whatever
@@ -224,14 +239,60 @@ module Steep
       # the call answers what `delete` removed, `nil` for a key the record did
       # not hold. Any other write leaves the variable the hash.
       def written(constr, node, receiver, record, keys, arguments, type:)
-        moved, answer =
-          if CollectionMutation.only?(constr, keys, STORES)
-            [stored(constr, record, arguments), nil]
-          else
-            deleted(constr, record, arguments)
-          end
+        moved, answer = moved(constr, record, keys, arguments)
         constr = refined(constr, receiver, moved || unknown_contents(constr, receiver))
         answer ? [answer, constr.add_typing(node, type: answer).constr] : [type, constr]
+      end
+
+      # `written` on the hash an object holds, read through its reader: a
+      # write made off a local nothing else names moves the object's state, and
+      # one made off any other variable, or one `written` does not follow,
+      # leaves the ivar out of what it holds.
+      def written_through(constr, node, object, state, ivar, record, keys, arguments, type:)
+        moved, answer = moved(constr, record, keys, arguments)
+        constr = left_holding(constr, object, state, ivar, (moved if followed?(constr, object)))
+        answer ? [answer, constr.add_typing(node, type: answer).constr] : [type, constr]
+      end
+
+      def moved(constr, record, keys, arguments)
+        return [stored(constr, record, arguments), nil] if CollectionMutation.only?(constr, keys, STORES)
+
+        deleted(constr, record, arguments)
+      end
+
+      def followed?(constr, object)
+        object.type == :lvar && (constr.method_context&.held_locals&.held?(object.children[0]) || false)
+      end
+
+      # `constr` with the variable `object` reads holding `state` with
+      # `record` in `ivar`, or without `ivar` where `record` is nil.
+      def left_holding(constr, object, state, ivar, record)
+        return constr unless %i[lvar ivar].include?(object.type)
+
+        ivars = record ? state.ivars.merge(ivar => record) : state.ivars.except(ivar)
+        left = ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
+        current = constr.context.type_env[object.children[0]]
+        left = AST::Types::Intersection.build(types: current.types.map { |member| member == state ? left : member }) if current.is_a?(AST::Types::Intersection)
+        refined(constr, object, left)
+      end
+
+      # `[state, ivar]` where `receiver` calls, with no arguments, the reader
+      # of `ivar` on an object whose state holds a record there.
+      def read_off_state(constr, receiver)
+        return unless receiver && Specializations::Receivers::SENDS.include?(receiver.type) && receiver.children.size == 2
+
+        object = receiver.children[0]
+        return unless object && constr.typing.has_type?(object)
+
+        state = ObjectStates.state_in(constr.typing.type_of(node: object)) or return
+        call = ObjectStates.recorded_call(constr, receiver)
+        ivar = call.is_a?(TypeInference::MethodCall::Typed) && ObjectStates.reader_ivar(constr, state, call)
+        [state, ivar] if ivar && state.ivar_type(ivar).is_a?(AST::Types::Record)
+      end
+
+      def declared_on(constr, instance, ivar)
+        declared = constr.checker.factory.definition_builder.build_instance(instance.name).instance_variables[ivar]
+        declared ? constr.checker.factory.type(declared.type) : AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type)
       end
 
       def unknown_contents(constr, receiver)
