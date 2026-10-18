@@ -69,7 +69,26 @@ module Steep
           when :hash then Specializations::Arguments.written_record(argument, constr.typing, nil)
           when :lvar then held_local_record(constr, argument)
           end
+        record = record && storable(record)
         record if record && held?(constr, instance, ivar, record, followed: followed)
+      end
+
+      # What a hash a state follows may hold under a key: a value nothing can
+      # change, or an object of a class, which stays of that class whatever is
+      # done to it. A hash, an array or a string read out of it could be
+      # changed through the name it was read into (`storable`).
+      def record_value?(type)
+        return type.types.all? { |member| record_value?(member) } if type.is_a?(AST::Types::Union)
+
+        ObjectStates.fixed?(type) || [AST::Types::RegexpLiteral, AST::Types::Name::Singleton, AST::Types::Name::Instance].any? { |kind| type.is_a?(kind) }
+      end
+
+      # `record` as a state may hold it (`record_value?`), with a
+      # hash, an array or a string under a key held as its class; nil where a
+      # value is none of these.
+      def storable(record)
+        elements = record.elements.transform_values { |value| storable_value(value) or return nil }
+        AST::Types::Record.new(elements: elements, required_keys: record.required_keys)
       end
 
       # Vouches for each local handed to a call that holds a record the checker
@@ -91,7 +110,7 @@ module Steep
       # call made through it moves its state, and a method of its own may also
       # write the hash by literal key (`autosave=`).
       def held?(constr, instance, ivar, record, followed:)
-        record.is_a?(AST::Types::Record) && record.elements.each_value.all? { |value| ObjectStates.record_value?(value) } &&
+        record.is_a?(AST::Types::Record) && record.elements.each_value.all? { |value| record_value?(value) } &&
           only_changed_by?(constr, instance, ivar, followed ? [*READS, *WRITES] : READS)
       end
 
@@ -220,9 +239,22 @@ module Steep
 
       def stored(constr, record, arguments)
         key, value = CollectionMutation.operand_types(constr, arguments)
-        return unless arguments.size == 2 && literal_key?(key) && value && ObjectStates.record_value?(value)
+        value = value && storable_value(value)
+        return unless arguments.size == 2 && literal_key?(key) && value
 
         AST::Types::Record.new(elements: record.elements.merge(key.value => value), required_keys: record.required_keys | [key.value])
+      end
+
+      def storable_value(type)
+        return type if record_value?(type)
+
+        case type
+        when AST::Types::Record then AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type)
+        when AST::Types::Tuple then AST::Builtin::Array.instance_type(AST::Builtin.any_type)
+        when AST::Types::Literal then AST::Builtin::String.instance_type if type.value.is_a?(::String)
+        when AST::Types::Union
+          AST::Types::Union.build(types: type.types.map { |member| storable_value(member) or return nil })
+        end
       end
 
       def literal_key?(type)

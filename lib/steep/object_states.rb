@@ -61,14 +61,7 @@ module Steep
       # array, kept only where nothing else reaches it (`collection_confined?`).
       def state_value?(type)
         fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton) ||
-          (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| record_value?(value) })
-      end
-
-      # What a hash a state follows may hold under a key: a value a state may
-      # hold, or an object of a class, which stays of that class whatever is
-      # done to it.
-      def record_value?(type)
-        state_value?(type) || type.is_a?(AST::Types::Name::Instance)
+          (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| HashMutation.record_value?(value) })
       end
 
       # A method runs whenever it is called, not where it is written: nothing

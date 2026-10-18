@@ -140,6 +140,23 @@ class ObjectStateRecordTest < Minitest::Test
     end
   end
 
+  # A hash, an array or a string read out of the record can be changed through
+  # the name it was read into, so the record holds only its class.
+  def test_a_mutable_value_in_the_record_is_held_as_its_class
+    check(<<~'RUBY') do |pair|
+      reflection = Options.new({ through: { name: :taggings }, list: [:a], class_name: "Post", kind: :plain })
+      reflection.options[:through].clear
+      through = reflection.options[:through]
+      kind = reflection.options[:kind]
+    RUBY
+      env = pair.context.type_env
+      record = "{ through: ::Hash[untyped, untyped], list: ::Array[::Symbol], class_name: ::String, kind: :plain }"
+      assert_equal state("::Options", :@options => record), env[:reflection]
+      assert_equal parse_type("::Hash[untyped, untyped]"), env[:through]
+      assert_equal parse_type(":plain"), env[:kind]
+    end
+  end
+
   def test_a_literal_key_written_to_a_record_local_moves_it
     check(<<~'RUBY') do |pair|
       # @type var options: { through: :taggings, counter_cache: true }
