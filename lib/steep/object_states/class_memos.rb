@@ -111,7 +111,7 @@ module Steep
         def built(constr, call, node, ivar, instance, wrappers)
           return fresh_state(constr, instance) if wrappers.empty?
 
-          key = Specializations.method_key(call.method_decls) or return
+          key = Specializations.body_key(constr, call, node) or return
           arguments = Specializations.call_site_arguments(constr, node, call) or return
           ObjectStates.state_in(ObjectStates.recorded_exit(constr, key, arguments)&.ivars&.[](ivar))
         end

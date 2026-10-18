@@ -14,10 +14,10 @@ module Steep
 
       # `{ "Foo#bar" => Set[Arguments] }` for the call sites in `typing` that
       # resolve to one method and fix at least one argument to a literal.
-      def self.call_sites(typing)
+      def self.call_sites(typing, overrides:)
         result = {} #: Hash[String, Set[Arguments]]
 
-        each_call_site(typing) do |key, arguments, _node|
+        each_call_site(typing, overrides: overrides) do |key, arguments, _node|
           # A tuple fixing no value specializes nothing: the body would be
           # re-checked under the declaration it already has.
           (result[key] ||= Set.new).merge(arguments.tuples)
@@ -34,10 +34,11 @@ module Steep
       #
       # `every_call`: also yield, with nil arguments, each project method a call
       # reaches that no tuple describes — through a receiver resolving to
-      # several methods, with an error, or in a shape `Arguments` declines.
-      def self.each_call_site(typing, every_call: false)
+      # several methods, one that may run another body (`Overrides`), with an
+      # error, or in a shape `Arguments` declines.
+      def self.each_call_site(typing, overrides:, every_call: false)
         each_call(typing, every_call) do |node, call|
-          key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls)
+          key = overrides.body_key(call, node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node))
           arguments = key && call_node?(node) && Arguments.recorded(node, typing)
           next yield key, arguments, node if arguments
           next unless every_call && call.respond_to?(:method_decls)
@@ -106,9 +107,9 @@ module Steep
       # argument or not. `call_sites` answers a subset — the calls that fix a
       # value today — and a call that fixes none now may fix one once an inner
       # call specializes, so what file to re-read is decided from this.
-      def self.callees(typing)
+      def self.callees(typing, overrides:)
         result = Set[] #: Set[String]
-        each_call_site(typing, every_call: true) { |key, _arguments, _node| result << key }
+        each_call_site(typing, overrides: overrides, every_call: true) { |key, _arguments, _node| result << key }
         result
       end
 

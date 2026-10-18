@@ -66,7 +66,7 @@ module Steep
         # out on its own. `kind` is `"module"` for a target declared as one.
         Chunk = Struct.new(:source, :target, :kind, keyword_init: true)
 
-        Walk = Struct.new(:writers, :typing, keyword_init: true)
+        Walk = Struct.new(:writers, :typing, :overrides, keyword_init: true)
 
         # Whether the method writes code, directly or through a method it calls.
         # The gate that keeps a project without the idiom from paying for a
@@ -102,10 +102,10 @@ module Steep
         # each carrying the flow's verdict. A macro that evals once and then
         # calls a writer writes both, and the class gets them in the order it is
         # written.
-        def effects(typing, def_node, writers)
+        def effects(typing, def_node, writers, overrides:)
           flow = Flow.new(typing)
           result = [] #: Array[Effect]
-          walk = Walk.new(writers: writers, typing: typing)
+          walk = Walk.new(writers: writers, typing: typing, overrides: overrides)
 
           each_effect(body_of(def_node), flow, true, walk) do |effect|
             result << effect
@@ -166,11 +166,11 @@ module Steep
 
         private
 
-        def resolved_send_key(node, typing)
-          call = typing.call_of(node: node)
-          return nil unless call.is_a?(TypeInference::MethodCall::Typed)
-
-          Specializations.method_key(call.method_decls)
+        def resolved_send_key(node, walk)
+          typing = walk.typing
+          walk.overrides.body_key(
+            typing.call_of(node: node), node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node)
+          )
         rescue Typing::UnknownNodeError
           nil
         end
@@ -276,7 +276,7 @@ module Steep
           return nil if walk.writers.empty? || node.type != :send
           return spelled_send_keys(node, walk.writers).first unless walk.typing
 
-          key = resolved_send_key(node, walk.typing)
+          key = resolved_send_key(node, walk)
           key if key && walk.writers.include?(key)
         end
 

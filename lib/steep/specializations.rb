@@ -55,8 +55,16 @@ module Steep
         key = method_key(call.method_decls) or return call
         arguments = call_site_arguments(constr, node, call) or return call
         type = store.call_return_type(key, arguments, factory: constr.checker.factory) or return call
+        return call unless body_key(constr, call, node)
 
         call.with_return_type(type)
+      end
+
+      # The key of the body `call` runs, or nil where it may run another
+      # (`Overrides`).
+      def body_key(constr, call, node)
+        Overrides.new(factory: constr.checker.factory, definitions: constr.specializations.definitions)
+          .body_key(call, node: node, exact_self: exact_self(constr), self_type: constr.self_type)
       end
 
       # The arguments `call`, being typed at `node`, is specialized under.
@@ -615,7 +623,7 @@ module Steep
     end
 
     class Store
-      attr_reader :methods, :source, :active
+      attr_reader :methods, :source, :active, :definitions
 
       def self.empty
         new(methods: {}, source: nil)
@@ -648,8 +656,11 @@ module Steep
       # (`Typing#class_exits`).
       # `declarations`: what each method answers across all its calls
       # (`CallSiteUnions`), as RBS.
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {})
+      # `definitions`: the methods the project defines in source, in a run that
+      # read the source (`Overrides`).
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, definitions: Set[])
         @methods = methods
+        @definitions = definitions
         @declarations = declarations
         @memo = {}.compare_by_identity
         @source = source
@@ -732,7 +743,7 @@ module Steep
       def with_active(active)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
-          class_exits: @class_exits, declarations: @declarations
+          class_exits: @class_exits, declarations: @declarations, definitions: @definitions
         )
       end
     end

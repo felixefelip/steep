@@ -216,9 +216,13 @@ module Steep
         return unless %i[send csend].include?(node.type) || Accumulators::LAMBDA_BODIES.include?(node.type)
 
         call = recorded_call(constr, node)
-        key = call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls) or return
+        return unless call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls)
+
         arguments = Specializations::Arguments.recorded(node, constr.typing) or return
-        recorded_exit(constr, key, arguments) if arguments.stateful?
+        return unless arguments.stateful?
+
+        key = Specializations.body_key(constr, call, node) or return
+        recorded_exit(constr, key, arguments)
       end
 
       def recorded_exit(constr, key, arguments)

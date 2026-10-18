@@ -68,6 +68,8 @@ module Steep
         @demanding = Set[] #: Set[[String, String]]
         @class_exits = {} #: Hash[RBS::TypeName, Hash[Symbol, AST::Types::t]]
         @declarations = {} #: Hash[String, String]
+        @definition_keys = Set[] #: Set[String]
+        @overrides = nil
       end
 
       # What each call site of a code-writing method defines there, by
@@ -116,16 +118,18 @@ module Steep
         context = load_target(target) or return
 
         writers = code_writers(context)
+        @definition_keys = context.sources.each_value.flat_map { |source| Collector.definitions(source).keys }.to_set
+        @overrides = Overrides.new(factory: context.subtyping.factory, definitions: @definition_keys)
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
         @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, collected, callees = collect(context, Store.empty, locations, writers)
+        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, definitions: @definition_keys), locations, writers)
         definitions.merge!(collected)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          harvest_evals(context, Store.empty, locations, definitions, writers)
+          harvest_evals(context, Store.new(methods: {}, source: nil, definitions: @definition_keys), locations, definitions, writers)
           return
         end
 
@@ -218,7 +222,7 @@ module Steep
           typings.each_value do |typing|
             next unless typing
 
-            Collector.call_sites(typing).each do |key, arguments|
+            Collector.call_sites(typing, overrides: @overrides).each do |key, arguments|
               (revealed[key] ||= Set.new).merge(arguments) if definitions.key?(key)
             end
           end
@@ -264,7 +268,7 @@ module Steep
       # `reading` holds the methods already being read on this chain, so a
       # writer that reaches itself is read once.
       def eval_sources(context, store, typing, def_node, definitions, writers, reading, self_target = nil)
-        Evals.effects(typing, def_node, writers).flat_map do |effect|
+        Evals.effects(typing, def_node, writers, overrides: @overrides).flat_map do |effect|
           next [Evals.chunk_of(typing, effect, context.subtyping.factory.env, self_target)] unless effect.kind == :frame
           # Code is written there and this call site does not decide what: a
           # hole, the same answer an eval it cannot fold gets.
@@ -380,7 +384,7 @@ module Steep
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) },
-          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits
+          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, definitions: @definition_keys
         )
       end
 
@@ -414,7 +418,7 @@ module Steep
           source = context.sources[path] or next
           typing = file_check(context, store, source, {})
 
-          Collector.each_call_site(typing) do |key, arguments, node|
+          Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
             next unless definitions.key?(key)
 
             (tuples[key] ||= Set.new).merge(arguments.tuples)
@@ -527,7 +531,7 @@ module Steep
         by_path = Hash.new do |hash, path|
           sites = Hash.new { |by_key, key| by_key[key] = [] } #: Hash[String, Array[untyped]]
           typing = type_check(context, store, context.sources.fetch(path), {})
-          Collector.each_call_site(typing, every_call: true) { |key, arguments, node| sites[key] << [path, node, arguments] }
+          Collector.each_call_site(typing, overrides: @overrides, every_call: true) { |key, arguments, node| sites[key] << [path, node, arguments] }
           hash[path] = sites
         end
 
@@ -600,12 +604,12 @@ module Steep
             baselines[key] = type.to_s if type
           end
 
-          Collector.each_call_site(typing) do |key, arguments, node|
+          Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
             (tuples[key] ||= Set.new).merge(arguments.tuples)
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
 
-          callees[path] = Collector.callees(typing) if typing
+          callees[path] = Collector.callees(typing, overrides: @overrides) if typing
         end
 
         tuples.select! { |key, _| definitions.key?(key) }
