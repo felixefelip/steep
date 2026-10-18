@@ -28,8 +28,9 @@ module Steep
       # name given as a value; `called` is the method called.
       #
       # `forwarded_by`: on an escape, the method whose whole body is the use,
-      # which answers what it does.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by)
+      # which answers what it does. `at`: the call naming it, on an explicit
+      # receiver (`site`).
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at)
       ESCAPE = Use.new(:escape, nil, Set[].freeze).freeze
 
       # Calls that reach a method or an ivar by a name given as a value.
@@ -77,6 +78,13 @@ module Steep
         end
         node.children.each { |child| block_calls(child, names: names, found: found) }
         found
+      end
+
+      # Where a call with an explicit receiver is, by the absolute path of its
+      # source and the position of its method name.
+      def self.site(node)
+        selector = node.loc.selector or return
+        "#{File.expand_path(node.loc.expression.source_buffer.name)}:#{selector.line}:#{selector.column}"
       end
 
       # `element_calls` for a block given by its parameters and body.
@@ -171,7 +179,9 @@ module Steep
       def record(name, node, parent, in_statement)
         return unless @names.include?(name)
 
-        @uses[name].concat(value_uses(node, parent, in_statement) || [ESCAPE])
+        uses = value_uses(node, parent, in_statement) || [ESCAPE]
+        at = %i[send csend].include?(node.type) && node.children[0] && node.children[0].type != :self && ClassMemoAnalyzer.site(node)
+        @uses[name].concat(at ? uses.map { |use| use.dup.tap { |sited| sited.at = at } } : uses)
       end
 
       def value_uses(node, parent, in_statement)

@@ -38,11 +38,8 @@ module Steep
       # @return self
       def build(project)
         loader = Services::FileLoader.new(base_dir: project.base_dir)
-        project.targets.each do |target|
-          loader.each_path_in_target(target) do |relative_path|
-            ingest(project.absolute_path(relative_path))
-          end
-        end
+        paths = project.targets.flat_map { |target| loader.each_path_in_target(target).to_a }.uniq
+        paths.each { |relative_path| ingest(project.absolute_path(relative_path)) }
         @entries.freeze
         @initializers.freeze
         @methods.freeze
@@ -133,6 +130,12 @@ module Steep
       def uses_of(name)
         index_uses unless @uses
         @uses.fetch(name.to_sym, [])
+      end
+
+      # Every name `uses_of` answers for.
+      def used_names
+        index_uses unless @uses
+        @uses.keys.to_set
       end
 
       # The class methods that store into the hash `memo` keeps in `ivar`,

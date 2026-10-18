@@ -344,13 +344,103 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  # `P13Status#options` shares the reader's name, and its hash is handed on.
+  # Only a receiver that may be a `P13Reflection`, in any target that checks
+  # it, counts against the reflection's `options`, `self` included; a reader
+  # on another class that answers it counts by what that reader's own
+  # receivers may be.
+  def test_a_use_whose_receiver_is_another_class_does_not_count_against_the_reader
+    union = "(singleton(::P13Through) | singleton(::P13Plain))"
+    leak = "Kernel.puts(status.options)"
+    cases = {
+      [["P13Status"], leak] => "singleton(::P13Through)",
+      [%w[P13Status P13Status], leak] => "singleton(::P13Through)",
+      [["p13_status"], leak] => "singleton(::P13Through)",
+      [["P13Status?"], "Kernel.puts(status&.options)"] => "singleton(::P13Through)",
+      [["untyped"], leak] => union,
+      [%w[P13Status untyped], leak] => union,
+      [["P13Tagged"], leak] => union,
+      [["P13Holder"], "status.held.delete(:through)"] => union,
+      [["P13Status"], leak, "def copy = itself.options.delete(:through)"] => union
+    }
+    cases.each do |(receivers, body, own), through|
+      in_tmpdir do
+        targets = receivers.each_with_index.map do |receiver, index|
+          write("sig_#{index}/leak.rbs", "class P13Leak\n  def self.leak: (#{receiver} status) -> void\nend\n")
+          "target :t#{index} do\n  signature \"sig\", \"sig_#{index}\"\n  check \"app\"\nend\n"
+        end
+        write("sig/pick.rbs", <<~RBS)
+          class P13Plain
+          end
+          class P13Through
+          end
+          class P13Reflection
+            @options: Hash[Symbol, untyped]
+            attr_reader options: Hash[Symbol, untyped]
+            def initialize: (Hash[Symbol, untyped] options) -> void
+            def kind: () -> (singleton(P13Through) | singleton(P13Plain))
+            def copy: () -> untyped
+          end
+          class P13Status
+            def options: () -> Hash[Symbol, untyped]
+          end
+          type p13_status = P13Status
+          module P13Tagged
+            def options: () -> Hash[Symbol, untyped]
+          end
+          class P13Holder
+            @reflection: P13Reflection
+            def initialize: (P13Reflection reflection) -> void
+            def held: () -> Hash[Symbol, untyped]
+          end
+          class P13Use
+            def through: () -> untyped
+          end
+        RBS
+        write("app/pick.rb", <<~RUBY)
+          class P13Reflection
+            attr_reader :options
+
+            def initialize(options)
+              @options = options
+            end
+
+            def kind
+              options[:through] ? P13Through : P13Plain
+            end
+
+            #{own}
+          end
+
+          class P13Holder
+            def initialize(reflection)
+              @reflection = reflection
+            end
+
+            def held = @reflection.options
+          end
+
+          class P13Leak
+            def self.leak(status) = #{body}
+          end
+
+          class P13Use
+            def through = P13Reflection.new({ through: :taggings }).kind
+          end
+        RUBY
+
+        assert_equal through, specialized_body_types("app/pick.rb", steepfile: targets.join).fetch("through"), [*receivers, body].join(", ")
+      end
+    end
+  end
+
   private
 
-  def specialized_body_types(path)
-    project = setup_project
+  def specialized_body_types(path, steepfile: STEEPFILE)
+    project = setup_project(steepfile: steepfile)
     postconditions = Steep::Postconditions::Runner.new(project)
     postconditions.write(postconditions.run)
-    project = setup_project
+    project = setup_project(steepfile: steepfile)
     runner = Steep::Specializations::Runner.new(project)
     runner.write(runner.run)
     project.reload_specializations!

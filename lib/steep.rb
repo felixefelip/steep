@@ -210,6 +210,7 @@ require "steep/specializations/evals_writer"
 require "steep/specializations/returns"
 require "steep/specializations/call_site_unions"
 require "steep/specializations/overrides"
+require "steep/specializations/receivers"
 require "steep/specializations/runner"
 require "steep/callbacks"
 

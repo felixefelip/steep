@@ -144,6 +144,15 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def test_readers_of_the_same_names_on_another_class_leave_the_list_known
+    ruby = source + "\nclass Catalog\n  def rules = []\n  def singulars = []\nend\n\nclass Dumper\n  def self.dump(catalog) = Kernel.puts(catalog.rules, catalog.singulars)\nend\n"
+    { "::Catalog" => [["def post_ids; []; end"], ["def category_ids; []; end"]], "untyped" => [[nil], [nil]] }.each do |receiver, expected|
+      rbs = RBS + "class Catalog\n  def rules: () -> Array[untyped]\n  def singulars: () -> Array[untyped]\nend\nclass Dumper\n  def self.dump: (#{receiver} catalog) -> untyped\nend\n"
+
+      assert_equal expected, chunks(ruby, rbs: rbs), receiver
+    end
+  end
+
   def test_a_block_may_hand_an_element_to_a_core_method_the_project_does_not_redefine
     reads = 'rules.singulars.each { |(rule, replacement)| "x".start_with?(replacement); break if result.sub!(rule, replacement) }'
 
