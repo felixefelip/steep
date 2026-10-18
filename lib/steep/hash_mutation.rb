@@ -261,19 +261,23 @@ module Steep
       end
 
       def followed?(constr, object)
-        object.type == :lvar && (constr.method_context&.held_locals&.held?(object.children[0]) || false)
+        return constr.method_context&.held_locals&.held?(object.children[0]) || false if object.type == :lvar
+
+        holder = ObjectStates::HeldIvar.self_ivar(constr, object)
+        !holder.nil? && ObjectStates::HeldIvar.held?(constr, holder)
       end
 
-      # `constr` with the variable `object` reads holding `state` with
-      # `record` in `ivar`, or without `ivar` where `record` is nil.
+      # `constr` with the variable `object` reads, a local or an ivar of
+      # `self`, holding `state` with `record` in `ivar`, or without `ivar`
+      # where `record` is nil.
       def left_holding(constr, object, state, ivar, record)
-        return constr unless %i[lvar ivar].include?(object.type)
+        name = ObjectStates::HeldIvar.variable(constr, object) or return constr
 
         ivars = record ? state.ivars.merge(ivar => record) : state.ivars.except(ivar)
         left = ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
-        current = constr.context.type_env[object.children[0]]
+        current = constr.context.type_env[name]
         left = AST::Types::Intersection.build(types: current.types.map { |member| member == state ? left : member }) if current.is_a?(AST::Types::Intersection)
-        refined(constr, object, left)
+        ObjectStates::HeldIvar.refine_variable(constr, object, left)
       end
 
       # `[state, ivar]` where `receiver` calls, with no arguments, the reader

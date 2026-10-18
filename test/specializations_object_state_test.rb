@@ -559,6 +559,157 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  # The object a store moves is held by an ivar of the caller, reached
+  # through the caller's reader, and read by a method called afterwards: that
+  # call's check leaves it as it found it, and `poke`'s leaves it written.
+  # A second name for it, here or in a method called, an argument, a block,
+  # `itself` or one held inside another object's state each leave it
+  # unknown.
+  def test_a_store_made_through_the_reader_moves_the_object_an_ivar_holds
+    in_tmpdir do
+      write("sig/runner.rbs", <<~RBS)
+        class P15Foo
+          @my_hash: Hash[Symbol, untyped]
+          attr_reader my_hash: Hash[Symbol, untyped]
+          def initialize: (Hash[Symbol, untyped] my_hash) -> void
+        end
+        class P15Writer
+          def self.write: (P15Foo foo) -> void
+        end
+        class P15Holder
+          @foo: P15Foo
+          @ready: bool
+          attr_reader foo: P15Foo
+          def initialize: (bool ready) -> void
+        end
+        class P15Runner
+          @foo: P15Foo?
+          attr_reader foo: P15Foo?
+          def run: () -> untyped
+          def run_bar: () -> untyped
+          def poked: () -> untyped
+          def poke: () -> untyped
+          def through_ivar: () -> untyped
+          def aliased: () -> untyped
+          def handed: () -> untyped
+          def blocked: () -> untyped
+          def itselfed: () -> untyped
+          def nested: () -> untyped
+          def sneaked: () -> untyped
+          def sneak: () -> nil
+        end
+      RBS
+      write("app/runner.rb", <<~RUBY)
+        class P15Foo
+          attr_reader :my_hash
+
+          def initialize(my_hash)
+            @my_hash = my_hash
+          end
+        end
+
+        class P15Writer
+          def self.write(foo) = foo.my_hash[:bar] = 5
+        end
+
+        class P15Holder
+          attr_reader :foo
+
+          def initialize(ready)
+            @foo = P15Foo.new({})
+            @ready = ready
+          end
+        end
+
+        class P15Runner
+          attr_reader :foo
+
+          def run
+            @foo = P15Foo.new({})
+            foo.my_hash[:bar] = 10
+            run_bar
+            foo.my_hash[:bar] + 10
+          end
+
+          def run_bar
+            foo.my_hash[:bar].to_s
+          end
+
+          def poked
+            @foo = P15Foo.new({})
+            foo.my_hash[:bar] = 10
+            poke
+            foo.my_hash[:bar]
+          end
+
+          def poke
+            foo.my_hash[:bar] = 99
+          end
+
+          def through_ivar
+            @foo = P15Foo.new({})
+            @foo.my_hash[:bar] = 10
+            @foo.my_hash[:bar]
+          end
+
+          def aliased
+            @foo = P15Foo.new({})
+            other = foo
+            other.my_hash[:bar] = 99
+            foo.my_hash[:bar]
+          end
+
+          def handed
+            @foo = P15Foo.new({})
+            foo.my_hash[:bar] = 10
+            P15Writer.write(foo)
+            foo.my_hash[:bar]
+          end
+
+          def blocked
+            @foo = P15Foo.new({})
+            foo.my_hash[:bar] = 10
+            [1].each { foo.my_hash[:bar] = 99 }
+            foo.my_hash[:bar]
+          end
+
+          def itselfed
+            @foo = P15Foo.new({})
+            foo.my_hash[:bar] = 10
+            foo.itself.my_hash[:bar] = 99
+            foo.my_hash[:bar]
+          end
+
+          def nested
+            holder = P15Holder.new(true)
+            holder.foo.my_hash[:bar] = 5
+            holder.foo.my_hash[:bar]
+          end
+
+          def sneaked
+            @foo = P15Foo.new({})
+            foo.my_hash[:bar] = 10
+            sneak
+            foo.my_hash[:bar]
+          end
+
+          def sneak
+            [1].each { foo.my_hash[:bar] = 7 }
+            nil
+          end
+        end
+      RUBY
+      types = specialized_body_types("app/runner.rb")
+
+      assert_equal "20", types.fetch("run")
+      assert_equal "99", types.fetch("poked")
+      assert_equal "10", types.fetch("through_ivar")
+      %w[aliased handed blocked itselfed nested sneaked].each do |name|
+        assert_equal "untyped", types.fetch(name), name
+      end
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)

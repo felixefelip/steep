@@ -124,6 +124,15 @@ module Steep
         { "class" => type.back_type.to_s, "ivars" => type.ivars.to_h { |name, value| [name.to_s, sidecar_value(value)] } }
       end
 
+      # How the sidecar writes what a body left its receiver holding
+      # (`ObjectStates::Exit`).
+      def sidecar_exit(exit)
+        ivars = ->(values) { values.to_h { |name, value| [name.to_s, sidecar_value(sidecar_writable(value))] } }
+        written = { "ivars" => ivars.(exit.ivars) }
+        written["classes"] = exit.classes.to_h { |name, values| [name.to_s, ivars.(values)] } unless exit.classes.empty?
+        written
+      end
+
       # `type` with every literal replaced by the class it instantiates. The
       # widening operator of the fixpoint: a value that keeps changing is a value
       # the program does not fix, and its class is what it does fix.
@@ -725,8 +734,9 @@ module Steep
         receivers = ((raw && raw["receivers"]) || {}).filter_map do |site, types|
           [File.expand_path(site, base_dir.to_s), types] if site.is_a?(String) && types.is_a?(Array) && types.all?(String)
         end.to_h
+        exits = ((raw && raw["exits"]) || {}).select { |key, entries| key.is_a?(String) && entries.is_a?(Hash) }
 
-        new(methods: methods, source: source, declarations: declarations, receivers: receivers)
+        new(methods: methods, source: source, declarations: declarations, receivers: receivers, exits: exits)
       end
 
       # `typed`: returns a run computed, as types, read ahead of `methods`.
@@ -761,8 +771,10 @@ module Steep
 
       # `in_checked_body`: whether the call is made in a body this check is
       # specializing, rather than elsewhere in its file.
-      def exit_ivars(method_key, arguments, in_checked_body:)
-        @exits.dig(method_key, arguments.key) || @demand&.call(self, method_key, arguments, in_checked_body)
+      def exit_ivars(method_key, arguments, in_checked_body:, factory:)
+        exit = @exits.dig(method_key, arguments.key)
+        exit = parse_exit(method_key, exit, factory: factory) if exit.is_a?(Hash)
+        exit || @demand&.call(self, method_key, arguments, in_checked_body)
       end
 
       def receiver_type(site, factory:)
@@ -814,6 +826,13 @@ module Steep
       rescue RBS::ParsingError, RBS::BaseError => exn
         Steep.logger.warn { "[specializations] unparsable type #{raw.inspect} for #{method_key}: #{exn.message}" }
         nil
+      end
+
+      def parse_exit(method_key, raw, factory:)
+        values = ->(written) { (written || {}).to_h { |name, value| [name.to_sym, parse(method_key, value, factory: factory) || (return nil)] } }
+        classes = (raw["classes"] || {}).to_h { |name, written| [RBS::TypeName.parse(name), values.(written) || (return nil)] }
+        ivars = values.(raw["ivars"]) or return nil
+        ObjectStates::Exit.new(ivars: ivars, classes: classes)
       end
 
       def parse_state(method_key, raw, factory:)

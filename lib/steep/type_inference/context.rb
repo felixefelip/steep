@@ -34,6 +34,12 @@ module Steep
           @held_locals ||= HeldLocals.of(node, reassigned: reassigned_parameters)
         end
 
+        # `reader`: the ivar a method of `self` called with no arguments
+        # answers (`HeldIvars`).
+        def held_ivars(&reader)
+          @held_ivars ||= HeldIvars.new(node, reader)
+        end
+
         def reassigned_parameter?(name)
           reassigned_parameters.include?(name)
         end

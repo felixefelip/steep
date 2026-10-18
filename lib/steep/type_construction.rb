@@ -442,7 +442,7 @@ module Steep
 
       type_env = apply_callbacks_for_method(method_name, type_env)
       type_env = apply_contract_self_type(node, method_name, type_env)
-      type_env = ObjectStates::ClassStates.entered_method(apply_method_entry_facts(method_name, type_env), arguments)
+      type_env = ObjectStates::ClassStates.entered_method(self, method_context, self_type, apply_method_entry_facts(method_name, type_env), arguments)
 
       method_params.errors.each do |error|
         typing.add_error error

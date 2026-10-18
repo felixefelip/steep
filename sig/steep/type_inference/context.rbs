@@ -50,6 +50,8 @@ module Steep
 
         def held_locals: () -> HeldLocals
 
+        def held_ivars: () { (Symbol) -> Symbol? } -> HeldIvars
+
         # Type of the block of the current method type
         def block_type: () -> Interface::Block?
 
