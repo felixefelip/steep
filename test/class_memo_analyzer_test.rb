@@ -86,6 +86,22 @@ class ClassMemoAnalyzerTest < Minitest::Test
     assert_equal [[:escape, :source_settings], [:escape, nil]], found.map { |use| [use.kind, use.forwarded_by] }
   end
 
+  def test_a_call_on_the_value_as_written_is_direct
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings)
+      class Article < Base
+        def self.write(source)
+          source.settings[:a] = 1
+          local = source.settings
+          local[:a] = 1
+          source.settings[:a] += 1
+          source.settings[:a], other = 1, 2
+        end
+      end
+    RUBY
+
+    assert_equal [[:[]=, true], [:[]=, false], [:[]=, nil], [:[], false], [:[]=, false]], found.map { |use| [use.called, use.direct] }
+  end
+
   def test_an_operator_assignment_counts_its_writer_too
     assert_equal [[:receiver, :[]=], [:receiver, :[]], [:receiver, :name=], [:receiver, :name], [:receiver, :[]=], [:receiver, :[]]],
                  uses(<<~RUBY, :settings) + uses(<<~RUBY, :@settings)
