@@ -32,12 +32,14 @@ module Steep
         end
       end
 
-      # A hash whose record keeps one, answered anywhere but a step, comes
-      # out with it held as its class: `answer_taken` makes every holder
-      # forget it, and the name it gets has to agree.
-      def handed_out(call, node, constr)
+      # A hash whose record keeps one, read off a state or `self` anywhere
+      # but a step, comes out with it held as its class: `answer_taken`
+      # makes every holder forget it, and the name it gets has to agree.
+      def handed_out(call, node, constr, receiver_type)
         type = call.return_type
-        type.is_a?(AST::Types::Record) && nested_in?(type) && !step?(constr, node) ? call.with_return_type(flatten(type)) : call
+        return call unless type.is_a?(AST::Types::Record) && nested_in?(type) && !step?(constr, node) && reader?(constr, call, node, receiver_type)
+
+        call.with_return_type(flatten(type))
       end
 
       # Once a call is done, one whose answer holds a record something in the
@@ -74,6 +76,13 @@ module Steep
         when AST::Types::Union, AST::Types::Intersection, AST::Types::Tuple then type.types.any? { |member| record_in?(member) }
         else false
         end
+      end
+
+      def reader?(constr, call, node, receiver_type)
+        return false unless call.is_a?(TypeInference::MethodCall::Typed) && node.children.size == 2
+
+        state = ObjectStates.state_in(receiver_type)
+        state ? !ObjectStates.reader_ivar(constr, state, call).nil? : !ObjectStates::HeldIvar.self_ivar(constr, node).nil?
       end
 
       def step?(constr, node)

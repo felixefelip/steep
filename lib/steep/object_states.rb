@@ -29,7 +29,7 @@ module Steep
       def answered(constr, call, node:, receiver_type:, arguments:)
         memo, constr = ClassMemos.remembered(constr, call, node)
         call = read(constr, memo || built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
-        call = HashMutation.handed_out(Yields.block_given(constr, call, node), node, constr)
+        call = HashMutation.handed_out(Yields.block_given(constr, call, node), node, constr, receiver_type)
         [call, handed_on(constr, arguments)]
       end
 
