@@ -15,6 +15,16 @@ module Steep
         !keys.empty? && keys.all? { |key| allowed.include?(key) && !constr.literal_method_registry.blocked?(key) }
       end
 
+      # Whether `receiver` reads an ivar whose contents the body was entered
+      # with. Its tuple or record is then what it holds: every call that may
+      # change it widens it or folds onto it.
+      def entered_with?(constr, receiver)
+        return false unless receiver&.type == :ivar
+
+        def_node = constr.method_context&.node or return false
+        constr.specialization_arguments(def_node)&.self_ivars&.key?(receiver.children[0]) || false
+      end
+
       # Each argument's type as an operand, or nil where one is not typed.
       def operand_types(constr, arguments)
         arguments.map do |argument|

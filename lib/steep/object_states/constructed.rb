@@ -8,19 +8,33 @@ module Steep
     #   end
     #
     # Each ivar the body assigns once, as a statement of its own after any
-    # `super`, and mentions nowhere else, as the value assigned; kept where
-    # `ObjectStates.settled` would keep it on any object. What the chain binds
-    # from its arguments is `ObjectStates.built`'s, and the two are merged.
+    # `super`, and mentions nowhere else, as the value assigned, where a state
+    # may hold it. Which of them hold for the object built is `kept`'s answer,
+    # at the call; what the chain binds from its arguments is
+    # `ObjectStates.built`'s, and the two are merged.
     module Constructed
       def self.record(constr, def_node, _pair)
-        instance = constr.self_type
-        return unless def_node.children[0] == :initialize && instance.is_a?(AST::Types::Name::Instance)
+        return unless def_node.children[0] == :initialize && constr.self_type.is_a?(AST::Types::Name::Instance)
 
-        assigned = assigned_values(constr.typing, def_node.children[2])
-        state = ObjectStates.settled(constr, AST::Types::ObjectState.new(back_type: instance, ivars: assigned))
+        assigned = assigned_values(constr.typing, def_node.children[2]).select { |_, value| ObjectStates.state_value?(value) }
         root = constr.typing
         root = root.parent while root.parent
-        root.add_exit_ivars(def_node, Exit.new(ivars: ObjectStates.state_in(state)&.ivars || {}, classes: {}))
+        root.add_exit_ivars(def_node, Exit.new(ivars: assigned, classes: {}))
+      end
+
+      # The ivars of `state`, what a `Klass.new` recorded, that hold for the
+      # object it answers: under any name, what `ObjectStates.settled` keeps;
+      # held by a local nothing else names, any value nothing changes and a
+      # hash the checker follows, unless a method `initialize` calls may
+      # assign it (`rewritten`).
+      def self.kept(constr, state, held:, rewritten:)
+        return {} unless state
+        return ObjectStates.state_in(ObjectStates.settled(constr, state))&.ivars || {} unless held
+
+        state.ivars.select do |ivar, value|
+          !rewritten.include?(ivar) &&
+            (ObjectStates.fixed?(value) || HashMutation.held?(constr, state.back_type, ivar, value, followed: true))
+        end
       end
 
       # The state a `Klass.new` key was recorded under, as the object it
