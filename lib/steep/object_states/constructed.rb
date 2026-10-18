@@ -16,7 +16,10 @@ module Steep
       def self.record(constr, def_node, _pair)
         return unless def_node.children[0] == :initialize && constr.self_type.is_a?(AST::Types::Name::Instance)
 
-        assigned = assigned_values(constr.typing, def_node.children[2]).select { |_, value| ObjectStates.state_value?(value) }
+        assigned = assigned_values(constr.typing, def_node.children[2]).filter_map do |ivar, value|
+          value = HashMutation.storable(value) if value.is_a?(AST::Types::Record)
+          [ivar, value] if value && ObjectStates.state_value?(value)
+        end.to_h
         root = constr.typing
         root = root.parent while root.parent
         root.add_exit_ivars(def_node, Exit.new(ivars: assigned, classes: {}))
