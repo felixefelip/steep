@@ -165,7 +165,7 @@ module Steep
 
         found.each do |key, entries|
           writable = entries.select { |argument_key, _| Arguments.persistable_key?(argument_key) }
-          (methods[key] ||= {}).merge!(writable.transform_values(&:to_s)) unless writable.empty?
+          (methods[key] ||= {}).merge!(writable.transform_values { |type| Specializations.sidecar_value(type) }) unless writable.empty?
         end
         @declarations.merge!(call_site_unions(context, store(found), found, baselines, callees, definitions))
 
@@ -523,6 +523,7 @@ module Steep
 
         found.each_key.filter_map do |key|
           union = reader.union(key) or next
+          union = Specializations.rbs_writable(union)
           [key, union.to_s] unless union.to_s == baselines[key]
         end.to_h
       end
@@ -601,7 +602,7 @@ module Steep
           Collector.definitions(source).each do |key, def_node|
             definitions[key] = [path, def_node]
             type = body_type(typing, def_node)
-            baselines[key] = type.to_s if type
+            baselines[key] = Specializations.rbs_writable(type).to_s if type
           end
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
@@ -689,7 +690,7 @@ module Steep
 
         # Every recorded return passes through here, which is why the sidecar's
         # spelling is settled here too rather than at each `to_s` below.
-        Specializations.rbs_writable(AST::Types::Union.build(types: types))
+        Specializations.sidecar_writable(AST::Types::Union.build(types: types))
       end
     end
   end

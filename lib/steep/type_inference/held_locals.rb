@@ -110,7 +110,7 @@ module Steep
         return [] unless args.is_a?(::Parser::AST::Node)
 
         args.children.filter_map do |param|
-          param.children[0] if param.is_a?(::Parser::AST::Node) && %i[arg procarg0 optarg kwarg kwoptarg].include?(param.type)
+          param.children[0] if param.is_a?(::Parser::AST::Node) && %i[arg procarg0 optarg kwarg kwoptarg kwrestarg].include?(param.type)
         end
       end
     end

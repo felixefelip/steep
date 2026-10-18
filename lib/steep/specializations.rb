@@ -98,6 +98,20 @@ module Steep
         type.map_type { |child| rbs_writable(child) }
       end
 
+      # `rbs_writable`, but an object whose ivars are known kept as one: the
+      # sidecar spells it (`sidecar_value`).
+      def sidecar_writable(type)
+        type.is_a?(AST::Types::ObjectState) ? type.map_type { |child| sidecar_writable(child) } : rbs_writable(type)
+      end
+
+      # How the sidecar writes a return: as RBS, or, for an object whose ivars
+      # are known, which RBS cannot spell, as its class and the value of each.
+      def sidecar_value(type)
+        return type.to_s unless type.is_a?(AST::Types::ObjectState)
+
+        { "class" => type.back_type.to_s, "ivars" => type.ivars.to_h { |name, value| [name.to_s, sidecar_value(value)] } }
+      end
+
       # `type` with every literal replaced by the class it instantiates. The
       # widening operator of the fixpoint: a value that keeps changing is a value
       # the program does not fix, and its class is what it does fix.
@@ -489,9 +503,8 @@ module Steep
         class_states.sort_by { |name, _| name.to_s }.map { |name, ivars| "#{name}{#{ivars_key(ivars).join(", ")}}" }
       end
 
-      # Where a key goes on to name the receiver's contents. No sidecar holds
-      # such a key: the contents have no RBS spelling, and only a run that
-      # computed them can read them back.
+      # Where a key goes on to name the receiver's contents. The check that
+      # reads it back computes the same contents where it types the call.
       STATE_MARKER = " with {"
 
       SELF_MARKER = " on "
@@ -499,7 +512,7 @@ module Steep
       BLOCK_MARKER = " &"
 
       def self.persistable_key?(key)
-        !key.include?(STATE_MARKER) && !key.include?(BLOCK_MARKER)
+        !key.include?(BLOCK_MARKER)
       end
 
       def block_key
@@ -614,10 +627,11 @@ module Steep
 
       private
 
-      # A tuple or a record fixes an argument as surely as a literal does — it
-      # is only ever one whose contents are known (`argument_type`).
+      # A tuple, a record or an object whose ivars are known fixes an argument
+      # as surely as a literal does — it is only ever one whose contents are
+      # known (`argument_type`).
       def literal_type?(type)
-        type.is_a?(AST::Types::Literal) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::Record)
+        [AST::Types::Literal, AST::Types::Tuple, AST::Types::Record, AST::Types::ObjectState].any? { |klass| type.is_a?(klass) }
       end
 
       # A positional index names one parameter only up to the first rest
@@ -691,7 +705,7 @@ module Steep
         ((raw && raw["methods"]) || {}).each do |method_key, entries|
           next unless entries.is_a?(Hash)
 
-          methods[method_key] = entries.select { |key, type| key.is_a?(String) && type.is_a?(String) }
+          methods[method_key] = entries.select { |key, type| key.is_a?(String) && (type.is_a?(String) || type.is_a?(Hash)) }
         end
 
         declarations = ((raw && raw["declarations"]) || {}).select { |key, type| key.is_a?(String) && type.is_a?(String) }
@@ -770,11 +784,20 @@ module Steep
 
       def parse(method_key, raw, factory:)
         return nil unless raw
+        return parse_state(method_key, raw, factory: factory) if raw.is_a?(Hash)
 
         factory.type(RBS::Parser.parse_type(raw).map_type_name { |name, _, _| name.absolute! })
       rescue RBS::ParsingError, RBS::BaseError => exn
         Steep.logger.warn { "[specializations] unparsable type #{raw.inspect} for #{method_key}: #{exn.message}" }
         nil
+      end
+
+      def parse_state(method_key, raw, factory:)
+        back_type = parse(method_key, raw["class"], factory: factory)
+        ivars = (raw["ivars"] || {}).to_h { |name, value| [name.to_sym, parse(method_key, value, factory: factory)] }
+        return nil unless back_type.is_a?(AST::Types::Name::Instance) && ivars.each_value.all?
+
+        AST::Types::ObjectState.new(back_type: back_type, ivars: ivars)
       end
 
       # The argument types a specialization pass is currently checking one BODY

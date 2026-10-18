@@ -1160,6 +1160,89 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_a_hash_kept_in_an_object_reads_back_its_branch
+    in_tmpdir do
+      write("sig/pick.rbs", <<~RBS)
+        class P8Plain
+        end
+        class P8Through
+        end
+        class P8Reflection
+          @options: Hash[Symbol, untyped]
+          attr_reader options: Hash[Symbol, untyped]
+          def initialize: (Hash[Symbol, untyped] options) -> void
+          def kind: () -> (singleton(P8Through) | singleton(P8Plain))
+        end
+        class P8Picker
+          def self.pick: (P8Reflection reflection) -> (singleton(P8Through) | singleton(P8Plain))
+        end
+        class P8Builder
+          def self.stored: (Hash[Symbol, untyped] options) -> P8Reflection
+          def self.keywords: (**untyped) -> P8Reflection
+        end
+        class P8Use
+          def a_through: () -> untyped
+          def a_plain: () -> untyped
+          def b_through: () -> untyped
+          def b_plain: () -> untyped
+          def c_through: () -> untyped
+          def c_plain: () -> untyped
+          def d_through: () -> untyped
+          def d_plain: () -> untyped
+        end
+      RBS
+      write("app/pick.rb", <<~RUBY)
+        class P8Reflection
+          attr_reader :options
+
+          def initialize(options)
+            @options = options
+          end
+
+          def kind
+            options[:through] ? P8Through : P8Plain
+          end
+        end
+
+        class P8Picker
+          def self.pick(reflection)
+            reflection.options[:through] ? P8Through : P8Plain
+          end
+        end
+
+        class P8Builder
+          def self.stored(options) = P8Reflection.new(options)
+          def self.keywords(**options) = P8Reflection.new(options)
+        end
+
+        class P8Use
+          def a_through = P8Reflection.new({ through: :taggings }).kind
+          def a_plain = P8Reflection.new({}).kind
+          def b_through = P8Picker.pick(P8Reflection.new({ through: :taggings }))
+          def b_plain = P8Picker.pick(P8Reflection.new({}))
+          def c_through = P8Builder.stored({ through: :taggings }).kind
+          def c_plain = P8Builder.stored({}).kind
+          def d_through = P8Builder.keywords(through: :taggings).kind
+          def d_plain = P8Builder.keywords.kind
+        end
+      RUBY
+      project = setup_project
+      postconditions = Steep::Postconditions::Runner.new(project)
+      postconditions.write(postconditions.run)
+      project = setup_project
+      runner = Specializations::Runner.new(project)
+      runner.write(runner.run)
+      project.reload_specializations!
+
+      types = body_types(project, current_dir + "app/pick.rb")
+
+      %w[a b c d].each do |caller|
+        assert_equal "singleton(::P8Through)", types.fetch("#{caller}_through"), caller
+        assert_equal "singleton(::P8Plain)", types.fetch("#{caller}_plain"), caller
+      end
+    end
+  end
+
   def test_a_call_site_passing_keywords_to_a_keyword_rest_reads_back_its_branch
     in_tmpdir do
       write("sig/pick.rbs", <<~RBS)

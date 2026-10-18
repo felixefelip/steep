@@ -49,6 +49,48 @@ module Steep
         [type, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, stored)]
       end
 
+      # The record a hash handed to `Klass.new` is, where `initialize` keeps it
+      # in `ivar` and nothing but the object can change it: written at the
+      # call, or held by a local nothing else names, and only ever read once
+      # stored (`read_only?`).
+      def held_record(constr, instance, ivar, argument)
+        record =
+          case argument.type
+          when :hash then Specializations::Arguments.written_record(argument, constr.typing, nil)
+          when :lvar then held_local_record(constr, argument)
+          end
+        record if record && held?(constr, instance, ivar, record)
+      end
+
+      def held?(constr, instance, ivar, record)
+        record.is_a?(AST::Types::Record) && record.elements.each_value.all? { |value| ObjectStates.record_value?(value) } &&
+          read_only?(constr, instance, ivar)
+      end
+
+      # Whether no method of `instance` but `initialize` writes `ivar` or lets
+      # its hash out, and every use the project makes of it and of the
+      # readers that answer it only reads the hash.
+      def read_only?(constr, instance, ivar)
+        registry = constr.constructor_bindings
+        uses = [] #: Array[TypeInference::ClassMemoAnalyzer::Use]
+        constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.each do |ancestor|
+          registry.method_bodies(ancestor.name.to_s).each do |name, bodies|
+            next if name == :initialize
+
+            bodies.each do |body|
+              return false unless body
+              next uses.concat(registry.uses_of(name)) if body.returns == ivar
+              return false if body.handed.include?(ivar) || body.writes.include?(ivar)
+
+              uses.concat(body.ivar_uses.fetch(ivar, []))
+            end
+          end
+        end
+        uses.all? { |use| reading_use?(constr.literal_method_registry, use) }
+      rescue RBS::BaseError
+        false
+      end
+
       # Whether every use the project makes of `names`, a memo of a hash and
       # its ivar, only reads the hash or stores into it.
       def confined?(constructor_bindings, literal_methods, names)
@@ -58,10 +100,25 @@ module Steep
       private
 
       def confined_use?(literal_methods, use)
+        use_within?(literal_methods, use, [*READS, *STORES])
+      end
+
+      def reading_use?(literal_methods, use)
+        use.kind != :yielded && use_within?(literal_methods, use, READS)
+      end
+
+      def use_within?(literal_methods, use, allowed)
         return false if use.kind == :escape || !use.element_calls.empty?
 
-        names = [*READS, *STORES].select { |key| key.end_with?("##{use.called}") }
+        names = allowed.select { |key| key.end_with?("##{use.called}") }
         !names.empty? && names.none? { |key| literal_methods.blocked?(key) }
+      end
+
+      def held_local_record(constr, node)
+        return unless constr.method_context&.held_locals&.held?(node.children[0])
+
+        type = constr.typing.type_of(node: node)
+        type if type.is_a?(AST::Types::Record)
       end
 
       def held_ivar(constr, receiver, receiver_type)
