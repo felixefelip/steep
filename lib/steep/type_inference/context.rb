@@ -40,6 +40,10 @@ module Steep
           @held_ivars ||= HeldIvars.new(node, reader)
         end
 
+        def value_uses
+          @value_uses ||= ValueUses.new(node)
+        end
+
         def reassigned_parameter?(name)
           reassigned_parameters.include?(name)
         end

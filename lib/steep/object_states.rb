@@ -13,8 +13,9 @@ module Steep
   # (`TypeInference::HeldLocals`), and each call made through it moves it.
   module ObjectStates
     # `reads_only`: the method leaves the object as it was. It only answers an
-    # ivar (`attr_reader`, `def x = @x`), or writes none and only reads what
-    # they hold (`ClassMemos.reading_uses?`).
+    # ivar (`attr_reader`, `def x = @x`: `:reader`), or writes none and only
+    # reads what they hold (`ClassMemos.reading_uses?`), which a record in a
+    # record does not see.
     Effect = Struct.new(:bindings, :writes, :reads_only, keyword_init: true)
 
     # What a body left its receiver holding (`ivars`), and each class object
@@ -28,7 +29,7 @@ module Steep
       def answered(constr, call, node:, receiver_type:, arguments:)
         memo, constr = ClassMemos.remembered(constr, call, node)
         call = read(constr, memo || built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
-        call = Yields.block_given(constr, call, node)
+        call = HashMutation.handed_out(Yields.block_given(constr, call, node), node, constr)
         [call, handed_on(constr, arguments)]
       end
 
@@ -61,7 +62,7 @@ module Steep
       # array, kept only where nothing else reaches it (`collection_confined?`).
       def state_value?(type)
         fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton) ||
-          (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| HashMutation.record_value?(value) })
+          (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| HashMutation.held_value?(value) })
       end
 
       # A method runs whenever it is called, not where it is written: nothing
@@ -144,7 +145,7 @@ module Steep
         end
         constr = ClassStates.moved(constr, node, receiver_type, handed)
         constr = ClassStates.after_call(constr)
-        handed_on(constr, arguments)
+        HashMutation.answer_taken(handed_on(constr, arguments), node)
       end
 
       # The ivars of `self` a call's own check left, made on `self` or handed
@@ -259,7 +260,7 @@ module Steep
       def settled(constr, type)
         case type
         when AST::Types::ObjectState
-          ivars = type.ivars.select { |ivar, value| (fixed?(value) || HashMutation.held?(constr, type.back_type, ivar, value, followed: false)) && never_rewritten?(constr, type.back_type, ivar) }
+          ivars = type.ivars.transform_values { |value| HashMutation.flatten(value) }.select { |ivar, value| (fixed?(value) || HashMutation.held?(constr, type.back_type, ivar, value, followed: false)) && never_rewritten?(constr, type.back_type, ivar) }
           ivars.empty? ? type.back_type : AST::Types::ObjectState.new(back_type: type.back_type, ivars: ivars)
         when AST::Types::Union, AST::Types::Intersection
           members = type.types.map { |member| settled(constr, member) }
@@ -393,7 +394,7 @@ module Steep
         rewritten = callee_writes(constr, instance, body, [method_name])
         writes = may_write(constr, owner, method_name) | rewritten
         reads_only = writes.empty? && body.self_sends.empty? &&
-                     (!body.returns.nil? || ClassMemos.reading_uses?(constr, body.ivar_uses.values.flatten(1)))
+                     (body.returns ? :reader : ClassMemos.reading_uses?(constr, body.ivar_uses.values.flatten(1)))
         Effect.new(bindings: body.bindings.reject { |ivar, _| rewritten.include?(ivar) }, writes: writes, reads_only: reads_only)
       end
 
@@ -457,7 +458,7 @@ module Steep
         effect = method_effect(constr, state.back_type, method_name) or return settled(constr, state)
         plain = arguments.all? { |argument| plain_argument?(argument) }
         rebound = plain ? bound_values(constr, state.back_type, effect.bindings, arguments, followed: false) : {} #: Hash[Symbol, AST::Types::t]
-        ivars = state.ivars.reject { |ivar, value| effect.writes.include?(ivar) || (!fixed?(value) && !effect.reads_only) }
+        ivars = (effect.reads_only == :reader ? state : HashMutation.flatten(state)).ivars.reject { |ivar, value| effect.writes.include?(ivar) || (!fixed?(value) && !effect.reads_only) }
         ivars.merge!(rebound)
         ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
       end

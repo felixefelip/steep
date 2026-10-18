@@ -710,6 +710,203 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  # example99's hash of hashes: a literal stored where nothing takes its
+  # value stays a record while every read of it is a step of a followed
+  # path, through the reader or `Foo`'s own ivar. Read into a local,
+  # returned, copied, its store's value taken, or changed where the path is
+  # not followed, it is held as its class.
+  def test_a_record_stored_under_a_key_stays_a_record_while_every_path_to_it_is_followed
+    in_tmpdir do
+      write("sig/nested.rbs", <<~RBS)
+        class P16Foo
+          @my_hash: Hash[untyped, untyped]
+          attr_reader my_hash: Hash[untyped, untyped]
+          def initialize: (Hash[untyped, untyped] my_hash) -> void
+          def sum: () -> untyped
+          def bump: () -> nil
+          def stash: () -> nil
+          def leak: () -> nil
+          def looped_bump: () -> nil
+        end
+        class P16Runner
+          @foo: P16Foo?
+          attr_reader foo: P16Foo?
+          def run: () -> untyped
+          def build: () -> untyped
+          def num1: () -> untyped
+          def change: () -> untyped
+          def give: () -> untyped
+          def local_alias: () -> untyped
+          def returned_alias: () -> untyped
+          def built_alias: () -> untyped
+          def taken_store: () -> untyped
+          def merged: () -> untyped
+          def fetched: () -> untyped
+          def bumped: () -> untyped
+          def stashed: () -> untyped
+          def outer_alias: () -> untyped
+          def leaked: () -> untyped
+          def looped: () -> untyped
+        end
+      RBS
+      write("app/nested.rb", <<~RUBY)
+        class P16Foo
+          attr_reader :my_hash
+
+          def initialize(my_hash)
+            @my_hash = my_hash
+          end
+
+          def sum
+            @my_hash[:bar][:num1] + @my_hash[:bar][:num2]
+          end
+
+          def bump
+            @my_hash[:bar][:num1] = 7
+            nil
+          end
+
+          def stash
+            stashed = @my_hash[:bar]
+            stashed[:num1] = 1
+            nil
+          end
+
+          def leak
+            copy = @my_hash.merge(extra: 1)
+            copy[:bar][:num1] = 1
+            nil
+          end
+
+          def looped_bump
+            [1].each { @my_hash[:bar][:num1] = 3 }
+            nil
+          end
+        end
+
+        class P16Runner
+          attr_reader :foo
+
+          def run
+            @foo = P16Foo.new({})
+            build
+            num1
+            change
+            foo.sum
+            foo.my_hash[:bar][:num2].to_s
+          end
+
+          def build
+            foo.my_hash[:bar] = { num1: 5, num2: 10 }
+          end
+
+          def num1
+            foo.my_hash[:bar][:num1]
+          end
+
+          def change
+            foo.my_hash[:bar][:num2] = foo.my_hash[:bar][:num2] + 20
+          end
+
+          def give = foo.my_hash[:bar]
+
+          def local_alias
+            @foo = P16Foo.new({})
+            build
+            inner = foo.my_hash[:bar]
+            inner[:num1] = 99
+            foo.my_hash[:bar][:num1]
+          end
+
+          def returned_alias
+            @foo = P16Foo.new({})
+            build
+            inner = give
+            inner[:num1] = 99
+            foo.my_hash[:bar][:num1]
+          end
+
+          def built_alias
+            @foo = P16Foo.new({})
+            inner = build
+            inner[:num1] = 99
+            foo.my_hash[:bar][:num1]
+          end
+
+          def taken_store
+            @foo = P16Foo.new({})
+            inner = (foo.my_hash[:bar] = { num1: 5 })
+            inner[:num1] = 99
+            foo.my_hash[:bar][:num1]
+          end
+
+          def merged
+            @foo = P16Foo.new({})
+            build
+            foo.my_hash[:bar].merge!(num1: 99)
+            foo.my_hash[:bar][:num1]
+          end
+
+          def fetched
+            @foo = P16Foo.new({})
+            build
+            foo.my_hash.fetch(:bar)[:num1] = 99
+            foo.my_hash[:bar][:num1]
+          end
+
+          def bumped
+            @foo = P16Foo.new({})
+            build
+            foo.bump
+            foo.my_hash[:bar][:num1]
+          end
+
+          def stashed
+            @foo = P16Foo.new({})
+            build
+            foo.stash
+            foo.my_hash[:bar][:num1]
+          end
+
+          def outer_alias
+            @foo = P16Foo.new({})
+            build
+            outer = foo.my_hash
+            outer[:bar][:num1] = 99
+            foo.my_hash[:bar][:num1]
+          end
+
+          def leaked
+            @foo = P16Foo.new({})
+            build
+            foo.leak
+            foo.my_hash[:bar][:num1]
+          end
+
+          def looped
+            @foo = P16Foo.new({})
+            build
+            foo.looped_bump
+            foo.my_hash[:bar][:num1]
+          end
+        end
+      RUBY
+      types = specialized_body_types("app/nested.rb")
+      checked = checked(setup_project.tap(&:reload_specializations!), current_dir + "app/nested.rb")
+      assert_empty checked.errors.grep(Steep::Diagnostic::Ruby::UnresolvedOverloading).map(&:header_line)
+      declarations = YAML.load_file(current_dir + "sig/generated/.steep_specializations.yml").fetch("declarations")
+
+      assert_equal({ "P16Foo#sum" => "35", "P16Runner#build" => "{ :num1 => 5, :num2 => 10 }", "P16Runner#change" => "30", "P16Runner#num1" => "5" },
+                   declarations.slice("P16Foo#sum", "P16Runner#build", "P16Runner#change", "P16Runner#num1"))
+      assert_equal '"30"', types.fetch("run")
+      assert_equal "7", types.fetch("bumped")
+      %w[local_alias returned_alias built_alias merged fetched stashed outer_alias leaked looped].each do |name|
+        assert_equal "untyped", types.fetch(name), name
+      end
+      assert_equal "::Integer", types.fetch("taken_store")
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)
