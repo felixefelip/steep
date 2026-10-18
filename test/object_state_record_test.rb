@@ -42,6 +42,22 @@ class ObjectStateRecordTest < Minitest::Test
     class FetchedReader
       def self.read: (Fetched fetched) -> void
     end
+    class Aliased
+      @aliased_options: Hash[Symbol, untyped]
+      attr_reader aliased_options: Hash[Symbol, untyped]
+      def initialize: (Hash[Symbol, untyped] options) -> void
+    end
+    class Leaked
+      @leaked_options: Hash[Symbol, untyped]
+      attr_reader leaked_options: Hash[Symbol, untyped]
+      def initialize: (Hash[Symbol, untyped] options) -> void
+    end
+    class Through
+      def source: () -> untyped
+      def source_options: () -> untyped
+      def source_leaked: () -> untyped
+      def self.read: (Through through) -> void
+    end
   RBS
 
   RUBY = <<~RUBY
@@ -90,6 +106,28 @@ class ObjectStateRecordTest < Minitest::Test
         fetched.fetched_options.filter_map { |key, value| :through == value }
       end
     end
+    class Aliased
+      attr_reader :aliased_options
+      def initialize(options)
+        @aliased_options = options
+      end
+    end
+    class Leaked
+      attr_reader :leaked_options
+      def initialize(options)
+        @leaked_options = options
+      end
+    end
+    class Through
+      def source_options = source.aliased_options
+      def source_leaked = source.leaked_options
+      def self.read(through)
+        options = through.source_options
+        options.fetch(:through) if options.key?(:through)
+        leaked = through.source_leaked
+        Kernel.puts(leaked)
+      end
+    end
   RUBY
 
   SIDECAR = [
@@ -97,7 +135,9 @@ class ObjectStateRecordTest < Minitest::Test
     ["Autosaved", "initialize", "@options"],
     ["Tweaked", "initialize", "@settings"],
     ["Handed", "initialize", "@options"],
-    ["Fetched", "initialize", "@fetched_options"]
+    ["Fetched", "initialize", "@fetched_options"],
+    ["Aliased", "initialize", "@aliased_options"],
+    ["Leaked", "initialize", "@leaked_options"]
   ].freeze
 
   def postconditions(rows)
@@ -172,6 +212,17 @@ class ObjectStateRecordTest < Minitest::Test
       fetched = Fetched.new({ through: :taggings })
     RUBY
       assert_equal state("::Fetched", :@fetched_options => "{ through: :taggings }"), pair.context.type_env[:fetched]
+    end
+  end
+
+  # `Through#source_options` answers the reader, and a local holds it.
+  def test_a_reader_forwarded_into_a_local_that_only_reads_keeps_the_record
+    check(<<~'RUBY') do |pair|
+      aliased = Aliased.new({ through: :taggings })
+      leaked = Leaked.new({ through: :taggings })
+    RUBY
+      assert_equal state("::Aliased", :@aliased_options => "{ through: :taggings }"), pair.context.type_env[:aliased]
+      assert_equal parse_type("::Leaked"), pair.context.type_env[:leaked]
     end
   end
 
