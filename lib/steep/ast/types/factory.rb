@@ -31,6 +31,10 @@ module Steep
           @descendant_index ||= DescendantIndex.new(definition_builder.env)
         end
 
+        def constant_resolver
+          @constant_resolver ||= RBS::Resolver::ConstantResolver.new(builder: definition_builder)
+        end
+
         def type_opt(type)
           if type
             type(type)

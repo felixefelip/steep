@@ -2413,6 +2413,50 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  def test_const_get_of_a_literal_is_the_constant_it_names
+    run_type_check_test(
+      signatures: {
+        "lookup.rbs" => <<~RBS
+          class Post
+          end
+
+          class Lookup
+            class X
+            end
+
+            def self.by_const_get: () -> untyped
+            def self.by_symbol: () -> untyped
+            def self.by_path: () -> untyped
+            def self.by_variable: (String name) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "lookup.rb" => <<~'RUBY'
+          class Lookup
+            def self.by_const_get = Object.const_get("Post")
+            def self.by_symbol = Object.const_get(:Post)
+            def self.by_path = Object.const_get("Lookup::X")
+            def self.by_variable(name) = Object.const_get(name)
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("lookup.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :defs && node.children[3]
+
+        actual[node.children[1].to_s] = typing.type_of(node: node.children[3]).to_s
+      end
+
+      assert_equal "singleton(::Post)", actual.fetch("by_const_get")
+      assert_equal "singleton(::Post)", actual.fetch("by_symbol")
+      assert_equal "singleton(::Lookup::X)", actual.fetch("by_path")
+      assert_equal "untyped", actual.fetch("by_variable")
+    end
+  end
+
   # A constant is the one name Ruby means to be written once, so the value at a
   # read is the value at the assignment — provided this file is where the name
   # is decided and nothing here changes the object behind it.

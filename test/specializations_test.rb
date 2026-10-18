@@ -157,6 +157,48 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_records_the_constant_a_const_get_of_a_literal_names
+    in_tmpdir do
+      write("sig/lookup.rbs", <<~RBS)
+        class Post
+        end
+        class Lookup
+          def self.find: (String name) -> untyped
+        end
+        module Finder
+          def methods_module: () -> untyped
+        end
+        module Holder
+          extend Finder
+          module Methods
+          end
+        end
+      RBS
+      write("app/lookup.rb", <<~RUBY)
+        class Lookup
+          def self.find(name) = Object.const_get(name)
+        end
+
+        module Finder
+          def methods_module = const_get(:Methods)
+        end
+
+        module Holder
+          extend Finder
+
+          methods_module
+        end
+
+        Lookup.find("Post")
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ '("Post")' => "singleton(::Post)" }, methods.fetch("Lookup.find"))
+      assert_equal(["singleton(::Holder::Methods)"], methods.fetch("Finder#methods_module").values)
+    end
+  end
+
   def test_runner_keeps_an_inherited_call_beside_a_memo_it_does_not_read
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
