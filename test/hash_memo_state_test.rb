@@ -177,7 +177,15 @@ class HashMemoStateTest < Minitest::Test
 
   def test_a_method_reads_what_its_class_body_stored
     assert_equal(
-      { "(:wheel) on singleton(::Car)" => ":round", "(:seat) on singleton(::Car)" => ":soft", "(:seat) on singleton(::Truck)" => ":bench" },
+      {
+        "(:wheel) on singleton(::Car)" => ":round", "(:seat) on singleton(::Car)" => ":soft", "(:seat) on singleton(::Truck)" => ":bench",
+        "(:wheel) on singleton(::Car) with {@registry: { :seat => :soft, :wheel => :round }}" => ":round",
+        "(:wheel) with {@registry: { :seat => :soft, :wheel => :round }}" => ":round",
+        "(:seat) on singleton(::Car) with {@registry: { :seat => :soft, :wheel => :round }}" => ":soft",
+        "(:seat) with {@registry: { :seat => :soft, :wheel => :round }}" => ":soft",
+        "(:seat) on singleton(::Truck) with {@registry: { :seat => :bench }}" => ":bench",
+        "(:seat) with {@registry: { :seat => :bench }}" => ":bench"
+      },
       returns(READERS, rbs: READERS_RBS)["Base.lookup"]
     )
   end

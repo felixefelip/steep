@@ -120,7 +120,7 @@ module Steep
         bindings = compose(chain).select do |ivar, _|
           held ? declared?(constr, instance, ivar) && !rewritten.include?(ivar) : never_rewritten?(constr, instance, ivar)
         end
-        ivars = bound_values(constr, bindings, arguments)
+        ivars = bound_values(constr, instance, bindings, arguments)
         return call if ivars.empty?
 
         call.with_return_type(AST::Types::ObjectState.new(back_type: instance, ivars: ivars))
@@ -264,7 +264,7 @@ module Steep
       def settled(constr, type)
         case type
         when AST::Types::ObjectState
-          ivars = type.ivars.select { |ivar, value| fixed?(value) && never_rewritten?(constr, type.back_type, ivar) }
+          ivars = type.ivars.select { |ivar, value| (fixed?(value) || HashMutation.held?(constr, type.back_type, ivar, value)) && never_rewritten?(constr, type.back_type, ivar) }
           ivars.empty? ? type.back_type : AST::Types::ObjectState.new(back_type: type.back_type, ivars: ivars)
         when AST::Types::Union, AST::Types::Intersection
           members = type.types.map { |member| settled(constr, member) }
@@ -277,7 +277,7 @@ module Steep
       # A reader called on an object whose ivar is known, answering what the
       # object holds. `call` unchanged for any other call.
       def read(constr, call, receiver_type:, arguments:)
-        state = state_in(receiver_type)
+        state = state_in(receiver_type) || EnteredSelf.state(constr, receiver_type, call)
         return call unless state && arguments.empty?
 
         ivar = constr.attr_method_backing_ivar(call.method_decls) ||
@@ -454,7 +454,7 @@ module Steep
 
         effect = method_effect(constr, state.back_type, method_name) or return settled(constr, state)
         plain = arguments.all? { |argument| plain_argument?(argument) }
-        rebound = plain ? bound_values(constr, effect.bindings, arguments) : {} #: Hash[Symbol, AST::Types::t]
+        rebound = plain ? bound_values(constr, state.back_type, effect.bindings, arguments) : {} #: Hash[Symbol, AST::Types::t]
         ivars = state.ivars.reject { |ivar, value| effect.writes.include?(ivar) || (!fixed?(value) && !effect.reads_only) }
         ivars.merge!(rebound)
         ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
@@ -491,10 +491,11 @@ module Steep
         constr.method_context&.held_locals&.held_value?(node) || false
       end
 
-      def bound_values(constr, bindings, arguments)
+      def bound_values(constr, instance, bindings, arguments)
         bindings.filter_map do |ivar, index|
           argument = arguments[index] or next
           next unless constr.typing.has_type?(argument)
+          record = HashMutation.held_record(constr, instance, ivar, argument) and next [ivar, record]
 
           type = settled(constr, constr.literal_operand_type(argument, constr.typing.type_of(node: argument)))
           [ivar, type] if fixed?(type) || frozen_literal?(constr, argument, type)

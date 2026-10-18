@@ -213,7 +213,7 @@ module Steep
           end
         end
         hashes.each { |name, ivar| names << name << ivar }
-        @methods.each_value { |methods| names.merge(accumulated_names(methods)) }
+        @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
         @uses = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (@uses[name] ||= []).concat(uses) }
@@ -259,10 +259,18 @@ module Steep
       # The ivars a class's methods start as an empty array, and the readers
       # that hand them out.
       def accumulated_names(methods)
-        bodies = methods.values.flatten.compact
-        ivars = bodies.flat_map { |body| body.empties.to_a }.to_set
-        readers = methods.select { |_, found| found.any? { |body| body && ivars.include?(body.returns) } }.keys
-        ivars | readers
+        ivars = methods.values.flatten.compact.flat_map { |body| body.empties.to_a }.to_set
+        ivars | readers(methods, ivars)
+      end
+
+      # The readers of the ivars an `initialize` binds from its arguments,
+      # whose uses `HashMutation.read_only?` follows.
+      def bound_names(initializers, methods)
+        readers(methods, initializers.compact.flat_map { |body| body.bindings.keys }.to_set)
+      end
+
+      def readers(methods, ivars)
+        methods.select { |_, found| found.any? { |body| body && ivars.include?(body.returns) } }.keys
       end
 
       def methods_of(class_name)
