@@ -34,6 +34,14 @@ class ObjectStateRecordTest < Minitest::Test
       def initialize: (Hash[Symbol, untyped] options) -> void
       def share: () -> void
     end
+    class Fetched
+      @fetched_options: Hash[Symbol, untyped]
+      attr_reader fetched_options: Hash[Symbol, untyped]
+      def initialize: (Hash[Symbol, untyped] options) -> void
+    end
+    class FetchedReader
+      def self.read: (Fetched fetched) -> void
+    end
   RBS
 
   RUBY = <<~RUBY
@@ -65,13 +73,31 @@ class ObjectStateRecordTest < Minitest::Test
       end
       def share = Kernel.puts(@options)
     end
+    class Fetched
+      attr_reader :fetched_options
+      def initialize(options)
+        @fetched_options = options
+      end
+    end
+    class FetchedReader
+      def self.read(fetched)
+        fetched.fetched_options.fetch(:through)
+        fetched.fetched_options.fetch(:dependent) { :nullify }
+        fetched.fetched_options.dig(:through)
+        fetched.fetched_options.merge(autosave: true)
+        fetched.fetched_options.except(:through)
+        fetched.fetched_options.select { |key, _value| :through == key }
+        fetched.fetched_options.filter_map { |key, value| :through == value }
+      end
+    end
   RUBY
 
   SIDECAR = [
     ["Options", "initialize", "@options"],
     ["Autosaved", "initialize", "@options"],
     ["Tweaked", "initialize", "@settings"],
-    ["Handed", "initialize", "@options"]
+    ["Handed", "initialize", "@options"],
+    ["Fetched", "initialize", "@fetched_options"]
   ].freeze
 
   def postconditions(rows)
@@ -81,14 +107,15 @@ class ObjectStateRecordTest < Minitest::Test
     )
   end
 
-  def check(source_text)
+  def check(source_text, reopened: "")
     registry = Steep::Project::ConstructorBindingRegistry.new
     registry.ingest_source(RUBY, path_name: "app.rb")
+    literal_methods = Steep::Project::LiteralMethodRegistry.new.ingest_source(reopened, path_name: "reopened.rb")
 
     with_checker({ "app.rbs" => RBS }, with_stdlib: true) do |checker|
       source = parse_ruby(source_text)
 
-      with_standard_construction(checker, source, constructor_bindings: registry, postconditions: postconditions(SIDECAR)) do |construction, typing|
+      with_standard_construction(checker, source, constructor_bindings: registry, postconditions: postconditions(SIDECAR), literal_method_registry: literal_methods) do |construction, typing|
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
@@ -140,6 +167,25 @@ class ObjectStateRecordTest < Minitest::Test
     end
   end
 
+  def test_a_reader_used_only_by_reads_and_copies_keeps_the_record
+    check(<<~'RUBY') do |pair|
+      fetched = Fetched.new({ through: :taggings })
+    RUBY
+      assert_equal state("::Fetched", :@fetched_options => "{ through: :taggings }"), pair.context.type_env[:fetched]
+    end
+  end
+
+  # `filter_map` walks the hash by its `each`.
+  def test_a_read_the_project_replaced_does_not_keep_the_record
+    ["class Hash; def fetch(*) = clear; end", "class Hash; def each(...) = clear; end"].each do |reopened|
+      check(<<~'RUBY', reopened: reopened) do |pair|
+        fetched = Fetched.new({ through: :taggings })
+      RUBY
+        assert_equal parse_type("::Fetched"), pair.context.type_env[:fetched], reopened
+      end
+    end
+  end
+
   # A hash, an array or a string read out of the record can be changed through
   # the name it was read into, so the record holds only its class.
   def test_a_mutable_value_in_the_record_is_held_as_its_class
@@ -176,6 +222,19 @@ class ObjectStateRecordTest < Minitest::Test
   end
 
   # A call that may change the hash some other way leaves no record to follow.
+  def test_a_read_or_a_copy_of_a_record_local_leaves_it
+    check(<<~'RUBY') do |pair|
+      # @type var options: { through: :taggings }
+      options = _ = nil
+      options.fetch(:through)
+      options.merge(autosave: true)
+      options.select { |key, _value| :through == key }
+      read = options
+    RUBY
+      assert_equal parse_type("{ through: :taggings }"), pair.context.type_env[:read]
+    end
+  end
+
   def test_any_other_change_to_a_record_local_leaves_a_hash
     check(<<~'RUBY') do |pair|
       # @type var options: { through: :taggings }
