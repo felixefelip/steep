@@ -1,14 +1,15 @@
 module Steep
   module Specializations
     class Writer
-      def self.write(path, methods, declarations)
-        new(path, methods, declarations).write
+      def self.write(path, methods, declarations, receivers)
+        new(path, methods, declarations, receivers).write
       end
 
-      def initialize(path, methods, declarations)
+      def initialize(path, methods, declarations, receivers)
         @path = path
         @methods = methods
         @declarations = declarations
+        @receivers = receivers
       end
 
       def write
@@ -25,6 +26,7 @@ module Steep
           "methods" => @methods.keys.sort.to_h { |key| [key, @methods[key].sort.to_h] }
         } #: Hash[String, untyped]
         payload["declarations"] = @declarations.sort.to_h unless @declarations.empty?
+        payload["receivers"] = @receivers.sort.to_h { |site, classes| [site, classes.sort] } unless @receivers.empty?
         payload
       end
     end

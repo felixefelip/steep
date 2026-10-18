@@ -70,6 +70,8 @@ module Steep
         @declarations = {} #: Hash[String, String]
         @definition_keys = Set[] #: Set[String]
         @overrides = nil
+        @receivers = {} #: Hash[String, Array[String]]
+        @unknown_receivers = Set[] #: Set[String]
       end
 
       # What each call site of a code-writing method defines there, by
@@ -80,12 +82,18 @@ module Steep
       # method. Filled by `run`.
       attr_reader :declarations
 
+      # The classes each typed receiver of a reader may be (`Receivers`), by
+      # site. Filled by `run`.
+      attr_reader :receivers
+
       def run
         methods = {} #: Hash[String, Hash[String, String]]
         @evals = {}
         @exits = {}
         @class_exits = {}
         @declarations = {}
+        @receivers = {}
+        @unknown_receivers = Set[]
         @project.targets.each { |target| specialize_target(target, methods) }
         methods
       end
@@ -99,10 +107,10 @@ module Steep
       end
 
       def write(methods)
-        if methods.empty? && @declarations.empty?
+        if methods.empty? && @declarations.empty? && @receivers.empty?
           output_path.delete if output_path.file?
         else
-          Writer.write(output_path, methods, @declarations)
+          Writer.write(output_path, methods, @declarations, @receivers.transform_keys { |site| @project.relative_path(Pathname(site)).to_s })
         end
 
         if @evals.empty?
@@ -124,12 +132,12 @@ module Steep
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
         @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, definitions: @definition_keys), locations, writers)
+        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, definitions: @definition_keys, receivers: @receivers), locations, writers)
         definitions.merge!(collected)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          harvest_evals(context, Store.new(methods: {}, source: nil, definitions: @definition_keys), locations, definitions, writers)
+          harvest_evals(context, Store.new(methods: {}, source: nil, definitions: @definition_keys, receivers: @receivers), locations, definitions, writers)
           return
         end
 
@@ -384,7 +392,8 @@ module Steep
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) },
-          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, definitions: @definition_keys
+          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, definitions: @definition_keys,
+          receivers: @receivers
         )
       end
 
@@ -600,6 +609,7 @@ module Steep
 
         context.sources.each do |path, source|
           typing = file_check(context, store, source, {})
+          record_receivers(typing, source)
 
           Collector.definitions(source).each do |key, def_node|
             definitions[key] = [path, def_node]
@@ -618,6 +628,17 @@ module Steep
         tuples.select! { |key, _| definitions.key?(key) }
         locations.select! { |key, _| definitions.key?(key) }
         [baselines, tuples, definitions, callees]
+      end
+
+      # A site read by two targets keeps what both may type it as.
+      def record_receivers(typing, source)
+        return unless typing && source.node
+
+        Receivers.collect(typing, source.node, @project.constructor_binding_registry.used_names).each do |site, classes|
+          @unknown_receivers << site unless classes
+          @receivers[site] = (@receivers.fetch(site, []) | classes) if classes
+        end
+        @receivers.reject! { |site, _| @unknown_receivers.include?(site) }
       end
 
       # One round per tuple position, so a method with two tuples costs two

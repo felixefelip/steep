@@ -78,7 +78,7 @@ class OverridesTest < Minitest::Test
   def check_calls
     with_checker(CHECKED_RBS, with_stdlib: true) do |checker|
       source = parse_ruby(CHECKED_RUBY)
-      store = Steep::Specializations::Store.from_hash({ "methods" => { "Base.tag" => { "(:a)" => '"a!"' } } }, source: nil)
+      store = Steep::Specializations::Store.from_hash({ "methods" => { "Base.tag" => { "(:a)" => '"a!"' } } }, source: nil, base_dir: Pathname("/"))
       with_standard_construction(checker, source, specializations: store) do |construction, typing|
         construction.synthesize(source.node)
         any, exact = source.node.children[2].children.map { |def_node| def_node.children[3] }

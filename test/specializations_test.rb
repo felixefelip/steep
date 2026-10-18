@@ -1114,7 +1114,7 @@ class SpecializationsTest < Minitest::Test
   def test_store_ignores_a_sidecar_from_another_schema_version
     store = Specializations::Store.from_hash(
       { "version" => 99, "methods" => { "Foo#bar" => { "(1)" => "Integer" } } },
-      source: "test"
+      source: "test", base_dir: Pathname("/")
     )
 
     assert_predicate store, :empty?

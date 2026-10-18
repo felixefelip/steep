@@ -25,7 +25,7 @@ module Steep
         return Store.empty unless absolute.file?
 
         raw = YAML.safe_load(absolute.read, aliases: true)
-        Store.from_hash(raw, source: absolute.to_s)
+        Store.from_hash(raw, source: absolute.to_s, base_dir: base_dir)
       rescue Psych::Exception, LoadError => exn
         Steep.logger.warn { "[specializations] failed to parse #{absolute}: #{exn.message}" }
         Store.empty
@@ -703,10 +703,11 @@ module Steep
       attr_reader :methods, :source, :active, :definitions
 
       def self.empty
-        new(methods: {}, source: nil)
+        new(methods: {}, source: nil, receivers: {})
       end
 
-      def self.from_hash(raw, source:)
+      # `base_dir`: what the sites under `receivers` are relative to.
+      def self.from_hash(raw, source:, base_dir:)
         version = raw && raw["version"]
         if version && version != SCHEMA_VERSION
           Steep.logger.warn { "[specializations] unsupported sidecar version #{version} (expected #{SCHEMA_VERSION}); ignoring #{source}" }
@@ -721,8 +722,11 @@ module Steep
         end
 
         declarations = ((raw && raw["declarations"]) || {}).select { |key, type| key.is_a?(String) && type.is_a?(String) }
+        receivers = ((raw && raw["receivers"]) || {}).filter_map do |site, classes|
+          [File.expand_path(site, base_dir.to_s), classes] if site.is_a?(String) && classes.is_a?(Array) && classes.all?(String)
+        end.to_h
 
-        new(methods: methods, source: source, declarations: declarations)
+        new(methods: methods, source: source, declarations: declarations, receivers: receivers)
       end
 
       # `typed`: returns a run computed, as types, read ahead of `methods`.
@@ -735,8 +739,11 @@ module Steep
       # (`CallSiteUnions`), as RBS.
       # `definitions`: the methods the project defines in source, in a run that
       # read the source (`Overrides`).
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, definitions: Set[])
+      # `receivers`: the classes the receiver of each call naming a reader may
+      # be (`Receivers`), by site.
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, definitions: Set[], receivers:)
         @methods = methods
+        @receivers = receivers
         @definitions = definitions
         @declarations = declarations
         @memo = {}.compare_by_identity
@@ -756,6 +763,10 @@ module Steep
       # specializing, rather than elsewhere in its file.
       def exit_ivars(method_key, arguments, in_checked_body:)
         @exits.dig(method_key, arguments.key) || @demand&.call(self, method_key, arguments, in_checked_body)
+      end
+
+      def receiver_classes(site)
+        @receivers[site]
       end
 
       def class_exit(name, ivar)
@@ -829,7 +840,7 @@ module Steep
       def with_active(active)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
-          class_exits: @class_exits, declarations: @declarations, definitions: @definitions
+          class_exits: @class_exits, declarations: @declarations, definitions: @definitions, receivers: @receivers
         )
       end
     end
