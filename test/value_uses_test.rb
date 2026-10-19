@@ -1,6 +1,6 @@
 require_relative "test_helper"
 
-# What a method body does with the value of each call in it
+# Where a method body puts the value of each expression in it
 # (felixefelip/steep#314).
 class ValueUsesTest < Minitest::Test
   def parse(source)
@@ -15,28 +15,43 @@ class ValueUsesTest < Minitest::Test
     nil
   end
 
-  def test_steps_statements_and_the_returned_value
+  def test_receivers_statements_and_what_is_taken
     def_node = parse(<<~RUBY)
       def run
         foo.my_hash[:bar][:num2] = 30
         y = foo.my_hash[:bar]
         Kernel.p(@my_hash)
-        foo.my_hash[:bar].merge!(num1: 1)
         foo.my_hash[:bar] = { num1: 5 }
       end
     RUBY
     uses = Steep::TypeInference::ValueUses.new(def_node)
 
-    assert uses.step?(find(def_node, "foo.my_hash[:bar]"))
-    assert uses.step?(find(def_node, "foo.my_hash"))
-    refute uses.step?(find(def_node, "@my_hash"))
-    refute uses.step?(find(def_node, "foo.my_hash[:bar].merge!(num1: 1)").children[0])
-    refute uses.kept?(find(def_node, "foo.my_hash[:bar][:num2] = 30"))
-    refute uses.kept?(find(def_node, "foo.my_hash[:bar] = { num1: 5 }"))
-    assert uses.kept?(find(def_node, "y = foo.my_hash[:bar]").children[1])
+    assert uses.receiver?(find(def_node, "foo.my_hash[:bar]"))
+    assert uses.receiver?(find(def_node, "foo.my_hash"))
+    assert uses.left?(find(def_node, "foo.my_hash[:bar][:num2] = 30"))
+    assert uses.left?(find(def_node, "foo.my_hash[:bar] = { num1: 5 }"))
+    assert uses.taken?(find(def_node, "y = foo.my_hash[:bar]").children[1])
+    assert uses.taken?(find(def_node, "@my_hash"))
   end
 
-  def test_a_value_a_block_answers_is_kept
+  def test_every_arm_the_method_finishes_on_is_returned
+    def_node = parse(<<~RUBY)
+      def run(ready)
+        return foo.my_hash[:bar] = { num1: 1 } if ready
+
+        if ready
+          foo.my_hash[:bar] = { num1: 2 }
+        else
+          foo.my_hash[:bar] = { num1: 3 }
+        end
+      end
+    RUBY
+    uses = Steep::TypeInference::ValueUses.new(def_node)
+
+    (1..3).each { |num| assert uses.left?(find(def_node, "foo.my_hash[:bar] = { num1: #{num} }")), num }
+  end
+
+  def test_a_value_a_block_answers_is_taken
     def_node = parse(<<~RUBY)
       def run
         [1].map { foo.my_hash[:bar] = { num1: 5 } }
@@ -44,6 +59,6 @@ class ValueUsesTest < Minitest::Test
       end
     RUBY
 
-    assert Steep::TypeInference::ValueUses.new(def_node).kept?(find(def_node, "foo.my_hash[:bar] = { num1: 5 }"))
+    assert Steep::TypeInference::ValueUses.new(def_node).taken?(find(def_node, "foo.my_hash[:bar] = { num1: 5 }"))
   end
 end

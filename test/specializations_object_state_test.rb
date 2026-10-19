@@ -713,8 +713,10 @@ class SpecializationsObjectStateTest < Minitest::Test
   # example99's hash of hashes: a literal stored where nothing takes its
   # value stays a record while every read of it is a step of a followed
   # path, through the reader or `Foo`'s own ivar. Read into a local,
-  # returned, copied, its store's value taken, or changed where the path is
-  # not followed, it is held as its class.
+  # returned, copied, read by a key that is no literal, its store's value
+  # taken, or changed where the path is not followed, it is held as its
+  # class. A nested record a signature declares (`P16Cfg`) is left as
+  # declared.
   def test_a_record_stored_under_a_key_stays_a_record_while_every_path_to_it_is_followed
     in_tmpdir do
       write("sig/nested.rbs", <<~RBS)
@@ -727,6 +729,15 @@ class SpecializationsObjectStateTest < Minitest::Test
           def stash: () -> nil
           def leak: () -> nil
           def looped_bump: () -> nil
+        end
+        class P16Cfg
+          @cfg: { db: { host: String } }
+          attr_reader cfg: { db: { host: String } }
+          def initialize: ({ db: { host: String } } cfg) -> void
+          def ivar: () -> void
+          def reader: () -> void
+          def param: ({ db: { host: String } } opts) -> void
+          def use: ({ db: { host: String } } cfg) -> void
         end
         class P16Runner
           @foo: P16Foo?
@@ -747,6 +758,7 @@ class SpecializationsObjectStateTest < Minitest::Test
           def outer_alias: () -> untyped
           def leaked: () -> untyped
           def looped: () -> untyped
+          def keyed: (Symbol key) -> untyped
         end
       RBS
       write("app/nested.rb", <<~RUBY)
@@ -782,6 +794,25 @@ class SpecializationsObjectStateTest < Minitest::Test
             [1].each { @my_hash[:bar][:num1] = 3 }
             nil
           end
+        end
+
+        class P16Cfg
+          attr_reader :cfg
+
+          def initialize(cfg)
+            @cfg = cfg
+          end
+
+          def ivar = use(@cfg)
+          def reader = use(cfg)
+
+          def param(opts)
+            db = opts[:db]
+            use(opts)
+            db
+          end
+
+          def use(cfg) = nil
         end
 
         class P16Runner
@@ -889,18 +920,26 @@ class SpecializationsObjectStateTest < Minitest::Test
             foo.looped_bump
             foo.my_hash[:bar][:num1]
           end
+
+          def keyed(key)
+            @foo = P16Foo.new({})
+            build
+            foo.my_hash[key][:num1] = 99
+            foo.my_hash[:bar][:num1]
+          end
         end
       RUBY
       types = specialized_body_types("app/nested.rb")
       checked = checked(setup_project.tap(&:reload_specializations!), current_dir + "app/nested.rb")
       assert_empty checked.errors.grep(Steep::Diagnostic::Ruby::UnresolvedOverloading).map(&:header_line)
+      assert_empty checked.errors.grep(Steep::Diagnostic::Ruby::ArgumentTypeMismatch).map(&:header_line)
       declarations = YAML.load_file(current_dir + "sig/generated/.steep_specializations.yml").fetch("declarations")
 
       assert_equal({ "P16Foo#sum" => "35", "P16Runner#build" => "{ :num1 => 5, :num2 => 10 }", "P16Runner#change" => "30", "P16Runner#num1" => "5" },
                    declarations.slice("P16Foo#sum", "P16Runner#build", "P16Runner#change", "P16Runner#num1"))
       assert_equal '"30"', types.fetch("run")
       assert_equal "7", types.fetch("bumped")
-      %w[local_alias returned_alias built_alias merged fetched stashed outer_alias leaked looped].each do |name|
+      %w[local_alias returned_alias built_alias merged fetched stashed outer_alias leaked looped keyed].each do |name|
         assert_equal "untyped", types.fetch(name), name
       end
       assert_equal "::Integer", types.fetch("taken_store")

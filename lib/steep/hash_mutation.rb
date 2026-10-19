@@ -41,6 +41,7 @@ module Steep
       def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
         keys = hash_method_keys(constr, method_name, private: private)
         block = block_params || block_body
+        receiver_type, constr = consumed(constr, receiver, receiver_type, keys, block: block) || [receiver_type, constr]
         return [receiver_type, constr] if reads?(constr.literal_method_registry, keys) && (!block || reading_block?(constr, block_params, block_body))
         if receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)
           return widened(constr, receiver, followed: !block && CollectionMutation.only?(constr, keys, WRITES))
@@ -72,7 +73,7 @@ module Steep
 
         ivar = held_ivar(constr, receiver, receiver_type)
         if CollectionMutation.only?(constr, keys, KEY_READ)
-          read = read(constr, receiver_type, ivar, arguments) or return [type, constr]
+          read = read(constr, receiver_type, ivar, arguments) or return read_by_key(constr, receiver, arguments, type)
           return [read, constr.add_typing(node, type: read).constr]
         end
         return [type, constr] unless ivar && CollectionMutation.only?(constr, keys, STORES)
@@ -243,7 +244,7 @@ module Steep
       # the call answers what `delete` removed, `nil` for a key the record did
       # not hold. Any other write leaves the variable the hash.
       def written(constr, node, receiver, record, keys, arguments, type:)
-        moved, answer = moved(constr, record, keys, arguments, fresh: receiver.type == :ivar && !taken?(constr, node))
+        moved, answer = moved(constr, record, keys, arguments, fresh: receiver.type == :ivar && left?(constr, node))
         constr = refined(constr, receiver, moved || unknown_contents(constr, receiver))
         answer ? [answer, constr.add_typing(node, type: answer).constr] : [type, constr]
       end
@@ -254,7 +255,7 @@ module Steep
       # leaves the ivar out of what it holds.
       def written_through(constr, node, object, state, ivar, record, keys, arguments, type:)
         followed = followed?(constr, object)
-        moved, answer = moved(constr, record, keys, arguments, fresh: followed && !taken?(constr, node))
+        moved, answer = moved(constr, record, keys, arguments, fresh: followed && left?(constr, node))
         constr = left_holding(constr, object, state, ivar, (moved if followed))
         answer ? [answer, constr.add_typing(node, type: answer).constr] : [type, constr]
       end
