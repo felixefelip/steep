@@ -300,7 +300,7 @@ class SpecializationsObjectStateTest < Minitest::Test
       assert_equal "singleton(::P11Plain)", types.fetch("plain")
       assert_equal ":saved", types.fetch("saved")
       assert_equal "(:saved | :unsaved)", types.fetch("looped")
-      assert_equal "(singleton(::P11Through) | singleton(::P11Plain))", types.fetch("unheld")
+      assert_equal "singleton(::P11Through)", types.fetch("unheld")
     end
   end
 
@@ -943,6 +943,87 @@ class SpecializationsObjectStateTest < Minitest::Test
         assert_equal "untyped", types.fetch(name), name
       end
       assert_equal "::Integer", types.fetch("taken_store")
+    end
+  end
+
+  def test_a_hash_written_under_any_name_keeps_what_no_write_touches
+    in_tmpdir do
+      write("sig/registry.rbs", <<~RBS)
+        class P17Plain
+        end
+        class P17Through
+        end
+        class P17Reflection
+          @options: Hash[Symbol, untyped]
+          attr_reader options: Hash[Symbol, untyped]
+          def initialize: (Hash[Symbol, untyped] options) -> void
+          def autosave=: (bool autosave) -> bool
+          def kind: () -> (singleton(P17Through) | singleton(P17Plain))
+        end
+        class P17Base
+          self.@registry: Hash[Symbol, P17Reflection]
+          def self.registry: () -> Hash[Symbol, P17Reflection]
+          def self.has_many: (Symbol name, **untyped options) -> P17Reflection
+          def self.nested: (Symbol name) -> bool
+          def self.lookup: (Symbol name) -> P17Reflection
+        end
+        class P17Post < P17Base
+          def tags: () -> untyped
+          def comments: () -> untyped
+          def tags_through: () -> untyped
+          def tags_autosave: () -> untyped
+        end
+      RBS
+      write("app/registry.rb", <<~RUBY)
+        class P17Reflection
+          attr_reader :options
+
+          def initialize(options)
+            @options = options
+          end
+
+          def autosave=(autosave)
+            @options[:autosave] = autosave
+          end
+
+          def kind = options[:through] ? P17Through : P17Plain
+        end
+
+        class P17Base
+          def self.registry
+            @registry ||= {}
+          end
+
+          def self.has_many(name, **options)
+            registry[name] = P17Reflection.new(options)
+          end
+
+          def self.nested(name)
+            lookup(name).autosave = true
+          end
+
+          def self.lookup(name)
+            registry[name]
+          end
+        end
+
+        class P17Post < P17Base
+          has_many :tags, through: :taggings
+          has_many :comments
+          nested :tags
+
+          def tags = self.class.lookup(:tags).kind
+          def comments = self.class.lookup(:comments).kind
+          def tags_through = self.class.lookup(:tags).options[:through]
+          def tags_autosave = self.class.lookup(:tags).options[:autosave]
+        end
+      RUBY
+      types = specialized_body_types("app/registry.rb")
+
+      assert_equal "singleton(::P17Through)", types.fetch("tags")
+      assert_equal "singleton(::P17Plain)", types.fetch("comments")
+      assert_equal ":taggings", types.fetch("tags_through")
+      assert_equal "untyped", types.fetch("tags_autosave")
     end
   end
 

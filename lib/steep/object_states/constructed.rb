@@ -36,7 +36,7 @@ module Steep
 
         state.ivars.select do |ivar, value|
           !rewritten.include?(ivar) &&
-            (ObjectStates.fixed?(value) || HashMutation.held?(constr, state.back_type, ivar, value, followed: true))
+            (ObjectStates.fixed?(value) || HashMutation.held(constr, state.back_type, ivar, value, followed: true))
         end
       end
 

@@ -85,7 +85,7 @@ module Steep
       # The record a hash handed to `Klass.new` is, where `initialize` keeps it
       # in `ivar` and nothing but the object can change it: written at the
       # call, or held by a local nothing else names, and once stored only ever
-      # changed the way `held?` follows.
+      # changed the way `held` follows.
       def held_record(constr, instance, ivar, argument, followed:)
         record =
           case argument.type
@@ -93,17 +93,17 @@ module Steep
           when :lvar then held_local_record(constr, argument)
           end
         record = record && storable(record)
-        record if record && held?(constr, instance, ivar, record, followed: followed)
+        record && held(constr, instance, ivar, record, followed: followed)
       end
 
       # What a hash a state follows may hold under a key: a value nothing can
-      # change, or an object of a class, which stays of that class whatever is
-      # done to it. A hash, an array or a string read out of it could be
+      # change, an object of a class, which stays of that class whatever is
+      # done to it, or `untyped`, which says nothing to change. A hash, an array or a string read out of it could be
       # changed through the name it was read into (`storable`).
       def record_value?(type)
         return type.types.all? { |member| record_value?(member) } if type.is_a?(AST::Types::Union)
 
-        ObjectStates.fixed?(type) || [AST::Types::RegexpLiteral, AST::Types::Name::Singleton, AST::Types::Name::Instance].any? { |kind| type.is_a?(kind) }
+        ObjectStates.fixed?(type) || [AST::Types::Any, AST::Types::RegexpLiteral, AST::Types::Name::Singleton, AST::Types::Name::Instance].any? { |kind| type.is_a?(kind) }
       end
 
       # `record` as a state may hold it (`record_value?`), with a
@@ -129,40 +129,56 @@ module Steep
         end
       end
 
-      # `followed`: the object is held by a local nothing else names, so each
-      # call made through it moves its state, and a method of its own may also
-      # write the hash by literal key (`autosave=`).
-      def held?(constr, instance, ivar, record, followed:)
-        record.is_a?(AST::Types::Record) && record.elements.each_value.all? { |value| record_value?(value) } &&
-          only_changed_by?(constr, instance, ivar, followed ? [*READS, *WRITES] : READS)
+      # The record `ivar` holds for an object built with `record` there, where
+      # nothing but a literal-key write can change it: held by a local nothing
+      # else names (`followed`), `record`, since each write made through it
+      # moves its state; under any name, `record` with whatever every such
+      # write the project makes may have left (`widened_by`).
+      def held(constr, instance, ivar, record, followed:)
+        return unless record.is_a?(AST::Types::Record) && record.elements.each_value.all? { |value| record_value?(value) }
+
+        writes = writes_to(constr, instance, ivar) or return
+        return record if followed
+
+        value = declared_value(constr, instance, ivar)
+        writes.reduce(record) { |held, use| widened_by(held, use, value) or return }
       end
 
-      # Whether no method of `instance` but `initialize` assigns `ivar` or lets
-      # its hash out, every use its own methods make of the ivar is one of
-      # `own_calls`, and every use the project makes of the readers that
-      # answer it only reads the hash. A write from a body with a block may
-      # land where the body's exit does not see it.
-      def only_changed_by?(constr, instance, ivar, own_calls)
+      # The writes made to `ivar`'s hash, by the methods of `instance` and on
+      # what the readers that answer it do, where no method of `instance` but
+      # `initialize` assigns `ivar` or lets its hash out, and every other use
+      # of either only reads the hash. Nil otherwise.
+      def writes_to(constr, instance, ivar)
         registry = constr.constructor_bindings
-        literal_methods = constr.literal_method_registry
+        writes = [] #: Array[TypeInference::ClassMemoAnalyzer::Use]
         constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.each do |ancestor|
           registry.method_bodies(ancestor.name.to_s).each do |name, bodies|
             next if name == :initialize
 
             bodies.each do |body|
-              return false unless body
-              next if body.returns == ivar && reader_uses?(constr, Specializations::Receivers.uses_on(constr, name, instance), name, own_calls)
-              return false if body.returns == ivar || body.handed.include?(ivar) || body.writes.include?(ivar)
-
-              own = body.ivar_uses.fetch(ivar, [])
-              return false unless own.all? { |use| use.kind != :yielded && use_within?(literal_methods, use, own_calls) }
-              return false if body.exposes_self && !own.all? { |use| reading_use?(constr, use) }
+              made = body_writes(constr, instance, ivar, name, body) or return
+              writes.concat(made)
             end
           end
         end
-        true
+        writes
       rescue RBS::BaseError
-        false
+        nil
+      end
+
+      def body_writes(constr, instance, ivar, name, body)
+        return unless body
+        if body.returns == ivar
+          return reader_writes(constr, Specializations::Receivers.uses_on(constr, name, instance), name)
+        end
+        return if body.handed.include?(ivar) || body.writes.include?(ivar)
+
+        literal_methods = constr.literal_method_registry
+        own = body.ivar_uses.fetch(ivar, [])
+        return unless own.all? { |use| use.kind != :yielded && use_within?(literal_methods, use, [*READS, *WRITES]) }
+        return if body.exposes_self && !own.all? { |use| reading_use?(constr, use) }
+
+        own.select { |use| use_within?(literal_methods, use, WRITES) }
       end
 
       def watched_keys
@@ -194,13 +210,31 @@ module Steep
         use.kind != :yielded && use_within?(constr.literal_method_registry, use, READS, elements: true)
       end
 
-      # Where the object is followed (`own_calls` writes), a write made on what
-      # a reader answers is one too: on the local that holds the object,
-      # `written_through` moves its state, and on any other object it leaves
-      # this one alone.
-      def reader_uses?(constr, uses, name, own_calls)
-        writes = uses.select { |use| use.at && use.direct && use_within?(constr.literal_method_registry, use, own_calls) }
-        reading_uses?(constr, uses - writes, name)
+      # The writes made on what a reader answers, where every other use of it
+      # only reads the hash: on the local that holds the object, or an ivar the
+      # body holds, `written_through` moves its state, and on any other object
+      # they are among what `held` widens it by.
+      def reader_writes(constr, uses, name)
+        writes = uses.select { |use| use.at && use.direct && use_within?(constr.literal_method_registry, use, WRITES) }
+        writes if reading_uses?(constr, uses - writes, name)
+      end
+
+      # `record` where the write `use` may or may not have run: the key it
+      # names holding what it held or `value`, or no longer required where it
+      # deletes it. Nil for a write by any other key.
+      def widened_by(record, use, value)
+        key = use.key or return
+        current = record.elements[key]
+        return AST::Types::Record.new(elements: record.elements, required_keys: record.required_keys - [key]) if use.called == :delete
+
+        element = current ? AST::Types::Union.build(types: [current, value]) : value
+        AST::Types::Record.new(elements: record.elements.merge(key => element), required_keys: record.required_keys)
+      end
+
+      def declared_value(constr, instance, ivar)
+        declared = declared_on(constr, instance, ivar)
+        hash = declared.is_a?(AST::Types::Name::Instance) && declared.name == AST::Builtin::Hash.module_name
+        (hash && declared.args[1]) || AST::Builtin.any_type
       end
 
       # A method that answers what a reader does is a reader too, whatever

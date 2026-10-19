@@ -34,6 +34,16 @@ class ObjectStateRecordTest < Minitest::Test
       def initialize: (Hash[Symbol, untyped] options) -> void
       def share: () -> void
     end
+    class Pruned
+      @options: Hash[Symbol, untyped]
+      def initialize: (Hash[Symbol, untyped] options) -> void
+      def prune!: () -> void
+    end
+    class Rekeyed
+      @options: Hash[Symbol, untyped]
+      def initialize: (Hash[Symbol, untyped] options) -> void
+      def set: (Symbol key, untyped value) -> void
+    end
     class Fetched
       @fetched_options: Hash[Symbol, untyped]
       attr_reader fetched_options: Hash[Symbol, untyped]
@@ -89,6 +99,18 @@ class ObjectStateRecordTest < Minitest::Test
       end
       def share = Kernel.puts(@options)
     end
+    class Pruned
+      def initialize(options)
+        @options = options
+      end
+      def prune! = @options.delete(:dependent)
+    end
+    class Rekeyed
+      def initialize(options)
+        @options = options
+      end
+      def set(key, value) = @options[key] = value
+    end
     class Fetched
       attr_reader :fetched_options
       def initialize(options)
@@ -135,6 +157,8 @@ class ObjectStateRecordTest < Minitest::Test
     ["Autosaved", "initialize", "@options"],
     ["Tweaked", "initialize", "@settings"],
     ["Handed", "initialize", "@options"],
+    ["Pruned", "initialize", "@options"],
+    ["Rekeyed", "initialize", "@options"],
     ["Fetched", "initialize", "@fetched_options"],
     ["Aliased", "initialize", "@aliased_options"],
     ["Leaked", "initialize", "@leaked_options"]
@@ -192,18 +216,25 @@ class ObjectStateRecordTest < Minitest::Test
     end
   end
 
-  # Something in the project may change the hash after it is stored: its own
-  # method through the ivar, another class through the reader, or one handing
-  # the hash on.
-  def test_a_hash_the_project_may_change_is_not_held
+  def test_a_hash_the_project_writes_by_literal_key_is_held_with_what_the_writes_may_leave
     check(<<~'RUBY') do |pair|
       autosaved = Autosaved.new({ through: :taggings })
       tweaked = Tweaked.new({ through: :taggings })
-      handed = Handed.new({ through: :taggings })
+      pruned = Pruned.new({ through: :taggings, dependent: :nullify })
     RUBY
-      assert_equal parse_type("::Autosaved"), pair.context.type_env[:autosaved]
-      assert_equal parse_type("::Tweaked"), pair.context.type_env[:tweaked]
+      assert_equal state("::Autosaved", :@options => "{ through: :taggings, ?autosave: untyped }"), pair.context.type_env[:autosaved]
+      assert_equal state("::Tweaked", :@settings => "{ through: :taggings, ?tweaked: untyped }"), pair.context.type_env[:tweaked]
+      assert_equal state("::Pruned", :@options => "{ through: :taggings, ?dependent: :nullify }"), pair.context.type_env[:pruned]
+    end
+  end
+
+  def test_a_hash_the_project_hands_on_or_writes_by_another_key_is_not_held
+    check(<<~'RUBY') do |pair|
+      handed = Handed.new({ through: :taggings })
+      rekeyed = Rekeyed.new({ through: :taggings })
+    RUBY
       assert_equal parse_type("::Handed"), pair.context.type_env[:handed]
+      assert_equal parse_type("::Rekeyed"), pair.context.type_env[:rekeyed]
     end
   end
 
