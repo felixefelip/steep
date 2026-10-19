@@ -216,7 +216,7 @@ module Steep
 
           case current
           when AST::Types::Nil then :then
-          when AST::Types::Name::Singleton, AST::Types::ObjectState then :else
+          when AST::Types::Name::Singleton, AST::Types::ObjectState, AST::Types::Record then :else
           end
         end
 

@@ -260,7 +260,11 @@ module Steep
       def settled(constr, type)
         case type
         when AST::Types::ObjectState
-          ivars = type.ivars.transform_values { |value| HashMutation.flatten(value) }.select { |ivar, value| (fixed?(value) || HashMutation.held?(constr, type.back_type, ivar, value, followed: false)) && never_rewritten?(constr, type.back_type, ivar) }
+          ivars = type.ivars.filter_map do |ivar, value|
+            value = HashMutation.flatten(value)
+            value = fixed?(value) ? value : HashMutation.held(constr, type.back_type, ivar, value, followed: false)
+            [ivar, value] if value && never_rewritten?(constr, type.back_type, ivar)
+          end.to_h
           ivars.empty? ? type.back_type : AST::Types::ObjectState.new(back_type: type.back_type, ivars: ivars)
         when AST::Types::Union, AST::Types::Intersection
           members = type.types.map { |member| settled(constr, member) }

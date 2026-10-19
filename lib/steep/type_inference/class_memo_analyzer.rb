@@ -31,8 +31,9 @@ module Steep
       # which answers what it does. `at`: the call naming it, on an explicit
       # receiver (`site`). `direct`: the call is made on the value as written,
       # not on a local it was read into, and is no `op=` or target of a
-      # multiple assignment.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct)
+      # multiple assignment. `key`: the symbol the call's first argument is
+      # written as.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key)
       ESCAPE = Use.new(:escape, nil, Set[].freeze).freeze
 
       # Calls that reach a method or an ivar by a name given as a value.
@@ -206,8 +207,9 @@ module Steep
         within = on_self ? class_method_of(call) : nil
         op_assigned = op_assigned?(call)
         direct &&= !op_assigned && @parents.fetch(call, nil)&.type != :mlhs
-        use = Use.new(in_statement && on_self ? :statement : :receiver, call.children[1], element_calls, within, nil, nil, direct)
-        op_assigned ? [Use.new(use.kind, :"#{use.called}=", Set[], within), use] : [use]
+        key = call.children[2]&.type == :sym ? call.children[2].children[0] : nil
+        use = Use.new(in_statement && on_self ? :statement : :receiver, call.children[1], element_calls, within, nil, nil, direct, key)
+        op_assigned ? [Use.new(use.kind, :"#{use.called}=", Set[], within, nil, nil, nil, key), use] : [use]
       end
 
       # What a local is given here is used where the local is, when every
