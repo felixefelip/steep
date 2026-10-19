@@ -29,6 +29,19 @@ module SpecializationsProjectHelper
   # `{ "method name" => type }` for every `def` in `path`, as an ordinary check
   # of the project sees them.
   def body_types(project, path)
+    typing = checked(project, path)
+    result = {}
+    typing.each_typing do |node, _|
+      next unless node.type == :def
+
+      body = node.children[2] or next
+      result[node.children[0].to_s] = typing.type_of(node: body).to_s
+    end
+    result
+  end
+
+  # An ordinary check of `path` in `project`.
+  def checked(project, path)
     target = project.targets.first or raise
     loader = Steep::Project::Target.construct_env_loader(options: target.options, project: project)
     file_loader = Steep::Services::FileLoader.new(base_dir: project.base_dir)
@@ -39,7 +52,7 @@ module SpecializationsProjectHelper
 
     status = Steep::Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts).status
     source = Steep::Source.parse(path.read, path: path, factory: status.subtyping.factory)
-    typing = Steep::Services::TypeCheckService.type_check(
+    Steep::Services::TypeCheckService.type_check(
       source: source,
       subtyping: status.subtyping,
       constant_resolver: status.constant_resolver,
@@ -54,14 +67,5 @@ module SpecializationsProjectHelper
       return_forwarding: project.return_forwarding_registry,
       return_alias: project.return_alias_registry
     )
-
-    result = {}
-    typing.each_typing do |node, _|
-      next unless node.type == :def
-
-      body = node.children[2] or next
-      result[node.children[0].to_s] = typing.type_of(node: body).to_s
-    end
-    result
   end
 end

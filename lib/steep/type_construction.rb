@@ -1636,7 +1636,7 @@ module Steep
             name = node.children[0]
 
             if type = context.type_env[name]
-              add_typing(node, type: type)
+              HashMutation.read_ivar(self, node, type)
             else
               fallback_to_any node
             end

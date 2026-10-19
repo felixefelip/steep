@@ -74,7 +74,7 @@ module Steep
           ivars = arguments.self_ivars
           if self_type.is_a?(AST::Types::Name::Instance)
             held = method_context.held_ivars { |name| ObjectStates::HeldIvar.reader_ivar(constr, self_type, name) }
-            ivars = ivars.to_h { |ivar, type| [ivar, held.held?(ivar) ? type : ObjectStates.settled(constr, type)] }
+            ivars = ivars.to_h { |ivar, type| [ivar, held.held?(ivar) ? type : HashMutation.flatten(ObjectStates.settled(constr, type))] }
           end
           env.refine_types(instance_variable_types: ivars).update(class_states: arguments.class_states)
         end
