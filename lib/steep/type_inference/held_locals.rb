@@ -39,6 +39,11 @@ module Steep
         @values.key?(node)
       end
 
+      # Whether the local `name` is assigned a hash written there.
+      def written_hash?(name)
+        @values.any? { |node, held| held == name && node.type == :hash }
+      end
+
       private
 
       def analyze(def_node)

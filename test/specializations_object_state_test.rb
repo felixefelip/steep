@@ -1027,6 +1027,189 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  def test_a_hash_a_local_holds_is_followed_into_the_methods_it_is_handed_to
+    in_tmpdir do
+      write("sig/handed.rbs", <<~RBS)
+        class P18Foo
+          @kept: untyped
+          def run: () -> untyped
+          def call_num1: (Hash[untyped, untyped] my_hash) -> untyped
+          def call_num2: (Hash[untyped, untyped] my_hash) -> untyped
+          def change_num2: (Hash[untyped, untyped] my_hash) -> untyped
+          def flat: () -> untyped
+          def widened_at_a_new_key: () -> untyped
+          def kept: () -> untyped
+          def keep: (Hash[untyped, untyped] my_hash) -> nil
+          def returned: () -> untyped
+          def same: (Hash[untyped, untyped] my_hash) -> Hash[untyped, untyped]
+          def keyed: (Symbol key) -> untyped
+          def write_by: (Hash[untyped, untyped] my_hash, Symbol key) -> nil
+          def early: () -> untyped
+          def early_write: (Hash[untyped, untyped] my_hash) -> nil
+          def core: () -> untyped
+          def aliased: () -> untyped
+          def looped: () -> untyped
+          def bump: (Hash[untyped, untyped] my_hash) -> nil
+        end
+      RBS
+      write("app/handed.rb", <<~RUBY)
+        class P18Foo
+          def run
+            my_hash = {}
+            my_hash[:bar] = { num1: 5, num2: 10 }
+            call_num1(my_hash)
+            call_num2(my_hash)
+            change_num2(my_hash)
+            my_hash[:bar][:num2].to_s
+          end
+
+          def call_num1(my_hash)
+            my_hash[:bar][:num1]
+          end
+
+          def call_num2(my_hash)
+            my_hash[:bar][:num2]
+          end
+
+          def change_num2(my_hash)
+            my_hash[:bar][:num2] = my_hash[:bar][:num2] + 20
+          end
+
+          def flat
+            h = {}
+            h[:bar] = 10
+            h[:bar]
+          end
+
+          def widened_at_a_new_key
+            g = { a: 1 }
+            g[:bar] = 10
+            g[:a]
+          end
+
+          def kept
+            h = { num: 1 }
+            keep(h)
+            h[:num]
+          end
+
+          def keep(my_hash)
+            @kept = my_hash
+            nil
+          end
+
+          def returned
+            h = { num: 1 }
+            other = same(h)
+            other[:num] = 2
+            h[:num]
+          end
+
+          def same(my_hash) = my_hash
+
+          def keyed(key)
+            h = { num: 1 }
+            write_by(h, key)
+            h[:num]
+          end
+
+          def write_by(my_hash, key)
+            my_hash[key] = 2
+            nil
+          end
+
+          def early
+            h = { num: 1 }
+            early_write(h)
+            h[:num]
+          end
+
+          def early_write(my_hash)
+            return nil if my_hash.empty?
+
+            my_hash[:num] = 2
+            nil
+          end
+
+          def core
+            h = { num: 1 }
+            Array(h)
+            h[:num]
+          end
+
+          def aliased
+            h = { num: 1 }
+            other = h
+            other[:num] = 2
+            h[:num]
+          end
+
+          def looped
+            h = { num: 1 }
+            [1].each { bump(h) }
+            h[:num]
+          end
+
+          def bump(my_hash)
+            my_hash[:num] = 2
+            nil
+          end
+        end
+      RUBY
+      types = specialized_body_types("app/handed.rb")
+      checked = checked(setup_project.tap(&:reload_specializations!), current_dir + "app/handed.rb")
+      declarations = YAML.load_file(current_dir + "sig/generated/.steep_specializations.yml").fetch("declarations")
+
+      assert_empty checked.errors.map(&:header_line)
+      assert_equal({ "P18Foo#call_num1" => "5", "P18Foo#call_num2" => "10", "P18Foo#change_num2" => "30" },
+                   declarations.slice("P18Foo#call_num1", "P18Foo#call_num2", "P18Foo#change_num2"))
+      assert_equal '"30"', types.fetch("run")
+      assert_equal "10", types.fetch("flat")
+      assert_equal "1", types.fetch("widened_at_a_new_key")
+      %w[kept returned keyed early core].each do |name|
+        assert_equal "untyped", types.fetch(name), name
+      end
+      assert_equal "::Integer", types.fetch("aliased")
+      assert_equal "::Integer", types.fetch("looped")
+    end
+  end
+
+  def test_a_nested_write_on_a_record_a_parameter_declares_moves_it
+    in_tmpdir do
+      write("sig/declared.rbs", <<~RBS)
+        class P19Foo
+          def change: ({ bar: { num1: 5, num2: 10 } } my_hash) -> 30
+          def reread: ({ bar: { num1: 5, num2: 10 } } my_hash) -> untyped
+          def keyed: ({ bar: { num1: 5, num2: 10 } } my_hash, Symbol key) -> untyped
+        end
+      RBS
+      write("app/declared.rb", <<~RUBY)
+        class P19Foo
+          def change(my_hash)
+            my_hash[:bar][:num2] = my_hash[:bar][:num2] + 20
+          end
+
+          def reread(my_hash)
+            my_hash[:bar][:num2] = 30
+            my_hash[:bar][:num2]
+          end
+
+          def keyed(my_hash, key)
+            my_hash[:bar][key] = 30
+            my_hash[:bar][:num2]
+          end
+        end
+      RUBY
+      types = specialized_body_types("app/declared.rb")
+      checked = checked(setup_project.tap(&:reload_specializations!), current_dir + "app/declared.rb")
+
+      assert_empty checked.errors.map(&:header_line)
+      assert_equal "30", types.fetch("change")
+      assert_equal "30", types.fetch("reread")
+      assert_equal "untyped", types.fetch("keyed")
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)

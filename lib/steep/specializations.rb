@@ -130,6 +130,7 @@ module Steep
         ivars = ->(values) { values.to_h { |name, value| [name.to_s, sidecar_value(sidecar_writable(value))] } }
         written = { "ivars" => ivars.(exit.ivars) }
         written["classes"] = exit.classes.to_h { |name, values| [name.to_s, ivars.(values)] } unless exit.classes.empty?
+        written["params"] = ivars.(exit.params) unless exit.params.empty?
         written
       end
 
@@ -545,6 +546,12 @@ module Steep
         !self_ivars.empty? || !class_states.empty?
       end
 
+      # Whether the call hands the body a record, whose exit says what the
+      # caller's local holds after it (`HashMutation.param_exits`).
+      def hands_records?
+        [*positionals, *keywords.values].any?(AST::Types::Record)
+      end
+
       def literal?
         stateful? || !self_type.nil? || fixes_a_value?
       end
@@ -832,7 +839,8 @@ module Steep
         values = ->(written) { (written || {}).to_h { |name, value| [name.to_sym, parse(method_key, value, factory: factory) || (return nil)] } }
         classes = (raw["classes"] || {}).to_h { |name, written| [RBS::TypeName.parse(name), values.(written) || (return nil)] }
         ivars = values.(raw["ivars"]) or return nil
-        ObjectStates::Exit.new(ivars: ivars, classes: classes)
+        params = values.(raw["params"]) or return nil
+        ObjectStates::Exit.new(ivars: ivars, classes: classes, params: params.transform_keys { |slot| slot.match?(/\A\d+\z/) ? slot.to_s.to_i : slot })
       end
 
       def parse_state(method_key, raw, factory:)

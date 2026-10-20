@@ -49,7 +49,7 @@ module Steep
         if !block && CollectionMutation.only?(constr, keys, WRITES) && (state, ivar = read_off_state(constr, receiver))
           return [declared_on(constr, state.back_type, ivar), constr]
         end
-        return [unknown_contents(constr, receiver), constr] if !block && CollectionMutation.only?(constr, keys, WRITES) && path(constr, receiver)
+        return [unknown_contents(constr, receiver), constr] if !block && CollectionMutation.only?(constr, keys, WRITES) && path(constr, receiver, writing: true)
 
         ivar = held_ivar(constr, receiver, receiver_type) or return [receiver_type, constr]
 
@@ -67,7 +67,7 @@ module Steep
         if CollectionMutation.only?(constr, keys, WRITES) && (state, ivar = read_off_state(constr, receiver))
           return written_through(constr, node, receiver.children[0], state, ivar, receiver_type, keys, arguments, type: type)
         end
-        if CollectionMutation.only?(constr, keys, WRITES) && receiver_type.is_a?(AST::Types::Record) && (along = path(constr, receiver))
+        if CollectionMutation.only?(constr, keys, WRITES) && receiver_type.is_a?(AST::Types::Record) && (along = path(constr, receiver, writing: true))
           return written_along(constr, node, along, receiver_type, keys, arguments, type: type)
         end
 
@@ -114,18 +114,53 @@ module Steep
         AST::Types::Record.new(elements: elements, required_keys: record.required_keys)
       end
 
+      # A hash written as the value of a local nothing else names, as the
+      # record it is: every literal-key write made through the local moves it.
+      def held_literal(constr, node, hint:)
+        return unless node.type == :hash && hint.nil? && constr.method_context&.held_locals&.held_value?(node)
+
+        record = Specializations::Arguments.written_record(node, constr.typing, nil)
+        constr.add_typing(node, type: record) if record && ObjectStates.state_value?(record)
+      end
+
       # Vouches for each local handed to a call that holds a record the checker
-      # computed and follows: one nothing else names, in a body checked for
-      # one call's arguments. A record a local is only declared to hold says
-      # nothing of what the hash holds now (`Arguments.argument_type`).
+      # computed and follows (`followed_record`). A record a local is only
+      # declared to hold says nothing of what the hash holds now
+      # (`Arguments.argument_type`).
       def vouch_held_records(constr, arguments)
-        def_node = constr.method_context&.node
-        return unless def_node && constr.specialization_arguments(def_node)
-
         arguments.each do |argument|
-          next unless argument.type == :lvar
+          record = followed_record(constr, argument) and constr.typing.add_vouched(argument, record)
+        end
+      end
 
-          record = held_local_record(constr, argument) and constr.typing.add_vouched(argument, record)
+      # What each local `vouch_held_records` vouched for holds once the call
+      # returns: what the body the call ran left its parameter holding, where
+      # it was checked under the record and its answer, which may be the
+      # hash, is no record something here takes; the hash otherwise.
+      def handed_back(constr, node, arguments)
+        handed = handed_slots(constr, node, arguments).select { |_, argument| followed_record(constr, argument) }
+        return constr if handed.empty?
+
+        call = ObjectStates.recorded_call(constr, node)
+        exits = ObjectStates.exit_of(constr, node, under: :hands_records?)&.params unless taken?(constr, node) && call && record_in?(call.return_type)
+        handed.reduce(constr) do |current, (slot, argument)|
+          ObjectStates.refine_local(current, argument.children[0], exits&.[](slot) || unknown_contents(current, argument))
+        end
+      end
+
+      # What a body checked for one call's arguments leaves each parameter it
+      # was handed a record in holding, by position or keyword: a parameter
+      # nothing else in the body names, still holding a record.
+      def param_exits(constr, def_node, arguments, env)
+        held = constr.method_context&.held_locals or return {}
+        positional, keyword = parameter_names(def_node)
+        slots = arguments.positionals.each_with_index.map { |type, index| [index, positional[index], type] } +
+                arguments.keywords.map { |name, type| [name, (name if keyword.include?(name)), type] }
+        slots.each_with_object({}) do |(slot, name, arrived), exits|
+          next unless name && arrived.is_a?(AST::Types::Record) && held.held?(name)
+
+          left = env[name]
+          exits[slot] = left if left.is_a?(AST::Types::Record)
         end
       end
 
@@ -278,7 +313,7 @@ module Steep
       # the call answers what `delete` removed, `nil` for a key the record did
       # not hold. Any other write leaves the variable the hash.
       def written(constr, node, receiver, record, keys, arguments, type:)
-        moved, answer = moved(constr, record, keys, arguments, fresh: receiver.type == :ivar && left?(constr, node))
+        moved, answer = moved(constr, record, keys, arguments, fresh: left?(constr, node) && (receiver.type == :ivar || followed_local?(constr, receiver.children[0])))
         constr = refined(constr, receiver, moved || unknown_contents(constr, receiver))
         answer ? [answer, constr.add_typing(node, type: answer).constr] : [type, constr]
       end
@@ -367,6 +402,37 @@ module Steep
 
         type = constr.typing.type_of(node: node)
         type if type.is_a?(AST::Types::Record)
+      end
+
+      # The record a local nothing else names holds, where the checker
+      # computed it: written as a hash here, or in a body checked for one
+      # call's arguments.
+      def followed_record(constr, node)
+        held_local_record(constr, node) if node.type == :lvar && followed_local?(constr, node.children[0])
+      end
+
+      def followed_local?(constr, name)
+        def_node = constr.method_context&.node or return false
+        held = constr.method_context.held_locals
+        held.held?(name) && (!constr.specialization_arguments(def_node).nil? || held.written_hash?(name))
+      end
+
+      # Each argument node with the slot it fills: its position among the
+      # positionals, or its keyword.
+      def handed_slots(constr, node, arguments)
+        arguments = arguments.dup
+        keywords = arguments.last&.type == :kwargs ? arguments.pop.children : []
+        arguments = arguments.drop(1) if TypeConstruction::SEND_SPELLINGS.key?(node.children[1]) && Specializations::Arguments.dispatched?(node, constr.typing)
+        slots = arguments.each_with_index.map { |argument, index| [index, argument] }
+        slots + keywords.filter_map { |pair| [pair.children[0].children[0], pair.children[1]] if pair.type == :pair && pair.children[0].type == :sym }
+      end
+
+      def parameter_names(def_node)
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        params = args.children.select { |param| param.is_a?(::Parser::AST::Node) }
+        positional = params.take_while { |param| %i[arg optarg].include?(param.type) }.map { |param| param.children[0] }
+        keyword = params.select { |param| %i[kwarg kwoptarg].include?(param.type) }.map { |param| param.children[0] }
+        [positional, keyword]
       end
 
       def held_ivar(constr, receiver, receiver_type)

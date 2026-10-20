@@ -13,8 +13,12 @@ module Steep
     # at the call; what the chain binds from its arguments is
     # `ObjectStates.built`'s, and the two are merged.
     module Constructed
-      def self.record(constr, def_node, _pair)
-        return unless def_node.children[0] == :initialize && constr.self_type.is_a?(AST::Types::Name::Instance)
+      def self.constructor?(constr, def_node)
+        def_node.children[0] == :initialize && constr.self_type.is_a?(AST::Types::Name::Instance)
+      end
+
+      def self.record(constr, def_node, _pair, params:)
+        return unless constructor?(constr, def_node)
 
         assigned = assigned_values(constr.typing, def_node.children[2]).filter_map do |ivar, value|
           value = HashMutation.storable(value) if value.is_a?(AST::Types::Record)
@@ -22,7 +26,7 @@ module Steep
         end.to_h
         root = constr.typing
         root = root.parent while root.parent
-        root.add_exit_ivars(def_node, Exit.new(ivars: assigned, classes: {}))
+        root.add_exit_ivars(def_node, Exit.new(ivars: assigned, classes: {}, params: params))
       end
 
       # The ivars of `state`, what a `Klass.new` recorded, that hold for the

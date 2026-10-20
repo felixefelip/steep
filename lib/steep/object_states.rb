@@ -18,9 +18,10 @@ module Steep
     # record does not see.
     Effect = Struct.new(:bindings, :writes, :reads_only, :reader, keyword_init: true)
 
-    # What a body left its receiver holding (`ivars`), and each class object
-    # it was handed the state of (`classes`).
-    Exit = Struct.new(:ivars, :classes, keyword_init: true)
+    # What a body left its receiver holding (`ivars`), each class object it
+    # was handed the state of (`classes`), and each record it was handed, by
+    # position or keyword (`params`).
+    Exit = Struct.new(:ivars, :classes, :params, keyword_init: true)
 
     class << self
       # The locals handed on are settled here, ahead of the callee's
@@ -33,20 +34,23 @@ module Steep
         [call, handed_on(constr, arguments)]
       end
 
-      # What a body checked under its receiver's contents leaves the receiver
-      # holding, of the ivars it was entered with. Only where the body ends
-      # where it falls off: a `return` leaves from elsewhere.
+      # What a body checked under its receiver's contents, or handed records,
+      # leaves the receiver and the records holding, of what it was entered
+      # with. Only where the body ends where it falls off: a `return` leaves
+      # from elsewhere.
       def record_exit(constr, def_node, pair)
         arguments = constr.specialization_arguments(def_node) or return
         return if returns_early?(pair_body(def_node))
-        return Constructed.record(constr, def_node, pair) unless arguments.stateful?
 
         env = pair.context.type_env
+        params = HashMutation.param_exits(constr, def_node, arguments, env)
+        return Constructed.record(constr, def_node, pair, params: params) if !arguments.stateful? && (Constructed.constructor?(constr, def_node) || params.empty?)
+
         ivars = entered_values(env, arguments)
         classes = arguments.class_states.keys.to_h { |name| [name, env.class_states.fetch(name, {})] }
         root = constr.typing
         root = root.parent while root.parent
-        root.add_exit_ivars(def_node, Exit.new(ivars: ivars, classes: classes))
+        root.add_exit_ivars(def_node, Exit.new(ivars: ivars, classes: classes, params: params))
       end
 
       def returns_early?(body)
@@ -145,13 +149,13 @@ module Steep
         end
         constr = ClassStates.moved(constr, node, receiver_type, handed)
         constr = ClassStates.after_call(constr)
-        HashMutation.answer_taken(handed_on(constr, arguments), node)
+        HashMutation.answer_taken(HashMutation.handed_back(handed_on(constr, arguments), node, arguments), node)
       end
 
       # The ivars of `self` a call's own check left, made on `self` or handed
       # it, or nil where it was not checked under them.
       def self_exit(constr, node, on_self)
-        exit = exit_of(constr, node) or return
+        exit = exit_of(constr, node, under: :stateful?) or return
         on_self ? exit.ivars : exit.classes[constr.self_type.name]
       end
 
@@ -206,15 +210,16 @@ module Steep
       end
 
       # What the body a call reached left its receiver holding, where it was
-      # checked under the contents this call's receiver holds.
-      def exit_of(constr, node)
+      # checked under the contents this call's receiver holds (`:stateful?`),
+      # or the records it was handed (`:hands_records?`).
+      def exit_of(constr, node, under:)
         return unless %i[send csend].include?(node.type) || Accumulators::LAMBDA_BODIES.include?(node.type)
 
         call = recorded_call(constr, node)
         return unless call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls)
 
         arguments = Specializations::Arguments.recorded(node, constr.typing) or return
-        return unless arguments.stateful?
+        return unless arguments.public_send(under)
 
         key = Specializations.body_key(constr, call, node) or return
         recorded_exit(constr, key, arguments)
@@ -454,7 +459,7 @@ module Steep
       # effect binds, and only the ivars no call can change — an array crosses a
       # call only through a check that followed it.
       def changed(constr, state, method_name, arguments, node)
-        if (exit = exit_of(constr, node)&.ivars)
+        if (exit = exit_of(constr, node, under: :stateful?)&.ivars)
           kept = exit.select { |ivar, value| !value.is_a?(AST::Types::Tuple) || ClassMemos.collection_confined?(constr, state.back_type, ivar) }
           return kept.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: kept)
         end
