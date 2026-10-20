@@ -542,6 +542,10 @@ module Steep
         "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key].join(", ")}}"
       end
 
+      def argument_types
+        [*positionals, *keywords.values, keyword_rest].compact
+      end
+
       def arguments_key
         parts = positionals.map(&:to_s)
         parts.concat(keywords.keys.sort.map { |name| "#{name}: #{keywords[name]}" })

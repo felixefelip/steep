@@ -869,6 +869,43 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_keeps_a_tuple_whose_arguments_are_each_narrow
+    in_tmpdir do
+      write("sig/registry.rbs", <<~RBS)
+        class Registry
+          def self.register: (untyped name) -> untyped
+          def self.store: (untyped kind, untyped name, untyped owner) -> untyped
+        end
+        class AVeryLongModelClassNameForTheOwner
+        end
+      RBS
+      write("app/registry.rb", <<~RUBY)
+        class Registry
+          def self.register(name)
+            store(:has_many, name, AVeryLongModelClassNameForTheOwner)
+          end
+
+          def self.store(kind, name, owner)
+            name
+          end
+        end
+
+        class AVeryLongModelClassNameForTheOwner
+        end
+
+        Registry.register(:comments)
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(:comments)" => ":comments" }, methods.fetch("Registry.register"))
+      assert_equal(
+        { "(:has_many, :comments, singleton(::AVeryLongModelClassNameForTheOwner))" => ":comments" },
+        methods.fetch("Registry.store")
+      )
+    end
+  end
+
   # The fixpoint's termination, which is the whole reason widening exists: every
   # generation folds a longer literal and supplies a tuple never seen before.
   def test_runner_terminates_on_a_body_that_folds_a_longer_literal
@@ -895,7 +932,7 @@ class SpecializationsTest < Minitest::Test
 
       recorded = methods.fetch("Bar#g", {})
       assert_operator recorded.size, :<=, Specializations::Runner::WIDEN_AFTER
-      recorded.each_key { |key| assert_operator key.length, :<=, Specializations::Runner::LITERAL_WIDTH }
+      recorded.each_key { |key| assert_operator key.delete_prefix("(").delete_suffix(")").length, :<=, Specializations::Runner::LITERAL_WIDTH }
     end
   end
 
