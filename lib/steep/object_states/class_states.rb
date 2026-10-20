@@ -151,22 +151,33 @@ module Steep
           return reach unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
 
           reach.methods << call.method_name
-          _, body = ObjectStates.resolved_body(constr, receiver, call.method_name)
-          visit_reach(constr, receiver, body, reach, reach.methods) if body
+          owner, body = ObjectStates.resolved_body(constr, receiver, call.method_name)
+          visit_reach(constr, receiver, owner, body, reach, reach.methods) if body
           reach
         end
 
         private
 
-        def visit_reach(constr, receiver, body, reach, seen)
+        def visit_reach(constr, receiver, owner, body, reach, seen)
           reach.ivars.merge(body.ivars || []).merge(body.writes).merge([body.returns].compact)
           reach.observes_self ||= body.exposes_self
           body.self_sends.each do |sent|
             next unless seen.add?(sent)
 
-            _, callee = ObjectStates.resolved_body(constr, receiver, sent)
-            callee ? visit_reach(constr, receiver, callee, reach, seen) : reach.observes_self = true
+            sent_owner, callee = ObjectStates.resolved_body(constr, receiver, sent)
+            reach.observes_self ||= overridden?(constr, receiver, owner, sent, sent_owner)
+            callee ? visit_reach(constr, receiver, sent_owner, callee, reach, seen) : reach.observes_self = true
           end
+        end
+
+        # Whether `sent`, called on `self` in a class method `owner` defines,
+        # runs another body on `receiver`, a subclass of `owner`, than on `owner`
+        # itself: the body then depends on which class it runs on.
+        def overridden?(constr, receiver, owner, sent, sent_owner)
+          return false unless receiver.is_a?(AST::Types::Name::Singleton) && owner && owner != receiver.name
+          return false unless constr.checker.factory.env.class_decls[owner].is_a?(RBS::Environment::ClassEntry)
+
+          ObjectStates.resolved_body(constr, AST::Types::Name::Singleton.new(name: owner), sent)&.first != sent_owner
         end
 
         # `self`'s ivars a body leaves known: its memos' objects as they stand,

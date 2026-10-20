@@ -134,6 +134,87 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_checks_an_inherited_class_method_on_the_subclass_whose_override_it_calls
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.build: (untyped name) -> untyped
+          def self.macro: () -> untyped
+          def self.create: (untyped macro, untyped name) -> untyped
+        end
+        class HasMany < Base
+          def self.macro: () -> :has_many
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.build(name)
+            create(macro, name)
+          end
+
+          def self.macro
+            raise NotImplementedError
+          end
+
+          def self.create(macro, name)
+            macro
+          end
+        end
+
+        class HasMany < Base
+          def self.macro
+            :has_many
+          end
+        end
+
+        HasMany.build(:comments)
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(:comments) on singleton(::HasMany)" => ":has_many" }, methods.fetch("Base.build"))
+      assert_equal({ "(:has_many, :comments)" => ":has_many" }, methods.fetch("Base.create"))
+    end
+  end
+
+  def test_runner_does_not_key_an_inherited_class_method_by_a_subclass_that_overrides_nothing_it_calls
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.build: (untyped name) -> untyped
+          def self.macro: () -> :base
+          def self.create: (untyped macro, untyped name) -> untyped
+        end
+        class Plain < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.build(name)
+            create(macro, name)
+          end
+
+          def self.macro
+            :base
+          end
+
+          def self.create(macro, name)
+            macro
+          end
+        end
+
+        class Plain < Base
+        end
+
+        Plain.build(:comments)
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(:comments)" => ":base" }, methods.fetch("Base.build"))
+    end
+  end
+
   def test_runner_records_the_constant_a_const_get_of_a_literal_names
     in_tmpdir do
       write("sig/lookup.rbs", <<~RBS)
