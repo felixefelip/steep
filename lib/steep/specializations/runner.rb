@@ -23,10 +23,11 @@ module Steep
     #
     # Widening answers both: a literal rises to the class it instantiates, which
     # is what a program that does not fix a value does fix. A tuple a later
-    # generation discovers widens past `WIDEN_AFTER` generations or past
-    # `LITERAL_WIDTH` characters, and a tuple fixing no value specializes
-    # nothing. A return widens as soon as it DISAGREES with the generation
-    # before, because one that keeps moving is not converging on a value.
+    # generation discovers widens past `WIDEN_AFTER` generations or where one
+    # of its arguments is past `LITERAL_WIDTH` characters, and a tuple fixing
+    # no value specializes nothing. A return widens as soon as it DISAGREES
+    # with the generation before, because one that keeps moving is not
+    # converging on a value.
     #
     # Widening is remembered per entry, so each side of one is bounded — a tuple
     # set that stops growing, a return that widens once and stays widened — and
@@ -40,8 +41,8 @@ module Steep
       # time cannot keep feeding itself.
       WIDEN_AFTER = 3
 
-      # A tuple whose spelling grows past this is folding rather than fixing, so
-      # it widens whatever the generation.
+      # An argument whose spelling grows past this is folding rather than
+      # fixing, so its tuple widens whatever the generation.
       LITERAL_WIDTH = 64
 
       STATE_WIDTH = 1024
@@ -353,7 +354,7 @@ module Steep
         return arguments.key.length > STATE_WIDTH if arguments.stateful?
         return false if arguments.self_type && !arguments.fixes_a_value?
 
-        generation >= WIDEN_AFTER || arguments.arguments_key.length > LITERAL_WIDTH
+        generation >= WIDEN_AFTER || arguments.argument_types.any? { |type| type.to_s.length > LITERAL_WIDTH }
       end
 
       def record_exit(key, arguments, typing, def_node)
