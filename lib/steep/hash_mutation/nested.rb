@@ -149,13 +149,22 @@ module Steep
       end
 
       # What `node` reads a followed record off: `[object, state, ivar]` for
-      # a reader off a state, or an ivar of `self` the body was entered with.
+      # a reader off a state, or the name of a local nothing else names or of
+      # an ivar of `self` the body was entered with.
       def holder_of(constr, node)
         state, ivar = read_off_state(constr, node)
         return [node.children[0], state, ivar] if state
 
-        name = ObjectStates::HeldIvar.self_ivar(constr, node)
-        name if name && entered_ivar?(constr, name) && constr.context.type_env[name].is_a?(AST::Types::Record)
+        name = node.type == :lvar ? node.children[0] : ObjectStates::HeldIvar.self_ivar(constr, node)
+        name if name && (node.type == :lvar ? followed_local?(constr, name) : entered_ivar?(constr, name)) && constr.context.type_env[name].is_a?(AST::Types::Record)
+      end
+
+      # `constr` with the variable `name` holding `type`, or what it is
+      # declared to hold where `type` is nil.
+      def refine_holder(constr, name, type)
+        return ObjectStates::HeldIvar.refine(constr, name, type || declared_hash(constr, name)) if name.start_with?("@")
+
+        ObjectStates.refine_local(constr, name, type || AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type))
       end
 
       def holder_record(constr, holder)
@@ -165,7 +174,7 @@ module Steep
       # `constr` with `holder` keeping `record`, where it is followed; and
       # what it keeps unknown otherwise, or where `record` is nil.
       def moved_holder(constr, holder, record)
-        return ObjectStates::HeldIvar.refine(constr, holder, record || declared_hash(constr, holder)) if holder.is_a?(Symbol)
+        return refine_holder(constr, holder, record) if holder.is_a?(Symbol)
 
         object, state, ivar = holder
         left_holding(constr, object, state, ivar, (record if followed?(constr, object)))
@@ -173,7 +182,7 @@ module Steep
 
       def flattened(constr, holder)
         flat = flatten(holder_record(constr, holder))
-        return ObjectStates::HeldIvar.refine(constr, holder, flat) if holder.is_a?(Symbol)
+        return refine_holder(constr, holder, flat) if holder.is_a?(Symbol)
 
         object, state, ivar = holder
         left_holding(constr, object, state, ivar, flat)
@@ -194,7 +203,7 @@ module Steep
       def forgotten(constr)
         env = constr.context.type_env
         constr = env.local_variable_types.each_key.reduce(constr) do |current, name|
-          flat = flatten_states(env[name])
+          flat = followed_local?(constr, name) ? flatten(env[name]) : flatten_states(env[name])
           flat.equal?(env[name]) ? current : ObjectStates.refine_local(current, name, flat)
         end
         env.instance_variable_types.each_key.reduce(constr) do |current, name|

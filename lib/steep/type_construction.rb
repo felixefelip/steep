@@ -2224,7 +2224,8 @@ module Steep
         when :hash, :kwargs
           # :kwargs happens for method calls with keyword argument, but the method doesn't have keyword params.
           # Conversion from kwargs to hash happens, and this when-clause is to support it.
-          type_hash(node, hint: hint).tap do |pair|
+          pair = type_hash(node, hint: hint)
+          HashMutation.held_literal(pair.constr, node, hint: hint) || pair.tap do |pair|
             if pair.type == AST::Builtin::Hash.instance_type(fill_untyped: true)
               case hint
               when AST::Types::Any, AST::Types::Top, AST::Types::Void

@@ -357,7 +357,7 @@ module Steep
       end
 
       def record_exit(key, arguments, typing, def_node)
-        return unless arguments.stateful? && typing
+        return unless (arguments.stateful? || arguments.hands_records?) && typing
 
         exit = typing.exit_ivars_of(node: def_node)
         exit ? (@exits[key] ||= {})[arguments.key] = exit : @exits[key]&.delete(arguments.key)
@@ -374,7 +374,7 @@ module Steep
       # checked further out is not checked again.
       def demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body)
         return nil unless @demanding.empty? || in_checked_body
-        return nil if !arguments.stateful? || !definitions.key?(key) || widened?(arguments, 0)
+        return nil if !(arguments.stateful? || arguments.hands_records?) || !definitions.key?(key) || widened?(arguments, 0)
 
         memo = [key, arguments.key] #: [String, String]
         return demanded[memo] if demanded.key?(memo)

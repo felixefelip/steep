@@ -126,7 +126,7 @@ module Steep
           reached = states.keys.select { |name| name == receiver || handed.include?(name) }
           return constr if reached.empty?
 
-          exit = ObjectStates.exit_of(constr, node)
+          exit = ObjectStates.exit_of(constr, node, under: :stateful?)
           left = reached.to_h do |name|
             ivars = name == receiver ? exit&.ivars : exit&.classes&.[](name)
             [name, ObjectStates.moved_ivars(constr, AST::Types::Name::Singleton.new(name: name), states[name], ivars)]
