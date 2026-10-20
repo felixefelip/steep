@@ -673,6 +673,82 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_carries_a_literal_through_a_call_that_passes_its_block
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: () -> String
+          def relay: (bool) ?{ () -> void } -> String
+          def label: (bool) ?{ () -> void } -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def greet
+            relay(true)
+          end
+
+          def relay(loud, &block)
+            label(loud, &block)
+          end
+
+          def label(loud, &block)
+            if block_given?
+              "block"
+            elsif loud
+              "LOUD"
+            else
+              "quiet"
+            end
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#label"))
+      assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#relay"))
+    end
+  end
+
+  def test_runner_does_not_record_a_passed_block_as_no_block
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: (^() -> void) -> String
+          def relay: (bool) ?{ () -> void } -> String
+          def label: (bool) ?{ () -> void } -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def greet(callback)
+            relay(true, &callback)
+          end
+
+          def relay(loud, &block)
+            label(loud, &block)
+          end
+
+          def label(loud, &block)
+            if block_given?
+              "block"
+            elsif loud
+              "LOUD"
+            else
+              "quiet"
+            end
+          end
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      refute_includes methods.fetch("Bar#label", {}).values, '"LOUD"'
+      refute_includes methods.fetch("Bar#relay", {}).values, '"LOUD"'
+    end
+  end
+
   # A tuple whose argument is a literal only because the call inside it
   # specialized: `shout` passes `label(true)`, typed `String` until `label` has
   # its entry and `"LOUD"` after.

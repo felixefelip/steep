@@ -151,6 +151,16 @@ module Steep
 
         method_decls.first.method_name.to_s.delete_prefix("::")
       end
+
+      # What a parameter holds in a body checked under `arguments`. The block
+      # parameter holds what the call passed: nothing, or a block.
+      def param_type(param, arguments)
+        return param.var_type unless arguments && param.is_a?(TypeInference::MethodParams::BlockParameter)
+        return AST::Builtin.nil_type unless arguments.block
+        return param.var_type unless param.type
+
+        AST::Types::Proc.new(type: param.type, block: nil, self_type: param.self_type)
+      end
     end
 
     # The argument types of one call, in the spelling both sides key on.
@@ -164,7 +174,8 @@ module Steep
       attr_reader :keyword_rest
 
       # The argument types of `node`, or nil when the call has a shape no tuple
-      # describes: a splat, a block pass, a non-symbol keyword.
+      # describes: a splat, a block pass that may or may not be a block, a
+      # non-symbol keyword.
       #
       # A call fixing no literal is still described. Specializing its RETURN
       # would only record the declaration back, so `Collector.call_sites` drops
@@ -181,23 +192,19 @@ module Steep
         # and the arguments are the rest (`TypeConstruction::SendDispatch`).
         args = args.drop(1) if TypeConstruction::SEND_SPELLINGS.key?(name) && dispatched?(node, typing)
 
-        keywords = {} #: Hash[Symbol, AST::Types::t]
-        if args.last&.type == :kwargs
-          args.pop.children.each do |pair|
-            return nil unless pair.type == :pair
+        if args.last&.type == :block_pass
+          passed = passed_block(args.pop, typing)
+          return nil if passed.nil?
 
-            key, value = pair.children
-            return nil unless key.type == :sym
-
-            return nil unless typing.has_type?(value)
-
-            keywords[key.children[0]] = argument_type(value, typing, exact_self)
-          end
+          block = passed if passed
         end
+
+        keywords = args.last&.type == :kwargs ? keyword_types(args.pop, typing, exact_self) : {}
+        return nil unless keywords
 
         positionals = [] #: Array[AST::Types::t]
         args.each do |arg|
-          return nil if arg.type == :splat || arg.type == :block_pass
+          return nil if arg.type == :splat
           return nil unless typing.has_type?(arg)
 
           positionals << argument_type(arg, typing, exact_self)
@@ -206,7 +213,32 @@ module Steep
         new(positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, class_states: class_states, self_type: self_type, block: block)
       end
 
-      def self.split_keyword_rest(call, keywords)
+      # The keywords a call writes, by name, or nil where one is not a plain
+      # `name: value` pair.
+      def self.keyword_types(kwargs, typing, exact_self)
+        kwargs.children.each_with_object({}) do |pair, keywords| #$ Hash[Symbol, AST::Types::t]
+          return nil unless pair.type == :pair
+
+          key, value = pair.children
+          return nil unless key.type == :sym && typing.has_type?(value)
+
+          keywords[key.children[0]] = argument_type(value, typing, exact_self)
+        end
+      end
+
+      # What a `&value` hands the callee, when the call fixes it: `false` for
+      # no block at all, the `block_pass` itself for a block whose body is not
+      # known here. nil when `value` may or may not be one.
+      def self.passed_block(block_pass, typing)
+        return nil unless typing.has_type?(block_pass)
+
+        type = typing.type_of(node: block_pass)
+        return false if type.is_a?(AST::Types::Nil)
+
+        block_pass unless type.is_a?(AST::Types::Union) && type.types.any? { |member| member.is_a?(AST::Types::Nil) }
+      end
+
+            def self.split_keyword_rest(call, keywords)
         method_type = call.is_a?(TypeInference::MethodCall::Typed) ? call.actual_method_type : nil
         params = method_type&.type&.params&.keyword_params
         return { keywords: keywords } unless params&.rest
