@@ -9863,12 +9863,14 @@ end
 class TestNilBlock
   def foo: () { () -> void } -> void
   def bar: () -> void
+  def baz: () ?{ () -> void } -> void
 end
     EOF
 
       source = parse_ruby(<<-'RUBY')
 TestNilBlock.new.foo(&nil)
 TestNilBlock.new.bar(&nil)
+TestNilBlock.new.baz(&nil)
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|

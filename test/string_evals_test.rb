@@ -358,7 +358,10 @@ class StringEvalsTest < Minitest::Test
         end
       RUBY
 
-      assert_equal({ "app/base.rb:10:2" => ["def without_block; end"] }, evals_of(setup_project))
+      assert_equal(
+        { "app/base.rb:9:2" => ["def with_block; end"], "app/base.rb:10:2" => ["def without_block; end"] },
+        evals_of(setup_project)
+      )
     end
   end
 

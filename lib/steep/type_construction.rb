@@ -409,14 +409,14 @@ module Steep
       local_variable_types = method_params.each_param.with_object({}) do |param, hash| #$ Hash[Symbol, AST::Types::t]
         if param.name
           if !SPECIAL_LVAR_NAMES.include?(param.name)
-            hash[param.name] = method_context.held_locals.held?(param.name) ? param.var_type : ObjectStates.settled(self, param.var_type)
+            hash[param.name] = method_context.held_locals.held?(param.name) ? Specializations.param_type(param, arguments) : ObjectStates.settled(self, Specializations.param_type(param, arguments))
           elsif param.name == :_ && !cast_lvar?(:_)
             # Untyped as before, but bound: an ordinary `_` from outside must
             # not show through it.
             hash[param.name] = AST::Builtin.any_type
           end
         elsif param.is_a?(TypeInference::MethodParams::BlockParameter)
-          hash[ANONYMOUS_BLOCK_PASSABLE_LVAR] = param.var_type
+          hash[ANONYMOUS_BLOCK_PASSABLE_LVAR] = Specializations.param_type(param, arguments)
         end
       end
       type_env = ObjectStates.entered_method(context.type_env).assign_local_variables(local_variable_types)
@@ -6873,7 +6873,7 @@ module Steep
                   errors << Diagnostic::Ruby::RequiredBlockMissing.new(
                     node: node,
                     method_type: method_type
-                  )
+                  ) if arg.block&.required?
                 else
                   # non-nil value is given
                   constr.check_relation(sub_type: node_type, super_type: arg.node_type, constraints: constraints).else do |result|
