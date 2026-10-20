@@ -46,7 +46,7 @@ module Steep
       # a key, that is no step: the holder keeps its records' records as
       # their class from here, and the call runs on what it then holds.
       def consumed(constr, receiver, receiver_type, keys, block:)
-        return unless receiver && (holder = holder_of(constr, receiver) || path(constr, receiver)&.first)
+        return unless receiver && (holder = holder_of(constr, receiver) || path(constr, receiver, writing: false)&.first)
         return unless nested_in?(holder_record(constr, holder)) && (block || !CollectionMutation.only?(constr, keys, STEPS))
 
         flat = holder_of(constr, receiver) ? flatten(receiver_type) : storable_value(receiver_type) || receiver_type
@@ -140,11 +140,12 @@ module Steep
       end
 
       # `[holder, key]` where `node` reads `key` off the record a holder
-      # keeps.
-      def path(constr, node)
+      # keeps. Written through, a local nothing else names holds what its
+      # record declares too, as a write on the record itself would follow.
+      def path(constr, node, writing:)
         return unless node.type == :send && node.children[1] == :[] && node.children.size == 3 && node.children[2].type == :sym
 
-        holder = holder_of(constr, node.children[0]) or return
+        holder = holder_of(constr, node.children[0]) || (writing && held_record_local(constr, node.children[0])) or return
         [holder, node.children[2].children[0]]
       end
 
@@ -165,6 +166,11 @@ module Steep
         return ObjectStates::HeldIvar.refine(constr, name, type || declared_hash(constr, name)) if name.start_with?("@")
 
         ObjectStates.refine_local(constr, name, type || AST::Builtin::Hash.instance_type(AST::Builtin.any_type, AST::Builtin.any_type))
+      end
+
+      def held_record_local(constr, node)
+        name = node.children[0]
+        name if node.type == :lvar && constr.method_context&.held_locals&.held?(name) && constr.context.type_env[name].is_a?(AST::Types::Record)
       end
 
       def holder_record(constr, holder)

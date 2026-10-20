@@ -49,7 +49,7 @@ module Steep
         if !block && CollectionMutation.only?(constr, keys, WRITES) && (state, ivar = read_off_state(constr, receiver))
           return [declared_on(constr, state.back_type, ivar), constr]
         end
-        return [unknown_contents(constr, receiver), constr] if !block && CollectionMutation.only?(constr, keys, WRITES) && path(constr, receiver)
+        return [unknown_contents(constr, receiver), constr] if !block && CollectionMutation.only?(constr, keys, WRITES) && path(constr, receiver, writing: true)
 
         ivar = held_ivar(constr, receiver, receiver_type) or return [receiver_type, constr]
 
@@ -67,7 +67,7 @@ module Steep
         if CollectionMutation.only?(constr, keys, WRITES) && (state, ivar = read_off_state(constr, receiver))
           return written_through(constr, node, receiver.children[0], state, ivar, receiver_type, keys, arguments, type: type)
         end
-        if CollectionMutation.only?(constr, keys, WRITES) && receiver_type.is_a?(AST::Types::Record) && (along = path(constr, receiver))
+        if CollectionMutation.only?(constr, keys, WRITES) && receiver_type.is_a?(AST::Types::Record) && (along = path(constr, receiver, writing: true))
           return written_along(constr, node, along, receiver_type, keys, arguments, type: type)
         end
 

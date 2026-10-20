@@ -1174,6 +1174,42 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  def test_a_nested_write_on_a_record_a_parameter_declares_moves_it
+    in_tmpdir do
+      write("sig/declared.rbs", <<~RBS)
+        class P19Foo
+          def change: ({ bar: { num1: 5, num2: 10 } } my_hash) -> 30
+          def reread: ({ bar: { num1: 5, num2: 10 } } my_hash) -> untyped
+          def keyed: ({ bar: { num1: 5, num2: 10 } } my_hash, Symbol key) -> untyped
+        end
+      RBS
+      write("app/declared.rb", <<~RUBY)
+        class P19Foo
+          def change(my_hash)
+            my_hash[:bar][:num2] = my_hash[:bar][:num2] + 20
+          end
+
+          def reread(my_hash)
+            my_hash[:bar][:num2] = 30
+            my_hash[:bar][:num2]
+          end
+
+          def keyed(my_hash, key)
+            my_hash[:bar][key] = 30
+            my_hash[:bar][:num2]
+          end
+        end
+      RUBY
+      types = specialized_body_types("app/declared.rb")
+      checked = checked(setup_project.tap(&:reload_specializations!), current_dir + "app/declared.rb")
+
+      assert_empty checked.errors.map(&:header_line)
+      assert_equal "30", types.fetch("change")
+      assert_equal "30", types.fetch("reread")
+      assert_equal "untyped", types.fetch("keyed")
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)
