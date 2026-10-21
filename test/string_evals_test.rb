@@ -1984,6 +1984,50 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_a_default_reaches_the_returns_the_inner_frame_reads
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name, untyped scope) -> void
+          def self.label: (Symbol name, untyped scope) -> Symbol
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name, ?untyped scope) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name, scope)
+            owner.module_eval "def \#{label(name, scope)}; end"
+          end
+
+          def self.label(name, scope)
+            name
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name, scope = nil)
+            Writer.generate(self, name, scope)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:18:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
   def test_a_call_whose_argument_is_not_fixed_records_a_hole
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
