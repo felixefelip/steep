@@ -906,6 +906,37 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_keeps_a_literal_handed_down_a_chain_deeper_than_the_widening_bound
+    in_tmpdir do
+      write("sig/chain.rbs", <<~RBS)
+        class Chain
+          def self.a: (untyped x) -> untyped
+          def self.b: (untyped x) -> untyped
+          def self.c: (untyped x) -> untyped
+          def self.d: (untyped x) -> untyped
+          def self.e: (untyped x) -> untyped
+        end
+      RBS
+      write("app/chain.rb", <<~RUBY)
+        class Chain
+          def self.a(x) = b(x)
+          def self.b(x) = c(x)
+          def self.c(x) = d(x)
+          def self.d(x) = e(x)
+          def self.e(x) = x
+        end
+
+        Chain.a(:lit)
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      %w[a b c d e].each do |name|
+        assert_equal({ "(:lit)" => ":lit" }, methods.fetch("Chain.#{name}"), "Chain.#{name}")
+      end
+    end
+  end
+
   # The fixpoint's termination, which is the whole reason widening exists: every
   # generation folds a longer literal and supplies a tuple never seen before.
   def test_runner_terminates_on_a_body_that_folds_a_longer_literal
