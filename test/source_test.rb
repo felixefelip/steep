@@ -1126,4 +1126,79 @@ super { } # $ nil
       assert_nil self_annotation, "Expected no self type annotation without STEEP_ERB_CONVENTION"
     end
   end
+
+  def test_only_defs_keeps_the_defs_given_and_the_ones_enclosing_them
+    with_factory do |factory|
+      source = Steep::Source.parse(<<~RUBY, path: Pathname("foo.rb"), factory: factory)
+        module Macro
+          def self.included(base)
+            base.class_eval do
+              def written = 1
+            end
+          end
+
+          def other = 2
+        end
+      RUBY
+
+      written = dig(source.node, 1, 0, 3, 2)
+      assert_equal :written, written.children[0]
+
+      assert_equal parse_ruby(<<~RUBY).node, Steep::Source::OnlyDefs.new(source, [written]).node
+        module Macro
+          def self.included(base)
+            base.class_eval do
+              def written = 1
+            end
+          end
+
+          nil
+        end
+      RUBY
+    end
+  end
+
+  def test_only_defs_drops_the_annotations_of_the_defs_it_removes
+    with_factory do |factory|
+      source = Steep::Source.parse(<<~RUBY, path: Pathname("foo.rb"), factory: factory)
+        class Foo
+          def kept
+            # @type var x: Integer
+            x = 1
+          end
+
+          def removed
+            # @type var y: String
+            y = ""
+          end
+        end
+      RUBY
+
+      kept = dig(source.node, 2, 0)
+      pruned = Steep::Source::OnlyDefs.new(source, [kept])
+
+      class_annotations = pruned.annotations(block: pruned.node, factory: factory, context: nil)
+      assert_nil class_annotations.var_type(lvar: :y)
+      method_annotations = pruned.annotations(block: dig(pruned.node, 2, 0), factory: factory, context: nil)
+      refute_nil method_annotations.var_type(lvar: :x)
+    end
+  end
+
+  def test_only_defs_keeps_the_analyses_of_the_whole_file
+    source = Steep::Source.parse(<<~RUBY, path: Pathname("c.rb"), factory: RBS::Factory.new)
+      class Reads
+        KEPT = ["a"]
+        GROWN = ["b"]
+
+        def read = KEPT.include?("a") || GROWN.include?("b")
+        def grow = GROWN << "c"
+      end
+    RUBY
+
+    read = dig(source.node, 2, 2)
+    pruned = Steep::Source::OnlyDefs.new(source, [read])
+
+    assert_same source.constants, pruned.constants
+    assert_equal 1, pruned.constants.size
+  end
 end

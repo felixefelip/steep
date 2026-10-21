@@ -74,6 +74,7 @@ module Steep
         @overrides = nil
         @receivers = {} #: Hash[String, Array[String]]
         @unknown_receivers = Set[] #: Set[String]
+        @pruned = {} #: Hash[[Pathname, Array[Integer]], Source]
       end
 
       # What each call site of a code-writing method defines there, by
@@ -681,7 +682,7 @@ module Steep
       # generation of a fixpoint whose bound is per-run.
       def type_check(context, store, source, active)
         Services::TypeCheckService.type_check(
-          source: source,
+          source: checked_source(source, active),
           subtyping: context.subtyping,
           constant_resolver: context.constant_resolver,
           cursor: nil,
@@ -694,6 +695,18 @@ module Steep
           constructor_bindings: @project.constructor_binding_registry,
           return_forwarding: @project.return_forwarding_registry,
           return_alias: @project.return_alias_registry
+        )
+      end
+
+      # A check under substituted parameters is read for the bodies it
+      # substitutes, so the rest of the file is left out of it. One under none
+      # is read for every call the file makes, and keeps it whole.
+      def checked_source(source, active)
+        positions = active.keys.filter_map { |path, position| position if path == source.path.to_s }.sort
+        return source if positions.empty?
+
+        @pruned[[source.path, positions]] ||= Source::OnlyDefs.new(
+          source, Collector.definitions(source).each_value.select { |def_node| positions.include?(def_node.loc.expression.begin_pos) }
         )
       end
 

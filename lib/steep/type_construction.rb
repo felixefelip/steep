@@ -1127,7 +1127,7 @@ module Steep
             instance_type: AST::Types::Intersection.build(
               types: [
                 AST::Builtin::Object.instance_type,
-                *module_entry.self_types.map {|module_self|
+                *checker.factory.module_self_types(module_entry).map {|module_self|
                   type = case
                         when module_self.name.interface?
                           RBS::Types::Interface.new(
