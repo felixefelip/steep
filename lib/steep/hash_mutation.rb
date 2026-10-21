@@ -61,6 +61,7 @@ module Steep
 
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         keys = hash_method_keys(constr, method_name, private: private)
+        return read_union(constr, node, receiver_type, keys, arguments, type: type) if record_union?(receiver_type)
         if (receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)) && CollectionMutation.only?(constr, keys, WRITES)
           return written(constr, node, receiver, receiver_type, keys, arguments, type: type)
         end
@@ -80,6 +81,10 @@ module Steep
 
         stored = stored(constr, receiver_type, arguments) || declared_hash(constr, ivar)
         [type, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, stored)]
+      end
+
+      def record_union?(type)
+        type.is_a?(AST::Types::Union) && type.types.all? { |member| member.is_a?(AST::Types::Record) }
       end
 
       # The record a hash handed to `Klass.new` is, where `initialize` keeps it
@@ -439,6 +444,22 @@ module Steep
         return unless receiver_type.is_a?(AST::Types::Record) && ObjectStates.on_self?(receiver)
 
         ObjectStates::ClassMemos.tracked_hash(constr, ObjectStates.recorded_call(constr, receiver))
+      end
+
+      # A read by literal key on a union of records reads each member: what it
+      # holds under the key, or nil where it has no such key.
+      def read_union(constr, node, union, keys, arguments, type:)
+        key, = CollectionMutation.operand_types(constr, arguments)
+        return [type, constr] unless CollectionMutation.only?(constr, keys, KEY_READ) && arguments.size == 1 && key.is_a?(AST::Types::Literal)
+
+        read = AST::Types::Union.build(types: union.types.map { |record| member_read(record, key.value) })
+        [read, constr.add_typing(node, type: read).constr]
+      end
+
+      def member_read(record, key)
+        return AST::Builtin.nil_type unless record.elements.key?(key)
+
+        record.optional?(key) ? AST::Builtin.optional(record.elements.fetch(key)) : record.elements.fetch(key)
       end
 
       # What `[]` answers where the record cannot: `nil` under a literal key it
