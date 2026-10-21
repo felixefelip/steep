@@ -132,6 +132,7 @@ module Steep
         writers = code_writers(context)
         @definition_keys = context.sources.each_value.flat_map { |source| Collector.definitions(source).keys }.to_set
         @overrides = Overrides.new(factory: context.subtyping.factory, definitions: @definition_keys)
+        @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
@@ -221,23 +222,19 @@ module Steep
         revealed = {} #: Hash[String, Set[Arguments]]
 
         rounds(tuples).each do |active|
-          typings = check_definitions(context, store, active, definitions)
+          outcomes = specialized_checks(context, store, active, definitions)
 
           active.each do |key, arguments|
-            path, def_node = definitions.fetch(key)
-            record_exit(key, arguments, typings[path], def_node)
-            type = returned_type(typings[path], def_node, key) or next
+            outcome = outcomes.fetch(definitions.fetch(key).first)
+            store_exit(key, arguments, outcome.exits[key]) if outcome.exits.key?(key)
+            type = outcome.returns[key] or next
             next if type.to_s == baselines[key]
 
             (found[key] ||= {})[arguments.key] = type
           end
 
-          typings.each_value do |typing|
-            next unless typing
-
-            Collector.call_sites(typing, overrides: @overrides).each do |key, arguments|
-              (revealed[key] ||= Set.new).merge(arguments) if definitions.key?(key)
-            end
+          outcomes.each_value do |outcome|
+            outcome.sites.each { |key, arguments| (revealed[key] ||= Set.new).merge(arguments) if definitions.key?(key) }
           end
         end
 
@@ -360,7 +357,10 @@ module Steep
       def record_exit(key, arguments, typing, def_node)
         return unless (arguments.stateful? || arguments.hands_records?) && typing
 
-        exit = typing.exit_ivars_of(node: def_node)
+        store_exit(key, arguments, typing.exit_ivars_of(node: def_node))
+      end
+
+      def store_exit(key, arguments, exit)
         exit ? (@exits[key] ||= {})[arguments.key] = exit : @exits[key]&.delete(arguments.key)
       end
 
@@ -383,7 +383,7 @@ module Steep
 
         begin
           path, def_node = definitions.fetch(key)
-          typing = type_check(context, store, context.sources.fetch(path), { node_key(path, def_node) => with_defaults(arguments, def_node) })
+          typing = type_check(context, store.with_reads(nil), context.sources.fetch(path), { node_key(path, def_node) => with_defaults(arguments, def_node) })
           record_exit(key, arguments, typing, def_node)
         ensure
           @demanding.delete(memo)
@@ -449,7 +449,7 @@ module Steep
 
         expression = node.loc.expression or return
         site = "#{@project.relative_path(path)}:#{expression.line}:#{expression.column}"
-        arguments = arguments.with_self(callee_self(typing, node))
+        arguments = arguments.with_self(CalleeSelf.of(typing, node))
 
         # A site re-read under a later generation's findings is that site under
         # what it passes now, not also under what it passed before.
@@ -457,70 +457,6 @@ module Steep
         by_arguments.each_value { |sites| sites.delete(site) }
         by_arguments.delete_if { |_, sites| sites.empty? }
         (by_arguments[arguments] ||= Set.new) << site
-      end
-
-      # What `self` is inside the method `node` calls: its receiver, or — for a
-      # call written on `self`, explicitly or not — the self of the frame the
-      # call sits in. nil for a receiver naming no one class, which leaves the
-      # body to the self its definition gives it.
-      def callee_self(typing, node)
-        type = typing.call_of(node: node).receiver_type
-        type = typing.self_type_of_call(node: node) if type.is_a?(AST::Types::Self)
-
-        case type
-        when AST::Types::Name::Singleton, AST::Types::Name::Instance then type
-        when AST::Types::Intersection then lexical_self(typing, node, type)
-        end
-      end
-
-      # A module body's `self` is that module, whatever an annotation adds to
-      # it. A concern is annotated `singleton(Host) & singleton(Concern)` so its
-      # body types against what the host has — but a call it makes there RUNS
-      # on the module:
-      #
-      #   module Labels
-      #     delegate :human_name, to: :class   # self is Labels, not the host
-      #   end
-      #
-      # So of an intersection of class objects, the one the call is lexically
-      # written in. Any other intersection names no one class.
-      def lexical_self(typing, node, type)
-        return nil unless type.types.all? { |component| component.is_a?(AST::Types::Name::Singleton) }
-
-        name = enclosing_module(typing.source.node, node) or return nil
-        type.types.find { |component| component.name.to_s.delete_prefix("::") == name }
-      end
-
-      # The name of the innermost `module`/`class` whose body holds `target`,
-      # outside any `def` — a method body runs with a self of its own.
-      def enclosing_module(root, target, nesting = [])
-        return nil unless root.is_a?(::Parser::AST::Node)
-        return nesting.empty? ? nil : nesting.join("::") if root.equal?(target)
-        return nil if root.type == :def || root.type == :defs
-
-        if root.type == :module || root.type == :class
-          name = constant_name(root.children[0]) or return nil
-          inner = name.start_with?("::") ? [name.delete_prefix("::")] : nesting + [name]
-          body = root.type == :module ? root.children[1] : root.children[2]
-          return enclosing_module(body, target, inner)
-        end
-
-        root.children.each do |child|
-          found = enclosing_module(child, target, nesting)
-          return found if found
-        end
-        nil
-      end
-
-      def constant_name(node)
-        return nil unless node&.type == :const
-
-        parent, name = node.children
-        return name.to_s unless parent
-        return "::#{name}" if parent.type == :cbase
-
-        prefix = constant_name(parent) or return nil
-        "#{prefix}::#{name}"
       end
 
       # The union of what each call returned, for each method in `found` whose
@@ -647,6 +583,21 @@ module Steep
 
         (0...depth).map do |index|
           lists.filter_map { |key, list| [key, list[index]] if list[index] }.to_h
+        end
+      end
+
+      # A check is reused where the store answers what it asked as before
+      # (`Checks`); one that is not is run in the same place in the round, so
+      # what it leaves in the class exits lands in the same order.
+      def specialized_checks(context, store, active, definitions)
+        active.group_by { |key, _| definitions.fetch(key).first }.to_h do |path, entries|
+          bodies = entries.to_h do |key, arguments|
+            def_node = definitions.fetch(key)[1]
+            [key, [def_node, arguments, node_key(path, def_node), with_defaults(arguments, def_node)]]
+          end
+          outcome = @checks.outcome(bodies, store) { |logged, by_node| file_check(context, logged, context.sources.fetch(path), by_node) }
+          @class_exits.merge!(outcome.class_exits)
+          [path, outcome]
         end
       end
 
