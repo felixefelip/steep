@@ -83,6 +83,7 @@ require "steep/object_states/constructed"
 require "steep/object_states/entered_self"
 require "steep/object_states/held_ivar"
 require "steep/object_states/tap"
+require "steep/object_states/unchanged"
 require "steep/object_states/yields"
 
 require "steep/range_extension"

@@ -142,13 +142,13 @@ module Steep
         handed = ClassStates.handed_classes(constr, arguments)
         on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
         reaches_self = on_self || hands_self?(constr, arguments, handed)
-        exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
+        unchanged = Unchanged.call?(constr, node)
+        exit = self_exit_or_unchanged(constr, node, on_self, unchanged) if reaches_self
         constr = HeldIvar.moved(self_moved(constr, exit), exit) if reaches_self
-        unless !reaches_self && ClassMemos.builds_only?(constr, recorded_call(constr, node))
+        unless unchanged || (!reaches_self && ClassMemos.builds_only?(constr, recorded_call(constr, node)))
           constr = ClassMemos.after_class_call(constr, exit, (ClassStates.reach(constr, recorded_call(constr, node)).methods if reaches_self))
         end
-        constr = ClassStates.moved(constr, node, receiver_type, handed)
-        constr = ClassStates.after_call(constr)
+        constr = ClassStates.after_call(ClassStates.moved(constr, node, receiver_type, handed)) unless unchanged
         HashMutation.answer_taken(HashMutation.handed_back(handed_on(constr, arguments), node, arguments), node)
       end
 
@@ -159,13 +159,12 @@ module Steep
         on_self ? exit.ivars : exit.classes[constr.self_type.name]
       end
 
-      # `self_exit`, or every ivar as it stands where the call evaluates a
-      # string that only defines methods.
-      def self_exit_or_unchanged(constr, node, on_self)
+      # `self_exit`, or every ivar as it stands where the call changes nothing.
+      def self_exit_or_unchanged(constr, node, on_self, unchanged)
         exit = self_exit(constr, node, on_self)
         return exit if exit
 
-        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node)
+        constr.context.type_env.instance_variable_types if unchanged
       end
 
       def hands_self?(constr, arguments, handed)

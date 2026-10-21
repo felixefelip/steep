@@ -217,4 +217,85 @@ class ClassStateAcrossBodiesTest < Minitest::Test
     ruby = config_inflector(writer: "") + config_model(body: "has_many_like :posts")
     assert_equal ["def post_ids; []; end"], chunks(ruby, signatures: CONFIG_RBS.sub("def self.reset!: () -> Config\n", ""))
   end
+
+  ASSOCIATIONS_RBS = <<~RBS
+    module Core
+      module ClassMethods
+        @generated_association_methods: Module?
+        def generated_association_methods: () -> Module
+      end
+    end
+
+    class Builder
+      def self.build: (untyped model, Symbol name) -> untyped
+      def self.define_accessors: (untyped model, Symbol name) -> untyped
+      def self.define_readers: (untyped mixin, Symbol name) -> untyped
+      def self.touch: (untyped model) -> untyped
+    end
+
+    class Base
+      extend Core::ClassMethods
+      def self.has_many: (Symbol name) -> untyped
+    end
+
+    class Post < Base
+    end
+
+    module Post::GeneratedAssociationMethods
+    end
+  RBS
+
+  def associations(touch)
+    <<~RUBY
+      module Core
+        module ClassMethods
+          def generated_association_methods
+            @generated_association_methods ||= begin
+              mod = const_set(:GeneratedAssociationMethods, Module.new)
+              include mod
+              mod
+            end
+          end
+        end
+      end
+
+      class Builder
+        def self.build(model, name)
+          touch(model)
+          define_accessors(model, name)
+        end
+
+        def self.touch(model) = #{touch}
+
+        def self.define_accessors(model, name)
+          mixin = model.generated_association_methods
+          define_readers(mixin, name)
+        end
+
+        def self.define_readers(mixin, name) = mixin.class_eval "def \#{name}; 1; end"
+      end
+
+      class Base
+        def self.has_many(name) = Builder.build(self, name)
+      end
+
+      class Post < Base
+        has_many :comments
+      end
+    RUBY
+  end
+
+  def test_a_nil_memo_outlives_a_call_with_no_body_in_the_program
+    assert_equal(
+      ["module GeneratedAssociationMethods\nend", "include ::Post::GeneratedAssociationMethods", "def comments; 1; end"],
+      chunks(associations("model.name"), signatures: ASSOCIATIONS_RBS)
+    )
+  end
+
+  def test_a_nil_memo_does_not_outlive_a_call_that_writes_the_ivar
+    assert_equal(
+      [nil, nil, "def comments; 1; end"],
+      chunks(associations("model.instance_variable_set(:@generated_association_methods, Post::GeneratedAssociationMethods)"), signatures: ASSOCIATIONS_RBS)
+    )
+  end
 end
