@@ -2490,7 +2490,11 @@ module Steep
 
         when :zsuper
           yield_self do
-            if method_context && method_context.method
+            if method_context&.method && method_context.super_method && (super_node = explicit_super(node, method_context.node))
+              type, constr = synthesize(super_node, hint: hint)
+              constr.typing.add_explicit_super(node, super_node)
+              constr.add_typing(node, type: type)
+            elsif method_context && method_context.method
               if method_context.super_method
                 types = method_context.super_method.method_types.map {|method_type|
                   checker.factory.method_type(method_type).type.return_type

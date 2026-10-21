@@ -187,7 +187,7 @@ module Steep
       # off the checker where it is being typed.
       def self.from_send(node, typing, call:, receiver_ivars:, class_states:, self_type:, exact_self:)
         block, node = node, node.children[0] if Accumulators::LAMBDA_BODIES.include?(node.type)
-        _receiver, name, *args = node.children
+        _receiver, name, *args = node.type == :super ? [nil, nil, *node.children] : node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
         # and the arguments are the rest (`TypeConstruction::SendDispatch`).
         args = args.drop(1) if TypeConstruction::SEND_SPELLINGS.key?(name) && dispatched?(node, typing)

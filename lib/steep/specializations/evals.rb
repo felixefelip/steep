@@ -49,6 +49,9 @@ module Steep
       # The `self_target` of a frame entered on a receiver naming no class.
       UNNAMED_SELF = :unnamed
 
+      SUPERS = %i[super zsuper].freeze
+      CALLS = [:send, *SUPERS].freeze
+
       class << self
         # One thing a body does that writes code, in source order.
         #
@@ -66,13 +69,13 @@ module Steep
         # out on its own. `kind` is `"module"` for a target declared as one.
         Chunk = Struct.new(:source, :target, :kind, keyword_init: true)
 
-        Walk = Struct.new(:writers, :typing, :overrides, keyword_init: true)
+        Walk = Struct.new(:writers, :typing, :overrides, :method_name, keyword_init: true)
 
         # Whether the method writes code, directly or through a method it calls.
         # The gate that keeps a project without the idiom from paying for a
         # single extra check, so it reads the AST and nothing else.
         def writes_code?(def_node, writers = Set[])
-          walk = Walk.new(writers: writers, typing: nil)
+          walk = Walk.new(writers: writers, typing: nil, method_name: method_name(def_node))
           each_effect(body_of(def_node), nil, true, walk) { return true }
           false
         end
@@ -105,7 +108,7 @@ module Steep
         def effects(typing, def_node, writers, overrides:)
           flow = Flow.new(typing)
           result = [] #: Array[Effect]
-          walk = Walk.new(writers: writers, typing: typing, overrides: overrides)
+          walk = Walk.new(writers: writers, typing: typing, overrides: overrides, method_name: method_name(def_node))
 
           each_effect(body_of(def_node), flow, true, walk) do |effect|
             result << effect
@@ -124,7 +127,13 @@ module Steep
           def_node.type == :defs ? def_node.children[3] : def_node.children[2]
         end
 
+        def method_name(def_node)
+          def_node.type == :defs ? def_node.children[1] : def_node.children[0]
+        end
+
         def on_self?(node)
+          return true if SUPERS.include?(node.type)
+
           receiver = node.children[0]
           receiver.nil? || receiver.type == :self
         end
@@ -175,11 +184,20 @@ module Steep
           nil
         end
 
+        # A `super` runs the one body its declaration names, whatever class
+        # `self` is.
+        def super_key(node, typing)
+          call = typing.call_of(node: node)
+          Specializations.method_key(call.method_decls) if call.is_a?(TypeInference::MethodCall::Typed)
+        rescue Typing::UnknownNodeError
+          nil
+        end
+
         # Any writer of the method's name: the class a constant spells may
         # inherit it from one named otherwise, and the typed walk decides.
-        def named_writers(node, writers)
-          name = node.children[1]
-          writers.select { |key| key.end_with?(".#{name}", "##{name}") }
+        def named_writers(node, walk)
+          name = SUPERS.include?(node.type) ? walk.method_name : node.children[1]
+          walk.writers.select { |key| key.end_with?(".#{name}", "##{name}") }
         end
 
         # `certain` is whether the call site's arguments decide that this point
@@ -221,6 +239,7 @@ module Steep
         end
 
         def write_at(node, certain, walk)
+          node = walk.typing.explicit_super_of(node: node) || node if node.type == :zsuper && walk.typing
           if (kind = written_kind(node, walk))
             Effect.new(kind: kind, node: node, certain: certain)
           elsif (callee = called_writer(node, walk))
@@ -234,10 +253,10 @@ module Steep
         # typing knows what it names, so the callee is keyed as every call site
         # is: by its declaration. Without a typing, any writer of that name.
         def called_writer(node, walk)
-          return nil if walk.writers.empty? || node.type != :send
-          return named_writers(node, walk.writers).first unless walk.typing
+          return nil if walk.writers.empty? || !CALLS.include?(node.type)
+          return named_writers(node, walk).first unless walk.typing
 
-          key = resolved_send_key(node, walk)
+          key = node.type == :send ? resolved_send_key(node, walk) : super_key(node, walk.typing)
           key if key && walk.writers.include?(key)
         end
 

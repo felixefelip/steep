@@ -5261,6 +5261,67 @@ EOF
     end
   end
 
+  def test_bare_super_is_typed_as_the_explicit_super_it_stands_for
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer, ?String, *Symbol, key: Integer) { () -> void } -> Integer
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer, ?String, *Symbol, key: Integer) { () -> void } -> Integer
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(a, b = "", *c, key:, &d)
+    a = "x"
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        zsuper = dig(source.node, 2, 2, 1)
+        assert_equal [:lvar, :lvar, :splat, :kwargs, :block_pass], typing.explicit_super_of(node: zsuper).children.map(&:type)
+        assert_equal parse_type("::Integer"), typing.type_of(node: zsuper)
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::ArgumentTypeMismatch, errors.first
+        end
+      end
+    end
+  end
+
+  def test_bare_super_with_an_anonymous_parameter_is_typed_by_the_super_method_s_return
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (*untyped) -> Integer
+end
+
+class TestSuperChild < TestSuper
+  def foo: (*untyped) -> Integer
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(*)
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        zsuper = dig(source.node, 2, 2)
+        assert_nil typing.explicit_super_of(node: zsuper)
+        assert_equal parse_type("::Integer"), typing.type_of(node: zsuper)
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_super_missing_required_block
     with_checker <<-EOF do |checker|
 class TestSuper
@@ -5283,7 +5344,7 @@ EOF
       with_standard_construction(checker, source) do |construction, typing|
         construction.synthesize(source.node)
 
-        assert_typing_error(typing, size: 1) do |errors|
+        assert_typing_error(typing, size: 2) do |errors|
           assert_all!(errors) do |error|
             assert_instance_of Diagnostic::Ruby::RequiredBlockMissing, error
             assert_equal "super", error.location.source
