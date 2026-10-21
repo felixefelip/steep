@@ -86,6 +86,8 @@ module Steep
     #
     def deconstruct_sendish_and_block_nodes: (*Parser::AST::Node) -> [Parser::AST::Node, Parser::AST::Node?]?
 
+    def explicit_super: (Parser::AST::Node zsuper, Parser::AST::Node def_node) -> Parser::AST::Node?
+
     def clone_node: (Node) -> Node
   end
 end

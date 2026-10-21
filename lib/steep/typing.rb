@@ -238,6 +238,8 @@ module Steep
     # The `case` clauses the check left unreachable. `UnreachableValueBranch`
     # is not reported for one whose body never finishes.
     attr_reader :dead_clauses
+    # The `super(...)` each bare `super` was typed as.
+    attr_reader :explicit_supers
     attr_reader :source_index
     attr_reader :cursor_context
 
@@ -273,6 +275,7 @@ module Steep
       (@break_envs = {}).compare_by_identity
       (@block_exits = {}).compare_by_identity
       (@dead_clauses = {}).compare_by_identity
+      (@explicit_supers = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -375,6 +378,14 @@ module Steep
 
     def add_dead_clause(node)
       dead_clauses[node] = true
+    end
+
+    def add_explicit_super(zsuper, super_node)
+      explicit_supers[zsuper] = super_node
+    end
+
+    def explicit_super_of(node:)
+      explicit_supers.fetch(node) { parent&.explicit_super_of(node: node) }
     end
 
     def arm_of(node:)
@@ -545,6 +556,7 @@ module Steep
       parent.branch_envs.merge!(branch_envs)
       parent.block_exits.merge!(block_exits)
       parent.dead_clauses.merge!(dead_clauses)
+      parent.explicit_supers.merge!(explicit_supers)
 
       errors.each do |error|
         parent.add_error error
