@@ -255,10 +255,8 @@ module Steep
         writing = locations.select { |key, _| definitions.key?(key) }
         return if writing.empty?
 
-        defaults = writing.keys.to_h { |key| [key, Collector.defaults(definitions.fetch(key)[1])] }
-
         rounds(writing.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
-          typings = check_definitions(context, store, with_defaults(active, defaults), definitions)
+          typings = check_definitions(context, store, active, definitions)
 
           active.each do |key, arguments|
             path, def_node = definitions.fetch(key)
@@ -307,22 +305,16 @@ module Steep
         else
           self_target = Evals.eval_target(typing, effect.node) || Evals::UNNAMED_SELF
         end
-        positionals, keywords = Collector.defaults(callee_node)
-        arguments = arguments.with_defaults(positionals: positionals, keywords: keywords)
-
         inner = check_definitions(context, store, { effect.callee => arguments }, definitions)[path] or return [nil]
         eval_sources(context, store, inner, callee_node, definitions, writers, reading | [effect.callee], self_target)
       end
 
       # A call omitting an optional parameter does not leave it open: the body
-      # runs with the definition's default, and which chunk the macro writes can
-      # turn on exactly that.
-      def with_defaults(active, defaults)
-        active.to_h do |key, arguments|
-          positionals, keywords = defaults.fetch(key)
-
-          [key, arguments.with_defaults(positionals: positionals, keywords: keywords)]
-        end
+      # runs with the definition's default, so the calls it makes, the value it
+      # returns and the chunk it writes can all turn on exactly that.
+      def with_defaults(arguments, def_node)
+        positionals, keywords = Collector.defaults(def_node)
+        arguments.with_defaults(positionals: positionals, keywords: keywords)
       end
 
       # The tuples for the next generation: the ones already known, plus the ones
@@ -390,7 +382,7 @@ module Steep
 
         begin
           path, def_node = definitions.fetch(key)
-          typing = type_check(context, store, context.sources.fetch(path), { node_key(path, def_node) => arguments })
+          typing = type_check(context, store, context.sources.fetch(path), { node_key(path, def_node) => with_defaults(arguments, def_node) })
           record_exit(key, arguments, typing, def_node)
         ensure
           @demanding.delete(memo)
@@ -661,7 +653,7 @@ module Steep
         paths = active.keys.filter_map { |key| definitions[key]&.first }.uniq
         by_node = active.to_h do |key, arguments|
           path, def_node = definitions.fetch(key)
-          [node_key(path, def_node), arguments]
+          [node_key(path, def_node), with_defaults(arguments, def_node)]
         end
 
         paths.to_h do |path|
