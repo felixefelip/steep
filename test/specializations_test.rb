@@ -754,6 +754,65 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_does_not_check_again_a_tuple_whose_reads_did_not_change
+    in_tmpdir do
+      write("sig/bar.rbs", <<~RBS)
+        class Bar
+          def greet: () -> String
+          def relay: (bool) -> String
+          def label: (bool) -> String
+        end
+
+        class Price
+          def show: () -> String
+          def format: (bool) -> String
+        end
+      RBS
+      write("app/bar.rb", <<~RUBY)
+        class Bar
+          def greet = relay(true)
+          def relay(loud) = label(loud)
+          def label(loud) = loud ? "LOUD" : "quiet"
+        end
+      RUBY
+      write("app/price.rb", <<~RUBY)
+        class Price
+          def show = format(true)
+          def format(paid) = paid ? "paid" : "free"
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      checked = Hash.new(0)
+      runner.singleton_class.prepend(Module.new do
+        define_method(:type_check) do |context, store, source, active|
+          checked[source.path.basename.to_s] += 1 unless active.empty?
+          super(context, store, source, active)
+        end
+      end)
+      methods = runner.run
+
+      assert_equal({ "(true)" => '"LOUD"' }, methods.fetch("Bar#relay"))
+      assert_equal({ "(true)" => '"paid"' }, methods.fetch("Price#format"))
+      assert_equal 1, checked["price.rb"]
+      assert_operator checked["bar.rb"], :>, 1
+    end
+  end
+
+  def test_reads_are_the_same_only_where_every_answer_is
+    reads = Specializations::Reads.new
+    reads.record(:class_exit, [:Foo, :@x], {}, "a")
+    reads.record(:class_exit, [:Foo, :@x], {}, "a")
+    reads.record(:empty?, [], {}, false)
+
+    store = Struct.new(:answers) do
+      def answer(name, arguments, _options) = answers.fetch([name, arguments])
+    end
+
+    assert reads.same?(store.new({ [:class_exit, [:Foo, :@x]] => "a", [:empty?, []] => false }))
+    refute reads.same?(store.new({ [:class_exit, [:Foo, :@x]] => "b", [:empty?, []] => false }))
+  end
+
   def test_runner_carries_a_literal_through_a_call_that_passes_its_block
     in_tmpdir do
       write("sig/bar.rbs", <<~RBS)

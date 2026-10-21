@@ -794,7 +794,9 @@ module Steep
       # read the source (`Overrides`).
       # `receivers`: the types the receiver of each call naming a reader was
       # given (`Receivers`), as RBS, by site.
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, definitions: Set[], receivers:)
+      # `reads`: where to record each question a check asks and the answer it
+      # got (`Reads`).
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, definitions: Set[], receivers:, reads: nil)
         @methods = methods
         @receivers = receivers
         @definitions = definitions
@@ -806,27 +808,32 @@ module Steep
         @exits = exits
         @demand = demand
         @class_exits = class_exits
+        @reads = reads
       end
 
       def empty?
-        @methods.empty? && @active.empty? && @typed.empty? && @exits.empty? && @declarations.empty?
+        read(:empty?) { @methods.empty? && @active.empty? && @typed.empty? && @exits.empty? && @declarations.empty? }
       end
 
       # `in_checked_body`: whether the call is made in a body this check is
       # specializing, rather than elsewhere in its file.
       def exit_ivars(method_key, arguments, in_checked_body:, factory:)
-        exit = @exits.dig(method_key, arguments.key)
-        exit = parse_exit(method_key, exit, factory: factory) if exit.is_a?(Hash)
-        exit || @demand&.call(self, method_key, arguments, in_checked_body)
+        read(:exit_ivars, method_key, arguments, in_checked_body: in_checked_body, factory: factory) do
+          exit = @exits.dig(method_key, arguments.key)
+          exit = parse_exit(method_key, exit, factory: factory) if exit.is_a?(Hash)
+          exit || @demand&.call(self, method_key, arguments, in_checked_body)
+        end
       end
 
       def receiver_type(site, factory:)
-        types = @receivers[site] or return nil
-        AST::Types::Union.build(types: types.map { |raw| parse(site, raw, factory: factory) or return nil })
+        read(:receiver_type, site, factory: factory) do
+          types = @receivers[site]&.map { |raw| parse(site, raw, factory: factory) or break nil }
+          types && AST::Types::Union.build(types: types)
+        end
       end
 
       def class_exit(name, ivar)
-        @class_exits.dig(name, ivar)
+        read(:class_exit, name, ivar) { @class_exits.dig(name, ivar) }
       end
 
       # The recorded return type for `method_key` called with `argument_key`, as a
@@ -835,13 +842,15 @@ module Steep
       # A union of literals passed in an argument is one of its members at run
       # time, so the call returns what one of those returned.
       def call_return_type(method_key, arguments, factory:)
-        types = arguments.alternatives.map do |alternative|
-          return_type(method_key, alternative.key, factory: factory) ||
-            (alternative.self_type && return_type(method_key, alternative.without_self.key, factory: factory)) ||
-            (return nil)
-        end
+        read(:call_return_type, method_key, arguments, factory: factory) do
+          types = arguments.alternatives.map do |alternative|
+            return_type(method_key, alternative.key, factory: factory) ||
+              (alternative.self_type && return_type(method_key, alternative.without_self.key, factory: factory)) ||
+              (break nil)
+          end
 
-        AST::Types::Union.build(types: types)
+          types && AST::Types::Union.build(types: types)
+        end
       end
 
       def return_type(method_key, argument_key, factory:)
@@ -850,7 +859,7 @@ module Steep
       end
 
       def declaration_type(method_key, factory:)
-        parse(method_key, @declarations[method_key], factory: factory)
+        read(:declaration_type, method_key, factory: factory) { parse(method_key, @declarations[method_key], factory: factory) }
       end
 
       # `yield`, computed once per `object` for as long as this store is the
@@ -901,11 +910,26 @@ module Steep
         @active[node_key]
       end
 
-      def with_active(active)
+      def with_active(active) = with(active: active, reads: @reads)
+
+      def with_reads(reads) = with(active: @active, reads: reads)
+
+      # Asks `name` again with what it was asked, for `Reads#same?`.
+      def answer(name, arguments, options) = public_send(name, *arguments, **options)
+
+      private
+
+      def with(active:, reads:)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
-          class_exits: @class_exits, declarations: @declarations, definitions: @definitions, receivers: @receivers
+          class_exits: @class_exits, declarations: @declarations, definitions: @definitions, receivers: @receivers, reads: reads
         )
+      end
+
+      def read(name, *arguments, **options)
+        answer = yield
+        @reads&.record(name, arguments, options, answer)
+        answer
       end
     end
   end
