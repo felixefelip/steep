@@ -10,6 +10,9 @@ class ObjectStateRecordTest < Minitest::Test
   include TypeConstructionHelper
 
   RBS = <<~RBS
+    class Extended
+      def self.options: () -> ({ extend: Array[Module] } | {  })
+    end
     class Options
       @options: Hash[Symbol, untyped]
       attr_reader options: Hash[Symbol, untyped]
@@ -300,6 +303,18 @@ class ObjectStateRecordTest < Minitest::Test
       assert_equal parse_type("nil"), env[:missing]
       assert_equal parse_type("{ through: :taggings }"), env[:after_delete]
       assert_equal parse_type("{ through: :taggings, autosave: true }"), env[:after_store]
+    end
+  end
+
+  def test_a_literal_key_read_on_a_union_of_records_reads_each_record
+    check(<<~'RUBY') do |pair|
+      options = Extended.options
+      through = options[:through]
+      extension = options[:extend]
+    RUBY
+      env = pair.context.type_env
+      assert_equal parse_type("nil"), env[:through]
+      assert_equal parse_type("::Array[::Module]?"), env[:extension]
     end
   end
 
