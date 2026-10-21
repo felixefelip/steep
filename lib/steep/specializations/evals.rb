@@ -175,49 +175,11 @@ module Steep
           nil
         end
 
-        # The writers a call could name before anything resolves it. A constant
-        # receiver is matched by its spelling, as a suffix of the full name
-        # (`::Writer` names only the top-level one); any other receiver by the
-        # method's name alone. The typed walk that follows decides: a call the
-        # gate lets through for nothing records nothing.
-        def spelled_send_keys(node, writers)
-          receiver = node.children[0]
-          unless receiver&.type == :const
-            name = node.children[1]
-            return writers.select { |key| key.end_with?(".#{name}", "##{name}") }
-          end
-
-          spelled = constant_send_key(node) or return []
-          return writers.select { |key| key == spelled } if absolute_constant?(receiver)
-
-          writers.select { |key| key == spelled || key.end_with?("::#{spelled}") }
-        end
-
-        def absolute_constant?(node)
-          parent = node.children[0]
-          return true if parent&.type == :cbase
-          return false unless parent&.type == :const
-
-          absolute_constant?(parent)
-        end
-
-        # `"Writer.generate"` for `Writer.generate(…)`, matching how a singleton
-        # method keys itself, or nil for any receiver that is not a constant.
-        def constant_send_key(node)
-          receiver = node.children[0]
-          return nil unless receiver&.type == :const
-
-          name = constant_path(receiver) or return nil
-          "#{name}.#{node.children[1]}"
-        end
-
-        def constant_path(node)
-          parent, name = node.children
-          return name.to_s if parent.nil? || parent.type == :cbase
-          return nil unless parent.type == :const
-
-          prefix = constant_path(parent) or return nil
-          "#{prefix}::#{name}"
+        # Any writer of the method's name: the class a constant spells may
+        # inherit it from one named otherwise, and the typed walk decides.
+        def named_writers(node, writers)
+          name = node.children[1]
+          writers.select { |key| key.end_with?(".#{name}", "##{name}") }
         end
 
         # `certain` is whether the call site's arguments decide that this point
@@ -270,11 +232,10 @@ module Steep
         # written relative to where the call sits — `Module#delegate` calls
         # `Delegation.generate` from inside `module ActiveSupport` — and only the
         # typing knows what it names, so the callee is keyed as every call site
-        # is: by its declaration. Without a typing, any writer the spelling
-        # could name.
+        # is: by its declaration. Without a typing, any writer of that name.
         def called_writer(node, walk)
           return nil if walk.writers.empty? || node.type != :send
-          return spelled_send_keys(node, walk.writers).first unless walk.typing
+          return named_writers(node, walk.writers).first unless walk.typing
 
           key = resolved_send_key(node, walk)
           key if key && walk.writers.include?(key)

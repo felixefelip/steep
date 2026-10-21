@@ -994,6 +994,51 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_a_writer_a_constant_inherits_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class HasMany < Writer
+        end
+
+        class Base
+          def self.has_many: (Symbol name) -> untyped
+        end
+
+        class Post < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class HasMany < Writer
+        end
+
+        class Base
+          def self.has_many(name)
+            HasMany.generate(self, name)
+          end
+        end
+
+        class Post < Base
+          has_many :comments
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:17:2" => ["def comments; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
   HANDED_SELF_RBS = <<~RBS
     module Writer
       def self.generate: (untyped owner, Symbol method) -> untyped
