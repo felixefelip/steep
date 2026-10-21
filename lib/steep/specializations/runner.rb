@@ -23,9 +23,10 @@ module Steep
     #
     # Widening answers both: a literal rises to the class it instantiates, which
     # is what a program that does not fix a value does fix. A tuple a later
-    # generation discovers widens past `WIDEN_AFTER` generations or where one
-    # of its arguments is past `LITERAL_WIDTH` characters, and a tuple fixing
-    # no value specializes nothing. A return widens as soon as it DISAGREES
+    # generation discovers widens once its method has already been handed new
+    # tuples in `WIDEN_AFTER` generations, or where one of its arguments is past
+    # `LITERAL_WIDTH` characters, and a tuple fixing no value specializes
+    # nothing. A return widens as soon as it DISAGREES
     # with the generation before, because one that keeps moving is not
     # converging on a value.
     #
@@ -36,9 +37,9 @@ module Steep
     class Runner
       DEFAULT_OUTPUT_PATH = Pathname("sig/generated/.steep_specializations.yml").freeze
 
-      # Generations whose newly discovered tuples are still taken literally. Past
-      # it every new tuple widens, so a body that folds a longer literal each
-      # time cannot keep feeding itself.
+      # Generations in which one method's newly discovered tuples are still
+      # taken literally. Past it that method's new tuples widen, so a body that
+      # folds a longer literal each time cannot keep feeding itself.
       WIDEN_AFTER = 3
 
       # An argument whose spelling grows past this is folding rather than
@@ -131,6 +132,7 @@ module Steep
         @definition_keys = context.sources.each_value.flat_map { |source| Collector.definitions(source).keys }.to_set
         @overrides = Overrides.new(factory: context.subtyping.factory, definitions: @definition_keys)
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
+        @growth = {} #: Hash[String, Set[Integer]]
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
         @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
@@ -333,9 +335,10 @@ module Steep
         collected.each do |key, arguments_set|
           arguments_set.each do |arguments|
             next if tuples[key]&.include?(arguments)
-            next if widened?(arguments, generation)
+            next if widened?(key, arguments, generation)
 
             (grown[key] ||= Set.new) << arguments
+            (@growth[key] ||= Set.new) << generation
           end
         end
 
@@ -350,12 +353,16 @@ module Steep
       # of the contents does.
       # A key fixing only the class a body runs on cannot keep growing: the
       # project has finitely many.
-      def widened?(arguments, generation)
+      def widened?(key, arguments, generation)
         return arguments.key.length > STATE_WIDTH if arguments.stateful?
         return false if arguments.self_type && !arguments.fixes_a_value?
 
-        generation >= WIDEN_AFTER || arguments.argument_types.any? { |type| type.to_s.length > LITERAL_WIDTH }
+        kept_growing?(key, generation) || arguments.argument_types.any? { |type| type.to_s.length > LITERAL_WIDTH }
       end
+
+      # A call chain hands each frame its tuple one generation after the frame
+      # before it, so how deep a frame sits says nothing about growth.
+      def kept_growing?(key, generation) = (@growth.fetch(key, Set.new) - [generation]).size >= WIDEN_AFTER
 
       def record_exit(key, arguments, typing, def_node)
         return unless (arguments.stateful? || arguments.hands_records?) && typing
@@ -375,7 +382,7 @@ module Steep
       # checked further out is not checked again.
       def demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body)
         return nil unless @demanding.empty? || in_checked_body
-        return nil if !(arguments.stateful? || arguments.hands_records?) || !definitions.key?(key) || widened?(arguments, 0)
+        return nil if !(arguments.stateful? || arguments.hands_records?) || !definitions.key?(key) || widened?(key, arguments, 0)
 
         memo = [key, arguments.key] #: [String, String]
         return demanded[memo] if demanded.key?(memo)
