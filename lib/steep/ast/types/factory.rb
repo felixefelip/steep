@@ -18,6 +18,14 @@ module Steep
           @type_cache = {}
           @method_type_cache = {}
           @method_type_cache.compare_by_identity
+          @module_self_types = {}
+          @module_self_types.compare_by_identity
+        end
+
+        # RBS recomputes these on every call, in time quadratic in the number of
+        # declarations reopening the module, and a module body asks once per check.
+        def module_self_types(module_entry)
+          @module_self_types[module_entry] ||= module_entry.self_types
         end
 
         def type_name_resolver
