@@ -245,7 +245,7 @@ class ClassStateAcrossBodiesTest < Minitest::Test
     end
   RBS
 
-  def associations(touch)
+  def associations(touch, base: "")
     <<~RUBY
       module Core
         module ClassMethods
@@ -277,6 +277,7 @@ class ClassStateAcrossBodiesTest < Minitest::Test
 
       class Base
         def self.has_many(name) = Builder.build(self, name)
+        #{base}
       end
 
       class Post < Base
@@ -296,6 +297,29 @@ class ClassStateAcrossBodiesTest < Minitest::Test
     assert_equal(
       [nil, nil, "def comments; 1; end"],
       chunks(associations("model.instance_variable_set(:@generated_association_methods, Post::GeneratedAssociationMethods)"), signatures: ASSOCIATIONS_RBS)
+    )
+  end
+
+  def test_a_nil_memo_does_not_outlive_a_ruby_override_the_signature_does_not_place
+    base = "def self.name; instance_variable_set(:@generated_association_methods, Post::GeneratedAssociationMethods); \"Base\"; end"
+    assert_equal(
+      [nil, nil, "def comments; 1; end"],
+      chunks(associations("model.name", base: base), signatures: ASSOCIATIONS_RBS)
+    )
+  end
+
+  def test_a_nil_memo_does_not_outlive_a_call_handed_a_callable_in_a_keyword
+    assert_equal(
+      [nil, nil, "def comments; 1; end"],
+      chunks(associations("model.then_call(on: -> { model.generated_association_methods })"), signatures: ASSOCIATIONS_RBS.sub("class Base\n", "class Base\n  def self.then_call: (on: ^() -> untyped) -> untyped\n"))
+    )
+  end
+
+  def test_a_nil_memo_does_not_outlive_a_call_running_a_hook_the_program_defines
+    base = "def self.method_added(name); instance_variable_set(:@generated_association_methods, Post::GeneratedAssociationMethods); end"
+    assert_equal(
+      [nil, nil, "def comments; 1; end"],
+      chunks(associations("model.attr_reader(:limit)", base: base), signatures: ASSOCIATIONS_RBS)
     )
   end
 end
