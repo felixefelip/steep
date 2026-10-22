@@ -65,6 +65,9 @@ module Steep
       # - `ivar_uses`: each mention of an ivar it reads, as a
       #   `ClassMemoAnalyzer::Use`;
       # - `returns`: the ivar it returns, when its body is exactly that.
+      # - `hands_back`: the methods it calls on `self` with nothing, where
+      #   every value it returns is one of those calls; a `yield` answers only
+      #   a caller that hands a block.
       # - `memo`: `[ivar, class names, wrappers]` when its body is exactly
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
       #   it is written; or that `Klass.new` with calls that take a block made
@@ -84,7 +87,7 @@ module Steep
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
-        :empties, :rebuilds, :handed, :consts,
+        :empties, :rebuilds, :handed, :consts, :hands_back,
         keyword_init: true
       )
 
@@ -317,6 +320,7 @@ module Steep
           iterations: self_iterations(body),
           ivar_uses: ClassMemoAnalyzer.uses(body, names: ivars).to_h,
           returns: single_ivar_reader(body),
+          hands_back: hands_back(body),
           memo: nesting && memo_of(body, nesting),
           memoizes: memoized_ivar(body),
           memoized_hash: memoized_hash(body),
@@ -583,6 +587,21 @@ module Steep
         name = const_to_name(klass) or return
         names = klass.children[0]&.type == :cbase ? [name] : nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
         [target.children[0], names, wrappers]
+      end
+
+      def hands_back(body)
+        names = Set[] #: Set[Symbol]
+        returned = [] #: Array[::Parser::AST::Node]
+        Accumulators.each_tail(body) { |node| returned << node }
+        Accumulators.each_returns(body) { |node| returned << node }
+        returned.each do |node|
+          next if node.type == :yield
+          receiver, name, *arguments = node.children
+          return unless node.type == :send && (receiver.nil? || receiver.type == :self) && arguments.empty?
+
+          names << name
+        end
+        names unless names.empty?
       end
 
       # A reader whose body is exactly `@ivar` (normal or endless def) →

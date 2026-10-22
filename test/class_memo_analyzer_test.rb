@@ -72,18 +72,34 @@ class ClassMemoAnalyzerTest < Minitest::Test
     RUBY
   end
 
-  def test_a_method_whose_body_is_the_use_forwards_it
+  def test_a_method_that_returns_the_use_forwards_it
     found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings)
       class Article < Base
         def source_settings = source.settings
-        def self.wrapped
-          source.settings
+        def self.picked(flag)
+          [1].each { return source.settings if flag }
+          -> { return source.settings }
+          kept = [source.settings]
           nil
         end
       end
     RUBY
 
-    assert_equal [[:escape, :source_settings], [:escape, nil]], found.map { |use| [use.kind, use.forwarded_by] }
+    assert_equal [[:escape, :source_settings], [:escape, :picked], [:escape, nil], [:escape, nil]], found.map { |use| [use.kind, use.forwarded_by] }
+  end
+
+  def test_a_value_left_unused_is_no_use
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings, [])
+      class Article < Base
+        settings { |value| value }
+        def self.wrapped
+          settings
+          nil
+        end
+      end
+    RUBY
+
+    assert_equal [], found
   end
 
   def test_a_call_on_the_value_as_written_is_direct

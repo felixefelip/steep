@@ -27,8 +27,8 @@ module Steep
       # a class body made on `self`, `:call` for any other, `:escape` for a
       # name given as a value; `called` is the method called.
       #
-      # `forwarded_by`: on an escape, the method whose whole body is the use,
-      # which answers what it does. `at`: the call naming it, on an explicit
+      # `forwarded_by`: on an escape, the method that returns the use, which
+      # answers it to its callers. `at`: the call naming it, on an explicit
       # receiver (`site`). `direct`: the call is made on the value as written,
       # not on a local it was read into, and is no `op=` or target of a
       # multiple assignment. `key`: the symbol the call's first argument is
@@ -100,6 +100,7 @@ module Steep
         @calls = calls
         @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[Use]]
         @parents = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node?]
+        @returned = {}.compare_by_identity #: Hash[::Parser::AST::Node, Set[::Parser::AST::Node]]
       end
 
       def uses(node)
@@ -158,7 +159,7 @@ module Steep
 
       def record_send(node, parent, in_statement)
         _, name, *arguments = node.children
-        record(name, node, parent, in_statement) if arguments.empty?
+        record(name, node, parent, in_statement)
         record_named(name, arguments)
       end
 
@@ -194,8 +195,20 @@ module Steep
           receiver_uses(node, parent, in_statement, direct: true)
         elsif parent&.type == :lvasgn
           local_uses(parent)
-        elsif (method = forwarding_method(node, parent))
+        elsif (method = returning_method(node))
           [Use.new(:escape, nil, Set[], nil, method)]
+        elsif parent&.type == :block && parent.children[0].equal?(node)
+          value_uses(parent, @parents[parent], in_statement)
+        elsif discarded?(node, parent)
+          []
+        end
+      end
+
+      def discarded?(node, parent)
+        case parent&.type
+        when :class, :module, :sclass then true
+        when :begin then !parent.children.last.equal?(node) || %i[class module sclass].include?(@parents[parent]&.type)
+        else false
         end
       end
 
@@ -225,11 +238,21 @@ module Steep
         end
       end
 
-      def forwarding_method(node, parent)
-        case parent&.type
-        when :def then parent.children[0] if parent.children[2].equal?(node)
-        when :defs then parent.children[1] if parent.children[3].equal?(node)
+      def returning_method(node)
+        scope = @parents[node]
+        scope = @parents[scope] until scope.nil? || LOCAL_SCOPES.include?(scope.type) || lambda?(scope)
+        return unless scope && %i[def defs].include?(scope.type)
+
+        returned = @returned[scope] ||= Set[].compare_by_identity.tap do |nodes|
+          body = scope.children.last
+          Accumulators.each_tail(body) { |value| nodes << value }
+          Accumulators.each_returns(body) { |value| nodes << value }
         end
+        scope.children[scope.type == :def ? 0 : 1] if returned.include?(node)
+      end
+
+      def lambda?(node)
+        Accumulators::LAMBDA_BODIES.include?(node.type) && node.children[0].type == :lambda
       end
 
       # `call op= value` calls the writer of what `call` reads, too.
