@@ -221,14 +221,13 @@ module Steep
         # A reflection is shadowed by the RECEIVER's class, and a receiver is
         # any class the project writes — so these are recorded whoever the owner
         # is, and on the side they were written on. The literal table's keys
-        # stay confined to the core list below: its receivers are literals, and
-        # nothing else can hold one.
+        # stay confined to the core list below: its receivers are literals, or
+        # a core module whose module function it folds (`Regexp.escape`).
         if ReflectionIntrinsics.dispatched_names.include?(method_name.to_sym)
           @blocked << key unless owner.empty?
           return
         end
 
-        return if singleton
         return unless CORE_CLASSES.include?(owner)
 
         @blocked << key if TABLES.any? { |table| table.watched_keys.include?(key) }

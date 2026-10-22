@@ -256,6 +256,76 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [["def person_ids; []; end"], ["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
   end
 
+  def test_an_uncountable_guard_that_matches_patterns_the_object_holds_decides_the_rules
+    rbs = <<~RBS
+      class Inflector
+        class Rules
+          attr_reader singulars: Array[untyped]
+          @regex_array: Array[untyped]
+          def initialize: () -> void
+          def singular: (untyped rule, untyped replacement) -> Array[untyped]
+          def uncountable: (untyped word) -> Array[untyped]
+          def uncountable?: (untyped str) -> bool
+        end
+
+        self.@rules: Inflector::Rules?
+        def self.rules: () -> Inflector::Rules
+        def self.has_many_like: (Symbol name) -> untyped
+      end
+    RBS
+    ruby = <<~'RUBY'
+      class Inflector
+        class Rules
+          attr_reader :singulars
+
+          def initialize
+            @singulars = []
+            @regex_array = []
+          end
+
+          def singular(rule, replacement)
+            @singulars.prepend([rule, replacement])
+          end
+
+          def uncountable(word)
+            @regex_array << /\b#{::Regexp.escape(word)}\Z/i
+          end
+
+          def uncountable?(str)
+            @regex_array.any? { |regex| regex.match? str }
+          end
+        end
+
+        def self.rules
+          @rules ||= Rules.new
+        end
+
+        rules.singular(/s\z/, "")
+        rules.uncountable("news")
+
+        def self.has_many_like(name)
+          result = name.to_s.dup
+          unless rules.uncountable?(result)
+            rules.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+          end
+          class_eval "def #{result}_ids; []; end"
+        end
+
+        has_many_like :posts
+        has_many_like :news
+      end
+    RUBY
+
+    assert_equal [["def post_ids; []; end"], ["def news_ids; []; end"]], chunks(ruby, rbs: rbs)
+
+    {
+      "the block keeps the pattern in $~" => "regex.match(str)",
+      "the block changes the element" => 'regex.source.sub!("news", "x")'
+    }.each do |label, read|
+      assert_equal [[nil], [nil]], chunks(ruby.sub("regex.match? str", read), rbs: rbs), label
+    end
+  end
+
   TAP_MEMO = '@rules ||= Rules.new.tap { |rules| rules.singular(/s\z/, ""); rules.singular(/ies\z/, "y") }'
 
   def tapped(memo = TAP_MEMO, body: "")

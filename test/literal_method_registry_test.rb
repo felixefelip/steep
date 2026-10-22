@@ -213,6 +213,17 @@ class LiteralMethodRegistryTest < Minitest::Test
     assert registry.blocked?("::Symbol#to_s")
   end
 
+  def test_a_redefined_module_function_blocks_its_fold
+    registry = registry_for(<<~RUBY)
+      class Regexp
+        def self.escape(string) = string
+      end
+    RUBY
+
+    assert registry.blocked?("::Regexp.escape")
+    refute registry.blocked?("::Regexp#match?")
+  end
+
   def test_fails_closed_when_a_source_cannot_be_parsed
     registry = registry_for("class String\n  def")
 

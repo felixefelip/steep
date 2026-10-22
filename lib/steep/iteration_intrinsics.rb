@@ -14,7 +14,8 @@ module Steep
   module IterationIntrinsics
     # `collect` says what a pass contributes: `:each` nothing (its passes are
     # read for their pushes, not their values), `:map` the value the block
-    # hands back, `:filter_map` that value only where it is truthy.
+    # hands back, `:filter_map` that value only where it is truthy, `:any`
+    # whether it is truthy, up to the first that is.
     #
     # `depends_on` as in `LiteralIntrinsics`: `Enumerable#filter_map` walks the
     # receiver by calling its `each`, so an `Array#each` the project replaced is
@@ -30,6 +31,7 @@ module Steep
       # it was.
       "::Array#map" => Entry.new(collect: :map),
       "::Array#collect" => Entry.new(collect: :map),
+      "::Array#any?" => Entry.new(collect: :any),
       "::Enumerable#filter_map" => Entry.new(collect: :filter_map, depends_on: ["::Array#each", "::Array#filter_map"])
     }.freeze
 
@@ -60,6 +62,8 @@ module Steep
       # say exactly what it contributes. A value is exact when it is a value the
       # fold can go on to read; anything wider is the declaration's to type.
       def collect(entry, results)
+        return any(results) if entry.collect == :any
+
         types =
           case entry.collect
           when :map
@@ -82,6 +86,18 @@ module Steep
           end
 
         types && AST::Types::Tuple.new(types: types)
+      end
+
+      def any(results)
+        results.each do |type|
+          case truthiness(type)
+          when :truthy then return AST::Types::Literal.new(value: true)
+          when :falsy then next
+          else return nil
+          end
+        end
+
+        AST::Types::Literal.new(value: false)
       end
 
       def truthiness(type)

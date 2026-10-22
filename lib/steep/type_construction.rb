@@ -3169,7 +3169,7 @@ module Steep
             synthesize(child)
           end
 
-          add_typing(node, type: AST::Builtin::Regexp.instance_type)
+          add_typing(node, type: LiteralSyntax.regexp(node, typing) || AST::Builtin::Regexp.instance_type)
 
         when :regopt
           # ignore

@@ -70,6 +70,22 @@ module Steep
       ).map { |owner, name| "::#{owner}##{name}" }
     ).freeze
 
+    # What `flatten` asks an element that is not an Array before it keeps it
+    # as it is: whether it converts with `to_ary`, through the same probes
+    # `join` makes. Elements are confined to strings and symbols, whose chains
+    # the registry watches.
+    FLATTEN_LEAVES = [::String, ::Symbol].freeze
+    FLATTEN_METHODS = (
+      %w[String Symbol Comparable Object Kernel BasicObject].product(
+        %w[to_ary respond_to? respond_to_missing? method_missing]
+      ).map { |owner, name| "::#{owner}##{name}" }
+    ).freeze
+
+    # The modules a call made on the module itself folds for, with the object
+    # the call is made on. Each entry below that names one is a module
+    # function of it.
+    MODULE_RECEIVERS = { "::Regexp" => ::Regexp }.freeze
+
     class << self
       # An operand that is a union of literals is each of them in turn: the call
       # folds once per combination of alternatives, and is the union of the
@@ -156,8 +172,7 @@ module Steep
       end
 
       def method_keys_for(class_name)
-        prefix = "::#{class_name}#"
-        watched_keys.select { |key| key.start_with?(prefix) }
+        watched_keys.select { |key| key.start_with?("::#{class_name}#", "::#{class_name}.") }
       end
 
       private
@@ -168,6 +183,7 @@ module Steep
       def operand?(type)
         case type
         when AST::Types::Literal, AST::Types::RegexpLiteral, AST::Types::RangeLiteral then true
+        when AST::Types::Name::Singleton then MODULE_RECEIVERS.key?(type.name.to_s)
         when AST::Types::Tuple, AST::Types::FiniteSet then type.types.all? { |element| operand?(element) }
         else false
         end
@@ -180,6 +196,7 @@ module Steep
         # Rebuilt rather than handed over, so the match runs under a timeout.
         when AST::Types::RegexpLiteral then ::Regexp.new(type.value.source, type.value.options, timeout: REGEXP_TIMEOUT)
         when AST::Types::RangeLiteral then type.value
+        when AST::Types::Name::Singleton then MODULE_RECEIVERS.fetch(type.name.to_s)
         else type.value
         end
       end
@@ -273,6 +290,10 @@ module Steep
     # nothing was substituted — with no second question to disagree with it.
     STRING_SUB_BANG = ->(receiver, arguments) { receiver.dup.sub!(*arguments) }
     STRING_AFFIX = ->(_receiver, arguments) { arguments.first.is_a?(String) }
+    ARRAY_FLATTEN = lambda do |receiver, arguments|
+      leaves = ->(value) { value.is_a?(::Array) ? value.all?(&leaves) : FLATTEN_LEAVES.any? { |klass| value.is_a?(klass) } }
+      (arguments.empty? || (arguments.size == 1 && arguments.first.is_a?(Integer))) && receiver.all?(&leaves)
+    end
     # Two strings compare their bytes in C. Anything else on the right is
     # asked through its own `to_str`/`==`, which is another call.
     STRING_EQUAL = ->(_receiver, arguments) { arguments.first.is_a?(String) }
@@ -380,6 +401,9 @@ module Steep
       # `Inflections#irregular` keys its branch on `s0.upcase == p0.upcase`.
       "::String#==" => Entry.new(method: String.instance_method(:==), arity: 1, preflight: STRING_EQUAL),
       "::String#[]" => Entry.new(method: String.instance_method(:[]), arity: 1..2, preflight: STRING_SLICE),
+      "::Array#flatten" => Entry.new(method: Array.instance_method(:flatten), arity: 0..1, preflight: ARRAY_FLATTEN, depends_on: FLATTEN_METHODS),
+      # `Inflections::Uncountables#to_regex`.
+      "::Regexp.escape" => Entry.new(method: ::Regexp.singleton_class.instance_method(:escape), arity: 1, preflight: STRING_AFFIX),
       "::String#delete_suffix" => Entry.new(method: String.instance_method(:delete_suffix), arity: 1, preflight: STRING_AFFIX),
       "::Array#prepend" => Entry.new(method: Array.instance_method(:prepend), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:prepend)),
       "::Array#unshift" => Entry.new(method: Array.instance_method(:unshift), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:unshift)),

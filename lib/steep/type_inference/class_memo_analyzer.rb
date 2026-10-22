@@ -255,7 +255,10 @@ module Steep
 
         case parent.type
         when :send, :csend
-          parent.children[1] if ElementReads::NAMES.include?(parent.children[1]) && parent.children.drop(2).any? { |argument| argument.equal?(mention) }
+          name = parent.children[1]
+          return name if ElementReads::RECEIVER_NAMES.include?(name) && parent.children[0].equal?(mention)
+
+          name if ElementReads::NAMES.include?(name) && parent.children.drop(2).any? { |argument| argument.equal?(mention) }
         when :begin
           @parents.fetch(parent, nil)&.type == :dstr || nil
         end

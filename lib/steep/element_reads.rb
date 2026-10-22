@@ -19,13 +19,25 @@ module Steep
 
     NAMES = ENTRIES.keys.map { |key| key.split("#", 2).last.to_sym }.uniq.freeze
 
+    # The ones that neither change nor keep their RECEIVER either, so an element
+    # may be the value a call is made on: `regex.match?(word)`. `match` and
+    # `=~` are left out, because the `MatchData` they leave in `$~` holds on to
+    # the pattern.
+    RECEIVER_ENTRIES = (
+      %w[match? == != eql?].map { |name| "::Regexp##{name}" } +
+      %w[match? == != eql?].map { |name| "::String##{name}" } +
+      %w[== != equal? eql?].map { |name| "::BasicObject##{name}" }
+    ).to_h { |key| [key, true] }.freeze
+
+    RECEIVER_NAMES = RECEIVER_ENTRIES.keys.map { |key| key.split("#", 2).last.to_sym }.uniq.freeze
+
     class << self
       def keys_for(method_name)
-        ENTRIES.keys.select { |key| key.end_with?("##{method_name}") }
+        watched_keys.select { |key| key.end_with?("##{method_name}") }
       end
 
       def watched_keys
-        @watched_keys ||= Set.new(ENTRIES.keys)
+        @watched_keys ||= Set.new(ENTRIES.keys + RECEIVER_ENTRIES.keys)
       end
 
       def method_keys_for(class_name)
