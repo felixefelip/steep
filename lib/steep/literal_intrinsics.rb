@@ -167,7 +167,7 @@ module Steep
       # and there is nothing to gain by refusing one depth.
       def operand?(type)
         case type
-        when AST::Types::Literal, AST::Types::RegexpLiteral then true
+        when AST::Types::Literal, AST::Types::RegexpLiteral, AST::Types::RangeLiteral then true
         when AST::Types::Tuple, AST::Types::FiniteSet then type.types.all? { |element| operand?(element) }
         else false
         end
@@ -179,6 +179,7 @@ module Steep
         when AST::Types::FiniteSet then ::Set.new(type.types.map { |element| operand_value(element) })
         # Rebuilt rather than handed over, so the match runs under a timeout.
         when AST::Types::RegexpLiteral then ::Regexp.new(type.value.source, type.value.options, timeout: REGEXP_TIMEOUT)
+        when AST::Types::RangeLiteral then type.value
         else type.value
         end
       end
@@ -272,6 +273,14 @@ module Steep
     # nothing was substituted — with no second question to disagree with it.
     STRING_SUB_BANG = ->(receiver, arguments) { receiver.dup.sub!(*arguments) }
     STRING_AFFIX = ->(_receiver, arguments) { arguments.first.is_a?(String) }
+    # Two strings compare their bytes in C. Anything else on the right is
+    # asked through its own `to_str`/`==`, which is another call.
+    STRING_EQUAL = ->(_receiver, arguments) { arguments.first.is_a?(String) }
+    # A slice by position: an index, a start and a length, or a range of
+    # integers. A string or a regexp argument searches, which is another call.
+    STRING_SLICE = lambda do |_receiver, arguments|
+      arguments.all?(Integer) || (arguments.size == 1 && arguments.first.is_a?(::Range))
+    end
     # On a copy, as `sub!`: what an array holds once a value is pushed onto it
     # (`ArrayMutation::IN_PLACE`).
     ARRAY_PUSH = ->(method_name) { ->(receiver, arguments) { receiver.dup.public_send(method_name, *arguments) } }
@@ -368,6 +377,9 @@ module Steep
       "::String#sub!" => Entry.new(
         method: String.instance_method(:sub!), arity: 2, preflight: STRING_SUB, native: STRING_SUB_BANG
       ),
+      # `Inflections#irregular` keys its branch on `s0.upcase == p0.upcase`.
+      "::String#==" => Entry.new(method: String.instance_method(:==), arity: 1, preflight: STRING_EQUAL),
+      "::String#[]" => Entry.new(method: String.instance_method(:[]), arity: 1..2, preflight: STRING_SLICE),
       "::String#delete_suffix" => Entry.new(method: String.instance_method(:delete_suffix), arity: 1, preflight: STRING_AFFIX),
       "::Array#prepend" => Entry.new(method: Array.instance_method(:prepend), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:prepend)),
       "::Array#unshift" => Entry.new(method: Array.instance_method(:unshift), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:unshift)),

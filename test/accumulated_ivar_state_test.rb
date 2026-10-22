@@ -234,6 +234,28 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [[nil], [nil]], chunks(ruby, rbs: apply_rbs)
   end
 
+  IRREGULAR = <<~'RUBY'
+    def irregular(singular, plural)
+      s0 = singular[0]
+      srest = singular[1..-1]
+      p0 = plural[0]
+      prest = plural[1..-1]
+
+      if s0.upcase == p0.upcase
+        singular(/(#{s0})#{srest}$/i, '\1' + srest)
+        singular(/(#{p0})#{prest}$/i, '\1' + srest)
+      end
+    end
+  RUBY
+
+  def test_an_irregular_rule_built_from_the_words_it_is_given_is_applied
+    ruby = source(body: "rules.irregular(\"person\", \"people\")\nhas_many_like :people")
+      .sub("    def singular(") { "#{IRREGULAR.gsub(/^/, '    ')}\n    def singular(" }
+    rbs = RBS.sub("def singular:", "def irregular: (untyped singular, untyped plural) -> untyped\n    def singular:")
+
+    assert_equal [["def person_ids; []; end"], ["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
+  end
+
   TAP_MEMO = '@rules ||= Rules.new.tap { |rules| rules.singular(/s\z/, ""); rules.singular(/ies\z/, "y") }'
 
   def tapped(memo = TAP_MEMO, body: "")
@@ -242,6 +264,12 @@ class AccumulatedIvarStateTest < Minitest::Test
 
   def test_rules_pushed_in_a_tap_memo_reach_a_macro_in_the_same_body
     assert_equal ["def post_ids; []; end"], chunks(tapped).first
+  end
+
+  def test_a_rule_whose_pattern_interpolates_literals_is_applied_as_the_pattern_written_out
+    memo = TAP_MEMO.sub('/ies\z/', '/#{"ie"}#{:s}\z/')
+
+    assert_equal chunks(tapped), chunks(tapped(memo))
   end
 
   def test_a_jump_inside_a_loop_of_the_tap_block_leaves_only_that_loop

@@ -2243,7 +2243,7 @@ module Steep
             synthesize(child)
           end
 
-          literal = node.type == :dstr ? folded_string_literal(node) : nil
+          literal = node.type == :dstr ? LiteralSyntax.string(node, typing) : nil
           add_typing(node, type: literal || AST::Builtin::String.instance_type)
 
         when :dsym
@@ -5837,9 +5837,17 @@ module Steep
         override_registry: literal_method_registry
       ) or return call
 
-      return call unless check_relation(sub_type: type, super_type: declared_return_type).success?
+      return call unless decided_predicate?(type, declared_return_type) || check_relation(sub_type: type, super_type: declared_return_type).success?
 
       call.with_return_type(type)
+    end
+
+    # A predicate the checker types as a narrowing (`==` is `ReceiverIsArg`)
+    # that the fold answered with one boolean. A `true | false` keeps the
+    # narrowing, which is what tells the branches apart.
+    def decided_predicate?(type, declared_return_type)
+      declared_return_type.is_a?(AST::Types::Logic::Base) &&
+        type.is_a?(AST::Types::Literal) && (type.value == true || type.value == false)
     end
 
     # Replaces a reflection's nominal return — `::Class`, `::UnboundMethod`,
@@ -5918,7 +5926,11 @@ module Steep
       # A pattern has no RBS literal to arrive as, so the node is the only
       # place one is ever read — the way `:str` is read below, one type over.
       if node.type == :regexp
-        return regexp_literal(node) || built_here_only(inferred_type)
+        return LiteralSyntax.regexp(node, typing) || built_here_only(inferred_type)
+      end
+
+      if node.type == :irange || node.type == :erange
+        return LiteralSyntax.range(node) || built_here_only(inferred_type)
       end
 
       # A constant whose value is written out ONCE in this file and only read
@@ -6011,23 +6023,6 @@ module Steep
     # A value the fold can take whole, that no scalar `Literal` spells.
     def written_out_value?(type)
       collection_value?(type) || type.is_a?(AST::Types::RegexpLiteral)
-    end
-
-    # The flags a literal can carry without changing what its source means.
-    # `o` only says when an interpolation is evaluated, and there is none; the
-    # encoding flags (`n`, `e`, `s`, `u`) change how the bytes are read, and
-    # decline.
-    REGEXP_OPTIONS = { i: Regexp::IGNORECASE, x: Regexp::EXTENDED, m: Regexp::MULTILINE, o: 0 }.freeze
-
-    # `/…/` with no interpolation, as the value it evaluates to.
-    def regexp_literal(node)
-      *parts, flags = node.children
-      return unless parts.all? { |part| part.type == :str }
-
-      options = flags.children.sum { |flag| REGEXP_OPTIONS.fetch(flag) { return } }
-      AST::Types::RegexpLiteral.new(value: Regexp.new(parts.map { |part| part.children[0] }.join, options))
-    rescue RegexpError
-      nil
     end
 
     # `type` is the collection the checker built at `node` (`record_built_value`),
@@ -7634,22 +7629,6 @@ module Steep
       else
         typ
       end
-    end
-
-    def folded_string_literal(node)
-      texts = node.children.inject([""]) do |prefixes, child|
-        pieces = child.type == :str ? [child.children[0]] : interpolated_pieces(typing.type_of(node: child))
-        return nil unless pieces&.all?(String)
-
-        prefixes.product(pieces).map(&:join)
-      end
-
-      AST::Types::Union.build(types: texts.uniq.map { |text| AST::Types::Literal.new(value: text) })
-    end
-
-    def interpolated_pieces(type)
-      members = type.is_a?(AST::Types::Union) ? type.types : [type]
-      members.map { |member| member.is_a?(AST::Types::Literal) ? member.value.to_s : (return nil) }
     end
 
     def test_literal_type(literal, hint)
