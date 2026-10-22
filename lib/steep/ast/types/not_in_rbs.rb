@@ -3,10 +3,11 @@ module Steep
     module Types
       # A type RBS cannot spell.
       #
-      # `FiniteSet`, `MetaClass`, `MethodObject` and `RegexpLiteral` are all
-      # exact where a signature can only be general — the members of a set, the
-      # module a singleton class is of, the method a reflection names, the
-      # pattern a regexp matches — and a signature
+      # `FiniteSet`, `MetaClass`, `MethodObject`, `RegexpLiteral` and
+      # `RangeLiteral` are all exact where a signature can only be general — the
+      # members of a set, the module a singleton class is of, the method a
+      # reflection names, the pattern a regexp matches, the bounds of a range —
+      # and a signature
       # is where each of them stops. `back_type` is what it is written AS at
       # that boundary, and every boundary asks for it through this module rather
       # than naming each: `Factory#type_1` on the way into RBS, subtyping

@@ -129,7 +129,7 @@ module Steep
         case type
         when AST::Types::Name::Instance, AST::Types::Name::Singleton, AST::Types::Literal, AST::Types::Nil,
              AST::Types::Boolean, AST::Types::Logic::Base, AST::Types::Proc, AST::Types::Tuple, AST::Types::Record,
-             AST::Types::FiniteSet, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral,
+             AST::Types::FiniteSet, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral, AST::Types::RangeLiteral,
              AST::Types::ObjectState
           true
         when AST::Types::Union, AST::Types::Intersection
@@ -196,7 +196,7 @@ module Steep
           if shape = cached_raw_shape(expanded, config)
             shape.update(type: type)
           end
-        when AST::Types::Literal, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral
+        when AST::Types::Literal, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral, AST::Types::RangeLiteral
           instance_type = type.back_type
           subst = class_subst(instance_type).update(self_type: type)
           object_shape(instance_type.name).subst(subst, type: type)
@@ -284,7 +284,7 @@ module Steep
           )
         when AST::Types::Name::Interface
           object_shape(type.name).subst(app_subst(type), type: type)
-        when AST::Types::Literal, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral
+        when AST::Types::Literal, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral, AST::Types::RangeLiteral
           instance_type = type.back_type
           subst = class_subst(instance_type).update(self_type: nil)
           object_shape(instance_type.name).subst(subst, type: type)

@@ -33,6 +33,111 @@ class StringFoldTest < Minitest::Test
     end
   end
 
+  def test_sub_with_an_interpolated_regexp_of_literals_folds
+    check(<<~'RUBY') do |pair|
+      # @type var word: "people"
+      word = _ = "people"
+      # @type var head: "p"
+      head = _ = "p"
+      x = word.sub(/(#{head})#{"eople"}$/i, '\1erson')
+    RUBY
+      assert_equal parse_type('"person"'), pair.context.type_env[:x]
+    end
+  end
+
+  def test_sub_with_a_regexp_interpolating_a_union_folds_each_pattern
+    check(<<~'RUBY') do |pair|
+      # @type var word: "posts"
+      word = _ = "posts"
+      # @type var suffix: "s" | "ts"
+      suffix = _ = "s"
+      x = word.sub(/#{suffix}\z/, "")
+    RUBY
+      assert_equal parse_type('"post" | "pos"'), pair.context.type_env[:x]
+    end
+  end
+
+  def test_sub_with_a_regexp_interpolating_a_string_does_not_fold
+    check(<<~'RUBY') do |pair|
+      # @type var word: "posts"
+      word = _ = "posts"
+      # @type var suffix: String
+      suffix = _ = "s"
+      x = word.sub(/#{suffix}\z/, "")
+    RUBY
+      assert_equal parse_type('::String'), pair.context.type_env[:x]
+    end
+  end
+
+  def test_slice_by_position_folds
+    check(<<~'RUBY') do |pair|
+      # @type var word: "person"
+      word = _ = "person"
+      head = word[0]
+      rest = word[1..-1]
+      middle = word[1, 2]
+      open = word[2..]
+      before = word[...2]
+      past = word[10]
+    RUBY
+      assert_equal parse_type('"p"'), pair.context.type_env[:head]
+      assert_equal parse_type('"erson"'), pair.context.type_env[:rest]
+      assert_equal parse_type('"er"'), pair.context.type_env[:middle]
+      assert_equal parse_type('"rson"'), pair.context.type_env[:open]
+      assert_equal parse_type('"pe"'), pair.context.type_env[:before]
+      assert_equal parse_type('nil'), pair.context.type_env[:past]
+    end
+  end
+
+  def test_slice_by_a_search_does_not_fold
+    check(<<~'RUBY') do |pair|
+      # @type var word: "person"
+      word = _ = "person"
+      x = word["er"]
+    RUBY
+      assert_equal parse_type('::String?'), pair.context.type_env[:x]
+    end
+  end
+
+  def test_equality_of_two_strings_folds
+    check(<<~'RUBY') do |pair|
+      # @type var word: "person"
+      word = _ = "person"
+      head = word[0]
+      x = head.upcase == "P"
+      y = head == "q"
+    RUBY
+      assert_equal parse_type('true'), pair.context.type_env[:x]
+      assert_equal parse_type('false'), pair.context.type_env[:y]
+    end
+  end
+
+  def test_equality_that_is_not_decided_keeps_narrowing_the_receiver
+    check(<<~'RUBY') do |pair|
+      # @type var word: "a" | "b"
+      word = _ = "a"
+      x = word == "a" ? word : nil
+    RUBY
+      assert_equal parse_type('"a" | nil'), pair.context.type_env[:x]
+    end
+  end
+
+  # `Inflections#irregular`, as Active Support writes the rule for a plural.
+  def test_an_irregular_rule_folds
+    check(<<~'RUBY') do |pair|
+      # @type var singular: "person"
+      singular = _ = "person"
+      # @type var plural: "people"
+      plural = _ = "people"
+      srest = singular[1..-1]
+      p0 = plural[0]
+      prest = plural[1..-1]
+      x = plural.sub(/(#{p0})#{prest}$/i, '\1' + srest)
+    RUBY
+      assert_equal parse_type('"person"'), pair.context.type_env[:x]
+    end
+  end
+
   def test_sub_with_a_backreference_folds
     check(<<~'RUBY') do |pair|
       # @type var word: "people"

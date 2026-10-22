@@ -274,20 +274,14 @@ module Steep
       # The value an argument written as a literal is, whatever the parameter
       # it lands in is declared: an `untyped` one would otherwise widen it at
       # the call, and the call fixes the value all the same.
-      def self.written_literal(arg)
+      def self.written_literal(arg, typing)
         case arg.type
         when :str, :sym, :int
           value = arg.children[0]
           AST::Types::Literal.new(value: value) if value.is_a?(::String) || value.is_a?(::Symbol) || value.is_a?(::Integer)
         when :regexp
-          *parts, flags = arg.children
-          return unless parts.all? { |part| part.type == :str }
-
-          options = flags.children.sum { |flag| TypeConstruction::REGEXP_OPTIONS.fetch(flag) { return } }
-          AST::Types::RegexpLiteral.new(value: ::Regexp.new(parts.map { |part| part.children[0] }.join, options))
+          LiteralSyntax.regexp(arg, typing)
         end
-      rescue RegexpError
-        nil
       end
 
       # The ivars of the object the call is made on whose contents are known
@@ -357,7 +351,7 @@ module Steep
       # `self`, where the call's body is checked for one class (`exact_self`),
       # is that class: the callee would read `self` as its own receiver.
       def self.argument_type(arg, typing, exact_self)
-        written = written_literal(arg) || written_record(arg, typing, exact_self) and return written
+        written = written_literal(arg, typing) || written_record(arg, typing, exact_self) and return written
         type = typing.type_of(node: arg)
         type = type.subst(Interface::Substitution.build([], self_type: exact_self)) if exact_self
         vouched = typing.vouched_of(node: arg)
