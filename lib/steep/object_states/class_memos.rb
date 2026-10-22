@@ -16,6 +16,8 @@ module Steep
           hash_ivar = tracked_hash(constr, call)
           return remembered_hash(constr, call, hash_ivar) if hash_ivar
 
+          return [call, constr] if handed_back?(constr, call)
+
           ivar, instance, wrappers = tracked_memo(constr, call)
           current = ivar && constr.context.type_env[ivar]
           state = ObjectStates.state_in(current) || (current.is_a?(AST::Types::Nil) && built(constr, call, node, ivar, instance, wrappers)) or return [nil, constr]
@@ -301,16 +303,30 @@ module Steep
           singleton = constr.self_type
           return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
 
-          owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
-          ivar, classes, wrappers = body&.memo
           instance = constr.typing.nominal_of(node: call.node) || call.return_type
-          instance = ObjectStates.state_in(instance)&.back_type || instance
+          tracked(constr, singleton, call.method_name, ObjectStates.state_in(instance)&.back_type || instance)
+        end
+
+        def tracked(constr, singleton, method_name, instance)
+          owner, body = ObjectStates.resolved_body(constr, singleton, method_name)
+          ivar, classes, wrappers = body&.memo
           return unless ivar && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
-          return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, call.method_name)
-          return unless [call.method_name, ivar].all? { |used| confined?(constr, singleton, instance, used) }
+          return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, method_name)
+          return unless [method_name, ivar].all? { |used| confined?(constr, singleton, instance, used) }
           return unless wrappers.all? { |name| Tap.resolves?(constr, instance, name) }
 
           [ivar, instance, wrappers]
+        end
+
+        # A method of the class whose every value is one of its tracked memos
+        # (`Body#hands_back`) answers the object as its own check left it.
+        def handed_back?(constr, call)
+          singleton = constr.self_type
+          state = ObjectStates.state_in(call.return_type)
+          return false unless state && call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
+
+          names = ObjectStates.resolved_body(constr, singleton, call.method_name)&.last&.hands_back or return false
+          names.all? { |name| tracked(constr, singleton, name, state.back_type) }
         end
 
         # `Klass.new` hands back an object nothing else holds.
@@ -328,13 +344,17 @@ module Steep
           false
         end
 
-        def confined?(constr, singleton, instance, name)
+        # A use a method returns (`Use#forwarded_by`) is made wherever that
+        # method is called, where only a read is followed (`handed_back?`).
+        def confined?(constr, singleton, instance, name, forwarders = Set[])
           Specializations::Receivers.uses_on(constr, name, singleton).all? do |use|
+            forwarder = use.forwarded_by
+            next forwarder == name || forwarders.include?(forwarder) || confined?(constr, singleton, instance, forwarder, forwarders | [name]) if forwarder
             next false if use.kind == :escape
             next constr.constructor_bindings.replayed_everywhere?(use.called) if use.kind == :yielded
 
             effect = ObjectStates.method_effect(constr, instance, use.called) or next false
-            use.kind == :statement || effect.reads_only
+            effect.reads_only || (use.kind == :statement && forwarders.empty?)
           end
         end
 

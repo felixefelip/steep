@@ -626,6 +626,44 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  HANDED_RBS = RBS.sub("def self.rules:", "def self.current: (Symbol locale) -> Inflector::Rules\n  def self.wipe: () -> untyped\n  def self.rules:")
+                  .sub("def singular:", "def clear: () -> Array[untyped]\n    def singular:")
+
+  HANDED_READS = 'current(:en).singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }'
+
+  def handed_back(current, body: "", rules: nil)
+    ruby = source(body: "#{current}\n#{body}", reads: HANDED_READS)
+    ruby = ruby.sub("    def singular(", "    #{rules}\n\n    def singular(") if rules
+    chunks(ruby, rbs: HANDED_RBS)
+  end
+
+  def test_a_method_whose_every_value_is_the_memo_reads_as_the_memo
+    {
+      "its whole body" => "def self.current(locale) = rules",
+      "a return from a loop and its last value" => "def self.current(locale)\n  [locale, :en].each { |k| return rules if k == :en }\n  rules\nend"
+    }.each do |label, current|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], handed_back(current), label
+    end
+  end
+
+  def test_a_method_that_yields_the_memo_and_hands_it_back_without_a_block_reads_the_rules_the_block_wrote
+    rbs = YIELD_RBS.sub("def self.inflections: () { (Inflector::Rules) -> void } -> void", "def self.inflections: () { (Inflector::Rules) -> void } -> void\n                      | () -> Inflector::Rules")
+    inflections = "def self.inflections\n  if block_given?\n    yield rules\n  else\n    rules\n  end\nend"
+    reads = 'inflections.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }'
+
+    assert_equal [["def article_ids; []; end"], ["def category_ids; []; end"]], chunks(source(body: "#{inflections}\n#{YIELD_BLOCK}", reads: reads), rbs: rbs)
+  end
+
+  def test_declines_a_memo_changed_through_a_method_that_hands_it_back
+    {
+      "in a statement of the class body" => "current(:en).clear",
+      "in a method" => "def self.wipe = current(:en).clear",
+      "kept under another name" => "KEPT = current(:en)"
+    }.each do |label, body|
+      assert_equal [[nil], [nil]], handed_back("def self.current(locale) = rules", body: body, rules: "def clear = @singulars.clear"), label
+    end
+  end
+
   def test_a_reopen_that_only_defines_methods_runs_nothing_first
     rbs = RBS.sub("def self.has_many_like", "def extra: () -> Integer\n  def self.has_many_like")
     reopen = "class Inflector\n  def extra = 1\nend\n"
