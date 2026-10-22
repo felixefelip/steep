@@ -76,13 +76,15 @@ module Steep
       # - `memoized_hash`: the ivar, when that value is `{}`;
       # - `calls`: whether it makes a call or a `yield`, a `super` aside;
       # - `empties`: the ivars a statement of the body sets to `[]`;
+      # - `rebuilds`: the ivars it only writes as `@ivar += …`, a new array
+      #   built out of the one it held;
       # - `handed`: the ivars whose object it lets out, naming one other than as
       #   the receiver of a call, the target of an assignment or the value it
       #   returns as a reader (`returns`).
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
-        :empties, :handed, :consts,
+        :empties, :rebuilds, :handed, :consts,
         keyword_init: true
       )
 
@@ -277,7 +279,7 @@ module Steep
       def attr_reader_body(name)
         Body.new(
           bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: :"@#{name}",
-          empties: Set[], handed: Set[], consts: Set[], calls: false
+          empties: Set[], rebuilds: Set[], handed: Set[], consts: Set[], calls: false
         )
       end
 
@@ -285,7 +287,7 @@ module Steep
         ivar = :"@#{name}"
         Body.new(
           bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: nil,
-          empties: Set[], handed: Set[], consts: Set[], calls: false
+          empties: Set[], rebuilds: Set[], handed: Set[], consts: Set[], calls: false
         )
       end
 
@@ -304,6 +306,7 @@ module Steep
         end
         Body.new(
           empties: empties_of(body),
+          rebuilds: rebuilds_of(body),
           handed: handed_ivars(body),
           bindings: ivar_param_bindings(args_node, body),
           writes: writes,
@@ -484,6 +487,14 @@ module Steep
           empties << stmt.children[0] if stmt.type == :ivasgn && stmt.children[1]&.type == :array && stmt.children[1].children.empty?
         end
         empties
+      end
+
+      def rebuilds_of(body)
+        targets = Set[].compare_by_identity #: Set[::Parser::AST::Node]
+        each_node(body) { |node| targets << node.children[0] if node.type == :op_asgn && node.children[0].type == :ivasgn && node.children[1] == :+ }
+        written = Hash.new { |hash, key| hash[key] = [] } #: Hash[Symbol, Array[::Parser::AST::Node]]
+        each_node(body) { |node| written[node.children[0]] << node if node.type == :ivasgn }
+        written.filter_map { |ivar, nodes| ivar if nodes.all? { |node| targets.include?(node) } }.to_set
       end
 
       def handed_ivars(body, parent = nil, handed = Set[])

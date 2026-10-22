@@ -100,6 +100,16 @@ module Steep
         AST::Types::Union.build(types: results)
       end
 
+      # A value an accumulated array may hold: a literal, `nil`, or an array of
+      # those.
+      def fold_value?(type)
+        case type
+        when AST::Types::Literal, AST::Types::Nil then true
+        when AST::Types::Tuple then type.types.all? { |element| fold_value?(element) }
+        else false
+        end
+      end
+
       def literal_union?(type)
         type.is_a?(AST::Types::Union) && type.types.all?(AST::Types::Literal)
       end

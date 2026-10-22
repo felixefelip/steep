@@ -84,6 +84,7 @@ require "steep/object_states/class_states"
 require "steep/object_states/constructed"
 require "steep/object_states/entered_self"
 require "steep/object_states/held_ivar"
+require "steep/object_states/nested"
 require "steep/object_states/tap"
 require "steep/object_states/yields"
 

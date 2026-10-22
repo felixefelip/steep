@@ -118,12 +118,21 @@ module Steep
         end
 
         # What `Klass.new` holds when its `initialize` chain is done: each array
-        # it starts empty and only pushes onto afterwards.
+        # it starts empty and only pushes onto afterwards, and each object it
+        # builds and keeps, as its own `Klass.new` left it.
         def fresh_state(constr, instance)
           chain = ObjectStates.initialize_chain(constr, instance) or return
           empties = chain.flat_map { |_, body| body ? body.empties.to_a : [] }
           ivars = empties.select { |ivar| collection_confined?(constr, instance, ivar) }.to_h { |ivar| [ivar, AST::Types::Tuple.new(types: [])] }
-          AST::Types::ObjectState.new(back_type: instance, ivars: ivars)
+          AST::Types::ObjectState.new(back_type: instance, ivars: built_objects(constr, instance).merge(ivars))
+        end
+
+        # The objects `Klass.new` called with nothing leaves in its ivars, as
+        # its check recorded them (`Constructed`).
+        def built_objects(constr, instance)
+          key = "#{instance.name.to_s.delete_prefix("::")}.new"
+          constructed = ObjectStates.state_in(constr.specializations.return_type(key, "()", factory: constr.checker.factory))
+          constructed&.ivars&.select { |_, value| ObjectStates.state_in(value) } || {}
         end
 
         # The memos' ivars start `nil` in the one class body that runs code,
@@ -357,7 +366,8 @@ module Steep
 
         # Nothing the project holds can change the array `instance` keeps in
         # `ivar`, nor one of its elements: only an `initialize` sets it, to `[]`,
-        # its own methods only push onto it or hand it out through a reader, and
+        # its own methods only push onto it, rebuild it with `+=` or hand it out
+        # through a reader, and
         # every use of it and of those readers only reads it — a block handed
         # its elements included (`CollectionReaders::ITERATIONS`).
         def collection_confined?(constr, instance, ivar)
@@ -369,7 +379,7 @@ module Steep
               bodies.each do |body|
                 return false unless body
                 next readers << name if body.returns == ivar
-                return false if body.handed.include?(ivar) || (body.writes - body.empties).include?(ivar)
+                return false if body.handed.include?(ivar) || (body.writes - body.empties - body.rebuilds).include?(ivar)
               end
             end
           end

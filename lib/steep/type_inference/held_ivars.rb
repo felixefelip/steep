@@ -16,9 +16,17 @@ module Steep
       # or nil.
       def initialize(def_node, reader)
         @reader = reader
+        @initializer = def_node&.type == :def && def_node.children[0] == :initialize
         @names = Set[] #: Set[Symbol]
+        @escaped = Set[] #: Set[Symbol]
         @values = {}.compare_by_identity #: Hash[::Parser::AST::Node, Symbol]
         analyze(def_node) if def_node
+      end
+
+      # Whether the body reaches `name` some way other than through calls made
+      # on it. One it never mentions it does not reach at all.
+      def escapes?(name)
+        @escaped.include?(name)
       end
 
       private
@@ -48,8 +56,11 @@ module Steep
       end
 
       # A statement of the body whose value nothing takes: not its last one,
-      # which the method answers.
+      # which the method answers, unless the method is an `initialize`, whose
+      # value `new` drops.
       def statement?(node, parents)
+        return parents.empty? || (parents.size == 1 && parents[0].type == :begin) if @initializer
+
         parents.size == 1 && parents[0].type == :begin && !parents[0].children.last.equal?(node)
       end
 

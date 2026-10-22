@@ -16,7 +16,7 @@ module Steep
     # of the receiver, so a constant is still the value it was written with
     # after one of these: `(KEYWORDS + EXTRA).to_set` reads both and changes
     # neither.
-    WHOLE = %i[join size length empty? count include? intersect? + - & | to_set].freeze
+    WHOLE = %i[join size length empty? count include? intersect? + - & | to_set flatten].freeze
 
     # Answer with an ELEMENT, which the caller may then change in place:
     #
@@ -35,6 +35,10 @@ module Steep
     # `parts.include?(x)` takes a value that has nothing to do with the
     # collection it is being looked for in.
     BINARY = %i[+ - & | intersect?].freeze
+
+    # Calls that change their receiver out of the arrays they are handed and
+    # keep none of them: `concat` copies the elements across, as `+` does.
+    ARGUMENT_READS = %i[concat].freeze
 
     # Calls that hand each element to a block and change nothing themselves
     # (`IterationIntrinsics`). `read?` refuses them, because the block may
@@ -64,6 +68,40 @@ module Steep
       # it as a value.
       def binary?(send_node)
         BINARY.include?(send_node.children[1])
+      end
+
+      # Whether `mention` is the receiver of a `map(&:reader)` that a scalar
+      # read consumes, outside any closure or loop in `node`.
+      def mapped_read_of?(node, mention, inside = false)
+        return false unless node.is_a?(Parser::AST::Node)
+        return false if LocalReach::SCOPES.include?(node.type)
+
+        if !inside && node.type == :send && scalar_mapped_read?(node)
+          return true if node.children[0].children[0].equal?(mention)
+        end
+
+        repeats = inside || LocalReach::CLOSURES.include?(node.type) || LocalReach::REPEATS.include?(node.type)
+        node.children.any? { |child| mapped_read_of?(child, mention, repeats) }
+      end
+
+      # `local.map(&:first).intersect?(…)`: the elements `map` picks are shared
+      # with the local, and the scalar read hands none of them on.
+      def scalar_mapped_read?(node)
+        node.type == :send && Accumulators::SCALAR_READS.include?(node.children[1]) && mapped_read?(node.children[0])
+      end
+
+      def mapped_read?(node)
+        return false unless node.is_a?(Parser::AST::Node) && node.type == :send
+        return false unless Accumulators::BLOCK_READS.include?(node.children[1]) && node.children.size == 3
+        return false unless node.children[0]&.type == :lvar
+
+        pass = node.children[2]
+        pass.type == :block_pass && pass.children[0]&.type == :sym &&
+          METHODS.include?(pass.children[0].children[0])
+      end
+
+      def reads_arguments?(send_node)
+        send_node.type == :send && ARGUMENT_READS.include?(send_node.children[1])
       end
     end
   end
