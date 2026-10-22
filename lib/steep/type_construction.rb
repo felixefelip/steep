@@ -564,7 +564,7 @@ module Steep
     def arrived_types(element)
       arguments = specialization_arguments(element.def_node) or return nil
       tuple = arguments.arrived(element.def_node, element.name) or return nil
-      return nil unless tuple.types.all? { |type| type.is_a?(AST::Types::Literal) }
+      return nil unless tuple.types.all? { |type| LiteralIntrinsics.fold_value?(type) }
 
       tuple.types
     end
@@ -580,7 +580,7 @@ module Steep
       return nil unless built_value?(node, tuple)
 
       return nil unless fresh_call?(node)
-      return nil unless tuple.types.all? { |type| fold_value?(type) }
+      return nil unless tuple.types.all? { |type| LiteralIntrinsics.fold_value?(type) }
 
       tuple.types
     end
@@ -592,14 +592,6 @@ module Steep
       call.is_a?(TypeInference::MethodCall::Typed) && Accumulators::FRESH.include?(MethodIdentity.key(call))
     rescue Typing::UnknownNodeError
       false
-    end
-
-    def fold_value?(type)
-      case type
-      when AST::Types::Literal, AST::Types::Nil then true
-      when AST::Types::Tuple then type.types.all? { |element| fold_value?(element) }
-      else false
-      end
     end
 
     # Records, for every local this call is handed that `Accumulators` vouches
@@ -755,6 +747,7 @@ module Steep
           .with_new_typing(typing.new_child)
           .update_type_env { |env| env.refine_types(local_variable_types: bindings) }
         type, _ = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
+        typing.add_pass_typing(pass.typing)
         type
       end
 
@@ -4723,6 +4716,7 @@ module Steep
       if receiver_type.is_a?(AST::Types::Self) && self_type.is_a?(AST::Types::Any)
         receiver_type = self_type
       end
+      receiver_type, constr = ObjectStates::Nested.read_through(constr, receiver, receiver_type, method_name) if receiver
       private = receiver.nil? || receiver.type == :self
 
       # felixefelip/steep#137. A literal-name `send` is a call to that method, so replace

@@ -66,15 +66,16 @@ module Steep
 
         # The method body `arguments` keys, entered with the class states its
         # caller knew, and with `self`'s ivars as they were, but an object
-        # the body may reach some other way than through calls made on it
-        # (`TypeInference::HeldIvars`) only with what holds under any name.
+        # the body reaches some other way than through calls made on it
+        # (`TypeInference::HeldIvars#escapes?`) only with what holds under any
+        # name.
         def entered_method(constr, method_context, self_type, env, arguments)
           return env unless arguments
 
           ivars = arguments.self_ivars
           if self_type.is_a?(AST::Types::Name::Instance)
             held = method_context.held_ivars { |name| ObjectStates::HeldIvar.reader_ivar(constr, self_type, name) }
-            ivars = ivars.to_h { |ivar, type| [ivar, held.held?(ivar) ? type : HashMutation.flatten(ObjectStates.settled(constr, type))] }
+            ivars = ivars.to_h { |ivar, type| [ivar, held.escapes?(ivar) ? HashMutation.flatten(ObjectStates.settled(constr, type)) : type] }
           end
           env.refine_types(instance_variable_types: ivars).update(class_states: arguments.class_states)
         end

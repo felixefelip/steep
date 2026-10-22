@@ -13,9 +13,9 @@ module Steep
   # (`TypeInference::HeldLocals`), and each call made through it moves it.
   module ObjectStates
     # `reads_only`: the method leaves the object as it was. It only answers an
-    # ivar (`attr_reader`, `def x = @x`: a `reader`), or writes none and only
-    # reads what they hold (`ClassMemos.reading_uses?`), which a record in a
-    # record does not see.
+    # ivar (`attr_reader`, `def x = @x`: a `reader`, which names it), or writes
+    # none and only reads what they hold (`ClassMemos.reading_uses?`), which a
+    # record in a record does not see.
     Effect = Struct.new(:bindings, :writes, :reads_only, :reader, keyword_init: true)
 
     # What a body left its receiver holding (`ivars`), each class object it
@@ -160,12 +160,13 @@ module Steep
       end
 
       # `self_exit`, or every ivar as it stands where the call evaluates a
-      # string that only defines methods.
+      # string that only defines methods, or is a core array method acting on
+      # `self`'s own elements.
       def self_exit_or_unchanged(constr, node, on_self)
         exit = self_exit(constr, node, on_self)
         return exit if exit
 
-        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node)
+        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node) || (on_self && ArrayMutation.elements_only?(recorded_call(constr, node), constr))
       end
 
       def hands_self?(constr, arguments, handed)
@@ -320,8 +321,9 @@ module Steep
       #
       # - a Ruby `initialize` the RBS does not place there would run first;
       # - one the project defines twice, or that could not be read;
-      # - a `super` that may not run, or reaches a body with no source
-      #   (`BasicObject#initialize`, which writes nothing, ends the chain).
+      # - a `super` that may not run, or reaches a body with no source but a
+      #   core class's (`BasicObject#initialize`, `Array#initialize`: C, which
+      #   writes no ivar, and ends the chain).
       def initialize_chain(constr, instance)
         registry = constr.constructor_bindings
         definition = constr.checker.factory.definition_builder.build_instance(instance.name)
@@ -339,7 +341,7 @@ module Steep
 
           initializers = registry.initializers_for(owner.to_s)
           if initializers.empty?
-            return nil unless owner == RBS::BuiltinNames::BasicObject.name
+            return nil unless Project::LiteralMethodRegistry::CORE_CLASSES.include?(owner.to_s.delete_prefix("::"))
             chain << [owner, nil]
             return chain
           end
@@ -394,7 +396,7 @@ module Steep
       # `self` may write after. Nil when the body cannot be read, calls
       # `super`, or may hand `self` on; and until `steep check` has written a
       # sidecar, since nothing then says what any method writes.
-      def method_effect(constr, instance, method_name)
+      def method_effect(constr, instance, method_name, visiting = [])
         return nil if constr.postconditions.empty?
 
         owner, body = resolved_body(constr, instance, method_name)
@@ -403,8 +405,8 @@ module Steep
         rewritten = callee_writes(constr, instance, body, [method_name])
         writes = may_write(constr, owner, method_name) | rewritten
         reads_only = writes.empty? && body.self_sends.empty? &&
-                     (!body.returns.nil? || ClassMemos.reading_uses?(constr, body.ivar_uses.values.flatten(1)))
-        Effect.new(bindings: body.bindings.reject { |ivar, _| rewritten.include?(ivar) }, writes: writes, reads_only: reads_only, reader: !body.returns.nil?)
+                     (!body.returns.nil? || body.ivar_uses.all? { |ivar, uses| Nested.reads_ivar?(constr, instance, ivar, uses, [*visiting, [instance, method_name]]) })
+        Effect.new(bindings: body.bindings.reject { |ivar, _| rewritten.include?(ivar) }, writes: writes, reads_only: reads_only, reader: body.returns)
       end
 
       # `[owner, body]` for the `method_name` an instance of `type` runs, or
@@ -467,7 +469,7 @@ module Steep
         effect = method_effect(constr, state.back_type, method_name) or return settled(constr, state)
         plain = arguments.all? { |argument| plain_argument?(argument) }
         rebound = plain ? bound_values(constr, state.back_type, effect.bindings, arguments, followed: false) : {} #: Hash[Symbol, AST::Types::t]
-        ivars = (effect.reader ? state : HashMutation.flatten(state)).ivars.reject { |ivar, value| effect.writes.include?(ivar) || (!fixed?(value) && !effect.reads_only) }
+        ivars = (effect.reader ? Nested.handed_out(constr, state, effect.reader) : HashMutation.flatten(state)).ivars.reject { |ivar, value| effect.writes.include?(ivar) || (!fixed?(value) && !effect.reads_only) }
         ivars.merge!(rebound)
         ivars.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: ivars)
       end

@@ -14,13 +14,24 @@ module Steep
       # Only reads that answer no element: one handed out is a name a call may
       # change it through. And only what `Array` defines itself, as the
       # registry keys it.
-      %w[<=> == all? any? count empty? eql? hash include? inspect intersect? join length none? size to_s]
+      %w[<=> == all? any? count empty? eql? hash include? inspect intersect? join length none? size to_s + - & | flatten]
         .map { |name| "::Array##{name}" } + CollectionMutation::OBJECT_READS
     ).to_h { |key| [key, true] }.freeze
 
     IN_PLACE = Set["::Array#prepend", "::Array#unshift", "::Array#push", "::Array#<<"].freeze
 
+    # The ones that read or change an array's elements, written in C, and reach
+    # no ivar of the object they run on: what an `Array` subclass calls on
+    # itself (`Inflections::Uncountables#add` runs `concat(words)`).
+    ELEMENT_METHODS = (ENTRIES.keys + IN_PLACE.to_a + ["::Array#concat"]).to_set.freeze
+
     class << self
+      def elements_only?(call, constr)
+        return false unless call.is_a?(TypeInference::MethodCall::Typed)
+
+        CollectionMutation.only?(constr, call.method_decls.map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }.uniq, ELEMENT_METHODS)
+      end
+
       # Before a call on `receiver`: the type to dispatch it against, and the
       # ivar it reads holding an array whose contents are not known, where the
       # call may change them and is no push this can follow.
@@ -53,7 +64,7 @@ module Steep
       end
 
       def watched_keys
-        @watched_keys ||= Set.new(ENTRIES.keys) | IN_PLACE
+        @watched_keys ||= Set.new(ENTRIES.keys) | ELEMENT_METHODS
       end
 
       def method_keys_for(class_name)

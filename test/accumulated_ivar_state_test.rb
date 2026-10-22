@@ -326,6 +326,122 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  # `ActiveSupport::Inflector::Inflections::Uncountables` (activesupport 8.0.4),
+  # kept in an ivar of the object that holds the rules.
+  UNCOUNTABLES_RBS = <<~RBS
+    class Inflector
+      class Uncountables < Array[String]
+        @regex_array: Array[untyped]
+        def initialize: () -> void
+        def <<: (*untyped word) -> self
+        def add: (untyped words) -> self
+        def uncountable?: (untyped str) -> bool
+        private def to_regex: (untyped string) -> Regexp
+      end
+      class Rules
+        attr_reader singulars: Array[untyped]
+        attr_reader uncountables: Inflector::Uncountables
+        def initialize: () -> void
+        def singular: (untyped rule, untyped replacement) -> Array[untyped]
+        def uncountable: (*untyped words) -> untyped
+        def uncountable?: (untyped word) -> bool
+      end
+
+      self.@rules: Inflector::Rules?
+      def self.rules: () -> Inflector::Rules
+      def self.has_many_like: (Symbol name) -> untyped
+    end
+  RBS
+
+  def uncountables_source(guard: "rules.uncountables.uncountable?(result)", body: "")
+    <<~RUBY
+      class Inflector
+        class Uncountables < Array
+          def initialize
+            @regex_array = []
+            super
+          end
+
+          def <<(*word)
+            add(word)
+          end
+
+          def add(words)
+            words = words.flatten.map(&:downcase)
+            concat(words)
+            @regex_array += words.map { |word| to_regex(word) }
+            self
+          end
+
+          def uncountable?(str)
+            @regex_array.any? { |regex| regex.match? str }
+          end
+
+          private
+            def to_regex(string)
+              /\\b\#{::Regexp.escape(string)}\\Z/i
+            end
+        end
+
+        class Rules
+          attr_reader :singulars, :uncountables
+
+          def initialize
+            @singulars = []
+            @uncountables = Uncountables.new
+          end
+
+          def singular(rule, replacement)
+            @singulars.prepend([rule, replacement])
+          end
+
+          def uncountable(*words)
+            @uncountables << words
+          end
+
+          def uncountable?(word)
+            @uncountables.uncountable?(word)
+          end
+        end
+
+        def self.rules
+          @rules ||= Rules.new
+        end
+
+        rules.singular(/s\\z/, "")
+        rules.uncountable("news")
+      #{body.gsub(/^/, "  ")}
+
+        def self.has_many_like(name)
+          result = name.to_s.dup
+          unless #{guard}
+            rules.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+          end
+          class_eval "def \#{result}_ids; []; end"
+        end
+
+        has_many_like :posts
+        has_many_like :news
+      end
+    RUBY
+  end
+
+  def test_an_uncountable_list_kept_in_an_object_of_its_own_decides_the_rules
+    expected = [["def post_ids; []; end"], ["def news_ids; []; end"]]
+
+    assert_equal expected, chunks(uncountables_source, rbs: UNCOUNTABLES_RBS), "through the reader"
+    assert_equal expected, chunks(uncountables_source(guard: "rules.uncountable?(result)"), rbs: UNCOUNTABLES_RBS), "through the holder"
+  end
+
+  def test_declines_an_uncountable_list_changed_where_its_holder_cannot_see
+    {
+      "through the reader" => 'rules.uncountables << "posts"',
+      "through another name" => "kept = rules.uncountables\nkept << \"posts\""
+    }.each do |label, body|
+      assert_equal [[nil], [nil]], chunks(uncountables_source(body: body), rbs: UNCOUNTABLES_RBS), label
+    end
+  end
+
   TAP_MEMO = '@rules ||= Rules.new.tap { |rules| rules.singular(/s\z/, ""); rules.singular(/ies\z/, "y") }'
 
   def tapped(memo = TAP_MEMO, body: "")

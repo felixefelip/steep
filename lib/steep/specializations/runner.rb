@@ -179,7 +179,7 @@ module Steep
 
         found.each do |key, entries|
           writable = entries.select { |argument_key, _| Arguments.persistable_key?(argument_key) }
-          (methods[key] ||= {}).merge!(writable.transform_values { |type| Specializations.sidecar_value(type) }) unless writable.empty?
+          (methods[key] ||= {}).merge!(writable.transform_values { |type| Specializations.sidecar_value(Specializations.sidecar_writable(type)) }) unless writable.empty?
         end
         @declarations.merge!(call_site_unions(context, store(found), found, baselines, callees, definitions))
 
@@ -432,7 +432,7 @@ module Steep
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
             next unless definitions.key?(key)
 
-            (tuples[key] ||= Set.new).merge(arguments.tuples)
+            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
         end
@@ -556,7 +556,7 @@ module Steep
           end
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
-            (tuples[key] ||= Set.new).merge(arguments.tuples)
+            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
 
@@ -675,9 +675,7 @@ module Steep
         types = [typing.type_of(node: body), *values].reject { |type| type.is_a?(AST::Types::Bot) }
         return nil if types.empty? || types.any? { |type| type.is_a?(AST::Types::Any) }
 
-        # Every recorded return passes through here, which is why the sidecar's
-        # spelling is settled here too rather than at each `to_s` below.
-        Specializations.sidecar_writable(AST::Types::Union.build(types: types))
+        AST::Types::Union.build(types: types)
       end
     end
   end

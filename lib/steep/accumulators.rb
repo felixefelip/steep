@@ -162,8 +162,11 @@ module Steep
     REPEATS = LocalReach::REPEATS
 
     class << self
-      # `{ name => [element node, …] }` for every local in `def_node` whose
-      # contents this can read, with the pushes in the order they happen.
+      # `{ name => index }` for every local in `def_node` whose contents this
+      # can read, up to the statement at `index` that takes them away, or nil
+      # where nothing does. Each statement runs after the one before it, so
+      # what a later one does to the array says nothing about what an earlier
+      # one read.
       #
       # Only the body's STRAIGHT LINE is read: a statement of the method itself,
       # not one inside an `if`, a loop or a block. That is the whole soundness
@@ -194,17 +197,20 @@ module Steep
         # struck because what follows could read the array the callee changed.
         returned = returned_local(lines.last)
 
+        ends = {} #: Hash[Symbol, Integer?]
         lines.each_with_index do |statement, index|
           next if index == lines.size - 1 && returned
 
+          live = found.select { |_, pushes| pushes }.keys
           read(statement, found, builders, handed)
+          live.each { |name| ends[name] ||= index if found[name].nil? }
         end
 
         # Handed back after being handed on: what leaves is what the callee
         # left in it.
-        found[returned] = nil if returned && handed.include?(returned)
+        ends[returned] ||= lines.size - 1 if returned && handed.include?(returned) && found[returned]
 
-        found.reject { |_, pushes| pushes.nil? }
+        found.filter_map { |name, pushes| [name, ends[name]] if pushes || ends.key?(name) }.to_h
       end
 
       # The locals born in one nested list of statements — an arm, a loop's body
@@ -330,7 +336,7 @@ module Steep
           each_line_list(def_node) do |lines, top|
           last = {} #: Hash[Symbol, [untyped, Array[untyped]]]
 
-          replay(def_node, lines, top, methods, reach) do |statement, pushed, contents|
+          ends = replay(def_node, lines, top, methods, reach) do |statement, pushed, contents|
             # A loop over a local this vouches for READS it, and the checker asks
             # for the count of passes at the `each`. The loop cannot push onto
             # the local it runs over, so the contents are the same either side.
@@ -375,8 +381,9 @@ module Steep
             end
           end
 
+          # A local read only up to a statement does not stay complete past it.
           last.each do |name, (statement, elements)|
-            (final[statement] ||= {})[name] = elements
+            (final[statement] ||= {})[name] = elements unless ends&.[](name)
           end
           end
         end
@@ -438,7 +445,8 @@ module Steep
       # Replays one body, yielding each statement with the name it pushes onto
       # (nil where it pushes onto nothing) and the contents of every readable
       # local as they stand AFTER that push. Yields nothing for a body this
-      # vouches for no local in.
+      # vouches for no local in. Answers where each local stops being readable
+      # (`in_body`).
       #
       # A local enters `contents` where its assignment is REACHED, never before:
       # seeding the whole body up front would make the array available
@@ -447,7 +455,7 @@ module Steep
       # the `parts` it actually reads is whatever else that name holds there, a
       # method argument included.
       def replay(def_node, lines, top, builders, reach)
-        readable = (top ? in_body(def_node, builders) : in_lines(def_node, lines, builders)).reject { |name, _| reach.include?(name) }
+        readable = (top ? in_body(def_node, builders) : in_lines(def_node, lines, builders).transform_values { nil }).reject { |name, _| reach.include?(name) }
         return if readable.empty?
 
         contents = {} #: Hash[Symbol, Array[untyped]]
@@ -458,10 +466,15 @@ module Steep
           end
         end
 
-        lines.each do |statement|
-          if (seed = seed_from(statement)) && readable.key?(seed[0])
-            contents[seed[0]] = seed[1]
+        ended = Set[] #: Set[Symbol]
+        lines.each_with_index do |statement, index|
+          readable.each { |name, ends| ended << name if ends == index }
+          ended.each { |name| contents.delete(name) }
+
+          if (seed = seed_from(statement)) && readable.key?(seed[0]) && !ended.include?(seed[0])
+            # The value is read before the name holds it.
             yield statement, [], contents
+            contents[seed[0]] = seed[1]
             next
           end
 
@@ -488,6 +501,8 @@ module Steep
 
           yield statement, pushed, contents
         end
+
+        readable
       end
 
       def body_of(def_node)
@@ -705,9 +720,10 @@ module Steep
           # under the new name too.
           strike_held_element(statement.children[1], found)
           consume(statement.children[1], found, handed)
-          # A second assignment is a different array, and nothing here orders
-          # the two.
-          found[name] = found.key?(name) ? nil : elements
+          # A second assignment is a different array from here on; the
+          # statements before it read the first one, in the order `replay`
+          # walks them. Unless the first was already beyond reading.
+          found[name] = found.key?(name) && found[name].nil? ? nil : elements
           return
         end
 
@@ -795,7 +811,7 @@ module Steep
 
           start = block.location.expression.begin_pos
           others = mention_nodes(node, name).reject { |mention| mention.equal?(block.children[0].children[0]) }
-          next unless others.all? { |mention| mention.location.expression.end_pos <= start && mapped_read_of?(node, mention) }
+          next unless others.all? { |mention| mention.location.expression.end_pos <= start && CollectionReaders.mapped_read_of?(node, mention) }
 
           name
         end
@@ -857,36 +873,6 @@ module Steep
         mentions
       end
 
-      # Whether `mention` is the receiver of a `map(&:reader)` that a scalar
-      # read consumes, outside any closure or loop in `node`.
-      def mapped_read_of?(node, mention, inside = false)
-        return false unless node.is_a?(Parser::AST::Node)
-        return false if SCOPES.include?(node.type)
-
-        if !inside && node.type == :send && scalar_mapped_read?(node)
-          return true if node.children[0].children[0].equal?(mention)
-        end
-
-        repeats = inside || CLOSURES.include?(node.type) || REPEATS.include?(node.type)
-        node.children.any? { |child| mapped_read_of?(child, mention, repeats) }
-      end
-
-      # `local.map(&:first).intersect?(…)`: the elements `map` picks are shared
-      # with the local, and the scalar read hands none of them on.
-      def scalar_mapped_read?(node)
-        node.type == :send && SCALAR_READS.include?(node.children[1]) && mapped_read?(node.children[0])
-      end
-
-      def mapped_read?(node)
-        return false unless node.is_a?(Parser::AST::Node) && node.type == :send
-        return false unless BLOCK_READS.include?(node.children[1]) && node.children.size == 3
-        return false unless node.children[0]&.type == :lvar
-
-        pass = node.children[2]
-        pass.type == :block_pass && pass.children[0]&.type == :sym &&
-          READERS.include?(pass.children[0].children[0])
-      end
-
       # The locals this statement hands to a call as a direct argument —
       # positional or keyword — and names nowhere else. A second mention in the
       # same statement could change the array before the call or after it, in an
@@ -902,6 +888,8 @@ module Steep
         candidates = [] #: Array[untyped]
 
         each_call_once(statement) do |child|
+          next if CollectionReaders.reads_arguments?(child)
+
           LocalReach.argument_values(child.children.drop(2)).each do |argument|
             candidates << argument if argument.type == :lvar && found[argument.children[0]]
           end
@@ -1198,12 +1186,18 @@ module Steep
           strike_held_element(node.children.last, found)
         end
 
-        if !closure && scalar_mapped_read?(node)
+        if !closure && CollectionReaders.scalar_mapped_read?(node)
           node.children.drop(2).each do |argument|
             next if CollectionReaders.binary?(node) && argument.type == :lvar
 
             strike(argument, found, closure: closure)
           end
+          return
+        end
+
+        if !closure && CollectionReaders.reads_arguments?(node)
+          strike(node.children[0], found, closure: closure)
+          node.children.drop(2).each { |argument| strike(argument, found, closure: closure) unless argument.type == :lvar }
           return
         end
 

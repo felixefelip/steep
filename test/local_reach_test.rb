@@ -166,6 +166,39 @@ class LocalReachTest < Minitest::Test
     assert_empty analysis.at_reads
   end
 
+  def test_accumulators_read_a_local_up_to_the_statement_that_takes_it_away
+    analysis = Steep::Accumulators.analyze(parse(<<~RUBY))
+      class Scans
+        def run
+          parts = []
+          parts << "a"
+          first = parts.join(";")
+          fill(parts)
+          parts.join(";")
+        end
+      end
+    RUBY
+
+    assert_equal [5], analysis.at_reads.keys.map { |read| read.location.line }
+  end
+
+  # `Inflections::Uncountables#add`.
+  def test_accumulators_read_a_parameter_in_the_assignment_that_replaces_it
+    analysis = Steep::Accumulators.analyze(parse(<<~RUBY))
+      class Uncountables < Array
+        def add(words)
+          words = words.flatten.map(&:downcase)
+          concat(words)
+          @regex_array += words.map { |word| to_regex(word) }
+          self
+        end
+      end
+    RUBY
+
+    reads = analysis.at_reads.to_h { |read, elements| [read.location.expression.source, elements.map(&:class)] }
+    assert_equal({ "words.flatten" => [Steep::Accumulators::Arrived], "words.map" => [Steep::Accumulators::Built] }, reads)
+  end
+
   def test_local_assignments_decline_a_reflective_body
     analysis = Steep::LocalAssignments.analyze(parse(<<~'RUBY'))
       def run

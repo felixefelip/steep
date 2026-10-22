@@ -20,7 +20,9 @@ module Steep
       def self.record(constr, def_node, _pair, params:)
         return unless constructor?(constr, def_node)
 
-        assigned = assigned_values(constr.typing, def_node.children[2]).filter_map do |ivar, value|
+        chain = ObjectStates.initialize_chain(constr, constr.self_type)
+        super_writes = chain.nil? || chain.drop(1).any? { |_, body| body }
+        assigned = assigned_values(constr, def_node.children[2], super_writes: super_writes).filter_map do |ivar, value|
           value = HashMutation.storable(value) if value.is_a?(AST::Types::Record)
           [ivar, value] if value && ObjectStates.state_value?(value)
         end.to_h
@@ -31,16 +33,16 @@ module Steep
 
       # The ivars of `state`, what a `Klass.new` recorded, that hold for the
       # object it answers: under any name, what `ObjectStates.settled` keeps;
-      # held by a local nothing else names, any value nothing changes and a
-      # hash the checker follows, unless a method `initialize` calls may
-      # assign it (`rewritten`).
+      # held by a local nothing else names, any value nothing changes and an
+      # array or a hash the checker follows, unless a method `initialize`
+      # calls may assign it (`rewritten`).
       def self.kept(constr, state, held:, rewritten:)
         return {} unless state
         return ObjectStates.state_in(ObjectStates.settled(constr, state))&.ivars || {} unless held
 
         state.ivars.select do |ivar, value|
           !rewritten.include?(ivar) &&
-            (ObjectStates.fixed?(value) || HashMutation.held(constr, state.back_type, ivar, value, followed: true))
+            (ObjectStates.fixed?(value) || value.is_a?(AST::Types::Tuple) || HashMutation.held(constr, state.back_type, ivar, value, followed: true))
         end
       end
 
@@ -59,19 +61,21 @@ module Steep
         false
       end
 
-      def self.assigned_values(typing, body)
+      # `super_writes`: whether a `super` may reach an `initialize` that writes
+      # ivars, which leaves only the assignments after the last one.
+      def self.assigned_values(constr, body, super_writes:)
         return {} unless body
 
         statements = body.type == :begin ? body.children : [body]
         last_super = statements.rindex { |statement| calls_super?(statement) }
-        statements = statements.drop(last_super + 1) if last_super
+        statements = statements.drop(last_super + 1) if last_super && super_writes
         mentions = Hash.new(0) #: Hash[Symbol, Integer]
         LocalReach.each_node(body) { |node| mentions[node.children[0]] += 1 if %i[ivasgn ivar].include?(node.type) }
         statements.each_with_object({}) do |statement, values|
           ivar, value = statement.children
-          next unless statement.type == :ivasgn && value && mentions[ivar] == 1 && typing.has_type?(value)
+          next unless statement.type == :ivasgn && value && mentions[ivar] == 1 && constr.typing.has_type?(value)
 
-          values[ivar] = typing.type_of(node: value)
+          values[ivar] = constr.literal_operand_type(value, constr.typing.type_of(node: value))
         end
       end
     end
