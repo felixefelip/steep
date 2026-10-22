@@ -1,0 +1,61 @@
+# Generated from test/call_site_unions_test.rb with RBS::Inline
+
+class CallSiteUnionsTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  include TypeErrorAssertions
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def declarations: (untyped rbs, untyped ruby) -> untyped
+
+  def setup_project: () -> untyped
+
+  RULES_RBS: ::String
+
+  def rules_ruby: (?untyped post_body) -> untyped
+
+  def test_a_method_every_call_of_which_specialized_returns_what_they_returned: () -> untyped
+
+  def test_a_call_fixing_no_value_leaves_the_method_to_its_declaration: () -> untyped
+
+  def test_a_call_passing_a_union_of_literals_returns_what_one_of_them_returned: () -> untyped
+
+  WRITER_RBS: ::String
+
+  WRITER_RUBY: ::String
+
+  def test_a_call_inside_a_body_is_read_under_each_call_of_that_body: () -> untyped
+
+  def test_a_call_inside_a_method_nothing_calls_is_read_under_its_declaration: () -> untyped
+
+  BODY_RBS: ::String
+
+  BODY_RUBY: ::String
+
+  def check_body: (untyped return_type) ?{ (?) -> untyped } -> untyped
+
+  def test_a_body_checked_under_its_declaration_answers_what_its_calls_returned: () -> untyped
+
+  def test_what_the_calls_returned_still_has_to_fit_the_declaration: () -> untyped
+
+  def test_a_body_checked_for_one_call_is_not_answered_by_all_of_them: () -> untyped
+
+  def test_an_override_with_no_signature_of_its_own_is_not_answered_by_its_parents_calls: () -> untyped
+
+  def test_a_call_passing_a_union_of_literals_is_typed_by_what_each_member_returned: () -> untyped
+
+  def test_a_union_that_is_not_of_literals_is_looked_up_whole: () -> untyped
+
+  def test_the_sidecar_carries_the_declarations: () -> untyped
+end

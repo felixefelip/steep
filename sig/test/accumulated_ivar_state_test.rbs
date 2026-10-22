@@ -1,0 +1,95 @@
+# Generated from test/accumulated_ivar_state_test.rb with RBS::Inline
+
+class AccumulatedIvarStateTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: () -> untyped
+
+  def chunks: (untyped ruby, ?rbs: untyped) -> untyped
+
+  def generations: (untyped ruby, ?rbs: untyped) -> untyped
+
+  RBS: ::String
+
+  def source: (?body: untyped, ?reads: untyped, ?magic: untyped) -> untyped
+
+  def test_rules_accumulated_in_the_class_body_are_applied_in_order: () -> untyped
+
+  def test_a_read_before_any_rule_is_pushed_is_a_hole: () -> untyped
+
+  def test_declines_a_list_something_else_may_change: () -> untyped
+
+  def test_readers_of_the_same_names_on_another_class_leave_the_list_known: () -> untyped
+
+  def test_a_block_may_hand_an_element_to_a_core_method_the_project_does_not_redefine: () -> untyped
+
+  def test_a_method_body_is_not_answered_with_what_the_class_body_knew: () -> untyped
+
+  def test_the_rules_reach_a_method_the_macro_calls: () -> untyped
+
+  APPLY: ::String
+
+  def walked_inside_rules: (?untyped apply, ?body: untyped) -> untyped
+
+  def apply_rbs: () -> untyped
+
+  def test_rules_walked_inside_the_object_that_holds_them_are_applied: () -> untyped
+
+  def test_declines_a_walk_inside_the_object_that_may_change_it: () -> untyped
+
+  def test_declines_a_walk_inside_the_object_with_an_iteration_the_project_replaced: () -> untyped
+
+  TAP_MEMO: ::String
+
+  def tapped: (?untyped memo, ?body: untyped) -> untyped
+
+  def test_rules_pushed_in_a_tap_memo_reach_a_macro_in_the_same_body: () -> untyped
+
+  def test_a_jump_inside_a_loop_of_the_tap_block_leaves_only_that_loop: () -> untyped
+
+  def test_rules_pushed_after_a_tap_memo_come_first: () -> untyped
+
+  def test_declines_a_tap_memo_whose_object_another_name_may_reach: () -> untyped
+
+  def test_declines_a_tap_the_project_replaces: () -> untyped
+
+  def test_rules_a_module_builds_with_tap_reach_another_class_through_the_object_that_holds_them: () -> untyped
+
+  IRREGULAR_RBS: untyped
+
+  def with_irregular: (untyped ruby, untyped body) -> untyped
+
+  def test_a_chain_of_rules_settles_in_as_many_generations_however_long_it_is: () -> untyped
+
+  def test_rules_written_through_a_method_of_the_object_that_calls_another_on_self: () -> untyped
+
+  YIELD_RBS: untyped
+
+  YIELD_BLOCK: ::String
+
+  def yielded: (?inflections: untyped, ?call: untyped) -> untyped
+
+  def test_rules_a_block_writes_through_the_object_a_method_yields: () -> untyped
+
+  def test_a_method_that_yields_the_memo_and_is_not_called_leaves_it_followed: () -> untyped
+
+  def test_a_block_whose_writes_settle_into_no_one_state_leaves_the_memo_unknown: () -> untyped
+
+  def test_declines_a_memo_yielded_alongside_another_value: () -> untyped
+
+  def test_declines_a_memo_yielded_from_inside_a_block: () -> untyped
+
+  def test_a_block_given_the_project_replaces_is_not_decided: () -> untyped
+
+  def test_declines_a_yielded_memo_whose_block_is_not_followed: () -> untyped
+
+  def test_a_reopen_that_only_defines_methods_runs_nothing_first: () -> untyped
+
+  def test_a_second_body_that_runs_code_may_have_built_the_object_first: () -> untyped
+end

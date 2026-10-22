@@ -1,0 +1,37 @@
+# Generated from test/class_body_state_test.rb with RBS::Inline
+
+class ClassBodyStateTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: () -> untyped
+
+  def chunks: (untyped rbs, untyped ruby) -> untyped
+
+  RBS: ::String
+
+  def test_a_state_set_in_the_class_body_reaches_a_macro_called_after_it: () -> untyped
+
+  def source: (article: untyped, ?extra_base: untyped, ?settings: untyped, ?memo: untyped) -> untyped
+
+  def test_each_class_body_has_its_own_object: () -> untyped
+
+  def test_a_read_before_the_object_is_set_up_is_a_hole: () -> untyped
+
+  def test_declines_an_object_something_else_may_reach: () -> untyped
+
+  def test_a_memo_written_in_class_self: () -> untyped
+
+  def test_declines_an_object_its_initialize_hands_on: () -> untyped
+
+  def test_a_name_no_call_reaches_the_memo_by_is_no_use_of_it: () -> untyped
+
+  def test_a_string_only_where_its_source_freezes_it: () -> untyped
+
+  def test_an_or_assignment_is_decided_only_by_what_the_env_knows_beyond_the_declaration: () -> untyped
+end

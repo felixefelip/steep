@@ -1,0 +1,81 @@
+# Generated from test/postconditions/param_establishment_test.rb with RBS::Inline
+
+class PostconditionsParamEstablishmentTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  Postconditions: untyped
+
+  RBS: ::String
+
+  def infer_for: (untyped ruby) -> untyped
+
+  def establishments_of: (untyped entries, untyped method_name) -> untyped
+
+  def test_infers_the_value_written_on_a_parameter: () -> untyped
+
+  def test_infers_it_for_a_singleton_method: () -> untyped
+
+  def test_a_reader_after_the_write_keeps_it: () -> untyped
+
+  def test_a_write_in_a_branch_establishes_nothing: () -> untyped
+
+  def test_handing_the_parameter_on_after_the_write_drops_it: () -> untyped
+
+  def test_calling_a_method_on_the_parameter_after_the_write_drops_it: () -> untyped
+
+  def test_reassigning_the_parameter_drops_it: () -> untyped
+
+  def test_an_early_return_establishes_nothing: () -> untyped
+
+  def test_a_parameter_after_a_splat_establishes_nothing: () -> untyped
+
+  def test_a_parameter_before_a_splat_keeps_its_position: () -> untyped
+
+  def test_a_later_write_through_another_parameter_takes_the_reader: () -> untyped
+
+  def test_an_optional_parameter_before_a_required_one_ends_the_positions: () -> untyped
+
+  def test_a_yield_after_the_write_drops_it: () -> untyped
+
+  def test_a_write_through_an_ivar_after_the_write_drops_it: () -> untyped
+
+  def test_a_call_on_self_after_the_write_drops_it: () -> untyped
+
+  def test_a_write_through_the_parameter_after_reassigning_it_establishes_nothing: () -> untyped
+
+  def test_a_setter_that_is_not_an_attr_writer_establishes_nothing: () -> untyped
+
+  def test_self_establishes_nothing: () -> untyped
+
+  def test_two_definitions_keep_only_what_both_write: () -> untyped
+
+  def test_a_value_as_wide_as_the_reader_establishes_nothing: () -> untyped
+
+  def test_the_writer_round_trips_the_slot: () -> untyped
+
+  def publish_postcondition: (?type: untyped, ?attr: untyped, ?klass: untyped) -> untyped
+
+  def value_type_after: (untyped ruby, postconditions: untyped) -> untyped
+
+  def test_the_call_site_reads_what_the_callee_wrote: () -> untyped
+
+  def test_a_singleton_call_site_reads_it_too: () -> untyped
+
+  def test_a_name_on_both_sides_establishes_nothing: () -> untyped
+
+  def test_the_call_replaces_a_narrowing_made_before_it: () -> untyped
+
+  def test_without_the_entry_the_reader_is_declared: () -> untyped
+
+  def test_a_value_the_reader_cannot_hold_is_ignored: () -> untyped
+
+  def test_a_call_that_may_not_run_establishes_nothing: () -> untyped
+
+  def test_a_write_after_the_call_wins: () -> untyped
+end

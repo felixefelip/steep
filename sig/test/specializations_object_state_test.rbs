@@ -1,0 +1,62 @@
+# Generated from test/specializations_object_state_test.rb with RBS::Inline
+
+# An options hash kept in an object's state on its way to the method that
+# branches on it, as Active Record's reflections keep theirs
+# (felixefelip/steep#298, #301), read back by an ordinary check.
+class SpecializationsObjectStateTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  include SpecializationsProjectHelper
+
+  def test_a_hash_kept_in_an_object_reads_back_its_branch: () -> untyped
+
+  def test_a_hash_written_before_initialize_stores_it_reads_back_its_branch: () -> untyped
+
+  def test_a_subclass_new_running_an_inherited_initialize_is_its_own_class: () -> untyped
+
+  def test_a_hash_its_own_method_writes_follows_the_object_a_local_holds: () -> untyped
+
+  def test_a_new_whose_arguments_met_several_recorded_calls_answers_the_class: () -> untyped
+
+  # `P13Status#options` shares the reader's name, and its hash is handed on.
+  # Only a receiver that may be a `P13Reflection`, in any target that checks
+  # it, counts against the reflection's `options`, `self` included; a reader
+  # on another class that answers it counts by what that reader's own
+  # receivers may be.
+  def test_a_use_whose_receiver_is_another_class_does_not_count_against_the_reader: () -> untyped
+
+  # `P14Tweaker` stores through the reader of an object no local of these
+  # bodies holds. A store made through the reader off a local nothing else
+  # names moves what that local holds; one made off any other name, through
+  # a local it was read into, or not by literal key, leaves the hash unknown.
+  def test_a_store_made_through_the_reader_moves_the_object_a_local_holds: () -> untyped
+
+  # The object a store moves is held by an ivar of the caller, reached
+  # through the caller's reader, and read by a method called afterwards: that
+  # call's check leaves it as it found it, and `poke`'s leaves it written.
+  # A second name for it, here or in a method called, an argument, a block,
+  # `itself` or one held inside another object's state each leave it
+  # unknown.
+  def test_a_store_made_through_the_reader_moves_the_object_an_ivar_holds: () -> untyped
+
+  # example99's hash of hashes: a literal stored where nothing takes its
+  # value stays a record while every read of it is a step of a followed
+  # path, through the reader or `Foo`'s own ivar. Read into a local,
+  # returned, copied, read by a key that is no literal, its store's value
+  # taken, or changed where the path is not followed, it is held as its
+  # class. A nested record a signature declares (`P16Cfg`) is left as
+  # declared.
+  def test_a_record_stored_under_a_key_stays_a_record_while_every_path_to_it_is_followed: () -> untyped
+
+  def test_a_hash_written_under_any_name_keeps_what_no_write_touches: () -> untyped
+
+  def test_a_hash_a_local_holds_is_followed_into_the_methods_it_is_handed_to: () -> untyped
+
+  def test_a_nested_write_on_a_record_a_parameter_declares_moves_it: () -> untyped
+
+  private
+
+  def specialized_body_types: (untyped path, ?steepfile: untyped) -> untyped
+end

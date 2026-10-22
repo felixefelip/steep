@@ -1,0 +1,29 @@
+# Generated from test/class_memo_analyzer_test.rb with RBS::Inline
+
+class ClassMemoAnalyzerTest < Minitest::Test
+  def parse: (untyped source) -> untyped
+
+  def uses: (untyped source, untyped name) -> untyped
+
+  def test_a_memo_built_with_new_is_a_body_s_memo: () -> untyped
+
+  def test_each_use_by_what_it_is: () -> untyped
+
+  def test_a_local_assigned_once_is_used_where_it_is: () -> untyped
+
+  def test_a_method_whose_body_is_the_use_forwards_it: () -> untyped
+
+  def test_a_call_on_the_value_as_written_is_direct: () -> untyped
+
+  def test_an_operator_assignment_counts_its_writer_too: () -> untyped
+
+  def test_an_ivar_counts_only_where_self_may_be_a_class: () -> untyped
+
+  def test_a_name_counts_only_where_a_call_reaches_it_by_name: () -> untyped
+
+  def test_an_iteration_counts_only_while_its_block_reads_the_elements: () -> untyped
+
+  def test_a_use_on_self_names_the_class_method_making_it: () -> untyped
+
+  def test_each_call_of_a_method_by_where_it_is_made: () -> untyped
+end

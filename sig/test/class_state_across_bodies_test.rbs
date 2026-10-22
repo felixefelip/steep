@@ -1,0 +1,59 @@
+# Generated from test/class_state_across_bodies_test.rb with RBS::Inline
+
+class ClassStateAcrossBodiesTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: () -> untyped
+
+  def chunks: (untyped ruby, ?kind: untyped, ?signatures: untyped) -> untyped
+
+  def rbs: (untyped kind) -> untyped
+
+  RULES: ::String
+
+  def inflector: (?kind: untyped, ?before: untyped, ?after: untyped) -> untyped
+
+  def model: (?body: untyped) -> untyped
+
+  FOLDED: untyped
+
+  def test_a_later_class_body_reads_the_state_an_earlier_one_left: () -> untyped
+
+  def test_a_module_leaves_its_state_as_a_class_does: () -> untyped
+
+  def test_a_body_that_runs_before_the_rules_are_written_does_not_fold: () -> untyped
+
+  def test_a_caller_reached_before_the_rules_are_written_does_not_fold: () -> untyped
+
+  def test_a_caller_reached_from_the_body_after_the_rules_are_written_folds: () -> untyped
+
+  def test_a_later_body_that_changes_the_memo_object_does_not_fold: () -> untyped
+
+  def test_a_method_is_checked_under_its_call_site_not_its_definition: () -> untyped
+
+  CONFIG_RBS: ::String
+
+  def config_inflector: (?after: untyped, ?writer: untyped) -> untyped
+
+  def config_model: (?body: untyped) -> untyped
+
+  def test_a_class_ivar_a_class_method_rewrites_in_a_later_body_does_not_fold: () -> untyped
+
+  def test_a_class_ivar_a_class_method_rewrites_in_its_own_body_does_not_fold: () -> untyped
+
+  SAME_BODY_MACRO: ::String
+
+  def test_a_class_ivar_a_class_method_rewrites_in_the_same_body_does_not_fold: () -> untyped
+
+  def test_a_class_ivar_read_directly_after_a_call_that_may_rewrite_it_does_not_fold: () -> untyped
+
+  def test_a_class_ivar_no_method_rewrites_folds_in_the_same_body: () -> untyped
+
+  def test_a_class_ivar_no_method_rewrites_folds_in_a_later_body: () -> untyped
+end

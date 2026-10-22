@@ -1,0 +1,25 @@
+# Generated from test/unrolled_each_test.rb with RBS::Inline
+
+class UnrolledEachTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  def after: (untyped body, ?word: untyped) -> untyped
+
+  def test_the_first_break_taken_ends_the_call: () -> untyped
+
+  def test_a_pass_that_does_not_break_hands_its_locals_to_the_next: () -> untyped
+
+  def test_the_locals_are_read_where_the_break_is: () -> untyped
+
+  def test_a_break_inside_a_nested_block_is_that_block_s: () -> untyped
+
+  def test_an_empty_collection_runs_no_pass: () -> untyped
+
+  def test_declines_what_a_pass_cannot_decide: () -> untyped
+end

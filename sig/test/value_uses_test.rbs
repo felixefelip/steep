@@ -1,0 +1,15 @@
+# Generated from test/value_uses_test.rb with RBS::Inline
+
+# Where a method body puts the value of each expression in it
+# (felixefelip/steep#314).
+class ValueUsesTest < Minitest::Test
+  def parse: (untyped source) -> untyped
+
+  def find: (untyped node, untyped source) -> untyped
+
+  def test_receivers_statements_and_what_is_taken: () -> untyped
+
+  def test_every_arm_the_method_finishes_on_is_returned: () -> untyped
+
+  def test_a_value_a_block_answers_is_taken: () -> untyped
+end

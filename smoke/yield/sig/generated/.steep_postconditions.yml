@@ -1,0 +1,15 @@
+---
+version: 1
+postconditions:
+- class: A
+  method: bar
+  when_true:
+    block_truthy: true
+- class: A
+  method: foo
+  when_true:
+    block_truthy: true
+- class: Foo
+  method: bar
+  when_true:
+    block_truthy: true

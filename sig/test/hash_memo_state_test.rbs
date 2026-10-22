@@ -1,0 +1,53 @@
+# Generated from test/hash_memo_state_test.rb with RBS::Inline
+
+class HashMemoStateTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: () -> untyped
+
+  def chunks: (untyped ruby, ?rbs: untyped) -> untyped
+
+  def returns: (untyped ruby, rbs: untyped) -> untyped
+
+  RBS: ::String
+
+  RUBY: ::String
+
+  READERS_RBS: untyped
+
+  READERS: untyped
+
+  def test_a_read_by_literal_key_answers_what_this_class_stored: () -> untyped
+
+  def test_declines_a_hash_something_else_may_change: () -> untyped
+
+  def test_a_reader_of_the_same_name_on_another_class_leaves_the_hash_known: () -> untyped
+
+  def test_a_store_under_a_key_that_is_no_literal_leaves_the_hash_unknown: () -> untyped
+
+  def test_a_string_eval_that_runs_code_leaves_the_hash_unknown: () -> untyped
+
+  def test_an_object_stored_under_a_key_is_read_back_as_its_class: () -> untyped
+
+  def test_an_object_whose_construction_may_reach_the_class_leaves_the_hash_unknown: () -> untyped
+
+  def test_a_read_under_a_key_the_hash_does_not_hold_answers_no_other_value: () -> untyped
+
+  def test_an_object_built_with_a_block_may_reach_the_class: () -> untyped
+
+  def test_an_object_built_with_a_callable_it_runs_may_reach_the_class: () -> untyped
+
+  def test_a_method_reads_what_its_class_body_stored: () -> untyped
+
+  def test_a_subclass_that_stores_nothing_adds_nil: () -> untyped
+
+  def test_declines_a_hash_a_store_may_reach_after_the_class_bodies: () -> untyped
+
+  def test_declines_a_class_whose_body_is_written_twice: () -> untyped
+end

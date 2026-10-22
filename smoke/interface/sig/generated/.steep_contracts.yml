@@ -1,0 +1,14 @@
+---
+version: 1
+methods:
+  A#hello:
+    requires:
+    - kind: not_nil
+      expr:
+        kind: send
+        receiver:
+          kind: self
+        method: foo
+        chain:
+        - foo
+    enforced: false

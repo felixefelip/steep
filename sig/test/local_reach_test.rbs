@@ -1,0 +1,37 @@
+# Generated from test/local_reach_test.rb with RBS::Inline
+
+class LocalReachTest < Minitest::Test
+  def parse: (untyped source) -> untyped
+
+  def body: (untyped source) -> untyped
+
+  def test_each_node_stops_at_a_body_of_its_own: () -> untyped
+
+  def test_mentions_count_reads_and_writes: () -> untyped
+
+  def reach: (untyped source) -> untyped
+
+  def test_a_frame_handed_out_reaches_every_local: () -> untyped
+
+  def test_a_string_run_more_than_once_reaches_every_local: () -> untyped
+
+  def test_a_string_run_once_reaches_what_runs_after_it: () -> untyped
+
+  def test_every_string_evaluation_shape: () -> untyped
+
+  def test_the_locals_a_caller_reads_after_the_body: () -> untyped
+
+  def test_calls_that_reach_no_local: () -> untyped
+
+  def test_argument_values_include_keyword_values: () -> untyped
+
+  def test_accumulators_decline_a_reflective_body: () -> untyped
+
+  def test_accumulators_read_an_array_a_string_run_before_cannot_reach: () -> untyped
+
+  def test_accumulators_decline_an_array_read_after_a_string_runs: () -> untyped
+
+  def test_local_assignments_decline_a_reflective_body: () -> untyped
+
+  def test_local_assignments_read_a_name_a_string_run_after_cannot_reach: () -> untyped
+end

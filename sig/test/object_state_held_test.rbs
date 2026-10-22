@@ -1,0 +1,85 @@
+# Generated from test/object_state_held_test.rb with RBS::Inline
+
+# A state changed after `new`, followed through the one local that owns the
+# object (felixefelip/steep#205, stage 2).
+class ObjectStateHeldTest < Minitest::Test
+  include TestHelper
+
+  include TypeErrorAssertions
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  RBS: ::String
+
+  RUBY: ::String
+
+  SIDECAR: untyped
+
+  def postconditions: (?untyped unconditional) -> untyped
+
+  # `rename` as rbs_infer's marker for it reads back.
+  RENAME_MARKER: untyped
+
+  # The type of the last statement of `body`, checked as `Probe#run`.
+  def last_value: (untyped body, ?postconditions: untyped) -> untyped
+
+  def def_body: (untyped node) -> untyped
+
+  def test_a_method_that_binds_the_ivar_moves_it: () -> untyped
+
+  def test_the_last_call_wins: () -> untyped
+
+  def test_a_read_before_the_change_is_not_reused: () -> untyped
+
+  def test_an_attr_writer_binds_its_argument: () -> untyped
+
+  def test_an_attr_writer_binds_an_ivar_the_state_did_not_know: () -> untyped
+
+  def test_an_attr_writer_and_the_reader_cache_agree: () -> untyped
+
+  def test_a_binding_a_method_called_on_self_may_overwrite: () -> untyped
+
+  # `may_write` is closed in the class that defines `rename`, which calls
+  # `Base#touch`; on a `Child` it runs `Child#touch`.
+  def test_a_method_called_on_self_that_a_subclass_overrides: () -> untyped
+
+  def test_an_initialize_that_rewrites_what_it_binds: () -> untyped
+
+  # Until `steep check` has written a sidecar, nothing says what any method
+  # writes.
+  def test_no_postconditions_yet: () -> untyped
+
+  def test_a_call_that_does_not_write_keeps_the_state: () -> untyped
+
+  def test_a_write_that_may_not_happen: () -> untyped
+
+  def test_a_write_through_a_method_called_on_self: () -> untyped
+
+  def test_a_method_that_hands_self_on: () -> untyped
+
+  def test_a_block_a_core_iteration_runs_hands_nothing_on: () -> untyped
+
+  def test_a_block_the_project_s_iteration_runs_may_be_kept: () -> untyped
+
+  def test_a_method_with_no_body_to_read: () -> untyped
+
+  def test_a_value_that_can_change_is_not_bound: () -> untyped
+
+  def test_handed_on: () -> untyped
+
+  def test_a_fixed_ivar_survives_being_handed_on: () -> untyped
+
+  def test_a_second_name: () -> untyped
+
+  def test_a_marker_the_call_leaves_is_what_the_state_is_written_as: () -> untyped
+
+  def test_one_of_two_states: () -> untyped
+
+  def test_a_state_returned_as_self: () -> untyped
+
+  def test_not_held_by_a_local: () -> untyped
+end

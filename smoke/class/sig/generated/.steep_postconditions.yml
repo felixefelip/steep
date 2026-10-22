@@ -1,0 +1,8 @@
+---
+version: 1
+postconditions:
+- class: WithSingletonConstructor
+  method: initialize
+  effects:
+    may_write:
+    - "@foo"

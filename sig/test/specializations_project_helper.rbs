@@ -1,0 +1,20 @@
+# Generated from test/specializations_project_helper.rb with RBS::Inline
+
+# A project written to a temporary directory, for the specializations
+# runner to record and an ordinary check to read back.
+module SpecializationsProjectHelper
+  STEEPFILE: ::String
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: (?steepfile: untyped) -> untyped
+
+  # `{ "method name" => type }` for every `def` in `path`, as an ordinary check
+  # of the project sees them.
+  def body_types: (untyped project, untyped path) -> untyped
+
+  # An ordinary check of `path` in `project`.
+  def checked: (untyped project, untyped path) -> untyped
+end

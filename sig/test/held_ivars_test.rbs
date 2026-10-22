@@ -1,0 +1,25 @@
+# Generated from test/held_ivars_test.rb with RBS::Inline
+
+# Which ivars of `self` a method body reaches only through calls made on them
+# (felixefelip/steep#312).
+class HeldIvarsTest < Minitest::Test
+  def parse: (untyped source) -> untyped
+
+  def test_receiver_through_the_ivar_or_its_reader: () -> untyped
+
+  def test_the_value_assigned_is_held: () -> untyped
+
+  def test_a_second_name_an_argument_or_a_return: () -> untyped
+
+  def test_a_mention_that_may_run_later_or_again: () -> untyped
+
+  def test_an_assignment_whose_value_something_takes: () -> untyped
+
+  private
+
+  def reader: (untyped def_node) -> untyped
+
+  def held_ivars: (untyped source) -> untyped
+
+  def new_call: (untyped node) -> untyped
+end

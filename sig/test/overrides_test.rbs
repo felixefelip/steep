@@ -1,0 +1,39 @@
+# Generated from test/overrides_test.rb with RBS::Inline
+
+class OverridesTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  include TypeErrorAssertions
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: () -> untyped
+
+  def run_specializations: (untyped rbs, untyped ruby) -> untyped
+
+  BASE_RUBY: ::String
+
+  def test_a_call_on_a_class_overriding_the_method_without_a_signature_is_not_specialized_with_the_parents_body: () -> untyped
+
+  def test_a_call_on_the_class_whose_body_it_runs_is_still_specialized: () -> untyped
+
+  CHECKED_RBS: ::String
+
+  CHECKED_RUBY: ::String
+
+  def check_calls: () -> untyped
+
+  def test_a_receiver_that_may_be_a_subclass_overriding_the_method_is_not_specialized: () -> untyped
+
+  def test_a_receiver_named_by_its_constant_is_specialized: () -> untyped
+end

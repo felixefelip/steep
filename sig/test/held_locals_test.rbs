@@ -1,0 +1,35 @@
+# Generated from test/held_locals_test.rb with RBS::Inline
+
+# Which locals of a method body own the object they hold
+# (felixefelip/steep#205, stage 2).
+class HeldLocalsTest < Minitest::Test
+  def parse: (untyped source) -> untyped
+
+  def held_locals: (untyped def_node) -> untyped
+
+  def held: (untyped source) -> untyped
+
+  def each_node: (untyped node) ?{ (?) -> untyped } -> untyped
+
+  def test_receiver_and_argument: () -> untyped
+
+  def test_a_second_name: () -> untyped
+
+  def test_returned_stored_or_interpolated: () -> untyped
+
+  def test_twice_in_one_call: () -> untyped
+
+  def test_inside_a_block_a_loop_or_a_rescue: () -> untyped
+
+  def test_assigned_twice_or_reassigned_parameter: () -> untyped
+
+  def test_compound_assignment: () -> untyped
+
+  def test_a_bare_super_hands_every_parameter_on: () -> untyped
+
+  def test_reflection_on_locals: () -> untyped
+
+  def test_a_string_run_once_reaches_only_what_follows_it: () -> untyped
+
+  def test_the_value_assigned: () -> untyped
+end

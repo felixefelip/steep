@@ -1,0 +1,68 @@
+# Generated from test/object_state_ancestors_test.rb with RBS::Inline
+
+# An ivar an ancestor's `initialize` binds: inherited, reached through `super`,
+# or from an included module (felixefelip/steep#230).
+class ObjectStateAncestorsTest < Minitest::Test
+  include TestHelper
+
+  include TypeErrorAssertions
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  RBS: ::String
+
+  RUBY: ::String
+
+  # Each `initialize` writes the ivars it assigns, and nothing else does.
+  SIDECAR: untyped
+
+  def postconditions: (untyped rows) -> untyped
+
+  def check: (untyped source_text, ?sidecar: untyped) -> untyped
+
+  def assert_name: (untyped expected, untyped klass, ?untyped args) -> untyped
+
+  def test_an_inherited_initialize_binds: () -> untyped
+
+  def test_super_with_arguments_hands_the_binding_on: () -> untyped
+
+  def test_super_maps_the_position_it_passes: () -> untyped
+
+  def test_a_bare_super_forwards_every_argument: () -> untyped
+
+  def test_the_chain_reaches_through_an_inherited_level: () -> untyped
+
+  def test_a_module_initialize_binds: () -> untyped
+
+  def test_a_super_that_may_not_run_binds_nothing: () -> untyped
+
+  def test_a_write_after_super_binds_nothing: () -> untyped
+
+  def test_a_literal_passed_to_super_is_not_the_argument: () -> untyped
+
+  # The RBS places no `initialize` in `Undeclared`, so the call resolves to
+  # `Macro#initialize`; the one Ruby runs is `Undeclared`'s.
+  def test_an_initialize_the_rbs_does_not_place_binds_nothing: () -> untyped
+
+  # `Opaque` has no source: its `initialize` may write `@name` after this one.
+  def test_a_super_into_an_initialize_without_source_binds_nothing: () -> untyped
+
+  # `Macro#initialize` writes `@name` too, but never runs on a `Shadow`.
+  def test_an_ancestor_initialize_that_does_not_run_does_not_count: () -> untyped
+
+  # Another method of an ancestor writing the ivar still counts.
+  def test_an_ancestor_method_writing_the_ivar_binds_nothing: () -> untyped
+
+  # A reader written as `def name = @name` in the ancestor that defines it.
+  def test_an_inherited_def_reader_reads_the_ivar: () -> untyped
+
+  # The RBS places `name` in `DefBase`, but the one Ruby runs is `DefHidden`'s.
+  def test_a_def_the_rbs_does_not_place_reads_nothing: () -> untyped
+
+  # The same, defined under a modifier or by `alias_method`.
+  def test_any_definition_the_rbs_does_not_place_reads_nothing: () -> untyped
+end

@@ -1,0 +1,7 @@
+---
+version: 1
+postconditions:
+- class: EmptyYield
+  method: foo
+  when_true:
+    block_truthy: true

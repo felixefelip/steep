@@ -1,0 +1,35 @@
+# Generated from test/rubocop/length_ceiling_test.rb with RBS::Inline
+
+class LengthCeilingTest < Minitest::Test
+  COP_CONFIG: untyped
+
+  def offenses: (untyped source, untyped path, ?cop_class: untyped) -> untyped
+
+  def module_offenses: (untyped source, untyped path) -> untyped
+
+  def class_of: (untyped lines, ?name: untyped, ?keyword: untyped) -> untyped
+
+  def module_of: (untyped lines, ?name: untyped) -> untyped
+
+  def test_holds_an_unlisted_file_to_max: () -> untyped
+
+  def test_lets_a_listed_files_largest_class_sit_at_its_ceiling: () -> untyped
+
+  def test_flags_a_listed_class_that_grew_past_its_ceiling: () -> untyped
+
+  def test_asks_for_the_ceiling_to_come_down_when_the_class_shrank: () -> untyped
+
+  def test_asks_for_the_ceiling_to_go_when_the_class_is_back_under_max: () -> untyped
+
+  def test_judges_a_stale_ceiling_by_the_files_largest_class_not_a_smaller_one_beside_it: () -> untyped
+
+  def test_holds_an_unlisted_files_module_to_max: () -> untyped
+
+  def test_lets_a_listed_files_largest_module_sit_at_its_ceiling: () -> untyped
+
+  def test_flags_a_listed_module_that_grew_past_its_ceiling: () -> untyped
+
+  def test_asks_for_the_module_ceiling_to_come_down_when_the_module_shrank: () -> untyped
+
+  def test_asks_for_the_module_ceiling_to_go_when_the_module_is_back_under_max: () -> untyped
+end
