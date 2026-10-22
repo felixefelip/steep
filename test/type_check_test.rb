@@ -1440,6 +1440,52 @@ class TypeCheckTest < Minitest::Test
   # A block run once per element of a collection the checker knows, and the
   # values it hands back collected in order. The chains are
   # `ActiveSupport::Delegation`'s reflection branch, spelled as it writes them.
+  # What `Inflections::Uncountables` runs on the words it is given
+  # (felixefelip/steep#264).
+  def test_the_operations_an_uncountable_list_runs_fold
+    run_type_check_test(
+      signatures: {
+        "uncountables.rbs" => <<~RBS
+          class Uncountable
+            def flattened: () -> Array[String]
+            def escaped: () -> String
+            def pattern: () -> Regexp
+            def patterns: () -> Array[Regexp]
+            def matched: () -> bool
+            def unmatched: () -> bool
+          end
+        RBS
+      },
+      code: {
+        "uncountables.rb" => <<~'RUBY'
+          class Uncountable
+            def flattened = [["News", "Fish"]].flatten.map(&:downcase)
+            def escaped = ::Regexp.escape("a.b")
+            def pattern = /\b#{::Regexp.escape("news")}\Z/i
+            def patterns = ["news"].map { |word| /\b#{word}\Z/i }
+            def matched = [/\bnews\Z/i].any? { |regex| regex.match?("news") }
+            def unmatched = [/\bnews\Z/i].any? { |regex| regex.match?("posts") }
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("uncountables.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '["news", "fish"]', actual.fetch("flattened")
+      assert_equal '"a\\\\.b"', actual.fetch("escaped")
+      assert_equal "/\\bnews\\Z/i", actual.fetch("pattern")
+      assert_equal "[/\\bnews\\Z/i]", actual.fetch("patterns")
+      assert_equal "true", actual.fetch("matched")
+      assert_equal "false", actual.fetch("unmatched")
+    end
+  end
+
   def test_a_block_over_known_elements_answers_each_of_them
     run_type_check_test(
       signatures: {

@@ -43,7 +43,7 @@ module Steep
     # argument of a call in `ElementReads`, or in an interpolation
     # (`TypeInference::ClassMemoAnalyzer#element_calls`). `Accumulators` and
     # `Constants` make no such proof, so for them a block stays out.
-    ITERATIONS = %i[each map collect filter_map].freeze
+    ITERATIONS = %i[each map collect filter_map any?].freeze
 
     class << self
       # Whether this send only READS its receiver. A block takes it out of the
