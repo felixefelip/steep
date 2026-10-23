@@ -811,6 +811,15 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def test_asking_for_a_key_decides_which_element_a_method_hands_back
+    {
+      "a key the hash holds" => "def self.instance_or_fallback(locale) = instances.key?(:en) ? instances[:en] : instances[:pt]",
+      "a key it does not" => "def self.instance_or_fallback(locale) = instances.key?(:pt) ? instances[:pt] : instance(locale)"
+    }.each do |label, body|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(handing(body), rbs: HANDING_RBS), label
+    end
+  end
+
   def test_a_method_handing_back_an_element_stored_again_never_answers_the_one_it_replaced
     written = chunks(handing("def self.instance_or_fallback(locale) = instance(locale)\ndef self.reset = (instances[:en] = Rules.new)\nreset"), rbs: HANDING_RBS).flatten
 
