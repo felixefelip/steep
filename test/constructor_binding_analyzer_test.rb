@@ -113,4 +113,46 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
 
     assert_empty result
   end
+  def bodies(source)
+    ConstructorBindingAnalyzer.scan(parse(source)).methods.fetch("Fallbacks").transform_values(&:first)
+  end
+
+  def test_a_hash_method_ending_in_super_or_a_store_under_its_key_is_a_keyed_memo
+    found = bodies(<<~RUBY)
+      class Fallbacks < Hash
+        def [](locale)
+          raise ArgumentError if locale.nil?
+          locale = locale.to_sym
+          super || store(locale, compute(locale))
+        end
+
+        def fetch_or(locale) = self[locale] || store(locale, [locale])
+        def other_key(locale) = super || store(:en, compute(locale))
+        def written_first(locale)
+          clear
+          super || store(locale, compute(locale))
+        end
+      end
+    RUBY
+
+    assert_equal "(send nil :compute\n  (lvar :locale))", found[:[]].keyed_memo.to_s
+    assert_equal "(array\n  (lvar :locale))", found[:fetch_or].keyed_memo.to_s
+    assert_nil found[:other_key].keyed_memo
+    assert_nil found[:written_first].keyed_memo
+  end
+
+  def test_a_body_reading_a_constant_a_global_a_class_variable_or_its_class_reads_outside_state
+    found = bodies(<<~RUBY)
+      class Fallbacks < Hash
+        def own(locale) = [locale, @default, helper(locale)]
+        def constant = DEFAULT
+        def global = $default
+        def class_variable = @@default
+        def its_class = self.class.default
+      end
+    RUBY
+
+    refute found[:own].outside_state
+    assert(%i[constant global class_variable its_class].all? { |name| found[name].outside_state })
+  end
 end

@@ -28,6 +28,8 @@ module Steep
       # postconditions, so a fact one states about them (`unconditional.params`)
       # is not dropped by the settling.
       def answered(constr, call, node:, receiver_type:, arguments:)
+        keyed = KeyedMemo.answered(constr, call, node) and return [keyed, constr]
+        call = KeyedMemo.stored(constr, call, arguments) || call
         memo, constr = ClassMemos.remembered(constr, call, node)
         call = read(constr, memo || built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
         call = HashMutation.handed_out(Yields.block_given(constr, call, node), node, constr, receiver_type)
@@ -49,7 +51,7 @@ module Steep
         return unless jumps.empty? || params.empty?
 
         envs = pair.type.is_a?(AST::Types::Bot) ? jumps : [env, *jumps]
-        ivars = Exits.common(envs.map { |left| entered_values(left, arguments) })
+        ivars = Exits.common(envs.map { |left| Exits.entered_values(left, arguments) })
         classes = arguments.class_states.keys.to_h { |name| [name, Exits.common(envs.map { |left| left.class_states.fetch(name, {}) })] }
         root = constr.typing
         root = root.parent while root.parent
@@ -85,16 +87,12 @@ module Steep
       def call_ivars(constr, call)
         def_node = constr.method_context&.node
         entered = def_node && constr.specialization_arguments(def_node)
-        ivars = entered ? entered_values(constr.context.type_env, entered).merge(self_ivars(constr)) : self_ivars(constr)
+        ivars = entered ? Exits.entered_values(constr.context.type_env, entered).merge(self_ivars(constr)) : self_ivars(constr)
         memos = ClassMemos.memo_values(constr)
         return ivars if memos.empty?
 
         reach = ClassStates.reach(constr, call)
         ivars.merge(memos.select { |ivar, _| reach.observes_self || reach.ivars.include?(ivar) })
-      end
-
-      def entered_values(env, arguments)
-        arguments.self_ivars.keys.to_h { |ivar| [ivar, env[ivar]] }.select { |_, type| state_value?(type) }
       end
 
       # A `.new` call whose `initialize` binds an ivar from one of the values
@@ -398,6 +396,7 @@ module Steep
         return nil if constr.postconditions.empty?
 
         owner, body = resolved_body(constr, instance, method_name)
+        return KeyedMemo.effect(constr, instance, body) if body&.keyed_memo
         return nil if owner.nil? || body.nil? || body.super_args || exposes_self?(constr, instance, body, [method_name])
 
         rewritten = callee_writes(constr, instance, body, [method_name])
