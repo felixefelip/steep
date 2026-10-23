@@ -444,6 +444,11 @@ module Steep
       typing.key?(node)
     end
 
+    # The type this typing or one it nests in recorded for `node`, nil for none.
+    def recorded_type_of(node:)
+      typing.fetch(node) { parent&.recorded_type_of(node: node) }
+    end
+
     def type_of(node:)
       type = typing[node]
 

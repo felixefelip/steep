@@ -5894,7 +5894,7 @@ module Steep
           # node that spells a value out needs nothing else to be read. Only an
           # interpolation needs the type, and one of those simply declines here
           # as it would have before.
-          inferred = typing.has_type?(child) ? typing.type_of(node: child) : AST::Builtin.any_type
+          inferred = typing.recorded_type_of(node: child) || AST::Builtin.any_type
           element = literal_operand_type(child, inferred)
           element if element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple) || element.is_a?(AST::Types::RegexpLiteral) || LiteralIntrinsics.literal_union?(element)
         end
@@ -6743,9 +6743,10 @@ module Steep
                   decls: decls
                 )
 
-                constr = UnrolledEach.apply(
+                constr, iterated = UnrolledEach.apply(
                   constr,
                   node,
+                  iterated: iterated,
                   entry: entry_constr,
                   receiver_type: receiver_type,
                   block_params: block_params_,

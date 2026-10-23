@@ -820,6 +820,30 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  WALK = "def self.instance_or_fallback(locale)\n  %s.each do |k|\n    return instances[k] if instances.key?(k)\n  end\n  instance(locale)\nend"
+
+  def test_a_walk_over_a_known_list_hands_back_the_first_element_the_hash_holds
+    {
+      "the locale itself" => format(WALK, "[locale, :en]"),
+      "past a key it does not hold" => format(WALK, "[:pt, locale]"),
+      "past every key, to the method that stores it" => format(WALK, "[:pt, :fr]")
+    }.each do |label, body|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(handing(body), rbs: HANDING_RBS), label
+    end
+  end
+
+  def test_a_walk_hands_back_an_element_held_ahead_of_the_locale
+    body = "#{format(WALK, "[:pt, locale]")}\ninstance(:pt).singular(/s\\z/, \"o\")"
+
+    assert_equal [["def posto_ids; []; end"], ["def categorieo_ids; []; end"]], chunks(handing(body), rbs: HANDING_RBS)
+  end
+
+  def test_declines_a_walk_whose_return_is_left_open
+    body = "def self.instance_or_fallback(locale)\n  [:pt, locale].each { |k| return instances[k] if [true, false].sample }\n  instance(locale)\nend"
+
+    assert_equal [[nil], [nil]], chunks(handing(body), rbs: HANDING_RBS)
+  end
+
   def test_a_method_handing_back_an_element_stored_again_never_answers_the_one_it_replaced
     written = chunks(handing("def self.instance_or_fallback(locale) = instance(locale)\ndef self.reset = (instances[:en] = Rules.new)\nreset"), rbs: HANDING_RBS).flatten
 
