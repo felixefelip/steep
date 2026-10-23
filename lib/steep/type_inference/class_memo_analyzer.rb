@@ -34,8 +34,10 @@ module Steep
       # multiple assignment. `key`: the symbol the call's first argument is
       # written as. `value`: on a read of one element (`KEY_READS`), the uses
       # of the element it answers, a call made on it in a statement of a class
-      # body, on a hash `self` holds, a `:statement`.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value) do
+      # body, on a hash `self` holds, a `:statement`. `enclosing`: of a call,
+      # the method, of an instance or a class, whose body makes it, and
+      # `owner` the module that defines that method, as written.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :owner) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
           value&.each { |use| use.each_forwarder(&block) }
@@ -178,7 +180,11 @@ module Steep
         receiver, name, *arguments = node.children
         if @names.include?(name)
           on_self = receiver.nil? || receiver.type == :self
-          @uses[name] << Use.new((statement || in_class_statement?(node)) && on_self ? :statement : :call, name, Set[], on_self ? class_method_of(node) : nil)
+          kind = (statement || in_class_statement?(node)) && on_self ? :statement : :call
+          @uses[name] << Use.new(kind, name, Set[], on_self ? class_method_of(node) : nil, nil, on_self ? nil : ClassMemoAnalyzer.site(node)).tap do |use|
+            use.enclosing = enclosing_method(node)
+            use.owner = owner_of(node)
+          end
         end
         record_named(name, arguments)
       end
@@ -361,6 +367,14 @@ module Steep
         when :def then node.children[0]
         when :defs then node.children[1]
         end
+      end
+
+      def owner_of(node)
+        names = [] #: Array[String]
+        while (node = @parents[node])
+          names.unshift(node.children[0].loc.expression.source) if %i[class module].include?(node.type)
+        end
+        names.join("::")
       end
 
       def in_class_statement?(node)

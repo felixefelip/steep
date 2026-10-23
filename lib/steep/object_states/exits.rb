@@ -1,6 +1,7 @@
 module Steep
   module ObjectStates
-    # The ways a body leaves besides falling off its end.
+    # What a body leaves holding, where it falls off its end and where it
+    # returns.
     module Exits
       module_function
 
@@ -15,6 +16,12 @@ module Steep
           envs << (typing.jump_env_of(node: node) or return)
         end
         envs
+      end
+
+      # What `env` holds, of the ivars a body was entered with, that a state
+      # may hold.
+      def entered_values(env, arguments)
+        arguments.self_ivars.keys.to_h { |ivar| [ivar, env[ivar]] }.select { |_, type| ObjectStates.state_value?(type) }
       end
 
       # What every one of `exits` holds alike.
