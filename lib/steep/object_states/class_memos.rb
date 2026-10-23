@@ -12,6 +12,7 @@ module Steep
         # state the env knows it in (`TypeInference::ClassMemoAnalyzer`); or,
         # where the ivar is still `nil`, the one it builds.
         def remembered(constr, call, node)
+          element = HashElements.answered(constr, call, node) and return [element, constr]
           return [nil, constr] unless ObjectStates.on_self?(node)
           hash_ivar = tracked_hash(constr, call)
           return remembered_hash(constr, call, hash_ivar) if hash_ivar
@@ -99,10 +100,14 @@ module Steep
           singleton = constr.self_type
           return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
 
-          owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
+          tracked_hash_named(constr, singleton, call.method_name)
+        end
+
+        def tracked_hash_named(constr, singleton, method_name)
+          owner, body = ObjectStates.resolved_body(constr, singleton, method_name)
           ivar = body&.memoized_hash or return
-          return unless written_only_by?(constr, singleton, ivar, owner, call.method_name)
-          uses = [call.method_name, ivar].flat_map { |name| Specializations::Receivers.uses_on(constr, name, singleton) }
+          return unless written_only_by?(constr, singleton, ivar, owner, method_name)
+          uses = [method_name, ivar].flat_map { |name| Specializations::Receivers.uses_on(constr, name, singleton) }
           return unless HashMutation.confined?(constr.literal_method_registry, uses)
 
           ivar
@@ -237,13 +242,24 @@ module Steep
         def after_class_call(constr, exit, reached)
           return constr if constr.method_context
 
-          moved = memo_values(constr).select { |_, type| type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Record) }
+          moved = memo_values(constr).select do |ivar, type|
+            type.is_a?(AST::Types::Nil) || (type.is_a?(AST::Types::Record) && (reached || !stored_in_class_bodies?(constr, ivar)))
+          end
           moved = moved.merge(yielded_memos(constr, reached)) if reached
           return constr if moved.empty?
 
           exit ||= {}
           constr.update_type_env do |env|
             env.refine_types(instance_variable_types: moved.to_h { |ivar, _| [ivar, exit.fetch(ivar) { ObjectStates.declared_ivar(constr, ivar) }] })
+          end
+        end
+
+        # Every store into the hash is made by a class body on its own class
+        # (`ConstructorBindingRegistry#class_body_storing`), so a call that
+        # reaches no class object leaves it as it was.
+        def stored_in_class_bodies?(constr, ivar)
+          value_memos(constr, constr.self_type).any? do |held, _, method_name|
+            held == ivar && constr.constructor_bindings.class_body_storing(method_name, ivar)
           end
         end
 
@@ -276,6 +292,9 @@ module Steep
         # Where nothing was known yet, it is still that one object, so what the
         # call binds is known from here.
         def remembered_after(constr, receiver, receiver_type, method_name, arguments, node)
+          constr = HashElements.after(constr, receiver, method_name, arguments, node)
+          return constr unless ObjectStates.on_self?(receiver)
+
           memo_call = ObjectStates.recorded_call(constr, receiver)
           ivar, instance = tracked_memo(constr, memo_call) if memo_call
           return constr unless ivar && instance

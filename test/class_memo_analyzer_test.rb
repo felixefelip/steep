@@ -88,6 +88,33 @@ class ClassMemoAnalyzerTest < Minitest::Test
     assert_equal [[:escape, :source_settings], [:escape, :picked], [:escape, nil], [:escape, nil]], found.map { |use| [use.kind, use.forwarded_by] }
   end
 
+  def test_a_read_by_key_carries_the_uses_of_the_element_it_answers
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:instances]).fetch(:instances)
+      class Inflector
+        def self.instance(locale) = (instances[locale] ||= Rules.new)
+        instances[:en].singular(1)
+        def self.peek = instances[:en].size
+      end
+    RUBY
+
+    assert_equal(
+      [[:[]=, nil], [:[], [[:escape, nil, :instance]]], [:[], [[:statement, :singular, nil]]], [:[], [[:receiver, :size, nil]]]],
+      found.map { |use| [use.called, use.value&.map { |value| [value.kind, value.called, value.forwarded_by] }] }
+    )
+  end
+
+  def test_a_call_in_a_statement_of_a_class_body_is_made_by_the_class_body
+    found = Steep::TypeInference::ClassMemoAnalyzer.calls(parse(<<~RUBY), names: Set[:instance]).fetch(:instance)
+      class Inflector
+        instance(:en).singular(1)
+        def self.read = instance(:en).singulars.each { |rule| rule }
+        on_load { instance(:en) }
+      end
+    RUBY
+
+    assert_equal [[:statement, nil], [:call, :read], [:call, nil]], found.map { |call| [call.kind, call.within] }
+  end
+
   def test_a_value_left_unused_is_no_use
     found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings, [])
       class Article < Base

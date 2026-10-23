@@ -79,8 +79,7 @@ module Steep
         end
         return [type, constr] unless ivar && CollectionMutation.only?(constr, keys, STORES)
 
-        stored = stored(constr, receiver_type, arguments) || declared_hash(constr, ivar)
-        [type, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, stored)]
+        stored_in_memo(constr, receiver, receiver_type, ivar, arguments, type)
       end
 
       def record_union?(type)
@@ -237,6 +236,13 @@ module Steep
       end
 
       private
+
+      # What a store into a memo's hash answers, and the record it leaves.
+      def stored_in_memo(constr, receiver, record, ivar, arguments, type)
+        object, stored = ObjectStates::HashElements.stored(constr, receiver, record, ivar, arguments)
+        stored ||= stored(constr, record, arguments) || declared_hash(constr, ivar)
+        [object || type, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, stored)]
+      end
 
       def confined_use?(literal_methods, use)
         use_within?(literal_methods, use, [*READS, *STORES])

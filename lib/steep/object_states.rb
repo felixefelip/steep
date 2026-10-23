@@ -66,7 +66,7 @@ module Steep
       # array, kept only where nothing else reaches it (`collection_confined?`).
       def state_value?(type)
         fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton) ||
-          (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| HashMutation.held_value?(value) })
+          (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| HashMutation.held_value?(value) || state_in(value) })
       end
 
       # A method runs whenever it is called, not where it is written: nothing
@@ -138,7 +138,7 @@ module Steep
         if (variable = receiver && HeldIvar.variable(constr, receiver)) && holds_state?(receiver_type)
           constr = HeldIvar.refine_variable(constr, receiver, left(constr, receiver_type, constr.context.type_env[variable], method_name, arguments, node))
         end
-        constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver && on_self?(receiver)
+        constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver
         handed = ClassStates.handed_classes(constr, arguments)
         on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
         reaches_self = on_self || hands_self?(constr, arguments, handed)
