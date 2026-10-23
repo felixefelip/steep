@@ -73,13 +73,17 @@ module Steep
 
           value = node.children[0]
           ivar, = ClassMemos.tracked_memo(constr, ObjectStates.recorded_call(constr, value)) if ObjectStates.on_self?(value)
-          state = ivar && ObjectStates.state_in(constr.typing.type_of(node: value)) or return constr
+          element = HashElements.followed(constr, value) unless ivar
+          state = (ivar && ObjectStates.state_in(constr.typing.type_of(node: value))) || element or return constr
 
           name = Tap.parameter(block)
           inner = constr.with_new_typing(constr.typing.new_child).update_type_env { |env| env.assign_local_variable(name, state, nil) }
           inner = inner.synthesize(block.children[2]).constr if block.children[2]
-          left = ObjectStates.state_in(inner.context.type_env[name]) || ObjectStates.declared_ivar(constr, ivar)
-          ClassMemos.remembered_as(constr.update_type_env { |env| env.update(instance_variable_types: inner.context.type_env.instance_variable_types, class_states: inner.context.type_env.class_states) }, value, ivar, left)
+          left = ObjectStates.state_in(inner.context.type_env[name])
+          constr = constr.update_type_env { |env| env.update(instance_variable_types: inner.context.type_env.instance_variable_types, class_states: inner.context.type_env.class_states) }
+          return HashElements.left_by(constr, value, left || state.back_type) if element
+
+          ClassMemos.remembered_as(constr, value, ivar, left || ObjectStates.declared_ivar(constr, ivar))
         end
 
         # `block_given?` in a body checked under a call, which says whether it

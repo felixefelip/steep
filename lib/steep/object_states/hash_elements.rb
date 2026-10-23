@@ -29,14 +29,25 @@ module Steep
         # A call made on an element leaves the hash holding it as the call's
         # check left it.
         def after(constr, receiver, method_name, arguments, node)
-          memo, ivar, key = element_of(constr, receiver)
-          return constr unless memo && ivar && key
+          state = followed(constr, receiver) or return constr
 
-          state = held(constr, ivar, key) or return constr
-          return constr unless keeps?(constr, memo, ivar, state.back_type)
+          left_by(constr, receiver, ObjectStates.changed(constr, state, method_name, arguments, node))
+        end
 
+        # The element `node` reads, as the env holds it, where the hash follows
+        # what is done to it.
+        def followed(constr, node)
+          memo, ivar, key = element_of(constr, node)
+          return unless memo && ivar && key
+
+          state = held(constr, ivar, key) or return
+          state if keeps?(constr, memo, ivar, state.back_type)
+        end
+
+        # The hash holding `left` as the element `receiver` reads.
+        def left_by(constr, receiver, left)
+          _, ivar, key = element_of(constr, receiver)
           record = constr.context.type_env[ivar] #: AST::Types::Record
-          left = ObjectStates.changed(constr, state, method_name, arguments, node)
           record = AST::Types::Record.new(elements: record.elements.merge(key => left), required_keys: record.required_keys)
           constr.update_type_env do |env|
             env = env.refine_types(instance_variable_types: { ivar => record })
@@ -133,7 +144,8 @@ module Steep
               element_use_kept?(constr, singleton, memo, instance, forwarded, followed && by_key, visiting | [forwarder])
             end
           end
-          return false if use.kind == :escape || use.kind == :yielded || !use.element_calls.empty?
+          return followed && constr.constructor_bindings.replayed_everywhere?(use.called) if use.kind == :yielded
+          return false if use.kind == :escape || !use.element_calls.empty?
 
           effect = ObjectStates.method_effect(constr, instance, use.called) or return false
           effect.reads_only || (followed && use.kind == :statement)

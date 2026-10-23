@@ -200,7 +200,7 @@ module Steep
       end
 
       def value_uses(node, parent, in_statement)
-        if parent&.type == :yield && parent.children.size == 1 && node.type == :send && (node.children[0].nil? || node.children[0].type == :self) && (method = enclosing_method(parent))
+        if parent&.type == :yield && parent.children.size == 1 && node.type == :send && on_self?(node) && (method = enclosing_method(parent))
           [Use.new(:yielded, method, Set[])]
         elsif parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
           receiver_uses(node, parent, in_statement, direct: true)

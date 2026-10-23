@@ -749,6 +749,33 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  YIELDED_RBS = KEYED_RBS.sub("def self.wipe:", "def self.inflections: (Symbol locale) ?{ (Inflector::Rules) -> void } -> void\n    class Other\n      def self.boot: () -> void\n    end\n    def self.wipe:")
+
+  def yielded_element(call, inflections: "def self.inflections(locale)\n  yield instance(locale) if block_given?\nend")
+    keyed(body: "#{inflections}\n#{call}", writes: "instance(:en)").sub(/^  instance\(:en\)\.singular.*\n  instance\(:en\)\.singular.*\n/, "")
+  end
+
+  YIELDED_BLOCK = 'inflections(:en) { |inflect| inflect.singular(/s\z/, ""); inflect.singular(/ies\z/, "y") }'
+
+  def test_rules_a_block_writes_through_an_element_a_method_yields
+    {
+      "through the method that stores it" => "def self.inflections(locale)\n  yield instance(locale) if block_given?\nend",
+      "by key" => "def self.inflections(locale)\n  instances[locale] ||= Rules.new\n  yield instances[locale]\nend"
+    }.each do |label, inflections|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(yielded_element(YIELDED_BLOCK, inflections: inflections), rbs: YIELDED_RBS), label
+    end
+  end
+
+  def test_declines_an_element_yielded_to_a_block_that_is_not_followed
+    {
+      "a block reading a local of its own scope" => "replacement = \"y\"\ninflections(:en) { |inflect| inflect.singular(/ies\\z/, replacement) }",
+      "a call from another class" => "class Other\n  def self.boot = Inflector.inflections(:en) { |inflect| inflect.singular(/ies\\z/, \"y\") }\nend",
+      "a block handed on" => "handed = proc { |inflect| inflect.singular(/ies\\z/, \"y\") }\ninflections(:en, &handed)"
+    }.each do |label, call|
+      assert_equal [[nil], [nil]], chunks(yielded_element(call), rbs: YIELDED_RBS), label
+    end
+  end
+
   def test_a_reopen_that_only_defines_methods_runs_nothing_first
     rbs = RBS.sub("def self.has_many_like", "def extra: () -> Integer\n  def self.has_many_like")
     reopen = "class Inflector\n  def extra = 1\nend\n"
