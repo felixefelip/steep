@@ -664,6 +664,91 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  KEYED_RBS = <<~RBS
+    class Inflector
+      class Rules
+        attr_reader singulars: Array[untyped]
+        def initialize: () -> Array[untyped]
+        def singular: (untyped rule, untyped replacement) -> Array[untyped]
+        def clear: () -> Array[untyped]
+      end
+
+      self.@instances: Hash[Symbol, Inflector::Rules]?
+      def self.instances: () -> Hash[Symbol, Inflector::Rules]
+      def self.instance: (Symbol locale) -> Inflector::Rules
+      def self.wipe: () -> untyped
+      def self.has_many_like: (Symbol name) -> untyped
+    end
+  RBS
+
+  def keyed(body: "", reads: "instance(:en)", writes: "instance(:en)", rules: "")
+    <<~RUBY
+      class Inflector
+        class Rules
+          attr_reader :singulars
+
+          def initialize
+            @singulars = []
+          end
+
+          def singular(rule, replacement)
+            @singulars.prepend([rule, replacement])
+          end
+          #{rules}
+        end
+
+        def self.instances = @instances ||= {}
+        def self.instance(locale) = (instances[locale] ||= Rules.new)
+
+        #{writes}.singular(/s\\z/, "")
+        #{writes}.singular(/ies\\z/, "y")
+      #{body.gsub(/^/, "  ")}
+
+        def self.has_many_like(name)
+          result = name.to_s.dup
+          #{reads}.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+          class_eval "def \#{result}_ids; []; end"
+        end
+
+        has_many_like :posts
+        has_many_like :categories
+      end
+    RUBY
+  end
+
+  def test_an_object_a_hash_memo_keeps_under_a_literal_key_holds_the_rules_written_to_it
+    {
+      "read through the method that stores it" => keyed,
+      "read by key" => keyed(reads: "instances[:en]"),
+      "written by key" => keyed(writes: "instances[:en]", body: "").sub("  instances[:en].singular(/s", "  instances[:en] = Rules.new\n  instances[:en].singular(/s")
+    }.each do |label, ruby|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: KEYED_RBS), label
+    end
+  end
+
+  def test_an_object_stored_again_under_the_key_is_never_answered_with_the_rules_of_the_one_it_replaced
+    rbs = KEYED_RBS.sub("def self.wipe:", "def self.reset: () -> untyped\n    class Other\n      def self.go: () -> untyped\n    end\n    def self.wipe:")
+    {
+      "by a statement of the class body" => "def self.reset = (instances[:en] = Rules.new)\nreset",
+      "by a method another class calls" => "def self.reset = (instances[:en] = Rules.new)\nclass Other\n  def self.go = Inflector.reset\nend\nOther.go"
+    }.each do |label, body|
+      written = chunks(keyed(body: body), rbs: rbs).flatten
+      refute_includes written, "def post_ids; []; end", label
+      refute_includes written, "def category_ids; []; end", label
+    end
+  end
+
+  def test_declines_an_object_a_hash_memo_keeps_that_something_else_may_change
+    {
+      "handed out by a read of every value" => keyed(body: "instances.values.each(&:clear)"),
+      "changed in a method" => keyed(body: "def self.wipe = instance(:en).clear", rules: "def clear = (@singulars = [])"),
+      "kept under another name" => keyed(body: "KEPT = instance(:en)"),
+      "stored from a local that changes it afterwards" => keyed(writes: "kept").sub("  kept.singular(/s", "  kept = Rules.new\n  instances[:en] = kept\n  kept.singular(/s")
+    }.each do |label, ruby|
+      assert_equal [[nil], [nil]], chunks(ruby, rbs: KEYED_RBS), label
+    end
+  end
+
   def test_a_reopen_that_only_defines_methods_runs_nothing_first
     rbs = RBS.sub("def self.has_many_like", "def extra: () -> Integer\n  def self.has_many_like")
     reopen = "class Inflector\n  def extra = 1\nend\n"

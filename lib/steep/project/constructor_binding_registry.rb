@@ -207,7 +207,7 @@ module Steep
           @nodes.each do |node|
             TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (found[name] ||= []).concat(uses) }
           end
-          names = found.each_value.flat_map { |uses| uses.filter_map(&:forwarded_by) }.to_set - indexed
+          names = found.each_value.flat_map { |uses| uses.flat_map { |use| use.enum_for(:each_forwarder).to_a } }.to_set - indexed
         end
         found
       end

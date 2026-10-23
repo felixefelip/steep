@@ -23,8 +23,8 @@ module Steep
       # `within`: the class method whose body makes the use on `self`, outside
       # any block.
       #
-      # Of a call of one of `names` (`calls`): `:statement` for a statement of
-      # a class body made on `self`, `:call` for any other, `:escape` for a
+      # Of a call of one of `names` (`calls`): `:statement` for one a statement
+      # of a class body makes on `self`, outside any block, `:call` for any other, `:escape` for a
       # name given as a value; `called` is the method called.
       #
       # `forwarded_by`: on an escape, the method that returns the use, which
@@ -32,9 +32,18 @@ module Steep
       # receiver (`site`). `direct`: the call is made on the value as written,
       # not on a local it was read into, and is no `op=` or target of a
       # multiple assignment. `key`: the symbol the call's first argument is
-      # written as.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key)
+      # written as. `value`: on a read of one element (`KEY_READS`), the uses
+      # of the element it answers, a call made on it in a statement of a class
+      # body, on a hash `self` holds, a `:statement`.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value) do
+        def each_forwarder(&block)
+          yield forwarded_by if forwarded_by
+          value&.each { |use| use.each_forwarder(&block) }
+        end
+      end
       ESCAPE = Use.new(:escape, nil, Set[].freeze).freeze
+
+      KEY_READS = %i[[]].freeze
 
       # Calls that reach a method or an ivar by a name given as a value.
       REFLECTIVE = %i[
@@ -101,6 +110,7 @@ module Steep
         @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[Use]]
         @parents = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node?]
         @returned = {}.compare_by_identity #: Hash[::Parser::AST::Node, Set[::Parser::AST::Node]]
+        @statements = Set[].compare_by_identity #: Set[::Parser::AST::Node]
       end
 
       def uses(node)
@@ -126,6 +136,7 @@ module Steep
       # `def` here defines a method of the class object (`class << self`).
       def walk(node, parent, statement:, in_statement:, on_class:, singleton_defs: false)
         @parents[node] = parent
+        @statements << node if statement
         case node.type
         when :class, :module, :sclass
           return walk_body(node)
@@ -167,7 +178,7 @@ module Steep
         receiver, name, *arguments = node.children
         if @names.include?(name)
           on_self = receiver.nil? || receiver.type == :self
-          @uses[name] << Use.new(statement && on_self ? :statement : :call, name, Set[], on_self ? class_method_of(node) : nil)
+          @uses[name] << Use.new((statement || in_class_statement?(node)) && on_self ? :statement : :call, name, Set[], on_self ? class_method_of(node) : nil)
         end
         record_named(name, arguments)
       end
@@ -216,13 +227,30 @@ module Steep
         element_calls = CollectionReaders::ITERATIONS.include?(call.children[1]) ? element_calls(call) : Set[]
         return unless element_calls
 
-        on_self = node.type == :ivar || (node.type == :send && (node.children[0].nil? || node.children[0].type == :self))
+        on_self = on_self?(node)
         within = on_self ? class_method_of(call) : nil
         op_assigned = op_assigned?(call)
         direct &&= !op_assigned && @parents.fetch(call, nil)&.type != :mlhs
         key = call.children[2]&.type == :sym ? call.children[2].children[0] : nil
         use = Use.new(in_statement && on_self ? :statement : :receiver, call.children[1], element_calls, within, nil, nil, direct, key)
+        use.value = element_uses(op_assigned ? @parents[call] : call) if KEY_READS.include?(use.called)
         op_assigned ? [Use.new(use.kind, :"#{use.called}=", Set[], within, nil, nil, nil, key), use] : [use]
+      end
+
+      # A hash `self` holds keeps its elements on `self` too.
+      def on_self?(node)
+        case node.type
+        when :ivar then true
+        when :send
+          receiver = node.children[0]
+          receiver.nil? || receiver.type == :self || (KEY_READS.include?(node.children[1]) && on_self?(receiver))
+        else false
+        end
+      end
+
+      def element_uses(read)
+        parent = @parents[read]
+        value_uses(read, parent, @statements.include?(parent)) || [ESCAPE]
       end
 
       # What a local is given here is used where the local is, when every
@@ -312,11 +340,26 @@ module Steep
       # The method a `yield` runs in, or nil inside a block, whose `yield`
       # the replay does not reach.
       def enclosing_method(node)
-        node = @parents[node] while node && !%i[def defs].include?(node.type) && !Accumulators::LAMBDA_BODIES.include?(node.type)
+        child = nil
+        until node.nil? || %i[def defs].include?(node.type) || (Accumulators::LAMBDA_BODIES.include?(node.type) && !node.children[0].equal?(child))
+          child = node
+          node = @parents[node]
+        end
         case node&.type
         when :def then node.children[0]
         when :defs then node.children[1]
         end
+      end
+
+      def in_class_statement?(node)
+        child = node
+        until (node = @parents[node]).nil? || LOCAL_SCOPES.include?(node.type)
+          return false if Accumulators::LAMBDA_BODIES.include?(node.type) && !node.children[0].equal?(child)
+          return true if @statements.include?(node)
+
+          child = node
+        end
+        false
       end
 
       def class_method_of(node)
