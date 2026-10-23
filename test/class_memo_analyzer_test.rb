@@ -115,6 +115,18 @@ class ClassMemoAnalyzerTest < Minitest::Test
     assert_equal [[:statement, nil], [:call, :read], [:call, nil]], found.map { |call| [call.kind, call.within] }
   end
 
+  def test_an_element_yielded_alone_is_yielded
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:instances]).fetch(:instances)
+      class Inflector
+        def self.inflections(locale)
+          yield instances[locale]
+        end
+      end
+    RUBY
+
+    assert_equal [[:[], [[:yielded, :inflections]]]], found.map { |use| [use.called, use.value.map { |value| [value.kind, value.called] }] }
+  end
+
   def test_a_value_left_unused_is_no_use
     found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings, [])
       class Article < Base
