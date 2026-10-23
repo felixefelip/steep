@@ -20,7 +20,7 @@ module Steep
         # there answers that object as it starts out.
         def answered(constr, call, node)
           memo, ivar, key, builds = element_of(constr, node)
-          return unless memo && ivar && key
+          return handed_back(constr, call, node) unless memo && ivar && key
 
           state = held(constr, ivar, key) || (builds && missing?(constr, ivar, key) && built(constr, call)) or return
           call.with_return_type(state) if keeps?(constr, memo, ivar, state.back_type)
@@ -73,6 +73,32 @@ module Steep
         end
 
         private
+
+        # A call of a method whose every returned value is an element of one
+        # memo answers what its own check returned.
+        def handed_back(constr, call, node)
+          singleton = constr.self_type
+          state = ObjectStates.state_in(call.return_type)
+          return unless state && singleton.is_a?(AST::Types::Name::Singleton) && node.type == :send && ObjectStates.on_self?(node)
+
+          memo = handing_back(constr, singleton, node.children[1], Set[]) or return
+          ivar = ClassMemos.tracked_hash_named(constr, singleton, memo) or return
+          call if keeps?(constr, memo, ivar, state.back_type)
+        end
+
+        # The memo every value `method_name` returns is an element of.
+        def handing_back(constr, singleton, method_name, visiting)
+          return if visiting.include?(method_name)
+
+          body = ObjectStates.resolved_body(constr, singleton, method_name)&.last or return
+          return body.hands_back_element.first if body.hands_back_element
+
+          elements = body.hands_back_elements or return
+          memo, calls = elements
+          memos = calls.map { |name| handing_back(constr, singleton, name, visiting | [method_name]) or return }
+          memos = [*memo, *memos].uniq
+          memos.first if memos.size == 1
+        end
 
         # `[memo, ivar, key]` for the element `node` reads: `memo[:key]` on
         # `self`, or a call of a method that hands back what a memo holds under

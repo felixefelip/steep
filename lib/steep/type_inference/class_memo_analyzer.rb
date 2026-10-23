@@ -212,6 +212,18 @@ module Steep
           value_uses(parent, @parents[parent], in_statement)
         elsif discarded?(node, parent)
           []
+        elsif passed_on?(node, parent)
+          value_uses(parent, @parents[parent], @statements.include?(@parents[parent]))
+        end
+      end
+
+      # Whether `parent`'s value may be `node`'s.
+      def passed_on?(node, parent)
+        case parent&.type
+        when :begin, :kwbegin, :when then parent.children.last.equal?(node)
+        when :if, :case then !parent.children[0].equal?(node)
+        when :or, :and then true
+        else false
         end
       end
 

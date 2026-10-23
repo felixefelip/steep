@@ -36,26 +36,24 @@ module Steep
 
       # What a body checked under its receiver's contents, or handed records,
       # leaves the receiver and the records holding, of what it was entered
-      # with. Only where the body ends where it falls off: a `return` leaves
-      # from elsewhere.
+      # with: what it holds alike where it falls off and at each `return`.
+      # Records handed to a body that returns early are left out.
       def record_exit(constr, def_node, pair)
         arguments = constr.specialization_arguments(def_node) or return
-        return if returns_early?(pair_body(def_node))
-
+        jumps = Exits.returned(constr.typing, pair_body(def_node)) or return
         env = pair.context.type_env
         params = HashMutation.param_exits(constr, def_node, arguments, env)
-        return Constructed.record(constr, def_node, pair, params: params) if !arguments.stateful? && (Constructed.constructor?(constr, def_node) || params.empty?)
+        if !arguments.stateful? && (Constructed.constructor?(constr, def_node) || params.empty?)
+          return jumps.empty? ? Constructed.record(constr, def_node, pair, params: params) : nil
+        end
+        return unless jumps.empty? || params.empty?
 
-        ivars = entered_values(env, arguments)
-        classes = arguments.class_states.keys.to_h { |name| [name, env.class_states.fetch(name, {})] }
+        envs = pair.type.is_a?(AST::Types::Bot) ? jumps : [env, *jumps]
+        ivars = Exits.common(envs.map { |left| entered_values(left, arguments) })
+        classes = arguments.class_states.keys.to_h { |name| [name, Exits.common(envs.map { |left| left.class_states.fetch(name, {}) })] }
         root = constr.typing
         root = root.parent while root.parent
         root.add_exit_ivars(def_node, Exit.new(ivars: ivars, classes: classes, params: params))
-      end
-
-      def returns_early?(body)
-        LocalReach.each_node(body) { |node| return true if node.type == :return }
-        false
       end
 
       def pair_body(def_node)

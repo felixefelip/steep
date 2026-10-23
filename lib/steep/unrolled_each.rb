@@ -44,7 +44,7 @@ module Steep
         taken = taken_break(pass.typing, breaks)
         return if taken == :open
 
-        exit_env = taken ? pass.typing.break_env_of(node: taken) : context.type_env
+        exit_env = taken ? pass.typing.jump_env_of(node: taken) : context.type_env
         return if exit_env.nil? || (!taken && body_type.is_a?(AST::Types::Bot))
 
         env = exit_env.update(local_variable_types: exit_env.local_variable_types.slice(*carried))
