@@ -1,37 +1,52 @@
 module Steep
   # An `each` over a collection the checker knows, whose block may change a
-  # String held by a local from out here, run as the program runs it: once per
-  # element, in order, each pass starting from the locals the one before it
-  # left, and the first `break` taken ending the call.
+  # String held by a local from out here or return from the method, run as
+  # the program runs it: once per element, in order, each pass starting from
+  # the locals the one before it left, and the first `break` or `return`
+  # taken ending the call.
   #
   #     result = word.dup
   #     [[/ies\z/, "y"], [/s\z/, ""]].each { |(rule, replacement)| break if result.sub!(rule, replacement) }
   #     result   # "category" for "categories", "post" for "posts"
   #
+  #     [:pt, locale].each { |k| return instances[k] if instances.key?(k) }
+  #
   # Declined, leaving the locals `StringMutation` widened, wherever a pass
-  # cannot say whether it stops: a jump other than `break`, a `break` under a
-  # condition the checker left open or under anything but an `if`, or a pass
-  # that cannot finish without taking one.
+  # cannot say whether it stops: a jump other than those, one under a
+  # condition the checker left open or under anything but an `if`, a `return`
+  # in a block nested in this one, or a pass that cannot finish without
+  # taking one.
   module UnrolledEach
-    OTHER_JUMPS = (Accumulators::JUMPS - [:break]).freeze
+    OTHER_JUMPS = (Accumulators::JUMPS - %i[break return]).freeze
     NESTED = [*LocalReach::SCOPES, *LocalReach::CLOSURES, *LocalReach::REPEATS, :for].freeze
 
     module_function
 
-    def apply(constr, node, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
-      unwidened = block_body && constr.typing.unwidened_of(node: block_body) or return constr
-      types = exit_types(constr, node, unwidened, entry: entry, receiver_type: receiver_type, block_params: block_params,
-                                                  block_body: block_body, block_type_hint: block_type_hint, decls: decls)
-      return constr unless types
+    # A `return` taken in a pass ends the method there: the call is `bot`
+    # (in place of `iterated`), and the `return` is read as that pass ran it.
+    # One no pass takes never runs.
+    def apply(constr, node, iterated:, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
+      unwidened = block_body && constr.typing.unwidened_of(node: block_body)
+      return [constr, iterated] unless unwidened || returns_in?(block_body)
 
-      constr.update_type_env { |env| env.refine_types(local_variable_types: types) }
+      env, taken, pass = run(constr, node, unwidened || {}, entry: entry, receiver_type: receiver_type, block_params: block_params,
+                                                            block_body: block_body, block_type_hint: block_type_hint, decls: decls)
+      return [constr, iterated] unless env
+
+      types = (unwidened || {}).keys.to_h { |name| [name, env.local_variable_types.fetch(name)[0]] }
+      constr = constr.update_type_env { |current| current.refine_types(local_variable_types: types) }
+      returned = taken&.type == :return && taken
+      returns_in(block_body).each { |left| left.equal?(returned) ? taken_return(constr, left, pass) : constr.typing.add_dead_clause(left) }
+      [constr, returned ? AST::Builtin.bottom_type : iterated]
     end
 
-    def exit_types(constr, node, unwidened, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
+    # The env the passes end with, the jump that ended them, and the pass that
+    # took it.
+    def run(constr, node, unwidened, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
       return unless constr.iteration_intrinsic(decls)&.collect == :each
       return if jumps_other_than_break?(block_body)
 
-      breaks = breaks_in(block_body, []) or return
+      jumps = breaks_in(block_body, []) or return
       collection = constr.iterated_collection(node.children[0], receiver_type) or return
       env = starting_env(constr, entry, unwidened)
       carried = env.local_variable_types.keys
@@ -41,17 +56,34 @@ module Steep
         pass = entry.with_new_typing(constr.typing.new_child).update_type_env { env.refine_types(local_variable_types: bindings) }
         body_type, context = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
 
-        taken = taken_break(pass.typing, breaks)
+        taken = taken_break(pass.typing, jumps)
         return if taken == :open
 
         exit_env = taken ? pass.typing.jump_env_of(node: taken) : context.type_env
         return if exit_env.nil? || (!taken && body_type.is_a?(AST::Types::Bot))
 
         env = exit_env.update(local_variable_types: exit_env.local_variable_types.slice(*carried))
-        break if taken
+        return [env, taken, pass] if taken
       end
 
-      unwidened.keys.to_h { |name| [name, env.local_variable_types.fetch(name)[0]] }
+      [env, nil, nil]
+    end
+
+    def taken_return(constr, node, pass)
+      value = node.children[0]
+      constr.typing.add_typing(value, pass.typing.type_of(node: value), nil) if value
+      constr.typing.add_jump_env(node, pass.typing.jump_env_of(node: node))
+    end
+
+    def returns_in?(node) = !returns_in(node).empty?
+
+    def returns_in(node, found = [])
+      return found unless node.is_a?(Parser::AST::Node)
+      return found if LocalReach::SCOPES.include?(node.type)
+
+      found << node if node.type == :return
+      node.children.each { |child| returns_in(child, found) }
+      found
     end
 
     # The block's env with the method's locals unpinned — the runs are known,
@@ -77,8 +109,8 @@ module Steep
     # anything but `if` and a list of statements.
     def breaks_in(node, conditions, found = [])
       return found unless node.is_a?(Parser::AST::Node)
-      return found if NESTED.include?(node.type)
-      return found << [node, conditions] if node.type == :break
+      return (returns_in(node).empty? ? found : nil) if NESTED.include?(node.type)
+      return found << [node, conditions] if node.type == :break || node.type == :return
 
       node.children.each_with_index do |child, index|
         next unless child.is_a?(Parser::AST::Node)
