@@ -127,6 +127,22 @@ class ClassMemoAnalyzerTest < Minitest::Test
     assert_equal [[:[], [[:yielded, :inflections]]]], found.map { |use| [use.called, use.value.map { |value| [value.kind, value.called] }] }
   end
 
+  def test_a_value_parentheses_a_conditional_or_an_or_pass_on_is_used_where_it_lands
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings)
+      class Article < Base
+        (settings).name
+        (flag ? other : settings).name
+        (settings || other).name
+        case flag
+        when 1 then settings
+        end.name
+        (case flag; in 1 then settings; end).name
+      end
+    RUBY
+
+    assert_equal %i[name name name name name], found.map(&:called)
+  end
+
   def test_a_value_left_unused_is_no_use
     found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings, [])
       class Article < Base

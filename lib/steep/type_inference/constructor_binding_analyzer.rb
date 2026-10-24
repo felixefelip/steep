@@ -73,6 +73,9 @@ module Steep
       #   parameter at `index`, read (`memo[key]`) or stored if missing
       #   (`memo[key] ||= value`); `builds` where each stores `Klass.new`
       #   handed nothing.
+      # - `hands_back_elements`: `[memo, calls]` where every value it returns
+      #   is an element of `memo` read or stored as above under any key, or
+      #   one of `calls`, made on `self`; `memo` is nil where it reads none.
       # - `memo`: `[ivar, class names, wrappers]` when its body is exactly
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
       #   it is written; or that `Klass.new` with calls that take a block made
@@ -92,7 +95,7 @@ module Steep
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
-        :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element,
+        :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :hands_back_elements,
         keyword_init: true
       )
 
@@ -325,8 +328,9 @@ module Steep
           iterations: self_iterations(body),
           ivar_uses: ClassMemoAnalyzer.uses(body, names: ivars).to_h,
           returns: single_ivar_reader(body),
-          hands_back: hands_back(body),
-          hands_back_element: hands_back_element(args_node, body),
+          hands_back: HandedBack.calls(body),
+          hands_back_element: HandedBack.element(args_node, body),
+          hands_back_elements: HandedBack.elements(body),
           memo: nesting && memo_of(body, nesting),
           memoizes: memoized_ivar(body),
           memoized_hash: memoized_hash(body),
@@ -593,46 +597,6 @@ module Steep
         name = const_to_name(klass) or return
         names = klass.children[0]&.type == :cbase ? [name] : nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
         [target.children[0], names, wrappers]
-      end
-
-      def hands_back(body)
-        names = Set[] #: Set[Symbol]
-        returned = [] #: Array[::Parser::AST::Node]
-        Accumulators.each_tail(body) { |node| returned << node }
-        Accumulators.each_returns(body) { |node| returned << node }
-        returned.each do |node|
-          next if node.type == :yield
-          receiver, name, *arguments = node.children
-          return unless node.type == :send && (receiver.nil? || receiver.type == :self) && arguments.empty?
-
-          names << name
-        end
-        names unless names.empty?
-      end
-
-      def hands_back_element(args_node, body)
-        positional = args_node.children.take_while { |param| %i[arg optarg].include?(param.type) }.map { |param| param.children[0] }
-        found = Set[] #: Set[[Symbol, Integer]]
-        builds = true
-        returned = [] #: Array[::Parser::AST::Node]
-        Accumulators.each_tail(body) { |node| returned << node }
-        Accumulators.each_returns(body) { |node| returned << node }
-        returned.each do |node|
-          read = node.type == :or_asgn ? node.children[0] : node
-          memo, method_name, key = read.children
-          return unless read.type == :send && method_name == :[] && read.children.size == 3 && key.type == :lvar
-          return unless memo&.type == :send && (memo.children[0].nil? || memo.children[0].type == :self) && memo.children.size == 2
-
-          index = positional.index(key.children[0]) or return
-          found << [memo.children[1], index]
-          builds &&= node.type == :or_asgn && fresh_object?(node.children[1])
-        end
-        [*found.first, builds] if found.size == 1
-      end
-
-      def fresh_object?(node)
-        receiver, method_name, *arguments = node.children
-        node.type == :send && method_name == :new && arguments.empty? && receiver&.type == :const
       end
 
       # A reader whose body is exactly `@ivar` (normal or endless def) →

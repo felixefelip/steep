@@ -232,7 +232,7 @@ module Steep
     # The types the locals a block body may change in place had before
     # `StringMutation` widened them, by the body; and the env each `break` was
     # reached with. What `UnrolledEach` runs an `each` from and stops it with.
-    attr_reader :unwidened, :break_envs
+    attr_reader :unwidened, :jump_envs
     # The env each block body ends with, by the block (`ObjectStates::Tap`).
     attr_reader :block_exits
     # The `case` clauses the check left unreachable. `UnreachableValueBranch`
@@ -275,7 +275,7 @@ module Steep
       (@vouched = {}).compare_by_identity
       (@nominals = {}).compare_by_identity
       (@unwidened = {}).compare_by_identity
-      (@break_envs = {}).compare_by_identity
+      (@jump_envs = {}).compare_by_identity
       (@block_exits = {}).compare_by_identity
       (@dead_clauses = {}).compare_by_identity
       (@explicit_supers = {}).compare_by_identity
@@ -416,12 +416,12 @@ module Steep
       block_exits.fetch(node) { parent&.block_exit_of(node: node) }
     end
 
-    def add_break_env(node, env)
-      break_envs[node] = env
+    def add_jump_env(node, env)
+      jump_envs[node] = env
     end
 
-    def break_env_of(node:)
-      break_envs[node]
+    def jump_env_of(node:)
+      jump_envs.fetch(node) { parent&.jump_env_of(node: node) }
     end
 
     def add_vouched(node, type)
@@ -563,6 +563,7 @@ module Steep
       parent.nominals.merge!(nominals)
       parent.branch_envs.merge!(branch_envs)
       parent.block_exits.merge!(block_exits)
+      parent.jump_envs.merge!(jump_envs)
       parent.dead_clauses.merge!(dead_clauses)
       parent.explicit_supers.merge!(explicit_supers)
       parent.pass_typings.concat(pass_typings)
