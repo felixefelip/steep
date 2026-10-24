@@ -20,7 +20,7 @@ module Steep
         body = def_node && (def_node.type == :defs ? def_node.children[3] : def_node.children[2])
         return unless body
 
-        ReturnedValues.each_value(body) { |node| @returned << node }
+        Accumulators::ReturnedValues.each_value(body) { |node| @returned << node }
         walk(body)
       end
 

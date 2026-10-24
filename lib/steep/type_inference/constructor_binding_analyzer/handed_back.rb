@@ -8,7 +8,7 @@ module Steep
 
         def calls(body)
           names = Set[] #: Set[Symbol]
-          ReturnedValues.each_value(body) do |node|
+          Accumulators::ReturnedValues.each_value(body) do |node|
             next if node.type == :yield
             return unless node.type == :send && ObjectStates.on_self?(node) && node.children.size == 2
 
@@ -21,7 +21,7 @@ module Steep
           positional = args_node.children.take_while { |param| %i[arg optarg].include?(param.type) }.map { |param| param.children[0] }
           found = Set[] #: Set[[Symbol, Integer]]
           builds = true
-          ReturnedValues.each_value(body) do |node|
+          Accumulators::ReturnedValues.each_value(body) do |node|
             read = node.type == :or_asgn ? node.children[0] : node
             memo, method_name, key = read.children
             return unless read.type == :send && method_name == :[] && read.children.size == 3 && key.type == :lvar
@@ -37,7 +37,7 @@ module Steep
         def elements(body)
           memos = Set[] #: Set[Symbol]
           calls = Set[] #: Set[Symbol]
-          ReturnedValues.each_value(body, logic: true) { |node| return unless element_returned?(node, memos, calls) }
+          Accumulators::ReturnedValues.each_value(body, logic: true) { |node| return unless element_returned?(node, memos, calls) }
           [memos.first, calls] if memos.size <= 1 && !(memos.empty? && calls.empty?)
         end
 

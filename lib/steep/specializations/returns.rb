@@ -9,7 +9,7 @@ module Steep
           flow = Evals::Flow.new(typing)
           values = [] #: Array[AST::Types::t]
 
-          ReturnedValues.each_returns(body) do |node|
+          Accumulators::ReturnedValues.each_returns(body) do |node|
             next if flow.dead?(node)
             return nil if node.type == :return && node.children.size > 1
             return nil unless node.type == :return || typing.has_type?(node)

@@ -9,7 +9,7 @@ module Steep
       def returned(typing, body)
         flow = Specializations::Evals::Flow.new(typing)
         envs = [] #: Array[TypeInference::TypeEnv]
-        ReturnedValues.each_return(body) do |node|
+        Accumulators::ReturnedValues.each_return(body) do |node|
           next if flow.dead?(node)
 
           envs << (typing.jump_env_of(node: node) or return)
