@@ -219,12 +219,7 @@ module Steep
 
       # Whether `parent`'s value may be `node`'s.
       def passed_on?(node, parent)
-        case parent&.type
-        when :begin, :kwbegin, :when then parent.children.last.equal?(node)
-        when :if, :case then !parent.children[0].equal?(node)
-        when :or, :and then true
-        else false
-        end
+        !!parent && ReturnedValues.value_children(parent).any? { |child| child.equal?(node) }
       end
 
       def discarded?(node, parent)
@@ -285,8 +280,7 @@ module Steep
 
         returned = @returned[scope] ||= Set[].compare_by_identity.tap do |nodes|
           body = scope.children.last
-          Accumulators.each_tail(body) { |value| nodes << value }
-          Accumulators.each_returns(body) { |value| nodes << value }
+          ReturnedValues.each_value(body) { |value| nodes << value }
         end
         scope.children[scope.type == :def ? 0 : 1] if returned.include?(node)
       end

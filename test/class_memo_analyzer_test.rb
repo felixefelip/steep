@@ -136,10 +136,11 @@ class ClassMemoAnalyzerTest < Minitest::Test
         case flag
         when 1 then settings
         end.name
+        (case flag; in 1 then settings; end).name
       end
     RUBY
 
-    assert_equal %i[name name name name], found.map(&:called)
+    assert_equal %i[name name name name name], found.map(&:called)
   end
 
   def test_a_value_left_unused_is_no_use
