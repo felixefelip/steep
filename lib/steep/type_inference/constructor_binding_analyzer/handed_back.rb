@@ -2,7 +2,7 @@ module Steep
   module TypeInference
     class ConstructorBindingAnalyzer
       # What a method's every returned value is (`Body#hands_back`,
-      # `#hands_back_element`, `#hands_back_elements`).
+      # `#hands_back_element`, `#hands_back_elements`, `#keyed_memo`).
       module HandedBack
         module_function
 
@@ -65,6 +65,45 @@ module Steep
             on_self?(receiver)
           end
         end
+
+        # The value a hash's own method stores under its first parameter when
+        # it holds nothing there, where its body ends `super || store(key,
+        # value)` and nothing before writes the hash.
+        def keyed_memo(args_node, body)
+          key = args_node.children.first
+          return unless key&.type == :arg && body
+
+          *before, tail = body.type == :begin ? body.children : [body]
+          return unless tail&.type == :or && before.none? { |statement| writes_entries?(statement) }
+
+          read, stored = tail.children
+          receiver, method_name, stored_key, value = stored.children
+          return unless stored.type == :send && on_self?(receiver) && method_name == :store && stored.children.size == 4
+          return unless stored_key.type == :lvar && stored_key.children[0] == key.children[0] && entry_read?(read, key.children[0])
+
+          value unless writes_entries?(value)
+        end
+
+        def entry_read?(node, key)
+          return true if node.type == :zsuper
+
+          node.type == :send && on_self?(node.children[0]) && node.children[1] == :[] && node.children[2..] == [s_lvar(key)]
+        end
+
+        def s_lvar(name) = ::Parser::AST::Node.new(:lvar, [name])
+
+        def writes_entries?(node)
+          return false unless node.is_a?(::Parser::AST::Node)
+          return true if node.type == :send && on_self?(node.children[0]) && ENTRY_WRITERS.include?(node.children[1])
+
+          node.children.any? { |child| writes_entries?(child) }
+        end
+
+        # What changes a hash's entries, called on the hash.
+        ENTRY_WRITERS = %i[
+          []= store delete clear replace merge! update shift keep_if select! filter! reject! delete_if compact!
+          transform_values! transform_keys! default= default_proc= compare_by_identity rehash
+        ].to_set.freeze
 
         def on_self?(receiver)
           receiver.nil? || receiver.type == :self

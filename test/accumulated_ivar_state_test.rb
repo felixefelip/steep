@@ -844,6 +844,61 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [[nil], [nil]], chunks(handing(body), rbs: HANDING_RBS)
   end
 
+  KEYED_MEMO_RBS = HANDING_RBS.sub("class Inflector\n", <<~RBS)
+    class Fallbacks < Hash[Symbol, Array[Symbol]]
+      @default: Symbol
+      def initialize: () -> void
+      def []: (Symbol locale) -> Array[Symbol]
+      def reset: () -> Fallbacks
+      def compute: (Symbol locale) -> Array[Symbol]
+    end
+    module Locales
+      self.@fallbacks: Fallbacks?
+      def self.fallbacks: () -> Fallbacks
+    end
+    class Other
+      def self.go: () -> untyped
+    end
+    class Inflector
+  RBS
+
+  def keyed_memo(extra: "", outside: "")
+    fallbacks = <<~RUBY
+      class Fallbacks < Hash
+        def initialize
+          @default = :en
+        end
+
+        def [](locale)
+          locale = locale.to_sym
+          super || store(locale, compute(locale))
+        end
+
+        def compute(locale) = [locale, @default]
+      #{extra.gsub(/^/, "  ")}
+      end
+
+      module Locales
+        def self.fallbacks = @fallbacks ||= Fallbacks.new
+      end
+    RUBY
+    fallbacks + handing(format(WALK, "Locales.fallbacks[locale]")) + outside
+  end
+
+  def test_a_hash_s_own_keyed_memo_answers_what_it_stores
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(keyed_memo, rbs: KEYED_MEMO_RBS)
+  end
+
+  def test_declines_a_keyed_memo_whose_entries_something_else_changes
+    {
+      "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),
+      "through a method of its own" => keyed_memo(extra: "def reset = clear", outside: "\nclass Other\n  def self.go = Locales.fallbacks.reset\nend\n"),
+      "built outside a memo" => keyed_memo(outside: "\nclass Other\n  def self.go = Fallbacks.new\nend\n")
+    }.each do |label, ruby|
+      assert_equal [[nil], [nil]], chunks(ruby, rbs: KEYED_MEMO_RBS), label
+    end
+  end
+
   def test_a_method_handing_back_an_element_stored_again_never_answers_the_one_it_replaced
     written = chunks(handing("def self.instance_or_fallback(locale) = instance(locale)\ndef self.reset = (instances[:en] = Rules.new)\nreset"), rbs: HANDING_RBS).flatten
 

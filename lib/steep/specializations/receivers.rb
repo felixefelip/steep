@@ -42,6 +42,12 @@ module Steep
           constr.constructor_bindings.uses_of(name).reject { |use| elsewhere?(constr, use, target) }
         end
 
+        # The calls of `name` whose receiver may be a value of `target`
+        # (`ConstructorBindingRegistry#calls_of`).
+        def calls_on(constr, name, target)
+          constr.constructor_bindings.calls_of(name).reject { |call| elsewhere?(constr, call, target) }
+        end
+
         private
 
         def written(type)
