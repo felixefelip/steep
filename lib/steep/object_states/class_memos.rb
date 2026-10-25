@@ -338,9 +338,8 @@ module Steep
           [ivar, instance, wrappers]
         end
 
-        # A memo `@ivar ||= Klass.new` whose ivar nothing else writes holds an
-        # object `Klass.new` built, whatever was done to it since: its ivars
-        # no method but `initialize` writes hold what that left them.
+        # The object a memo `@ivar ||= Klass.new` whose ivar nothing else
+        # writes holds, with the ivars no method but `initialize` writes.
         def settled_memo(constr, call)
           return unless call.is_a?(TypeInference::MethodCall::Typed)
 

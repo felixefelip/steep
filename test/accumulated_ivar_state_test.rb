@@ -862,14 +862,16 @@ class AccumulatedIvarStateTest < Minitest::Test
     class Inflector
   RBS
 
-  def keyed_memo(extra: "", outside: "")
+  def keyed_memo(extra: "", outside: "", initialize: "@default = :en", read: "")
     fallbacks = <<~RUBY
       class Fallbacks < Hash
         def initialize
-          @default = :en
+      #{initialize.gsub(/^/, "    ")}
         end
 
         def [](locale)
+          raise ArgumentError if locale.nil?
+      #{read.gsub(/^/, "    ")}
           locale = locale.to_sym
           super || store(locale, compute(locale))
         end
@@ -893,7 +895,11 @@ class AccumulatedIvarStateTest < Minitest::Test
     {
       "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),
       "through a method of its own" => keyed_memo(extra: "def reset = clear", outside: "\nclass Other\n  def self.go = Locales.fallbacks.reset\nend\n"),
-      "built outside a memo" => keyed_memo(outside: "\nclass Other\n  def self.go = Fallbacks.new\nend\n")
+      "built outside a memo" => keyed_memo(outside: "\nclass Other\n  def self.go = Fallbacks.new\nend\n"),
+      "built in an instance method named like the memo" => keyed_memo(outside: "\nmodule Locales\n  def fallbacks = Fallbacks.new\nend\n"),
+      "cleared before it stores" => keyed_memo(read: "clear"),
+      "with a default" => keyed_memo(initialize: "super([:pt])\n@default = :en"),
+      "with a default of its own" => keyed_memo(extra: "def default(_key = nil) = [:pt]")
     }.each do |label, ruby|
       assert_equal [[nil], [nil]], chunks(ruby, rbs: KEYED_MEMO_RBS), label
     end

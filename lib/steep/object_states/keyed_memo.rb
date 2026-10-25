@@ -1,42 +1,39 @@
 module Steep
   module ObjectStates
     # A hash's own method that stores under its key what it holds nothing
-    # under yet (felixefelip/steep#354), the keyed form of `@ivar ||= value`:
+    # under yet, the keyed form of `@ivar ||= value`:
     #
     #   class Fallbacks < Hash
     #     def [](locale) = super || store(locale, compute(locale))
     #   end
     #
-    # The hash only ever holds `compute(locale)` under `locale`, so the call
-    # answers that whether the key was filled or not, and reads the object.
-    # Only where what the value reads is settled once the object is built
-    # (its ivars, written only while it is built, and nothing outside it,
-    # `Body#outside_state`), no method the memo runs writes the entries, and
-    # every object of the class is one a memo `@ivar ||= Klass.new` the
-    # project follows built (`ClassMemos.tracked`).
+    # The call answers what it stores, whether the key was filled or not.
     module KeyedMemo
+      HASH = RBS::TypeName.parse("::Hash")
+
+      DEFAULT_WRITERS = %i[default= default_proc=].freeze
+
       class << self
         # The memo's read of its own entries adds nothing to its value, so
         # it answers `nil` and the call answers what the memo stores.
         def answered(constr, call, node)
-          call.with_return_type(AST::Builtin.nil_type) if read_type(constr, node)
+          call.with_return_type(AST::Builtin.nil_type) if read_type(constr, node, call)
         end
 
-        # `nil` for the memo's read, `self[key]` or a bare `super`.
-        def read_type(constr, node)
-          def_node = constr.method_context&.node
+        def read_type(constr, node, call = nil)
+          method_name = constr.method_context&.name
           instance = constr.self_type
-          return unless def_node && instance.is_a?(AST::Types::Name::Instance) && memo_read?(def_node, node)
+          return unless method_name && instance.is_a?(AST::Types::Name::Instance) && hash_read?(constr, node, call)
 
-          AST::Builtin.nil_type if kept?(constr, instance, constr.method_context.name)
+          _, body = ObjectStates.resolved_body(constr, instance, method_name)
+          read, = body&.keyed_memo
+          AST::Builtin.nil_type if read && same_node?(read, node) && kept?(constr, instance, method_name)
         end
 
         # `store` answers the value it stores.
         def stored(constr, call, arguments)
           return unless call.is_a?(TypeInference::MethodCall::Typed) && arguments.size == 2 && constr.typing.has_type?(arguments[1])
-
-          names = call.method_decls.map { |decl| decl.method_name.to_s }.uniq
-          return unless names == ["::Hash#store"]
+          return unless hash_method?(call, :store)
 
           value = constr.typing.type_of(node: arguments[1])
           call.with_return_type(value) if constr.check_relation(sub_type: value, super_type: call.return_type).success?
@@ -49,33 +46,68 @@ module Steep
 
         def kept?(constr, instance, method_name)
           _, body = ObjectStates.resolved_body(constr, instance, method_name)
-          !!body&.keyed_memo && read?(constr, instance, body) && built_by_memos?(constr, instance)
+          !!body&.keyed_memo && read?(constr, instance, body) && without_default?(constr, instance) && built_by_memos?(constr, instance)
         end
 
         private
 
-        def writers = TypeInference::ConstructorBindingAnalyzer::HandedBack::ENTRY_WRITERS
+        # What may be called on `self` without changing the hash's entries.
+        def readers
+          @readers ||= (CollectionReaders::METHODS + HashElements::KEY_QUERIES - %i[[]= store] + %i[raise fail]).to_set.freeze
+        end
 
-        def memo_read?(def_node, node)
-          body = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
-          tail = body&.type == :begin ? body.children.last : body
-          tail&.type == :or && tail.children[0].equal?(node)
+        def hash_read?(constr, node, call)
+          case node.type
+          when :super, :zsuper
+            context = constr.method_context or return false
+            context.name == :[] && !!context.super_method&.defs&.all? { |defn| defn.implemented_in == HASH }
+          when :send
+            hash_method?(call, :[])
+          else
+            false
+          end
+        end
+
+        def hash_method?(call, name)
+          call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.map { |decl| decl.method_name.to_s }.uniq == ["::Hash##{name}"]
+        end
+
+        # The registry parses the file apart from the check, so the same node
+        # is a different object there.
+        def same_node?(read, node)
+          read.type == node.type && read.loc.expression.to_range == node.loc.expression.to_range
         end
 
         def read?(constr, instance, body)
-          body.writes.empty? && entries_left?(constr, instance, body.self_sends - [:store], Set[]) && settled?(constr, instance, body.keyed_memo)
+          _, value = body.keyed_memo
+          body.writes.empty? && entries_left?(constr, instance, body.self_sends - [:store], Set[]) && settled?(constr, instance, value)
         end
 
         # No method of `names`, or one they call on `self`, writes the entries.
         def entries_left?(constr, instance, names, visiting)
           names.all? do |name|
             next true if visiting.include?(name)
-            next false if writers.include?(name)
 
             _, callee = ObjectStates.resolved_body(constr, instance, name)
-            next !constr.constructor_bindings.defines_any?([name]) unless callee
+            next readers.include?(name) unless callee
 
             entries_left?(constr, instance, callee.self_sends, visiting | [name])
+          end
+        end
+
+        # A missing key reads `nil`: nothing hands `Hash#initialize` a default
+        # or sets one, and no method answers in its place.
+        def without_default?(constr, instance)
+          ancestor_bodies(constr, instance).all? do |name, bodies|
+            name != :default && bodies.all? { |body| body && !(name == :initialize && body.super_args) && !body.self_sends.intersect?(DEFAULT_WRITERS) }
+          end
+        rescue RBS::BaseError
+          false
+        end
+
+        def ancestor_bodies(constr, instance)
+          constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.flat_map do |ancestor|
+            constr.constructor_bindings.method_bodies(ancestor.name.to_s).to_a
           end
         end
 
@@ -83,10 +115,11 @@ module Steep
         def built_by_memos?(constr, instance)
           calls = %i[new allocate].flat_map { |name| constr.constructor_bindings.calls_of(name) }.select { |call| builds?(constr, call, instance) }
           !calls.empty? && calls.all? do |call|
-            next false if call.kind == :escape || call.called != :new || call.at.nil? || call.enclosing.nil? || call.owner.to_s.empty?
+            next false if call.kind == :escape || call.called != :new || call.at.nil? || !call.singleton || call.owner.to_s.empty?
 
             owner = AST::Types::Name::Singleton.new(name: RBS::TypeName.parse("::#{call.owner}"))
-            ClassMemos.tracked(constr, owner, call.enclosing, instance)
+            _, _, wrappers = ClassMemos.tracked(constr, owner, call.enclosing, instance)
+            !!wrappers&.empty?
           end
         end
 
@@ -138,7 +171,7 @@ module Steep
           return true if visiting.include?(method_name)
 
           _, body = ObjectStates.resolved_body(constr, instance, method_name)
-          return false if body.nil? || body.outside_state || body.super_args || body.self_sends.intersect?(writers)
+          return false if body.nil? || body.outside_state || body.super_args
 
           ivars.merge(body.ivars || [])
           ivars << body.returns if body.returns
@@ -153,7 +186,7 @@ module Steep
           loop do
             grown = names.select do |name|
               !building.include?(name) &&
-                Specializations::Receivers.calls_on(constr, name, instance).all? { |call| call.kind != :escape && call.at.nil? && building.include?(call.enclosing) }
+                Specializations::Receivers.calls_on(constr, name, instance).all? { |call| call.kind != :escape && call.at.nil? && call.singleton == false && building.include?(call.enclosing) }
             end
             return building if grown.empty?
 
@@ -162,17 +195,15 @@ module Steep
         end
 
         def written_while_built?(constr, instance, ivar, building)
-          definition = constr.checker.factory.definition_builder.build_instance(instance.name)
-          definition.ancestors.ancestors.all? do |ancestor|
-            constr.constructor_bindings.method_bodies(ancestor.name.to_s).all? do |name, bodies|
-              building.include?(name) || bodies.all? { |body| body && !body.writes.include?(ivar) && reads_only?(constr, instance, ivar, body, name) }
-            end
+          ancestor_bodies(constr, instance).all? do |name, bodies|
+            building.include?(name) || bodies.all? { |body| body && !body.writes.include?(ivar) && reads_only?(constr, instance, ivar, body, name) }
           end
         rescue RBS::BaseError
           false
         end
 
-        # Values no call can change, however they are used.
+        # Values no call changes. Unlike `ObjectStates.fixed?`, a type that
+        # says nothing about which value it is, which a state would not hold.
         UNCHANGEABLE = %w[::Symbol ::Integer ::Float ::NilClass ::TrueClass ::FalseClass].freeze
 
         def unchangeable?(type)

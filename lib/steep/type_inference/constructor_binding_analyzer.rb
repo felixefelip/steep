@@ -76,9 +76,9 @@ module Steep
       # - `hands_back_elements`: `[memo, calls]` where every value it returns
       #   is an element of `memo` read or stored as above under any key, or
       #   one of `calls`, made on `self`; `memo` is nil where it reads none.
-      # - `keyed_memo`: on a hash's own method, the value it stores under its
-      #   first parameter when it holds nothing there (`super || store(key,
-      #   value)`).
+      # - `keyed_memo`: on a hash's own method, `[read, value]` where it stores
+      #   `value` under its first parameter when `read` of it finds nothing
+      #   there (`super || store(key, value)`).
       # - `outside_state`: whether it reads anything but its parameters, its
       #   locals, `self`'s ivars and what it calls on them: a constant, a
       #   global, a class variable or `self.class`.

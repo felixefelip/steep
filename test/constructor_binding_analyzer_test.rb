@@ -113,6 +113,7 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
 
     assert_empty result
   end
+
   def bodies(source)
     ConstructorBindingAnalyzer.scan(parse(source)).methods.fetch("Fallbacks").transform_values(&:first)
   end
@@ -128,17 +129,17 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
 
         def fetch_or(locale) = self[locale] || store(locale, [locale])
         def other_key(locale) = super || store(:en, compute(locale))
-        def written_first(locale)
-          clear
+        def stored_first(locale)
+          store(:en, [])
           super || store(locale, compute(locale))
         end
       end
     RUBY
 
-    assert_equal "(send nil :compute\n  (lvar :locale))", found[:[]].keyed_memo.to_s
-    assert_equal "(array\n  (lvar :locale))", found[:fetch_or].keyed_memo.to_s
+    assert_equal ["(zsuper)", "(send nil :compute\n  (lvar :locale))"], found[:[]].keyed_memo.map(&:to_s)
+    assert_equal ["(send\n  (self) :[]\n  (lvar :locale))", "(array\n  (lvar :locale))"], found[:fetch_or].keyed_memo.map(&:to_s)
     assert_nil found[:other_key].keyed_memo
-    assert_nil found[:written_first].keyed_memo
+    assert_nil found[:stored_first].keyed_memo
   end
 
   def test_a_body_reading_a_constant_a_global_a_class_variable_or_its_class_reads_outside_state
