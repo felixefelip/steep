@@ -162,6 +162,16 @@ class HashMemoStateTest < Minitest::Test
     assert_equal [nil], chunks(ruby)["app/app.rb:29:2"]
   end
 
+  def test_asking_for_a_literal_key_answers_whether_the_hash_holds_it
+    ruby = READERS.sub("    registry[name]\n", "    registry.key?(name) ? registry[name] : :none\n")
+                  .sub(/  def seat = self\.class\.lookup\(:seat\)\nend\n\z/, "  def seat = self.class.lookup(:seat)\n  def wheel = self.class.lookup(:wheel)\nend\n")
+    rbs = READERS_RBS.sub("class Truck < Base\n  def seat: () -> Symbol\nend", "class Truck < Base\n  def seat: () -> Symbol\n  def wheel: () -> Symbol\nend")
+    lookup = returns(ruby, rbs: rbs)["Base.lookup"]
+
+    assert_equal ":round", lookup["(:wheel) on singleton(::Car)"]
+    assert_equal ":none", lookup["(:wheel) on singleton(::Truck)"]
+  end
+
   def test_an_object_built_with_a_block_may_reach_the_class
     rbs = RBS.sub("class Car < Base", "class Maker\n  def initialize: () { () -> void } -> void\nend\nclass Car < Base")
     ruby = RUBY.sub("class Car < Base", "class Maker\n  def initialize = yield\nend\n\nclass Car < Base")

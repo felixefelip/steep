@@ -30,6 +30,8 @@ module Steep
 
     KEY_READ = Set["::Hash#[]"].freeze
 
+    KEY_QUERY = Set["::Hash#key?", "::Hash#has_key?", "::Hash#include?", "::Hash#member?"].freeze
+
     STORES = Set["::Hash#[]=", "::Hash#store"].freeze
 
     # What a local holding a record follows: a store, or `delete` of a key.
@@ -61,6 +63,7 @@ module Steep
 
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         keys = hash_method_keys(constr, method_name, private: private)
+        answer = queried(constr, node, receiver_type, keys, arguments) and return answer
         return read_union(constr, node, receiver_type, keys, arguments, type: type) if record_union?(receiver_type)
         if (receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)) && CollectionMutation.only?(constr, keys, WRITES)
           return written(constr, node, receiver, receiver_type, keys, arguments, type: type)
@@ -460,6 +463,23 @@ module Steep
 
         read = AST::Types::Union.build(types: union.types.map { |record| member_read(record, key.value) })
         [read, constr.add_typing(node, type: read).constr]
+      end
+
+      # Whether a record, or each member of a union of records, holds a
+      # literal key, as `read` answers `nil` under one it does not list.
+      def queried(constr, node, type, keys, arguments)
+        key, = CollectionMutation.operand_types(constr, arguments)
+        return unless CollectionMutation.only?(constr, keys, KEY_QUERY) && arguments.size == 1 && literal_key?(key)
+
+        held = (type.is_a?(AST::Types::Union) ? type.types : [type]).map do |record|
+          next true if record.required_keys.include?(key.value)
+
+          record.elements.key?(key.value) ? nil : false
+        end.uniq
+        return unless held.size == 1 && !held.first.nil?
+
+        answer = AST::Types::Literal.new(value: held.first)
+        [answer, constr.add_typing(node, type: answer).constr]
       end
 
       def member_read(record, key)
