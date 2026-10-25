@@ -1942,6 +1942,7 @@ module Steep
               end
             end
 
+            constr.typing.add_jump_env(node, constr.context.type_env)
             constr.add_typing(node, type: AST::Builtin.bottom_type)
           end
 
@@ -1980,7 +1981,7 @@ module Steep
             typing.add_error Diagnostic::Ruby::UnexpectedJump.new(node: node)
           end
 
-          typing.add_break_env(node, context.type_env)
+          typing.add_jump_env(node, context.type_env)
           add_typing(node, type: AST::Builtin.bottom_type)
 
         when :next

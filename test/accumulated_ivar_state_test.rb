@@ -776,6 +776,48 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  HANDING_RBS = KEYED_RBS.sub("def self.wipe:", "def self.instance_or_fallback: (Symbol locale) -> Inflector::Rules\n    def self.reset: () -> untyped\n    def self.wipe:")
+
+  def handing(body, rules: "") = keyed(body: body, reads: "instance_or_fallback(:en)", rules: rules)
+
+  def test_a_method_whose_every_returned_value_is_an_element_hands_that_element_back
+    {
+      "under a fixed key" => "def self.instance_or_fallback(locale) = instances[:en]",
+      "through the method that stores it" => "def self.instance_or_fallback(locale) = instance(locale)",
+      "a conditional over its keys" => "def self.instance_or_fallback(locale) = instances.key?(locale) ? instances[locale] : instance(locale)",
+      "an early return" => "def self.instance_or_fallback(locale)\n  return instances[locale] if locale == :en\n  instance(locale)\nend",
+      "either of two" => "def self.instance_or_fallback(locale) = instances[locale] || instance(locale)"
+    }.each do |label, body|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(handing(body), rbs: HANDING_RBS), label
+    end
+  end
+
+  def test_an_element_read_inside_parentheses_or_a_conditional_is_followed
+    {
+      "parentheses" => "(instances[:en])",
+      "a call in parentheses" => "(instance(:en))",
+      "a conditional" => "(instances.key?(:en) ? instances[:en] : instance(:en))"
+    }.each do |label, reads|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(keyed(reads: reads), rbs: KEYED_RBS), label
+    end
+  end
+
+  def test_declines_a_method_that_may_hand_back_anything_but_an_element
+    {
+      "an object of its own" => handing("def self.instance_or_fallback(locale) = locale == :en ? instances[locale] : Rules.new"),
+      "an element changed through it" => handing("def self.instance_or_fallback(locale) = instance(locale)\ninstance_or_fallback(:en).clear", rules: "def clear = (@singulars = [])")
+    }.each do |label, ruby|
+      assert_equal [[nil], [nil]], chunks(ruby, rbs: HANDING_RBS), label
+    end
+  end
+
+  def test_a_method_handing_back_an_element_stored_again_never_answers_the_one_it_replaced
+    written = chunks(handing("def self.instance_or_fallback(locale) = instance(locale)\ndef self.reset = (instances[:en] = Rules.new)\nreset"), rbs: HANDING_RBS).flatten
+
+    refute_includes written, "def post_ids; []; end"
+    refute_includes written, "def category_ids; []; end"
+  end
+
   def test_a_reopen_that_only_defines_methods_runs_nothing_first
     rbs = RBS.sub("def self.has_many_like", "def extra: () -> Integer\n  def self.has_many_like")
     reopen = "class Inflector\n  def extra = 1\nend\n"

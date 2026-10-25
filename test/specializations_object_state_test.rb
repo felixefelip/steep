@@ -304,6 +304,79 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  def test_a_body_that_returns_early_leaves_what_every_way_out_holds_alike
+    in_tmpdir do
+      write("sig/early.rbs", <<~RBS)
+        class P13Reflection
+          @options: Hash[Symbol, untyped]
+          attr_reader options: Hash[Symbol, untyped]
+          def initialize: (Hash[Symbol, untyped] options) -> void
+          def saving: () -> (:saved | :unsaved)
+        end
+        class P13Decided < P13Reflection
+          def autosave=: (bool autosave) -> bool
+        end
+        class P13Open < P13Reflection
+          def autosave=: (bool autosave) -> bool
+        end
+        class P13Alike < P13Reflection
+          def autosave=: (bool autosave) -> bool
+        end
+        class P13Use
+          def decided: () -> untyped
+          def open: () -> untyped
+          def alike: () -> untyped
+        end
+      RBS
+      write("app/early.rb", <<~RUBY)
+        class P13Reflection
+          attr_reader :options
+
+          def initialize(options)
+            @options = options
+          end
+
+          def saving
+            options[:autosave] ? :saved : :unsaved
+          end
+        end
+
+        class P13Decided < P13Reflection
+          def autosave=(autosave)
+            return autosave unless autosave
+            @options[:autosave] = autosave
+          end
+        end
+
+        class P13Open < P13Reflection
+          def autosave=(autosave)
+            return autosave if [true, false].sample
+            @options[:autosave] = autosave
+          end
+        end
+
+        class P13Alike < P13Reflection
+          def autosave=(autosave)
+            @options[:autosave] = autosave
+            return autosave if [true, false].sample
+            autosave
+          end
+        end
+
+        class P13Use
+          def decided = P13Decided.new({}).tap { |reflection| reflection.autosave = true }.saving
+          def open = P13Open.new({}).tap { |reflection| reflection.autosave = true }.saving
+          def alike = P13Alike.new({}).tap { |reflection| reflection.autosave = true }.saving
+        end
+      RUBY
+      types = specialized_body_types("app/early.rb")
+
+      assert_equal ":saved", types.fetch("decided")
+      assert_equal "(:saved | :unsaved)", types.fetch("open")
+      assert_equal ":saved", types.fetch("alike")
+    end
+  end
+
   def test_a_new_whose_arguments_met_several_recorded_calls_answers_the_class
     in_tmpdir do
       write("sig/box.rbs", <<~RBS)
