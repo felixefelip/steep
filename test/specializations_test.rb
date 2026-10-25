@@ -1252,6 +1252,54 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_runner_records_the_return_a_walk_over_a_known_list_takes
+    in_tmpdir do
+      write("sig/walked.rbs", <<~RBS)
+        class Walked
+          def self.picked: (String word) -> String
+          def self.open: (String word) -> String
+          def self.nested: (String word) -> String
+        end
+        class WalkedUse
+          def self.a: () -> String
+          def self.b: () -> String
+          def self.c: () -> String
+          def self.d: () -> String
+        end
+      RBS
+      write("app/walked.rb", <<~'RUBY')
+        class Walked
+          def self.picked(word)
+            ["a", "b"].each { |candidate| return candidate.upcase if candidate == word }
+            "none"
+          end
+
+          def self.open(word)
+            ["a", "b"].each { |candidate| return candidate if [true, false].sample }
+            word
+          end
+
+          def self.nested(word)
+            ["a", "b"].each { |candidate| [1].each { return candidate } if candidate == word }
+            "none"
+          end
+        end
+
+        class WalkedUse
+          def self.a = Walked.picked("b")
+          def self.b = Walked.picked("z")
+          def self.c = Walked.open("z")
+          def self.d = Walked.nested("z")
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+      assert_equal({ '("b")' => '"B"', '("z")' => '"none"' }, unkeyed(methods.fetch("Walked.picked")))
+      assert_equal({ '("z")' => '("z" | ::String)' }, unkeyed(methods.fetch("Walked.open")))
+      assert_nil methods["Walked.nested"]
+    end
+  end
+
   def test_runner_records_nothing_for_a_literal_mutated_by_rules_it_does_not_know
     in_tmpdir do
       write("sig/mutation.rbs", <<~RBS)
