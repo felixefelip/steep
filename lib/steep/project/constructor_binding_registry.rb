@@ -35,6 +35,7 @@ module Steep
         @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
         @declared = Set[] #: Set[String]
         @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
+        @born_objects = {} #: Hash[String, Hash[Symbol, Symbol]]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
         @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
@@ -105,6 +106,12 @@ module Steep
       # each with how (`ConstructorBindingAnalyzer::Scan#born_hashes`).
       def born_hashes(class_name)
         @born_hashes.fetch(class_name.to_s.delete_prefix("::"), {})
+      end
+
+      # The ivars a statement of a body of `class_name` sets to `Klass.new`
+      # handed nothing, each with how.
+      def born_objects(class_name)
+        @born_objects.fetch(class_name.to_s.delete_prefix("::"), {})
       end
 
       MIXIN_HOOKS = %i[included extended prepended append_features extend_object prepend_features].freeze
@@ -229,7 +236,9 @@ module Steep
         scan.class_bodies.each { |class_name, count| @class_bodies[class_name] += count }
         scan.mixin_bodies.each { |class_name, bodies| (@mixin_bodies[class_name] ||= []).concat(bodies) }
         @declared.merge(scan.declared)
-        scan.born_hashes.each { |class_name, ivars| (@born_hashes[class_name] ||= {}).merge!(ivars, &TypeInference::ConstructorBindingAnalyzer::JOIN_BIRTHS) }
+        [[@born_hashes, scan.born_hashes], [@born_objects, scan.born_objects]].each do |index, scanned|
+          scanned.each { |class_name, ivars| (index[class_name] ||= {}).merge!(ivars, &TypeInference::ConstructorBindingAnalyzer::JOIN_BIRTHS) }
+        end
         merge_bodies(@methods, scan.methods)
         merge_bodies(@singleton_methods, scan.singleton_methods)
         @nodes << node
@@ -273,6 +282,7 @@ module Steep
         end
         hashes = hash_memos
         hashes.each { |name, ivar| names << name << ivar }
+        @born_objects.each_value { |ivars| names.merge(ivars.keys) }
         @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
         names.merge(keyed_memo_names)
         @uses = uses_by_name(names)

@@ -124,6 +124,15 @@ module Steep
           ivar if HashMutation.confined?(constr.literal_method_registry, Specializations::Receivers.uses_on(constr, ivar, singleton))
         end
 
+        # An object a statement of the class body sets `ivar` to with
+        # `Klass.new`, reached through the ivar itself, kept on the terms
+        # `tracked` keeps a memo's.
+        def born_object(constr, singleton, ivar, instance)
+          return unless instance.is_a?(AST::Types::Name::Instance) && constr.constructor_bindings.born_objects(singleton.name).key?(ivar)
+
+          ivar if fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, nil, nil) && confined?(constr, singleton, instance, ivar)
+        end
+
         # What a memo still `nil` builds: the object `Klass.new` does, or, where
         # calls are made on it first, what the memo's own check, entered with
         # the ivar `nil`, left the ivar holding.
@@ -170,7 +179,7 @@ module Steep
           return constr if ancestors.any? { |name| registry.defines?(name, :inherited, singleton: true) }
 
           memos = ObjectStates.class_side_bodies(constr, singleton).filter_map { |_, _, body| body&.memoizes }
-          memos += registry.born_hashes(singleton.name).filter_map { |ivar, how| ivar if how == :or_asgn }
+          memos += [registry.born_hashes(singleton.name), registry.born_objects(singleton.name)].flat_map { |born| born.filter_map { |ivar, how| ivar if how == :or_asgn } }
           return constr if memos.empty?
 
           constr.update_type_env { |env| env.refine_types(instance_variable_types: memos.to_h { |ivar| [ivar, AST::Builtin.nil_type] }) }
@@ -217,14 +226,17 @@ module Steep
         end
 
         # `[ivar, owner, method name]` for each `def self.m = @ivar ||= value`
-        # on the class's ancestors, and `[ivar, nil, ivar]` for each hash the
-        # class body sets an ivar to (`born_hash`). One whose `Klass.new` they
-        # follow holds no object state only while it is `nil`.
+        # on the class's ancestors, and `[ivar, nil, ivar]` for each hash or
+        # object the class body sets an ivar to (`born_hash`, `born_object`).
+        # One whose `Klass.new` they follow holds no object state only while it
+        # is `nil`.
         def value_memos(constr, singleton)
           memos = ObjectStates.class_side_bodies(constr, singleton).filter_map do |owner, method_name, body|
             [body.memoizes, owner, method_name] if body&.memoizes
           end
-          memos + constr.constructor_bindings.born_hashes(singleton.name).each_key.map { |ivar| [ivar, nil, ivar] }
+          registry = constr.constructor_bindings
+          born = registry.born_hashes(singleton.name).keys | registry.born_objects(singleton.name).keys
+          memos + born.map { |ivar| [ivar, nil, ivar] }
         end
 
         # `@x ||= value` where the env knows more of `@x` than its declaration:
@@ -246,14 +258,23 @@ module Steep
         end
 
         # A class body setting a hash it keeps (`born_hash`) to `{}` leaves it
-        # holding the empty record.
+        # holding the empty record; one setting an object it keeps
+        # (`born_object`) to `Klass.new`, what `Klass.new` holds.
         def born(pair, ivar, value)
           constr = pair.constr
           singleton = constr.self_type
-          return pair unless !constr.method_context && singleton.is_a?(AST::Types::Name::Singleton) && value.type == :hash && value.children.empty?
-          return pair unless born_hash(constr, singleton, ivar)
+          return pair unless !constr.method_context && singleton.is_a?(AST::Types::Name::Singleton)
 
-          pair.with(constr: constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => EMPTY_HASH }) })
+          state = born_state(constr, singleton, ivar, value, pair.type) or return pair
+          pair.with(constr: constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => state }) })
+        end
+
+        def born_state(constr, singleton, ivar, value, type)
+          return EMPTY_HASH if value.type == :hash && value.children.empty? && born_hash(constr, singleton, ivar)
+          return unless TypeInference::ConstructorBindingAnalyzer::HandedBack.fresh_object?(value)
+
+          instance = ObjectStates.state_in(type)&.back_type || type
+          fresh_state(constr, instance) if born_object(constr, singleton, ivar, instance)
         end
 
         def or_arm(current, declared)

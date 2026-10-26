@@ -191,7 +191,8 @@ module Steep
         def held(constr, singleton)
           memos = memo_ivars(constr, singleton.name)
           ObjectStates.self_ivars(constr).filter_map do |ivar, type|
-            value = memos.include?(ivar) ? type : ObjectStates.settled(constr, type)
+            kept = memos.include?(ivar) || ClassMemos.born_object(constr, singleton, ivar, ObjectStates.state_in(type)&.back_type)
+            value = kept ? type : ObjectStates.settled(constr, type)
             [ivar, value] if ObjectStates.state_in(value)
           end.to_h
         end

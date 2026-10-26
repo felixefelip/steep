@@ -134,6 +134,47 @@ class ClassStateAcrossBodiesTest < Minitest::Test
     assert_equal ["def post_ids; []; end"], chunks(ruby)
   end
 
+  def held_by_ivar(born: "@rules = Rules.new", before: "", after: "")
+    inflector(before: before, after: after).sub("def self.rules\n    @rules ||= Rules.new\n  end\n", born).gsub(/(?<![@\w])rules\./, "@rules.")
+  end
+
+  def held_by_ivar_rbs(extra = "")
+    rbs("class").sub("  def self.rules: () -> Rules\n", extra)
+  end
+
+  def test_an_object_the_class_body_sets_an_ivar_to_keeps_its_state
+    {
+      "set" => held_by_ivar,
+      "set by a memo" => held_by_ivar(born: "@rules ||= Rules.new")
+    }.each do |label, inflector|
+      assert_equal FOLDED, chunks(RULES + inflector + model, signatures: held_by_ivar_rbs), label
+    end
+  end
+
+  def test_declines_an_object_an_ivar_holds_that_something_else_may_change
+    {
+      "set again by a method" => [held_by_ivar(after: "def self.reset! = (@rules = Rules.new)"), "  def self.reset!: () -> Rules\n"],
+      "handed to another method" => [held_by_ivar(after: "def self.take(r) = r\n  take(@rules)"), "  def self.take: (Rules r) -> Rules\n"]
+    }.each do |label, (inflector, extra)|
+      refute_equal FOLDED, chunks(RULES + inflector + model, signatures: held_by_ivar_rbs(extra)), label
+    end
+  end
+
+  def test_an_object_an_ivar_holds_changed_by_a_later_body_does_not_fold
+    add = "def self.add(rule, replacement) = @rules.singular(rule, replacement)"
+    ruby = RULES + held_by_ivar(after: add) + model(body: "Inflector.add(/posts\\z/, \"article\")\n  has_many_like :posts")
+    refute_includes chunks(ruby, signatures: held_by_ivar_rbs("  def self.add: (Regexp rule, String replacement) -> untyped\n")), "def post_ids; []; end"
+  end
+
+  def test_an_object_an_ivar_holds_handed_out_and_changed_by_a_later_body_does_not_fold
+    ruby = RULES + held_by_ivar(after: "def self.rules = @rules") + model(body: "Inflector.rules.singular(/posts\\z/, \"article\")\n  has_many_like :posts")
+    refute_includes chunks(ruby, signatures: held_by_ivar_rbs("  def self.rules: () -> Rules\n")), "def post_ids; []; end"
+  end
+
+  def test_an_object_an_ivar_holds_does_not_fold_before_the_body_sets_it
+    assert_equal [nil, nil], chunks(RULES + model + held_by_ivar, signatures: held_by_ivar_rbs)
+  end
+
   CONFIG_RBS = <<~RBS
     class Config
       attr_reader name: Symbol
