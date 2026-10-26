@@ -741,6 +741,8 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
     class Stamp
       def to_str: () -> String
+      def to_a: () -> Array[untyped]
+      def to_int: () -> Integer
     end
   RBS
 
@@ -780,7 +782,9 @@ class AccumulatedIvarStateTest < Minitest::Test
         body: wipe, post: "Helper.go", outside: "class Middle\n  def self.go = Inflector.wipe\nend\n\nclass Helper\n  def self.go = Middle.go\nend\n"
       ),
       "by key from another class" => keyed_across(post: "def self.reset = (Inflector.instances[:en] = Inflector::Rules.new)\nreset"),
-      "through a conversion the runtime calls" => keyed_across(body: wipe, post: '"a" + Stamp.new', outside: "class Stamp\n  def to_str = (Inflector.wipe && \"\")\nend\n")
+      "through a conversion the runtime calls" => keyed_across(body: wipe, post: '"a" + Stamp.new', outside: "class Stamp\n  def to_str = (Inflector.wipe && \"\")\nend\n"),
+      "through a splat" => keyed_across(body: wipe, post: "[*Stamp.new]", outside: "class Stamp\n  def to_a = (Inflector.wipe && [])\nend\n"),
+      "through an index the runtime converts" => keyed_across(body: wipe, post: "[1][Stamp.new]", outside: "class Stamp\n  def to_int = (Inflector.wipe && 0)\nend\n")
     }.each do |label, ruby|
       refute_includes chunks(ruby, rbs: ACROSS_RBS).flatten, "def post_ids; []; end", label
     end

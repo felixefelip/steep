@@ -11,6 +11,10 @@ module Steep
     # classes have no Ruby body to analyze and are simply absent — `bindings_for`
     # returns nil and the caller falls through.
     class ConstructorBindingRegistry
+      # The methods, of any class, a call of which may run a store into a hash
+      # memo, by name, and whether `new` may, through an `initialize` that does.
+      StoringClosure = Struct.new(:methods, :constructs)
+
       def self.build(project)
         new.tap { |r| r.build(project) }
       end
@@ -32,8 +36,9 @@ module Steep
         @declared = Set[] #: Set[String]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
+        @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
         @class_body_storing = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
-        @storing_closure = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
+        @storing_closure = {} #: Hash[[Symbol, Symbol], StoringClosure?]
       end
 
       # @return self
@@ -149,9 +154,9 @@ module Steep
         @keyed_memo_names = keyed.empty? ? Set[] : keyed.each_value.flat_map(&:keys).to_set | %i[new allocate]
       end
 
-      # Every method, of any class, a call of which may run a store into the
-      # hash `memo` keeps in `ivar`, by name; nil where a store may run from
-      # code no method name stands for.
+      # The calls that may run a store into the hash `memo` keeps in `ivar`
+      # (`StoringClosure`); nil where a store may run from code no method name
+      # stands for.
       def storing_closure(memo, ivar)
         index_uses unless @uses
         @storing_closure[[memo.to_sym, ivar.to_sym]]
@@ -165,8 +170,8 @@ module Steep
       end
 
       # The class methods that store into the hash `memo` keeps in `ivar`,
-      # where every store is made by a class body on its own class
-      # (`class_body_storing_methods`); nil otherwise.
+      # where every store is made by a class body on its own class; nil
+      # otherwise.
       def class_body_storing(memo, ivar)
         index_uses unless @uses
         @class_body_storing[[memo.to_sym, ivar.to_sym]]
@@ -261,9 +266,9 @@ module Steep
         @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
         names.merge(keyed_memo_names)
         @uses = uses_by_name(names)
-        @calls = calls_by_name(keyed_memo_names)
-        @class_body_storing = hashes.to_h { |memo, ivar| [[memo, ivar], class_body_storing_methods(memo, ivar)] }
+        calls_named(keyed_memo_names)
         @storing_closure = hashes.to_h { |memo, ivar| [[memo, ivar], closure_of_stores(memo, ivar)] }
+        @class_body_storing = @storing_closure.transform_values { |closure| class_body_storing_methods(closure) }
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
@@ -271,60 +276,51 @@ module Steep
         end
       end
 
-      def calls_by_name(names)
-        return {} if names.empty?
-
-        @nodes.each_with_object({}) do |node, found|
-          TypeInference::ClassMemoAnalyzer.calls(node, names: names).each { |name, calls| (found[name] ||= []).concat(calls) }
+      # Every call the project makes of one of `names`, each name looked for
+      # in the sources once.
+      def calls_named(names)
+        unscanned = names.to_set - @calls.keys
+        unless unscanned.empty?
+          unscanned.each { |name| @calls[name] = [] }
+          @nodes.each do |node|
+            TypeInference::ClassMemoAnalyzer.calls(node, names: unscanned).each { |name, calls| @calls[name].concat(calls) }
+          end
         end
+        names.flat_map { |name| @calls[name] }
       end
 
       # Each store into the hash is a use of the memo or its ivar on `self`
-      # (`ClassMemoAnalyzer::Use`), made by a class body or by a class method
-      # that stores; each call of a storing method is one too, by its name.
-      def class_body_storing_methods(memo, ivar)
-        stores = [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| HASH_STORES.include?(use.called) }
-        return unless stores.all? { |use| use.kind == :statement || use.within }
-
-        storing = storing_methods(stores.filter_map(&:within).to_set)
-        called_by_class_bodies = @nodes.all? do |node|
-          TypeInference::ClassMemoAnalyzer.calls(node, names: storing).each_value.all? do |calls|
-            calls.all? { |call| call.kind == :statement || storing.include?(call.within) }
-          end
-        end
-        storing if called_by_class_bodies
+      # (`ClassMemoAnalyzer::Use`).
+      def stores_into(memo, ivar)
+        [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| HASH_STORES.include?(use.called) }
       end
 
       def closure_of_stores(memo, ivar)
-        stores = [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| HASH_STORES.include?(use.called) }
+        stores = stores_into(memo, ivar)
         return if stores.any? { |use| use.kind != :statement && !use.within }
 
         storing = stores.filter_map(&:within).to_set
         loop do
-          storing |= [:new] if storing.include?(:initialize)
-          calls = @nodes.flat_map { |node| TypeInference::ClassMemoAnalyzer.calls(node, names: storing).values.flatten }
+          constructs = storing.include?(:initialize)
+          calls = calls_named(constructs ? storing | [:new] : storing)
           return if calls.any? { |call| call.kind == :escape || !(call.in_class_body || call.enclosing) }
 
           grown = calls.filter_map(&:enclosing).to_set - storing
-          return storing if grown.empty?
+          return StoringClosure.new(storing - [:initialize], constructs) if grown.empty?
 
           storing |= grown
         end
+      end
+
+      # The closure, where each call of its methods is a statement of a class
+      # body on its own class or is made by one of them on `self`.
+      def class_body_storing_methods(closure)
+        return unless closure && !closure.constructs
+
+        closure.methods if calls_named(closure.methods).all? { |call| call.kind == :statement || closure.methods.include?(call.within) }
       end
 
       HASH_STORES = HashMutation::STORES.to_set { |key| key.split("#").last.to_sym }.freeze
-
-      # `storing` with every class method that calls one of them on `self`.
-      def storing_methods(storing)
-        loop do
-          grown = @singleton_methods.each_value.flat_map do |methods|
-            methods.filter_map { |name, bodies| name if !storing.include?(name) && bodies.any? { |body| body&.self_sends&.intersect?(storing) } }
-          end
-          return storing if grown.empty?
-
-          storing |= grown
-        end
-      end
 
       # The ivars a class's methods start as an empty array, and the readers
       # that hand them out.

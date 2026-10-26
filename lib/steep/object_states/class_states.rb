@@ -125,9 +125,9 @@ module Steep
         # (`ClassMemos.stored_through`).
         def moved(constr, node, receiver_type, handed)
           states = constr.context.type_env.class_states
-          return constr if states.empty?
-
           receiver = receiver_type.name if receiver_type.is_a?(AST::Types::Name::Singleton)
+          return constr unless states.any? { |name, ivars| name == receiver || handed.include?(name) || ivars.each_value.any?(AST::Types::Record) }
+
           exit = ObjectStates.exit_of(constr, node, under: :stateful?)
           call = ObjectStates.recorded_call(constr, node)
           left = states.to_h do |name, ivars|

@@ -275,16 +275,20 @@ module Steep
           value_memos(constr, singleton).any? do |held, _, method_name|
             next false unless held == ivar
 
-            storing = constr.constructor_bindings.storing_closure(method_name, ivar)
-            storing.nil? || storing.include?(call.method_name) || called_implicitly?(constr, storing - %i[initialize new])
+            closure = constr.constructor_bindings.storing_closure(method_name, ivar)
+            closure.nil? || closure.methods.include?(call.method_name) || (closure.constructs && call.method_name == :new) ||
+              called_implicitly?(constr, closure.methods)
           end
         end
 
-        # Conversions the runtime calls with no send written for them.
-        IMPLICIT_PROTOCOLS = %i[each to_ary to_str to_hash to_proc coerce].freeze
-
+        # A method the runtime may call with no send written for it: one of
+        # `Class`'s, or of a protocol declared as a top-level interface
+        # (`_ToA`, `_ToInt`, `_Each`, ...).
         def called_implicitly?(constr, names)
-          names.intersect?(IMPLICIT_PROTOCOLS) || overrides_class_method?(constr, names)
+          builder = constr.checker.factory.definition_builder
+          overrides_class_method?(constr, names) || builder.env.interface_decls.each_key.any? do |name|
+            name.namespace.empty? && builder.build_interface(name).methods.each_key.any? { |method| names.include?(method) }
+          end
         end
 
         # `Klass.new` whose `initialize` chain only binds or stores what it is
