@@ -38,8 +38,8 @@ module Steep
       # the instance method, or with `singleton` the class method, whose body
       # makes it, and `owner` the module that defines that method, as written;
       # `in_class_body` where a statement of a class body makes it, outside
-      # any block.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body) do
+      # any block; `on_self` where it is made on `self`.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
           value&.each { |use| use.each_forwarder(&block) }
@@ -188,6 +188,7 @@ module Steep
             use.enclosing, use.singleton = defined_in(node)
             use.owner = owner_of(node)
             use.in_class_body = in_class_body
+            use.on_self = on_self
           end
         end
         record_named(name, arguments)

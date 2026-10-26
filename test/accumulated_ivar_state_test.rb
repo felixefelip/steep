@@ -1039,4 +1039,67 @@ class AccumulatedIvarStateTest < Minitest::Test
 
     assert_equal [[nil], [nil]], chunks(reopen + source)
   end
+
+  BOX_RBS = <<~RBS
+    class Box
+      @entries: Hash[Symbol, Symbol]
+      def initialize: () -> void
+      def put: (Symbol key, Symbol value) -> Symbol
+      def get: (Symbol key) -> Symbol?
+    end
+    class Inflector
+      self.@box: Box?
+      def self.box: () -> Box
+      def self.has_many_like: (Symbol name) -> untyped
+    end
+    class Elsewhere
+      def self.run: () -> untyped
+    end
+  RBS
+
+  def box_source(elsewhere: "")
+    <<~RUBY
+      class Box
+        def initialize
+          @entries = {}
+        end
+
+        def put(key, value)
+          @entries[key] = value
+        end
+
+        def get(key)
+          @entries[key]
+        end
+      end
+
+      class Inflector
+        def self.box = @box ||= Box.new
+
+        box.put(:posts, :post)
+        box.put(:news, :news)
+
+        def self.has_many_like(name)
+          class_eval "def \#{box.get(name)}_ids; []; end"
+        end
+
+        has_many_like :posts
+        has_many_like :news
+      end
+
+      class Elsewhere
+        def self.run
+          #{elsewhere}
+        end
+      end
+    RUBY
+  end
+
+  def test_a_hash_the_initialize_of_a_memo_s_object_sets_keeps_what_the_class_body_stores
+    assert_equal [["def post_ids; []; end"], ["def news_ids; []; end"]], chunks(box_source, rbs: BOX_RBS)
+  end
+
+  def test_declines_a_hash_in_a_memo_s_object_that_another_class_stores_into
+    assert_equal [[nil], [nil]], chunks(box_source(elsewhere: "Inflector.box.put(:posts, :other)"), rbs: BOX_RBS)
+  end
 end

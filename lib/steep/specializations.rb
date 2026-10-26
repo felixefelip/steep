@@ -296,8 +296,13 @@ module Steep
         state.is_a?(AST::Types::ObjectState) ? state.ivars : {}
       end
 
+      # A `super` runs on `self`, whatever type its call is resolved on.
+      def self.receiver_of(node, call)
+        node.type == :super ? AST::Types::Self.instance : call.receiver_type
+      end
+
       def self.recorded_receiver_ivars(node, typing)
-        receiver_ivars(typing.call_of(node: node).receiver_type, typing.self_ivars_of_call(node: node), typing.class_states_of_call(node: node))
+        receiver_ivars(receiver_of(node, typing.call_of(node: node)), typing.self_ivars_of_call(node: node), typing.class_states_of_call(node: node))
       rescue Typing::UnknownNodeError
         {}
       end
@@ -307,7 +312,7 @@ module Steep
       def self.at_call(node, typing, call, self_ivars:, class_states:, keyed_self:, exact_self:)
         from_send(
           node, typing, call: call,
-          receiver_ivars: receiver_ivars(call.receiver_type, self_ivars, class_states),
+          receiver_ivars: receiver_ivars(receiver_of(node, call), self_ivars, class_states),
           class_states: callee_class_states(call, class_states),
           self_type: keyed_self, exact_self: exact_self
         )
@@ -478,6 +483,20 @@ module Steep
           keyword_defaults: @keyword_defaults,
           self_type: self_type,
           self_ivars: @self_ivars,
+          class_states: @class_states,
+          block: @block
+        )
+      end
+
+      def with_self_ivars(self_ivars)
+        Arguments.new(
+          positionals: @positionals,
+          keywords: @keywords,
+          keyword_rest: @keyword_rest,
+          positional_defaults: @positional_defaults,
+          keyword_defaults: @keyword_defaults,
+          self_type: @self_type,
+          self_ivars: self_ivars,
           class_states: @class_states,
           block: @block
         )

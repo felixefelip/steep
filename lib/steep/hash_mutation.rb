@@ -195,7 +195,7 @@ module Steep
         writes = [] #: Array[TypeInference::ClassMemoAnalyzer::Use]
         constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.each do |ancestor|
           registry.method_bodies(ancestor.name.to_s).each do |name, bodies|
-            next if name == :initialize
+            next if name == :initialize || registry.initializing?(name)
 
             bodies.each do |body|
               made = body_writes(constr, instance, ivar, name, body) or return
@@ -236,6 +236,10 @@ module Steep
       # reads the hash or stores into it.
       def confined?(literal_methods, uses)
         uses.all? { |use| confined_use?(literal_methods, use) }
+      end
+
+      def reads_only?(constr, uses)
+        uses.all? { |use| reading_use?(constr, use) }
       end
 
       private

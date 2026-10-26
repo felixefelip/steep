@@ -1283,6 +1283,176 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  P20_RBS = <<~RBS
+    class P20Box
+      @entries: Hash[Symbol, Symbol]
+      def initialize: () -> void
+      def put: (Symbol key, Symbol value) -> Symbol
+      def get: (Symbol key) -> Symbol?
+    end
+    class P20Backend
+      @entries: Hash[Symbol, Symbol]
+      def initialize: (?Symbol? default) -> void
+      def put: (Symbol key, Symbol value) -> Symbol
+      def get: (Symbol key) -> Symbol?
+      def reset: () -> Hash[Symbol, Symbol]
+      def share: (Hash[Symbol, Symbol] other) -> untyped
+      private
+      def set_entries: (Symbol? default) -> Hash[Symbol, Symbol]
+    end
+    class P20Map < P20Backend
+      @lock: Integer
+      def initialize: (?Symbol? default) -> void
+    end
+    class P20Labels
+      @labels: Hash[Symbol, String]
+      @fallback: Symbol?
+      def initialize: () -> void
+      def get: (Symbol key) -> String?
+      def fallback: () -> Symbol?
+    end
+    class P20Use
+      def label: () -> untyped
+      def fallback: () -> untyped
+      def direct: () -> untyped
+      def through_super: () -> untyped
+      def missing: () -> untyped
+      def defaulted: () -> untyped
+    end
+  RBS
+
+  def p20_source(backend: "")
+    <<~RUBY
+      class P20Box
+        def initialize
+          @entries = {}
+        end
+
+        def put(key, value)
+          @entries[key] = value
+        end
+
+        def get(key)
+          @entries[key]
+        end
+      end
+
+      class P20Backend
+        def initialize(default = nil)
+          set_entries(default)
+        end
+
+        def put(key, value)
+          @entries[key] = value
+        end
+
+        def get(key)
+          @entries[key]
+        end
+      #{backend.gsub(/^/, "  ")}
+
+        private
+
+        def set_entries(default)
+          if default
+            @entries = Hash.new(default)
+          else
+            @entries = {}
+          end
+        end
+      end
+
+      class P20Map < P20Backend
+        def initialize(default = nil)
+          super(default)
+          @lock = 1
+        end
+      end
+
+      class P20Labels
+        def initialize
+          @labels = { a: "x" }
+          @fallback = nil
+        end
+
+        def get(key)
+          @labels[key]
+        end
+
+        def fallback
+          @fallback
+        end
+      end
+
+      class P20Use
+        def label
+          labels = P20Labels.new
+          labels.get(:a)
+        end
+
+        def fallback
+          labels = P20Labels.new
+          labels.fallback
+        end
+
+        def direct
+          box = P20Box.new
+          box.put(:a, :x)
+          box.get(:a)
+        end
+
+        def through_super
+          map = P20Map.new
+          map.put(:a, :x)
+          map.get(:a)
+        end
+
+        def missing
+          map = P20Map.new
+          map.put(:a, :x)
+          map.get(:b)
+        end
+
+        def defaulted
+          map = P20Map.new(:none)
+          map.put(:a, :x)
+          map.get(:a)
+        end
+      end
+    RUBY
+  end
+
+  def test_a_hash_the_initialize_chain_sets_is_followed_through_super_and_a_method_it_calls_on_self
+    in_tmpdir do
+      write("sig/map.rbs", P20_RBS)
+      write("app/map.rb", p20_source)
+      types = specialized_body_types("app/map.rb")
+
+      assert_equal ":x", types.fetch("direct")
+      assert_equal ":x", types.fetch("through_super")
+      assert_equal "nil", types.fetch("missing")
+      assert_equal "(::String | nil)", types.fetch("label")
+      assert_equal "nil", types.fetch("fallback")
+      assert_equal "(::Symbol | nil)", types.fetch("defaulted")
+    end
+  end
+
+  def test_declines_a_hash_the_initialize_chain_sets_that_something_else_may_change
+    {
+      "a method run after initialize sets it" => "def reset = set_entries(nil)",
+      "a method hands it on" => "def share(other) = other.replace(@entries)"
+    }.each do |label, backend|
+      in_tmpdir do
+        write("sig/map.rbs", P20_RBS)
+        write("app/map.rb", p20_source(backend: backend))
+        types = specialized_body_types("app/map.rb")
+
+        assert_equal ":x", types.fetch("direct"), label
+        assert_equal "(::Symbol | nil)", types.fetch("through_super"), label
+      end
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)

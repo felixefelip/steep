@@ -40,6 +40,7 @@ module Steep
         @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
         @class_body_storing = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
         @storing_closure = {} #: Hash[[Symbol, Symbol], StoringClosure?]
+        @initializing = Set[] #: Set[Symbol]
       end
 
       # @return self
@@ -176,6 +177,14 @@ module Steep
         @calls.fetch(name.to_sym, [])
       end
 
+      # Whether `name` runs only while an object is initialized: every call
+      # the project makes of it is made on `self` by an `initialize`, or by
+      # another method that does.
+      def initializing?(name)
+        index_uses unless @uses
+        @initializing.include?(name.to_sym)
+      end
+
       # The class methods that store into the hash `memo` keeps in `ivar`,
       # where every store is made by a class body on its own class; nil
       # otherwise.
@@ -270,10 +279,30 @@ module Steep
         calls_named(keyed_memo_names)
         @storing_closure = hashes.to_h { |memo, ivar| [[memo, ivar], closure_of_stores(memo, ivar)] }
         @class_body_storing = @storing_closure.transform_values { |closure| class_body_storing_methods(closure) }
+        @initializing = initializing_methods
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.block_calls(node, names: yielders).each { |name, kinds| (@block_calls[name] ||= []).concat(kinds) }
+        end
+      end
+
+      def initializing_methods
+        reached = Set[] #: Set[Symbol]
+        sends = @initializers.each_value.flat_map { |bodies| bodies.flat_map { |body| body&.self_sends.to_a } }
+        until sends.empty?
+          names = sends.to_set - reached - [:initialize]
+          reached.merge(names)
+          sends = @methods.each_value.flat_map { |methods| names.flat_map { |name| methods.fetch(name, []).flat_map { |body| body&.self_sends.to_a } } }
+        end
+        calls = reached.to_h { |name| [name, calls_named([name])] }
+        loop do
+          kept = reached.select do |name|
+            calls[name].all? { |call| call.on_self && !call.singleton && (call.enclosing == :initialize || reached.include?(call.enclosing)) }
+          end.to_set
+          return kept if kept == reached
+
+          reached = kept
         end
       end
 
