@@ -34,6 +34,7 @@ module Steep
         @class_bodies = Hash.new(0) #: Hash[String, Integer]
         @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
         @declared = Set[] #: Set[String]
+        @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
         @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
@@ -97,6 +98,12 @@ module Steep
       def class_bodies(class_name)
         name = class_name.to_s.delete_prefix("::")
         @class_bodies[name] + (@mixin_bodies[name] || []).count { |names| names.none? { |mixed| inert?(mixed) } }
+      end
+
+      # The ivars a statement of a body of `class_name` sets to an empty hash,
+      # each with how (`ConstructorBindingAnalyzer::Scan#born_hashes`).
+      def born_hashes(class_name)
+        @born_hashes.fetch(class_name.to_s.delete_prefix("::"), {})
       end
 
       MIXIN_HOOKS = %i[included extended prepended append_features extend_object prepend_features].freeze
@@ -208,15 +215,12 @@ module Steep
         node = parse(content, path_name)
         return unless node
         scan = TypeInference::ConstructorBindingAnalyzer.scan(node)
-        scan.readers.each do |class_name, readers|
-          (@entries[class_name] ||= {}).merge!(readers)
-        end
-        scan.initializers.each do |class_name, initializers|
-          (@initializers[class_name] ||= []).concat(initializers)
-        end
+        scan.readers.each { |class_name, readers| (@entries[class_name] ||= {}).merge!(readers) }
+        scan.initializers.each { |class_name, initializers| (@initializers[class_name] ||= []).concat(initializers) }
         scan.class_bodies.each { |class_name, count| @class_bodies[class_name] += count }
         scan.mixin_bodies.each { |class_name, bodies| (@mixin_bodies[class_name] ||= []).concat(bodies) }
         @declared.merge(scan.declared)
+        scan.born_hashes.each { |class_name, ivars| (@born_hashes[class_name] ||= {}).merge!(ivars, &TypeInference::ConstructorBindingAnalyzer::JOIN_BIRTHS) }
         merge_bodies(@methods, scan.methods)
         merge_bodies(@singleton_methods, scan.singleton_methods)
         @nodes << node
@@ -255,13 +259,10 @@ module Steep
       # source read before the one that defines it.
       def index_uses
         names = Set[] #: Set[Symbol]
-        hashes = Set[] #: Set[[Symbol, Symbol]]
         @singleton_methods.each_value do |methods|
-          methods.each do |name, bodies|
-            bodies.each { |body| names << name << body.memo[0] if body&.memo }
-            bodies.each { |body| hashes << [name, body.memoized_hash] if body&.memoized_hash }
-          end
+          methods.each { |name, bodies| bodies.each { |body| names << name << body.memo[0] if body&.memo } }
         end
+        hashes = hash_memos
         hashes.each { |name, ivar| names << name << ivar }
         @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
         names.merge(keyed_memo_names)
@@ -274,6 +275,16 @@ module Steep
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.block_calls(node, names: yielders).each { |name, kinds| (@block_calls[name] ||= []).concat(kinds) }
         end
+      end
+
+      # `[memo, ivar]` for each hash a class keeps: what a memo of `{}` holds
+      # (`Body#memoized_hash`), or what an ivar a class body sets to `{}`
+      # holds, reached by the ivar itself.
+      def hash_memos
+        readers = @singleton_methods.each_value.flat_map do |methods|
+          methods.flat_map { |name, bodies| bodies.filter_map { |body| [name, body.memoized_hash] if body&.memoized_hash } }
+        end
+        readers.to_set | @born_hashes.each_value.flat_map { |ivars| ivars.each_key.map { |ivar| [ivar, ivar] } }
       end
 
       # Every call the project makes of one of `names`, each name looked for

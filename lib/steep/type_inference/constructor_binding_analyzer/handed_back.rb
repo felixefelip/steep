@@ -25,10 +25,10 @@ module Steep
             read = node.type == :or_asgn ? node.children[0] : node
             memo, method_name, key = read.children
             return unless read.type == :send && method_name == :[] && read.children.size == 3 && key.type == :lvar
-            return unless memo_reader?(memo)
 
+            name = memo_name(memo) or return
             index = positional.index(key.children[0]) or return
-            found << [memo.children[1], index]
+            found << [name, index]
             builds &&= node.type == :or_asgn && fresh_object?(node.children[1])
           end
           [*found.first, builds] if found.size == 1
@@ -47,17 +47,21 @@ module Steep
 
           receiver, method_name, *arguments = read.children
           if method_name == :[]
-            memo_read = memo_reader?(receiver) && arguments.size == 1
-            memos << receiver.children[1] if memo_read
-            memo_read
+            memo = memo_name(receiver) if arguments.size == 1
+            memos << memo if memo
+            !memo.nil?
           else
             calls << method_name if ObjectStates.on_self?(read)
             ObjectStates.on_self?(read)
           end
         end
 
-        def memo_reader?(node)
-          node&.type == :send && ObjectStates.on_self?(node) && node.children.size == 2
+        # How a call reaches a memo's hash: by the memo's name, called on
+        # `self` with nothing, or by the ivar that holds it.
+        def memo_name(node)
+          return node.children[0] if node&.type == :ivar
+
+          node.children[1] if node&.type == :send && ObjectStates.on_self?(node) && node.children.size == 2
         end
 
         # `[read, value]` where a hash's own method ends `read || store(key,

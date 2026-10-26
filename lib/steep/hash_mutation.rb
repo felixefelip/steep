@@ -65,7 +65,8 @@ module Steep
         keys = hash_method_keys(constr, method_name, private: private)
         answer = queried(constr, node, receiver_type, keys, arguments) and return answer
         return read_union(constr, node, receiver_type, keys, arguments, type: type) if record_union?(receiver_type)
-        if (receiver&.type == :lvar || CollectionMutation.entered_with?(constr, receiver)) && CollectionMutation.only?(constr, keys, WRITES)
+        memo = held_ivar(constr, receiver, receiver_type)
+        if (receiver&.type == :lvar || (!memo && CollectionMutation.entered_with?(constr, receiver))) && CollectionMutation.only?(constr, keys, WRITES)
           return written(constr, node, receiver, receiver_type, keys, arguments, type: type)
         end
         if CollectionMutation.only?(constr, keys, WRITES) && (state, ivar = read_off_state(constr, receiver))
@@ -75,14 +76,13 @@ module Steep
           return written_along(constr, node, along, receiver_type, keys, arguments, type: type)
         end
 
-        ivar = held_ivar(constr, receiver, receiver_type)
         if CollectionMutation.only?(constr, keys, KEY_READ)
-          read = read(constr, receiver_type, ivar, arguments) or return read_by_key(constr, receiver, arguments, type)
+          read = read(constr, receiver_type, memo, arguments) or return read_by_key(constr, receiver, arguments, type)
           return [read, constr.add_typing(node, type: read).constr]
         end
-        return [type, constr] unless ivar && CollectionMutation.only?(constr, keys, STORES)
+        return [type, constr] unless memo && CollectionMutation.only?(constr, keys, STORES)
 
-        stored_in_memo(constr, receiver, receiver_type, ivar, arguments, type)
+        stored_in_memo(constr, receiver, receiver_type, memo, arguments, type)
       end
 
       def record_union?(type)
@@ -450,9 +450,11 @@ module Steep
       end
 
       def held_ivar(constr, receiver, receiver_type)
-        return unless receiver_type.is_a?(AST::Types::Record) && ObjectStates.on_self?(receiver)
+        return unless receiver_type.is_a?(AST::Types::Record)
+        return ObjectStates::ClassMemos.tracked_hash(constr, ObjectStates.recorded_call(constr, receiver)) if ObjectStates.on_self?(receiver)
 
-        ObjectStates::ClassMemos.tracked_hash(constr, ObjectStates.recorded_call(constr, receiver))
+        singleton = constr.self_type
+        ObjectStates::ClassMemos.born_hash(constr, singleton, receiver.children[0]) if receiver&.type == :ivar && singleton.is_a?(AST::Types::Name::Singleton)
       end
 
       # A read by literal key on a union of records reads each member: what it

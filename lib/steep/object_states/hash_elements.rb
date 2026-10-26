@@ -66,7 +66,7 @@ module Steep
           built = constr.typing.type_of(node: value)
           instance = ObjectStates.state_in(built)&.back_type || built
           return unless literal_key?(key) && instance.is_a?(AST::Types::Name::Instance)
-          return unless keeps?(constr, receiver.children[1], ivar, instance)
+          return unless keeps?(constr, TypeInference::ConstructorBindingAnalyzer::HandedBack.memo_name(receiver), ivar, instance)
 
           state = ClassMemos.fresh_state(constr, instance) or return
           [state, AST::Types::Record.new(elements: record.elements.merge(key.value => state), required_keys: record.required_keys | [key.value])]
@@ -108,8 +108,7 @@ module Steep
           return unless singleton.is_a?(AST::Types::Name::Singleton) && node.type == :send
 
           receiver, method_name, *arguments = node.children
-          if method_name == :[] && receiver && ObjectStates.on_self?(receiver) && arguments.size == 1
-            memo = receiver.children[1]
+          if method_name == :[] && arguments.size == 1 && (memo = TypeInference::ConstructorBindingAnalyzer::HandedBack.memo_name(receiver))
             key_node = arguments[0]
           elsif ObjectStates.on_self?(node)
             memo, index, builds = ObjectStates.resolved_body(constr, singleton, method_name)&.last&.hands_back_element
