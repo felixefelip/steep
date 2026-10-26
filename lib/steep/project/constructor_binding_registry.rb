@@ -132,10 +132,27 @@ module Steep
         @uses.fetch(name.to_sym, [])
       end
 
-      # Every name `uses_of` answers for.
+      # Every name `uses_of` answers for, and every one `calls_of` does.
       def used_names
         index_uses unless @uses
-        @uses.keys.to_set
+        @uses.keys.to_set | keyed_memo_names
+      end
+
+      # Where a hash keeps a keyed memo (`Body#keyed_memo`), what builds its
+      # objects, and its class's methods, whose callers decide when what the
+      # memo stores may change.
+      def keyed_memo_names
+        return @keyed_memo_names if @keyed_memo_names
+
+        keyed = @methods.select { |_, methods| methods.each_value.any? { |bodies| bodies.any? { |body| body&.keyed_memo } } }
+        @keyed_memo_names = keyed.empty? ? Set[] : keyed.each_value.flat_map(&:keys).to_set | %i[new allocate]
+      end
+
+      # Every call the project makes of `name`, one of `keyed_memo_names`
+      # (`TypeInference::ClassMemoAnalyzer.calls`).
+      def calls_of(name)
+        index_uses unless @uses
+        @calls.fetch(name.to_sym, [])
       end
 
       # The class methods that store into the hash `memo` keeps in `ivar`,
@@ -191,6 +208,7 @@ module Steep
         @nodes << node
         @uses = nil
         @defined_names = nil
+        @keyed_memo_names = nil
       rescue StandardError, ::Parser::SyntaxError => e
         Steep.logger.warn { "[constructor_binding_registry] failed to ingest #{path_name}: #{e.message}" }
       end
@@ -232,12 +250,22 @@ module Steep
         end
         hashes.each { |name, ivar| names << name << ivar }
         @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
+        names.merge(keyed_memo_names)
         @uses = uses_by_name(names)
+        @calls = calls_by_name(keyed_memo_names)
         @class_body_storing = hashes.to_h { |memo, ivar| [[memo, ivar], class_body_storing_methods(memo, ivar)] }
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.block_calls(node, names: yielders).each { |name, kinds| (@block_calls[name] ||= []).concat(kinds) }
+        end
+      end
+
+      def calls_by_name(names)
+        return {} if names.empty?
+
+        @nodes.each_with_object({}) do |node, found|
+          TypeInference::ClassMemoAnalyzer.calls(node, names: names).each { |name, calls| (found[name] ||= []).concat(calls) }
         end
       end
 

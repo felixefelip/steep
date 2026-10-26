@@ -2,7 +2,7 @@ module Steep
   module TypeInference
     class ConstructorBindingAnalyzer
       # What a method's every returned value is (`Body#hands_back`,
-      # `#hands_back_element`, `#hands_back_elements`).
+      # `#hands_back_element`, `#hands_back_elements`, `#keyed_memo`).
       module HandedBack
         module_function
 
@@ -58,6 +58,39 @@ module Steep
 
         def memo_reader?(node)
           node&.type == :send && ObjectStates.on_self?(node) && node.children.size == 2
+        end
+
+        # `[read, value]` where a hash's own method ends `read || store(key,
+        # value)`, `read` being `super` or `self[key]` and `key` its first
+        # parameter, and stores nothing anywhere else.
+        def keyed_memo(args_node, body)
+          key = args_node.children.first
+          return unless key&.type == :arg && body
+
+          *before, tail = body.type == :begin ? body.children : [body]
+          return unless tail&.type == :or
+
+          read, stored = tail.children
+          _, method_name, stored_key, value = stored.children
+          return unless stored.type == :send && ObjectStates.on_self?(stored) && method_name == :store && stored.children.size == 4
+          return unless stored_key.type == :lvar && stored_key.children[0] == key.children[0] && entry_read?(read, key.children[0])
+
+          [read, value] unless [*before, read, value].any? { |node| stores?(node) }
+        end
+
+        def entry_read?(node, key)
+          return true if node.type == :zsuper
+
+          node.type == :send && ObjectStates.on_self?(node) && node.children[1] == :[] && node.children[2..] == [s_lvar(key)]
+        end
+
+        def s_lvar(name) = ::Parser::AST::Node.new(:lvar, [name])
+
+        def stores?(node)
+          return false unless node.is_a?(::Parser::AST::Node)
+          return true if node.type == :send && ObjectStates.on_self?(node) && node.children[1] == :store
+
+          node.children.any? { |child| stores?(child) }
         end
 
         def fresh_object?(node)

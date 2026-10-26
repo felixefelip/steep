@@ -2487,13 +2487,13 @@ module Steep
             if method_context&.method && method_context.super_method && (super_node = explicit_super(node, method_context.node))
               type, constr = synthesize(super_node, hint: hint)
               constr.typing.add_explicit_super(node, super_node)
-              constr.add_typing(node, type: type)
+              constr.add_typing(node, type: ObjectStates::KeyedMemo.read_type(constr, node) || type)
             elsif method_context && method_context.method
               if method_context.super_method
                 types = method_context.super_method.method_types.map {|method_type|
                   checker.factory.method_type(method_type).type.return_type
                 }
-                add_typing(node, type: union_type(*types))
+                add_typing(node, type: ObjectStates::KeyedMemo.read_type(self, node) || union_type(*types))
               else
                 fallback_to_any(node) do
                   Diagnostic::Ruby::UnexpectedSuper.new(node: node, method: method_context.name)

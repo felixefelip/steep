@@ -13,7 +13,7 @@ module Steep
         # where the ivar is still `nil`, the one it builds.
         def remembered(constr, call, node)
           element = HashElements.answered(constr, call, node) and return [element, constr]
-          return [nil, constr] unless ObjectStates.on_self?(node)
+          return [settled_memo(constr, call), constr] unless ObjectStates.on_self?(node)
           hash_ivar = tracked_hash(constr, call)
           return remembered_hash(constr, call, hash_ivar) if hash_ivar
 
@@ -21,7 +21,7 @@ module Steep
 
           ivar, instance, wrappers = tracked_memo(constr, call)
           current = ivar && constr.context.type_env[ivar]
-          state = ObjectStates.state_in(current) || (current.is_a?(AST::Types::Nil) && built(constr, call, node, ivar, instance, wrappers)) or return [nil, constr]
+          state = ObjectStates.state_in(current) || (current.is_a?(AST::Types::Nil) && built(constr, call, node, ivar, instance, wrappers)) or return [settled_memo(constr, call), constr]
           [call.with_return_type(state), constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => state }) }]
         end
 
@@ -134,12 +134,13 @@ module Steep
           AST::Types::ObjectState.new(back_type: instance, ivars: built_objects(constr, instance).merge(ivars))
         end
 
-        # The objects `Klass.new` called with nothing leaves in its ivars, as
-        # its check recorded them (`Constructed`).
+        # The objects and the values no call can change `Klass.new` called
+        # with nothing leaves in its ivars, as its check recorded them
+        # (`Constructed`).
         def built_objects(constr, instance)
           key = "#{instance.name.to_s.delete_prefix("::")}.new"
           constructed = ObjectStates.state_in(constr.specializations.return_type(key, "()", factory: constr.checker.factory))
-          constructed&.ivars&.select { |_, value| ObjectStates.state_in(value) } || {}
+          constructed&.ivars&.select { |_, value| ObjectStates.state_in(value) || ObjectStates.fixed?(value) } || {}
         end
 
         # The memos' ivars start `nil` in the one class body that runs code,
@@ -335,6 +336,24 @@ module Steep
           return unless wrappers.all? { |name| Tap.resolves?(constr, instance, name) }
 
           [ivar, instance, wrappers]
+        end
+
+        # The object a memo `@ivar ||= Klass.new` whose ivar nothing else
+        # writes holds, with the ivars no method but `initialize` writes.
+        def settled_memo(constr, call)
+          return unless call.is_a?(TypeInference::MethodCall::Typed)
+
+          singleton = call.receiver_type.is_a?(AST::Types::Self) ? constr.self_type : call.receiver_type
+          return unless singleton.is_a?(AST::Types::Name::Singleton)
+
+          owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
+          ivar, classes, wrappers = body&.memo
+          instance = call.return_type
+          return unless ivar && wrappers.empty? && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
+          return unless written_only_by?(constr, singleton, ivar, owner, call.method_name)
+
+          state = ObjectStates.settled(constr, fresh_state(constr, instance) || instance)
+          call.with_return_type(state) if state.is_a?(AST::Types::ObjectState)
         end
 
         # A method of the class whose every value is one of its tracked memos

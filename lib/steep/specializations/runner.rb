@@ -675,7 +675,7 @@ module Steep
         types = [typing.type_of(node: body), *values].reject { |type| type.is_a?(AST::Types::Bot) }
         return nil if types.empty? || types.any? { |type| type.is_a?(AST::Types::Any) }
 
-        AST::Types::Union.build(types: types)
+        AST::Types::Union.build(types: types.reject { |type| type.is_a?(AST::Types::ObjectState) && types.include?(type.back_type) })
       end
     end
   end

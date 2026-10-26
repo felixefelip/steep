@@ -76,6 +76,12 @@ module Steep
       # - `hands_back_elements`: `[memo, calls]` where every value it returns
       #   is an element of `memo` read or stored as above under any key, or
       #   one of `calls`, made on `self`; `memo` is nil where it reads none.
+      # - `keyed_memo`: on a hash's own method, `[read, value]` where it stores
+      #   `value` under its first parameter when `read` of it finds nothing
+      #   there (`super || store(key, value)`).
+      # - `outside_state`: whether it reads anything but its parameters, its
+      #   locals, `self`'s ivars and what it calls on them: a constant, a
+      #   global, a class variable or `self.class`.
       # - `memo`: `[ivar, class names, wrappers]` when its body is exactly
       #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
       #   it is written; or that `Klass.new` with calls that take a block made
@@ -95,7 +101,7 @@ module Steep
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
-        :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :hands_back_elements,
+        :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :hands_back_elements, :keyed_memo, :outside_state,
         keyword_init: true
       )
 
@@ -302,14 +308,18 @@ module Steep
         )
       end
 
+      OUTSIDE = %i[gvar cvar nth_ref back_ref].freeze
+
       def method_body(args_node, body, nesting: nil)
         writes = Set[] #: Set[Symbol]
         ivars = Set[] #: Set[Symbol]
         self_sends = Set[] #: Set[Symbol]
         consts = Set[] #: Set[String]
         calls = false
+        outside = false
         each_node(body) do |node|
           calls ||= CALLS.include?(node.type)
+          outside ||= OUTSIDE.include?(node.type) || (node.type == :send && node.children[1] == :class && node.children[0]&.type == :self)
           writes << node.children[0] if node.type == :ivasgn
           ivars << node.children[0] if node.type == :ivar
           consts.merge(referenced_names(node, nesting || [])) if node.type == :const
@@ -331,6 +341,8 @@ module Steep
           hands_back: HandedBack.calls(body),
           hands_back_element: HandedBack.element(args_node, body),
           hands_back_elements: HandedBack.elements(body),
+          keyed_memo: HandedBack.keyed_memo(args_node, body),
+          outside_state: outside || !consts.empty?,
           memo: nesting && memo_of(body, nesting),
           memoizes: memoized_ivar(body),
           memoized_hash: memoized_hash(body),
