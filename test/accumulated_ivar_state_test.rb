@@ -726,6 +726,66 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  ACROSS_RBS = KEYED_RBS.sub("  def self.has_many_like: (Symbol name) -> untyped\nend\n", <<~RBS)
+      def self.singularize: (String word) -> String
+    end
+    class Post
+      def self.has_many_like: (Symbol name) -> untyped
+      def self.reset: () -> untyped
+    end
+    class Helper
+      def self.go: () -> untyped
+    end
+    class Middle
+      def self.go: () -> untyped
+    end
+    class Stamp
+      def to_str: () -> String
+    end
+  RBS
+
+  def keyed_across(reads: "instance(:en)", body: "", post: "", outside: "")
+    keyed(body: body).sub(/  def self\.has_many_like.*\z/m, <<~RUBY)
+        def self.singularize(word)
+          result = word.dup
+          #{reads}.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+          result
+        end
+      end
+
+      #{outside}
+      class Post
+        def self.has_many_like(name) = class_eval("def \#{Inflector.singularize(name.to_s)}_ids; []; end")
+      #{post.gsub(/^/, "  ")}
+        has_many_like :posts
+        has_many_like :categories
+      end
+    RUBY
+  end
+
+  def test_an_object_a_hash_memo_keeps_holds_its_rules_for_a_macro_of_another_class
+    {
+      "read through the method that stores it" => keyed_across,
+      "read by key" => keyed_across(reads: "instances[:en]")
+    }.each do |label, ruby|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: ACROSS_RBS), label
+    end
+  end
+
+  def test_a_macro_of_another_class_never_reads_rules_a_store_since_replaced
+    wipe = "def self.wipe = (instances[:en] = Rules.new)"
+    {
+      "through a method of its own" => keyed_across(body: wipe, post: "def self.reset = Inflector.wipe\nreset"),
+      "through classes handed nothing of it" => keyed_across(
+        body: wipe, post: "Helper.go", outside: "class Middle\n  def self.go = Inflector.wipe\nend\n\nclass Helper\n  def self.go = Middle.go\nend\n"
+      ),
+      "by key from another class" => keyed_across(post: "def self.reset = (Inflector.instances[:en] = Inflector::Rules.new)\nreset"),
+      "through a conversion the runtime calls" => keyed_across(body: wipe, post: '"a" + Stamp.new', outside: "class Stamp\n  def to_str = (Inflector.wipe && \"\")\nend\n")
+    }.each do |label, ruby|
+      refute_includes chunks(ruby, rbs: ACROSS_RBS).flatten, "def post_ids; []; end", label
+    end
+  end
+
   def test_an_object_stored_again_under_the_key_is_never_answered_with_the_rules_of_the_one_it_replaced
     rbs = KEYED_RBS.sub("def self.wipe:", "def self.reset: () -> untyped\n    class Other\n      def self.go: () -> untyped\n    end\n    def self.wipe:")
     {

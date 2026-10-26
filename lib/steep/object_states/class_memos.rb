@@ -240,11 +240,11 @@ module Steep
         # In a class body, a call may reach a memo still `nil`: it holds what the
         # call's own check left it, or what its declaration says. So does a memo
         # whose object a method the call runs (`reached`) yields to a block.
-        def after_class_call(constr, exit, reached)
+        def after_class_call(constr, call, exit, reached)
           return constr if constr.method_context
 
           moved = memo_values(constr).select do |ivar, type|
-            type.is_a?(AST::Types::Nil) || (type.is_a?(AST::Types::Record) && (reached || !stored_in_class_bodies?(constr, ivar)))
+            type.is_a?(AST::Types::Nil) || (type.is_a?(AST::Types::Record) && (reached || may_store?(constr, constr.self_type, call, ivar)))
           end
           moved = moved.merge(yielded_memos(constr, reached)) if reached
           return constr if moved.empty?
@@ -255,13 +255,36 @@ module Steep
           end
         end
 
-        # Every store into the hash is made by a class body on its own class
-        # (`ConstructorBindingRegistry#class_body_storing`), so a call that
-        # reaches no class object leaves it as it was.
-        def stored_in_class_bodies?(constr, ivar)
-          value_memos(constr, constr.self_type).any? do |held, _, method_name|
-            held == ivar && constr.constructor_bindings.class_body_storing(method_name, ivar)
+        # What a call that may store into a hash memo of `singleton`, without
+        # reaching the class object, leaves the class holding: the record its
+        # check left there (`left`), or none.
+        def stored_through(constr, singleton, ivars, call, left)
+          ivars.filter_map do |ivar, type|
+            next [ivar, type] unless type.is_a?(AST::Types::Record) && may_store?(constr, singleton, call, ivar)
+
+            value = left&.[](ivar)
+            [ivar, value] if value.is_a?(AST::Types::Record)
+          end.to_h
+        end
+
+        # Whether `call` may run a store into the hash a memo of `singleton`
+        # keeps in `ivar` (`ConstructorBindingRegistry#storing_closure`).
+        def may_store?(constr, singleton, call, ivar)
+          return true unless call.is_a?(TypeInference::MethodCall::Typed)
+
+          value_memos(constr, singleton).any? do |held, _, method_name|
+            next false unless held == ivar
+
+            storing = constr.constructor_bindings.storing_closure(method_name, ivar)
+            storing.nil? || storing.include?(call.method_name) || called_implicitly?(constr, storing - %i[initialize new])
           end
+        end
+
+        # Conversions the runtime calls with no send written for them.
+        IMPLICIT_PROTOCOLS = %i[each to_ary to_str to_hash to_proc coerce].freeze
+
+        def called_implicitly?(constr, names)
+          names.intersect?(IMPLICIT_PROTOCOLS) || overrides_class_method?(constr, names)
         end
 
         # `Klass.new` whose `initialize` chain only binds or stores what it is

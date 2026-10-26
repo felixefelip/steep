@@ -33,6 +33,7 @@ module Steep
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
         @class_body_storing = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
+        @storing_closure = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
       end
 
       # @return self
@@ -148,6 +149,14 @@ module Steep
         @keyed_memo_names = keyed.empty? ? Set[] : keyed.each_value.flat_map(&:keys).to_set | %i[new allocate]
       end
 
+      # Every method, of any class, a call of which may run a store into the
+      # hash `memo` keeps in `ivar`, by name; nil where a store may run from
+      # code no method name stands for.
+      def storing_closure(memo, ivar)
+        index_uses unless @uses
+        @storing_closure[[memo.to_sym, ivar.to_sym]]
+      end
+
       # Every call the project makes of `name`, one of `keyed_memo_names`
       # (`TypeInference::ClassMemoAnalyzer.calls`).
       def calls_of(name)
@@ -254,6 +263,7 @@ module Steep
         @uses = uses_by_name(names)
         @calls = calls_by_name(keyed_memo_names)
         @class_body_storing = hashes.to_h { |memo, ivar| [[memo, ivar], class_body_storing_methods(memo, ivar)] }
+        @storing_closure = hashes.to_h { |memo, ivar| [[memo, ivar], closure_of_stores(memo, ivar)] }
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
@@ -283,6 +293,23 @@ module Steep
           end
         end
         storing if called_by_class_bodies
+      end
+
+      def closure_of_stores(memo, ivar)
+        stores = [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| HASH_STORES.include?(use.called) }
+        return if stores.any? { |use| use.kind != :statement && !use.within }
+
+        storing = stores.filter_map(&:within).to_set
+        loop do
+          storing |= [:new] if storing.include?(:initialize)
+          calls = @nodes.flat_map { |node| TypeInference::ClassMemoAnalyzer.calls(node, names: storing).values.flatten }
+          return if calls.any? { |call| call.kind == :escape || !(call.in_class_body || call.enclosing) }
+
+          grown = calls.filter_map(&:enclosing).to_set - storing
+          return storing if grown.empty?
+
+          storing |= grown
+        end
       end
 
       HASH_STORES = HashMutation::STORES.to_set { |key| key.split("#").last.to_sym }.freeze

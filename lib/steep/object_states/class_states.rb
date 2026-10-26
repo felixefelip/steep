@@ -36,8 +36,8 @@ module Steep
           states = exit.context.type_env.class_states
           singleton = exit.self_type
           if singleton.is_a?(AST::Types::Name::Singleton)
-            unset = ClassMemos.memo_values(exit).select { |_, type| type.is_a?(AST::Types::Nil) }
-            ivars = held(exit, singleton).merge(unset)
+            memos = ClassMemos.memo_values(exit).select { |_, type| type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Record) }
+            ivars = held(exit, singleton).merge(memos)
             states = ivars.empty? ? states.except(singleton.name) : states.merge(singleton.name => ivars)
           end
           outer.update_type_env { |env| env.update(class_states: states) }
@@ -120,20 +120,25 @@ module Steep
 
         # A call made on a class object whose state the env knows, or handed
         # one, leaves it holding what the call's own check left it, and where
-        # nothing says so, only what no call can change.
+        # nothing says so, only what no call can change. One that may store
+        # into another class's hash memo leaves it as its check left it there
+        # (`ClassMemos.stored_through`).
         def moved(constr, node, receiver_type, handed)
           states = constr.context.type_env.class_states
-          receiver = receiver_type.name if receiver_type.is_a?(AST::Types::Name::Singleton)
-          reached = states.keys.select { |name| name == receiver || handed.include?(name) }
-          return constr if reached.empty?
+          return constr if states.empty?
 
+          receiver = receiver_type.name if receiver_type.is_a?(AST::Types::Name::Singleton)
           exit = ObjectStates.exit_of(constr, node, under: :stateful?)
-          left = reached.to_h do |name|
-            ivars = name == receiver ? exit&.ivars : exit&.classes&.[](name)
-            [name, ObjectStates.moved_ivars(constr, AST::Types::Name::Singleton.new(name: name), states[name], ivars)]
+          call = ObjectStates.recorded_call(constr, node)
+          left = states.to_h do |name, ivars|
+            singleton = AST::Types::Name::Singleton.new(name: name)
+            next [name, ClassMemos.stored_through(constr, singleton, ivars, call, exit&.classes&.[](name))] unless name == receiver || handed.include?(name)
+
+            [name, ObjectStates.moved_ivars(constr, singleton, ivars, name == receiver ? exit&.ivars : exit&.classes&.[](name))]
           end
-          states = states.merge(left).reject { |_, ivars| ivars.empty? }
-          constr.update_type_env { |env| env.update(class_states: states) }
+          return constr if left == states
+
+          constr.update_type_env { |env| env.update(class_states: left.reject { |_, ivars| ivars.empty? }) }
         end
 
         # What a call's body may reach on its receiver, following the calls it
