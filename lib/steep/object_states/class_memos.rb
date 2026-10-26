@@ -145,13 +145,15 @@ module Steep
           AST::Types::ObjectState.new(back_type: instance, ivars: built_objects(constr, instance).merge(ivars))
         end
 
-        # The objects and the values no call can change `Klass.new` called
-        # with nothing leaves in its ivars, as its check recorded them
-        # (`Constructed`).
+        # The objects, the values no call can change and the hashes the checker
+        # follows that `Klass.new` called with nothing leaves in its ivars, as
+        # its check recorded them (`Constructed`).
         def built_objects(constr, instance)
           key = "#{instance.name.to_s.delete_prefix("::")}.new"
           constructed = ObjectStates.state_in(constr.specializations.return_type(key, "()", factory: constr.checker.factory))
-          constructed&.ivars&.select { |_, value| ObjectStates.state_in(value) || ObjectStates.fixed?(value) } || {}
+          constructed&.ivars&.select do |ivar, value|
+            ObjectStates.state_in(value) || ObjectStates.fixed?(value) || HashMutation.held(constr, instance, ivar, value, followed: true)
+          end || {}
         end
 
         # The memos' ivars start `nil` in the one class body that runs code,

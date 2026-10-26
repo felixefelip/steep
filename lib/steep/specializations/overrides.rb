@@ -34,6 +34,7 @@ module Steep
 
         key = Specializations.method_key(call.method_decls) or return nil
         return key unless @definitions.empty? || @definitions.include?(key)
+        return key if node.type == :super
 
         key if runs_declared_body?(call, key, node, exact_self, self_type)
       end

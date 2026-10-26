@@ -45,7 +45,7 @@ module Steep
         jumps = Exits.returned(constr.typing, pair_body(def_node)) or return
         env = pair.context.type_env
         params = HashMutation.param_exits(constr, def_node, arguments, env)
-        if !arguments.stateful? && (Constructed.constructor?(constr, def_node) || params.empty?)
+        if Constructed.constructor?(constr, def_node) ? arguments.class_states.empty? : !arguments.stateful? && params.empty?
           return jumps.empty? ? Constructed.record(constr, def_node, pair, params: params) : nil
         end
         return unless jumps.empty? || params.empty?
@@ -116,7 +116,7 @@ module Steep
           held ? declared?(constr, instance, ivar) && !rewritten.include?(ivar) : never_rewritten?(constr, instance, ivar)
         end
         bound = arguments.all? { |argument| plain_argument?(argument) } ? bound_values(constr, instance, bindings, arguments, followed: held) : {}
-        ivars = bound.merge(Constructed.kept(constr, constructed, held: held, rewritten: rewritten))
+        ivars = bound.merge(Constructed.kept(constr, constructed, held: held))
         return call if ivars.empty?
 
         call.with_return_type(AST::Types::ObjectState.new(back_type: instance, ivars: ivars))
@@ -155,13 +155,15 @@ module Steep
       end
 
       # `self_exit`, or every ivar as it stands where the call evaluates a
-      # string that only defines methods, or is a core array method acting on
-      # `self`'s own elements.
+      # string that only defines methods, is a core array method acting on
+      # `self`'s own elements, or a `super` reaching a core class's
+      # `initialize` (`initialize_chain`).
       def self_exit_or_unchanged(constr, node, on_self)
         exit = self_exit(constr, node, on_self)
         return exit if exit
 
-        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node) || (on_self && ArrayMutation.elements_only?(recorded_call(constr, node), constr))
+        call = recorded_call(constr, node)
+        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node) || Supers.core_initializer?(call, node) || (on_self && ArrayMutation.elements_only?(call, constr))
       end
 
       def hands_self?(constr, arguments, handed)
@@ -209,7 +211,7 @@ module Steep
       # checked under the contents this call's receiver holds (`:stateful?`),
       # or the records it was handed (`:hands_records?`).
       def exit_of(constr, node, under:)
-        return unless %i[send csend].include?(node.type) || Accumulators::LAMBDA_BODIES.include?(node.type)
+        return unless %i[send csend super].include?(node.type) || Accumulators::LAMBDA_BODIES.include?(node.type)
 
         call = recorded_call(constr, node)
         return unless call.is_a?(TypeInference::MethodCall::Typed) && Specializations.method_key(call.method_decls)
@@ -503,6 +505,21 @@ module Steep
         end
       end
 
+      # What the methods `body` calls on `self` may write, each resolved on
+      # `instance`. `may_write` alone is closed in the class that defines the
+      # caller, so it misses a subclass's override.
+      def callee_writes(constr, instance, body, visiting)
+        body.self_sends.each_with_object(Set[]) do |name, writes|
+          next if visiting.include?(name)
+
+          owner, callee = resolved_body(constr, instance, name)
+          next unless owner
+
+          writes.merge(may_write(constr, owner, name))
+          writes.merge(callee_writes(constr, instance, callee, [*visiting, name])) if callee
+        end
+      end
+
       private
 
       def held_value?(constr, node)
@@ -562,21 +579,6 @@ module Steep
 
       def handed_locals(arguments)
         LocalReach.argument_values(arguments).filter_map { |value| value.children[0] if value.type == :lvar }
-      end
-
-      # What the methods `body` calls on `self` may write, each resolved on
-      # `instance`. `may_write` alone is closed in the class that defines the
-      # caller, so it misses a subclass's override.
-      def callee_writes(constr, instance, body, visiting)
-        body.self_sends.each_with_object(Set[]) do |name, writes|
-          next if visiting.include?(name)
-
-          owner, callee = resolved_body(constr, instance, name)
-          next unless owner
-
-          writes.merge(may_write(constr, owner, name))
-          writes.merge(callee_writes(constr, instance, callee, [*visiting, name])) if callee
-        end
       end
 
       def may_write(constr, owner, method_name)

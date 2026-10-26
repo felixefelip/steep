@@ -131,7 +131,8 @@ module Steep
 
         writers = code_writers(context)
         @definition_keys = context.sources.each_value.flat_map { |source| Collector.definitions(source).keys }.to_set
-        @overrides = Overrides.new(factory: context.subtyping.factory, definitions: @definition_keys)
+        @factory = context.subtyping.factory
+        @overrides = Overrides.new(factory: @factory, definitions: @definition_keys)
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
@@ -309,10 +310,19 @@ module Steep
 
       # A call omitting an optional parameter does not leave it open: the body
       # runs with the definition's default, so the calls it makes, the value it
-      # returns and the chunk it writes can all turn on exactly that.
-      def with_defaults(arguments, def_node)
+      # returns and the chunk it writes can all turn on exactly that. A `.new`
+      # runs its `initialize` on an object that holds nothing yet.
+      def with_defaults(key, arguments, def_node)
         positionals, keywords = Collector.defaults(def_node)
+        arguments = arguments.with_self_ivars(fresh_ivars(key)) if Collector.constructor?(key, def_node)
         arguments.with_defaults(positionals: positionals, keywords: keywords)
+      end
+
+      def fresh_ivars(key)
+        name = RBS::TypeName.parse("::#{key.delete_suffix(".new")}")
+        @factory.definition_builder.build_instance(name).instance_variables.keys.to_h { |ivar| [ivar, AST::Builtin.nil_type] }
+      rescue RBS::BaseError
+        {}
       end
 
       # The tuples for the next generation: the ones already known, plus the ones
@@ -383,7 +393,7 @@ module Steep
 
         begin
           path, def_node = definitions.fetch(key)
-          typing = type_check(context, store.with_reads(nil), context.sources.fetch(path), { node_key(path, def_node) => with_defaults(arguments, def_node) })
+          typing = type_check(context, store.with_reads(nil), context.sources.fetch(path), { node_key(path, def_node) => with_defaults(key, arguments, def_node) })
           record_exit(key, arguments, typing, def_node)
         ensure
           @demanding.delete(memo)
@@ -593,7 +603,7 @@ module Steep
         active.group_by { |key, _| definitions.fetch(key).first }.to_h do |path, entries|
           bodies = entries.to_h do |key, arguments|
             def_node = definitions.fetch(key)[1]
-            [key, [def_node, arguments, node_key(path, def_node), with_defaults(arguments, def_node)]]
+            [key, [def_node, arguments, node_key(path, def_node), with_defaults(key, arguments, def_node)]]
           end
           outcome = @checks.outcome(bodies, store) { |logged, by_node| file_check(context, logged, context.sources.fetch(path), by_node) }
           @class_exits.merge!(outcome.class_exits)
@@ -605,7 +615,7 @@ module Steep
         paths = active.keys.filter_map { |key| definitions[key]&.first }.uniq
         by_node = active.to_h do |key, arguments|
           path, def_node = definitions.fetch(key)
-          [node_key(path, def_node), with_defaults(arguments, def_node)]
+          [node_key(path, def_node), with_defaults(key, arguments, def_node)]
         end
 
         paths.to_h do |path|

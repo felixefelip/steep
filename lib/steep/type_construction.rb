@@ -1622,7 +1622,7 @@ module Steep
 
           rhs_type, constr = synthesize(rhs, hint: context.type_env[name])
 
-          ObjectStates::ClassMemos.born(constr.ivasgn(node, rhs_type), name, rhs)
+          ObjectStates::EnteredSelf.assigned(ObjectStates::ClassMemos.born(constr.ivasgn(node, rhs_type), name, rhs), name, rhs)
 
         when :ivar
           yield_self do
@@ -1724,7 +1724,7 @@ module Steep
                 )
 
                 if call && constr
-                  constr.add_call(call)
+                  ObjectStates::Supers.after(constr.add_call(call), node)
                 else
                   error = Diagnostic::Ruby::UnresolvedOverloading.new(
                     node: node,

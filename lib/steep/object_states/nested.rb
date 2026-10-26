@@ -49,13 +49,15 @@ module Steep
         end
 
         # Whether each use of `ivar` only reads what it holds: an array, through
-        # a call `ClassMemos.reading_uses?` vouches for; an object of the
-        # project's, through a call that `inspects?` it.
+        # a call `ClassMemos.reading_uses?` vouches for; a hash, through one
+        # `HashMutation` does; an object of the project's, through a call that
+        # `inspects?` it.
         def reads_ivar?(constr, instance, ivar, uses, visiting)
           return true if ClassMemos.reading_uses?(constr, uses)
 
           held = declared_ivar_type(constr, instance, ivar)
           return false unless held.is_a?(AST::Types::Name::Instance)
+          return HashMutation.reads_only?(constr, uses) if held.name == AST::Builtin::Hash.module_name
 
           uses.all? { |use| use.kind == :receiver && use.called && inspects?(constr, held, use.called, visiting) }
         end
