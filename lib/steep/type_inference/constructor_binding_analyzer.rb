@@ -45,10 +45,12 @@ module Steep
       # constants is in `mixin_bodies` instead, as the names they may resolve
       # to: the mixed-in modules' hooks are the code it runs. `declared` is
       # every class or module the source writes a body for.
-      # Where both `@x = {}` and `@x ||= {}` set an ivar, the assignment.
+      # `born_hashes` and `born_objects`: the ivars a statement of a body sets
+      # to `{}`, or to `Klass.new` handed nothing, each with how. Where both
+      # `@x = …` and `@x ||= …` set one, the assignment.
       JOIN_BIRTHS = proc { |_, *hows| hows.include?(:ivasgn) ? :ivasgn : :or_asgn }
 
-      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, :mixin_bodies, :declared, :born_hashes, keyword_init: true)
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, :mixin_bodies, :declared, :born_hashes, :born_objects, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
       #
@@ -125,13 +127,15 @@ module Steep
         @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
         @declared = Set[] #: Set[String]
         @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
+        @born_objects = {} #: Hash[String, Hash[Symbol, Symbol]]
       end
 
       def scan(node)
         walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
         Scan.new(
           readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods,
-          class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared, born_hashes: @born_hashes
+          class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared, born_hashes: @born_hashes,
+          born_objects: @born_objects
         )
       end
 
@@ -540,20 +544,25 @@ module Steep
 
       def record_body(names, body, nesting)
         @declared.merge(names)
-        born = born_hashes(body)
-        names.each { |name| (@born_hashes[name] ||= {}).merge!(born, &JOIN_BIRTHS) } unless born.empty?
+        record_births(@born_hashes, names, births(body) { |value| value.type == :hash && value.children.empty? })
+        record_births(@born_objects, names, births(body) { |value| HandedBack.fresh_object?(value) })
         code = body_code(body, nesting) or return
 
         names.each { |name| code == true ? @class_bodies[name] += 1 : (@mixin_bodies[name] ||= []) << code }
       end
 
-      # The ivars a statement of the body sets to an empty hash, each with how:
-      # `:ivasgn` for `@x = {}`, `:or_asgn` for `@x ||= {}`.
-      def born_hashes(body)
+      def record_births(index, names, born)
+        names.each { |name| (index[name] ||= {}).merge!(born, &JOIN_BIRTHS) } unless born.empty?
+      end
+
+      # The ivars a statement of the body sets to a value the block accepts,
+      # each with how: `:ivasgn` for `@x = value`, `:or_asgn` for
+      # `@x ||= value`.
+      def births(body)
         born = {} #: Hash[Symbol, Symbol]
         each_stmt(body) do |stmt|
           target, value = stmt.type == :or_asgn ? stmt.children : [stmt, stmt.children[1]]
-          next unless target.type == :ivasgn && value&.type == :hash && value.children.empty?
+          next unless target.type == :ivasgn && value && yield(value)
 
           born.merge!({ target.children[0] => stmt.type }, &JOIN_BIRTHS)
         end
