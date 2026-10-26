@@ -36,8 +36,10 @@ module Steep
       # of the element it answers, a call made on it in a statement of a class
       # body, on a hash `self` holds, a `:statement`. `enclosing`: of a call,
       # the instance method, or with `singleton` the class method, whose body
-      # makes it, and `owner` the module that defines that method, as written.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner) do
+      # makes it, and `owner` the module that defines that method, as written;
+      # `in_class_body` where a statement of a class body makes it, outside
+      # any block.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
           value&.each { |use| use.each_forwarder(&block) }
@@ -180,10 +182,12 @@ module Steep
         receiver, name, *arguments = node.children
         if @names.include?(name)
           on_self = receiver.nil? || receiver.type == :self
-          kind = (statement || in_class_statement?(node)) && on_self ? :statement : :call
+          in_class_body = statement || in_class_statement?(node)
+          kind = in_class_body && on_self ? :statement : :call
           @uses[name] << Use.new(kind, name, Set[], on_self ? class_method_of(node) : nil, nil, on_self ? nil : ClassMemoAnalyzer.site(node)).tap do |use|
             use.enclosing, use.singleton = defined_in(node)
             use.owner = owner_of(node)
+            use.in_class_body = in_class_body
           end
         end
         record_named(name, arguments)
