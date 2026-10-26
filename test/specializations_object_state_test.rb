@@ -1321,7 +1321,7 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   RBS
 
-  def p20_source(backend: "")
+  def p20_source(backend: "", defaulted_entries: "Hash.new(default)", entries: "{}")
     <<~RUBY
       class P20Box
         def initialize
@@ -1355,9 +1355,9 @@ class SpecializationsObjectStateTest < Minitest::Test
 
         def set_entries(default)
           if default
-            @entries = Hash.new(default)
+            @entries = #{defaulted_entries}
           else
-            @entries = {}
+            @entries = #{entries}
           end
         end
       end
@@ -1434,6 +1434,28 @@ class SpecializationsObjectStateTest < Minitest::Test
       assert_equal "(::String | nil)", types.fetch("label")
       assert_equal "nil", types.fetch("fallback")
       assert_equal "(::Symbol | nil)", types.fetch("defaulted")
+    end
+  end
+
+  def test_a_branch_of_the_initialize_chain_the_call_never_runs_does_not_hand_self_on
+    in_tmpdir do
+      write("sig/map.rbs", P20_RBS)
+      write("app/map.rb", p20_source(defaulted_entries: "Hash.new { |_entries, key| [self, key] && default }"))
+      types = specialized_body_types("app/map.rb")
+
+      assert_equal ":x", types.fetch("through_super")
+      assert_equal "nil", types.fetch("missing")
+      assert_equal "(::Symbol | nil)", types.fetch("defaulted")
+    end
+  end
+
+  def test_declines_where_the_branch_the_call_runs_hands_self_on
+    in_tmpdir do
+      write("sig/map.rbs", P20_RBS)
+      write("app/map.rb", p20_source(entries: "Hash.new { |_entries, key| [self, key] && nil }"))
+      types = specialized_body_types("app/map.rb")
+
+      assert_equal "(::Symbol | nil)", types.fetch("through_super")
     end
   end
 

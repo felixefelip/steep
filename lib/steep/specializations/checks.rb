@@ -56,7 +56,10 @@ module Steep
         Outcome.new(
           reads: reads,
           returns: bodies.to_h { |key, (def_node, _)| [key, @returned.call(typing, def_node, key)] },
-          exits: bodies.filter_map { |key, (def_node, arguments)| [key, typing.exit_ivars_of(node: def_node)] if arguments.stateful? || arguments.hands_records? }.to_h,
+          exits: bodies.filter_map do |key, (def_node, arguments)|
+            exit = typing.exit_ivars_of(node: def_node)
+            [key, exit] if ObjectStates::KeptSelf.exit_kept?(arguments, exit)
+          end.to_h,
           sites: Collector.call_sites(typing, overrides: @overrides),
           class_exits: typing.class_exits
         )

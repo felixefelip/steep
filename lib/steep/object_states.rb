@@ -19,9 +19,10 @@ module Steep
     Effect = Struct.new(:bindings, :writes, :reads_only, :reader, keyword_init: true)
 
     # What a body left its receiver holding (`ivars`), each class object it
-    # was handed the state of (`classes`), and each record it was handed, by
-    # position or keyword (`params`).
-    Exit = Struct.new(:ivars, :classes, :params, keyword_init: true)
+    # was handed the state of (`classes`), each record it was handed, by
+    # position or keyword (`params`), and whether it kept `self` where its
+    # text may hand it on (`keeps_self`, `KeptSelf`).
+    Exit = Struct.new(:ivars, :classes, :params, :keeps_self, keyword_init: true)
 
     class << self
       # The locals handed on are settled here, ahead of the callee's
@@ -55,7 +56,7 @@ module Steep
         classes = arguments.class_states.keys.to_h { |name| [name, Exits.common(envs.map { |left| left.class_states.fetch(name, {}) })] }
         root = constr.typing
         root = root.parent while root.parent
-        root.add_exit_ivars(def_node, Exit.new(ivars: ivars, classes: classes, params: params))
+        root.add_exit_ivars(def_node, Exit.new(ivars: ivars, classes: classes, params: params, keeps_self: KeptSelf.kept?(constr, def_node)))
       end
 
       def pair_body(def_node)
@@ -110,7 +111,7 @@ module Steep
 
         call = call.with_return_type(instance) if constructed
         chain = initialize_chain(constr, instance) or return call
-        held = held_value?(constr, node) && chain.none? { |_, body| body && exposes_self?(constr, instance, body, [:initialize]) }
+        held = held_value?(constr, node) && KeptSelf.fresh_chain?(constr, instance, chain, Specializations.call_site_arguments(constr, node, call)&.key)
         rewritten = chain.flat_map { |_, body| body ? callee_writes(constr, instance, body, [:initialize]).to_a : [] }
         bindings = compose(chain).select do |ivar, _|
           held ? declared?(constr, instance, ivar) && !rewritten.include?(ivar) : never_rewritten?(constr, instance, ivar)

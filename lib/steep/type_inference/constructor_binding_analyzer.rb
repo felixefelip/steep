@@ -342,7 +342,7 @@ module Steep
           ivars: ivars,
           super_args: super_args(args_node, body),
           self_sends: self_sends,
-          exposes_self: exposes_self?(body),
+          exposes_self: !self.class.self_exposures(body).empty?,
           iterations: self_iterations(body),
           ivar_uses: ClassMemoAnalyzer.uses(body, names: ivars).to_h,
           returns: single_ivar_reader(body),
@@ -359,14 +359,16 @@ module Steep
         )
       end
 
-      # Whether `self` may reach anything but a call made on it: handed on,
-      # returned, stored, or captured by a block.
-      def exposes_self?(node, parent = nil)
-        return false unless node.is_a?(::Parser::AST::Node)
-        return true if %i[block numblock].include?(node.type)
-        return true if node.type == :self && !(parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node))
+      # The nodes through which `self` may reach anything but a call made on
+      # it: a `self` handed on, returned or stored, and a block, which
+      # captures it.
+      def self.self_exposures(node, parent = nil, found = [])
+        return found unless node.is_a?(::Parser::AST::Node)
+        return found << node if %i[block numblock].include?(node.type)
+        return found << node if node.type == :self && !(parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node))
 
-        node.children.any? { |child| exposes_self?(child, node) }
+        node.children.each { |child| self_exposures(child, node, found) }
+        found
       end
 
       # `[ivar, method]` for each block handed to an iteration over an ivar,

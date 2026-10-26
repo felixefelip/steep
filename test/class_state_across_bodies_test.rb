@@ -175,6 +175,40 @@ class ClassStateAcrossBodiesTest < Minitest::Test
     assert_equal [nil, nil], chunks(RULES + model + held_by_ivar, signatures: held_by_ivar_rbs)
   end
 
+  def rules_watched(watch)
+    RULES.sub("  def initialize\n    @singulars = []\n  end\n", <<~RUBY.gsub(/^/, "  "))
+      def initialize(on_miss = nil)
+        @singulars = []
+        #{watch}
+      end
+
+      def watch(on_miss) = on_miss.call(self)
+    RUBY
+  end
+
+  def rbs_watched(kind = "class")
+    rbs(kind).sub("def initialize: () -> Array[untyped]", "def initialize: (?untyped on_miss) -> void\n  def watch: (untyped on_miss) -> untyped")
+  end
+
+  def test_a_memo_s_object_whose_initialize_hands_self_on_only_where_new_never_runs_keeps_its_state
+    {
+      "directly" => "on_miss.call(self) if on_miss",
+      "through a method it calls on self" => "watch(on_miss) if on_miss"
+    }.each do |label, watch|
+      assert_equal FOLDED, chunks(rules_watched(watch) + inflector + model, signatures: rbs_watched), label
+    end
+  end
+
+  def test_declines_a_memo_s_object_whose_initialize_hands_self_on_where_new_runs
+    {
+      "directly" => "[self].size",
+      "through a method it calls on self" => "watch(-> (_rules) {})",
+      "next to a branch it never runs" => "on_miss.call(self) if on_miss\n  watch(:log)"
+    }.each do |label, watch|
+      assert_equal [nil, nil], chunks(rules_watched(watch) + inflector + model, signatures: rbs_watched), label
+    end
+  end
+
   CONFIG_RBS = <<~RBS
     class Config
       attr_reader name: Symbol

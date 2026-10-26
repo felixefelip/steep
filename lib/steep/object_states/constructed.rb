@@ -31,7 +31,7 @@ module Steep
         end.to_h
         root = constr.typing
         root = root.parent while root.parent
-        root.add_exit_ivars(def_node, Exit.new(ivars: assigned, classes: {}, params: params))
+        root.add_exit_ivars(def_node, Exit.new(ivars: assigned, classes: {}, params: params, keeps_self: KeptSelf.kept?(constr, def_node)))
       end
 
       # What the `initialize` chain may assign, itself or through a method it
