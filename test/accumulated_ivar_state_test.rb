@@ -726,6 +726,53 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def held_by_ivar(rbs) = rbs.sub("self.@instances: Hash[Symbol, Inflector::Rules]?\n  def self.instances: () -> Hash[Symbol, Inflector::Rules]\n", "self.@instances: Hash[Symbol, Inflector::Rules]\n")
+
+  BY_IVAR_RBS = KEYED_RBS.sub("def self.wipe:", "def self.instance_or_fallback: (Symbol locale) -> Inflector::Rules\n  def self.wipe:")
+
+  def read_by_ivar(ruby, born: "@instances = {}")
+    held = ruby.sub("  def self.instances = @instances ||= {}\n  def self.instance(locale) = (instances[locale] ||= Rules.new)\n", <<~RUBY.gsub(/^/, "  "))
+      #{born}
+      def self.instance(locale) = (@instances[locale] ||= Rules.new)
+    RUBY
+    held.gsub(/(?<![@.\w])instances\[/, "@instances[")
+  end
+
+  def by_ivar(born: "@instances = {}", reads: "instance(:en)", body: "") = read_by_ivar(keyed(reads: reads, body: body), born: born)
+
+  def test_a_hash_an_ivar_holds_directly_keeps_its_objects
+    fallback = "def self.instance_or_fallback(locale) = @instances.key?(locale) ? @instances[locale] : instance(locale)"
+    {
+      "born in the class body, read through the method that stores it" => by_ivar,
+      "born in the class body, read by key" => by_ivar(reads: "@instances[:en]"),
+      "born in the class body, read through a fallback" => by_ivar(reads: "instance_or_fallback(:en)", body: fallback),
+      "born by a memo" => by_ivar(born: "@instances ||= {}")
+    }.each do |label, ruby|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: held_by_ivar(BY_IVAR_RBS)), label
+    end
+  end
+
+  def test_declines_a_hash_an_ivar_holds_that_something_else_may_change
+    rbs = held_by_ivar(BY_IVAR_RBS).sub("def self.wipe:", "def self.reset: () -> untyped\n  def self.all: () -> untyped\n  class Other\n    def self.go: () -> untyped\n  end\n  def self.wipe:")
+    {
+      "set again by a method" => by_ivar(body: "def self.reset = (@instances = {})\nreset"),
+      "set again by a method another class calls" => by_ivar(
+        body: "def self.reset = (@instances = {})\nclass Other\n  def self.go = Inflector.reset\nend\nOther.go"
+      ),
+      "set first by a method" => by_ivar(born: "def self.reset = (@instances = {})\nreset"),
+      "stored again by a method" => by_ivar(body: "def self.reset = (@instances[:en] = Rules.new)\nreset"),
+      "stored again by a method another class calls" => by_ivar(
+        body: "def self.reset = (@instances[:en] = Rules.new)\nclass Other\n  def self.go = Inflector.reset\nend\nOther.go"
+      ),
+      "handed out" => by_ivar(body: "def self.all = @instances\nall.each_value(&:clear)"),
+      "deleted from" => by_ivar(body: "@instances.delete(:en)")
+    }.each do |label, ruby|
+      written = chunks(ruby, rbs: rbs).flatten
+      refute_includes written, "def post_ids; []; end", label
+      refute_includes written, "def category_ids; []; end", label
+    end
+  end
+
   ACROSS_RBS = KEYED_RBS.sub("  def self.has_many_like: (Symbol name) -> untyped\nend\n", <<~RBS)
       def self.singularize: (String word) -> String
     end
@@ -771,6 +818,7 @@ class AccumulatedIvarStateTest < Minitest::Test
       "read by key" => keyed_across(reads: "instances[:en]")
     }.each do |label, ruby|
       assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: ACROSS_RBS), label
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(read_by_ivar(ruby), rbs: held_by_ivar(ACROSS_RBS)), "#{label}, held by the ivar"
     end
   end
 
@@ -787,6 +835,9 @@ class AccumulatedIvarStateTest < Minitest::Test
       "through an index the runtime converts" => keyed_across(body: wipe, post: "[1][Stamp.new]", outside: "class Stamp\n  def to_int = (Inflector.wipe && 0)\nend\n")
     }.each do |label, ruby|
       refute_includes chunks(ruby, rbs: ACROSS_RBS).flatten, "def post_ids; []; end", label
+      next if ruby.include?("Inflector.instances")
+
+      refute_includes chunks(read_by_ivar(ruby), rbs: held_by_ivar(ACROSS_RBS)).flatten, "def post_ids; []; end", "#{label}, held by the ivar"
     end
   end
 

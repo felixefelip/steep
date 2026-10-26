@@ -1622,7 +1622,7 @@ module Steep
 
           rhs_type, constr = synthesize(rhs, hint: context.type_env[name])
 
-          constr.ivasgn(node, rhs_type)
+          ObjectStates::ClassMemos.born(constr.ivasgn(node, rhs_type), name, rhs)
 
         when :ivar
           yield_self do

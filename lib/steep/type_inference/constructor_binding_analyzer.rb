@@ -45,7 +45,10 @@ module Steep
       # constants is in `mixin_bodies` instead, as the names they may resolve
       # to: the mixed-in modules' hooks are the code it runs. `declared` is
       # every class or module the source writes a body for.
-      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, :mixin_bodies, :declared, keyword_init: true)
+      # Where both `@x = {}` and `@x ||= {}` set an ivar, the assignment.
+      JOIN_BIRTHS = proc { |_, *hows| hows.include?(:ivasgn) ? :ivasgn : :or_asgn }
+
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, :mixin_bodies, :declared, :born_hashes, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
       #
@@ -121,13 +124,14 @@ module Steep
         @class_bodies = Hash.new(0) #: Hash[String, Integer]
         @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
         @declared = Set[] #: Set[String]
+        @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
       end
 
       def scan(node)
         walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
         Scan.new(
           readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods,
-          class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared
+          class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared, born_hashes: @born_hashes
         )
       end
 
@@ -536,9 +540,24 @@ module Steep
 
       def record_body(names, body, nesting)
         @declared.merge(names)
+        born = born_hashes(body)
+        names.each { |name| (@born_hashes[name] ||= {}).merge!(born, &JOIN_BIRTHS) } unless born.empty?
         code = body_code(body, nesting) or return
 
         names.each { |name| code == true ? @class_bodies[name] += 1 : (@mixin_bodies[name] ||= []) << code }
+      end
+
+      # The ivars a statement of the body sets to an empty hash, each with how:
+      # `:ivasgn` for `@x = {}`, `:or_asgn` for `@x ||= {}`.
+      def born_hashes(body)
+        born = {} #: Hash[Symbol, Symbol]
+        each_stmt(body) do |stmt|
+          target, value = stmt.type == :or_asgn ? stmt.children : [stmt, stmt.children[1]]
+          next unless target.type == :ivasgn && value&.type == :hash && value.children.empty?
+
+          born.merge!({ target.children[0] => stmt.type }, &JOIN_BIRTHS)
+        end
+        born
       end
 
       # `true` for a body that runs code but method and module definitions and

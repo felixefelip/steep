@@ -104,6 +104,8 @@ module Steep
         end
 
         def tracked_hash_named(constr, singleton, method_name)
+          return born_hash(constr, singleton, method_name) if method_name.start_with?("@")
+
           owner, body = ObjectStates.resolved_body(constr, singleton, method_name)
           ivar = body&.memoized_hash or return
           return unless written_only_by?(constr, singleton, ivar, owner, method_name)
@@ -111,6 +113,15 @@ module Steep
           return unless HashMutation.confined?(constr.literal_method_registry, uses)
 
           ivar
+        end
+
+        # A hash a statement of the class body sets `ivar` to, reached through
+        # the ivar itself: no method writes it, and the project only stores
+        # into it or reads from it.
+        def born_hash(constr, singleton, ivar)
+          return unless constr.constructor_bindings.born_hashes(singleton.name).key?(ivar) && written_only_by?(constr, singleton, ivar, nil, nil)
+
+          ivar if HashMutation.confined?(constr.literal_method_registry, Specializations::Receivers.uses_on(constr, ivar, singleton))
         end
 
         # What a memo still `nil` builds: the object `Klass.new` does, or, where
@@ -157,6 +168,7 @@ module Steep
           return constr if ancestors.any? { |name| registry.defines?(name, :inherited, singleton: true) }
 
           memos = ObjectStates.class_side_bodies(constr, singleton).filter_map { |_, _, body| body&.memoizes }
+          memos += registry.born_hashes(singleton.name).filter_map { |ivar, how| ivar if how == :or_asgn }
           return constr if memos.empty?
 
           constr.update_type_env { |env| env.refine_types(instance_variable_types: memos.to_h { |ivar| [ivar, AST::Builtin.nil_type] }) }
@@ -203,12 +215,14 @@ module Steep
         end
 
         # `[ivar, owner, method name]` for each `def self.m = @ivar ||= value`
-        # on the class's ancestors. One whose `Klass.new` they follow holds no
-        # object state only while it is `nil`.
+        # on the class's ancestors, and `[ivar, nil, ivar]` for each hash the
+        # class body sets an ivar to (`born_hash`). One whose `Klass.new` they
+        # follow holds no object state only while it is `nil`.
         def value_memos(constr, singleton)
-          ObjectStates.class_side_bodies(constr, singleton).filter_map do |owner, method_name, body|
+          memos = ObjectStates.class_side_bodies(constr, singleton).filter_map do |owner, method_name, body|
             [body.memoizes, owner, method_name] if body&.memoizes
           end
+          memos + constr.constructor_bindings.born_hashes(singleton.name).each_key.map { |ivar| [ivar, nil, ivar] }
         end
 
         # `@x ||= value` where the env knows more of `@x` than its declaration:
@@ -225,7 +239,19 @@ module Steep
           type, after = constr.synthesize(rhs, hint: declared || hint)
           return [current, constr] if arm == :else
 
-          after.ivasgn(asgn, type)
+          pair = after.ivasgn(asgn, type)
+          arm == :then ? born(pair, asgn.children[0], rhs) : pair
+        end
+
+        # A class body setting a hash it keeps (`born_hash`) to `{}` leaves it
+        # holding the empty record.
+        def born(pair, ivar, value)
+          constr = pair.constr
+          singleton = constr.self_type
+          return pair unless !constr.method_context && singleton.is_a?(AST::Types::Name::Singleton) && value.type == :hash && value.children.empty?
+          return pair unless born_hash(constr, singleton, ivar)
+
+          pair.with(constr: constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => EMPTY_HASH }) })
         end
 
         def or_arm(current, declared)
