@@ -131,6 +131,7 @@ module Steep
         written = { "ivars" => ivars.(exit.ivars) }
         written["classes"] = exit.classes.to_h { |name, values| [name.to_s, ivars.(values)] } unless exit.classes.empty?
         written["params"] = ivars.(exit.params) unless exit.params.empty?
+        written["keeps_self"] = true if exit.keeps_self
         written
       end
 
@@ -838,6 +839,15 @@ module Steep
         end
       end
 
+      # Whether the body `method_key` was checked under `argument_key` kept
+      # `self` (`ObjectStates::KeptSelf`).
+      def keeps_self?(method_key, argument_key)
+        read(:keeps_self?, method_key, argument_key) do
+          exit = @exits.dig(method_key, argument_key)
+          (exit.is_a?(Hash) ? exit["keeps_self"] : exit&.keeps_self) == true
+        end
+      end
+
       def receiver_type(site, factory:)
         read(:receiver_type, site, factory: factory) do
           types = @receivers[site]&.map { |raw| parse(site, raw, factory: factory) or break nil }
@@ -898,7 +908,10 @@ module Steep
         classes = (raw["classes"] || {}).to_h { |name, written| [RBS::TypeName.parse(name), values.(written) || (return nil)] }
         ivars = values.(raw["ivars"]) or return nil
         params = values.(raw["params"]) or return nil
-        ObjectStates::Exit.new(ivars: ivars, classes: classes, params: params.transform_keys { |slot| slot.match?(/\A\d+\z/) ? slot.to_s.to_i : slot })
+        ObjectStates::Exit.new(
+          ivars: ivars, classes: classes, params: params.transform_keys { |slot| slot.match?(/\A\d+\z/) ? slot.to_s.to_i : slot },
+          keeps_self: raw["keeps_self"] == true || nil
+        )
       end
 
       def parse_state(method_key, raw, factory:)

@@ -365,9 +365,10 @@ module Steep
       def kept_growing?(key, generation) = (@growth.fetch(key, Set.new) - [generation]).size >= WIDEN_AFTER
 
       def record_exit(key, arguments, typing, def_node)
-        return unless (arguments.stateful? || arguments.hands_records?) && typing
+        return unless typing
 
-        store_exit(key, arguments, typing.exit_ivars_of(node: def_node))
+        exit = typing.exit_ivars_of(node: def_node)
+        store_exit(key, arguments, exit) if ObjectStates::KeptSelf.exit_kept?(arguments, exit)
       end
 
       def store_exit(key, arguments, exit)

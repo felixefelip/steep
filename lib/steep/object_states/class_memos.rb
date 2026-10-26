@@ -446,7 +446,7 @@ module Steep
         # `Klass.new` hands back an object nothing else holds.
         def fresh?(constr, instance)
           chain = ObjectStates.initialize_chain(constr, instance) or return false
-          chain.none? { |_, body| body && ObjectStates.exposes_self?(constr, instance, body, [:initialize]) }
+          KeptSelf.fresh_chain?(constr, instance, chain, "()")
         end
 
         def written_only_by?(constr, singleton, ivar, owner, method_name)
