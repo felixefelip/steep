@@ -354,7 +354,7 @@ module Steep
 
       super_method = if definition
                        if (this_method = definition.methods[method_name])
-                         if module_context&.class_name == this_method.defined_in
+                         if module_context&.class_name == this_method.implemented_in
                            this_method.super_method
                          else
                            this_method
@@ -1716,7 +1716,7 @@ module Steep
                   receiver_type: self_type,
                   method_name: method_context!.name || raise("method context must have a name"),
                   method: super_method,
-                  arguments: node.children,
+                  arguments: with_method_block(node),
                   block_params: nil,
                   block_body: nil,
                   tapp: nil,
@@ -6865,7 +6865,7 @@ module Steep
 
               node_type, constr = constr.synthesize(arg.node)
 
-              unless constr.check_relation(sub_type: node_type, super_type: AST::Builtin.nil_type).success?
+              unless method_block_pass?(arg.node, node) || constr.check_relation(sub_type: node_type, super_type: AST::Builtin.nil_type).success?
                 errors << Diagnostic::Ruby::UnexpectedBlockGiven.new(
                   node: node,
                   method_type: method_type

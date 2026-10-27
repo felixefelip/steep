@@ -5354,6 +5354,143 @@ EOF
     end
   end
 
+  def test_super_passes_the_method_block_on
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(key)
+    super
+    super(key)
+    [1].each { super }
+    nil
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_super_passes_an_optional_method_block_as_possibly_missing
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: () { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: () ?{ () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::BlockTypeMismatch, errors.first
+        end
+      end
+    end
+  end
+
+  def test_super_drops_the_method_block_on_a_method_taking_none
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: () -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: () { () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_super_drops_the_method_block_on_an_overload_taking_none
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer) -> nil
+         | () { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(key)
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_super_in_an_overloading_method_reaches_the_parent_s
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer) -> nil | ...
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(key)
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        call = typing.call_of(node: typing.explicit_super_of(node: dig(source.node, 2, 2)))
+        assert_equal ["(::Integer) { () -> nil } -> nil"], call.method_decls.map { |decl| decl.method_type.to_s }
+      end
+    end
+  end
+
   def test_super_correct_block
     with_checker <<-EOF do |checker|
 class TestSuper

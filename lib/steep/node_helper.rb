@@ -263,6 +263,21 @@ module Steep
       end
     end
 
+    # A `super` given no block of its own passes the method's, as `&` would.
+    def with_method_block(super_node)
+      arguments = super_node.children
+      return arguments if arguments.any? { |arg| arg.is_a?(Parser::AST::Node) && arg.type == :block_pass }
+
+      [*arguments, Parser::AST::Node.new(:block_pass, [nil], location: super_node.location)]
+    end
+
+    # The block a `super` passes without saying so, which a method that takes
+    # none silently drops. It spans the whole call — so does the `&block` a bare
+    # `super` stands for (`explicit_super`) — where a written `&` spans itself.
+    def method_block_pass?(block_pass, call)
+      block_pass.location.expression == call.location.expression
+    end
+
     # The `super(...)` a bare `super` in `def_node` stands for: every parameter,
     # as the local it is where `super` stands. nil where one has no name to
     # pass (`*`, `**`, `&`, `...`).
