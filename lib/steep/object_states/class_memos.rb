@@ -104,7 +104,7 @@ module Steep
         end
 
         def tracked_hash_named(constr, singleton, method_name)
-          return born_hash(constr, singleton, method_name) if method_name.start_with?("@")
+          return born_hash(constr, singleton, method_name) || forwarded_hash(constr, singleton, method_name) if method_name.start_with?("@")
 
           owner, body = ObjectStates.resolved_body(constr, singleton, method_name)
           ivar = body&.memoized_hash or return
@@ -126,11 +126,27 @@ module Steep
 
         # An object a statement of the class body sets `ivar` to with
         # `Klass.new`, reached through the ivar itself, kept on the terms
-        # `tracked` keeps a memo's.
+        # `tracked` keeps a memo's; or, where it forwards to a hash it keeps
+        # (`ForwardedHash`), on the terms `born_hash` keeps a hash's.
         def born_object(constr, singleton, ivar, instance)
           return unless instance.is_a?(AST::Types::Name::Instance) && constr.constructor_bindings.born_objects(singleton.name).key?(ivar)
+          return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, nil, nil)
 
-          ivar if fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, nil, nil) && confined?(constr, singleton, instance, ivar)
+          nested = ForwardedHash.nested(constr, instance)
+          ivar if confined?(constr, singleton, instance, ivar, stores: nested ? ForwardedHash.store_names(constr, instance, nested) : Set[])
+        end
+
+        # The ivar of an object `born_object` keeps, where it holds a hash
+        # the object forwards to.
+        def forwarded_hash(constr, singleton, ivar)
+          type = constr.context.type_env[ivar]
+          ivar if ForwardedHash.record(constr, type) && born_object(constr, singleton, ivar, ObjectStates.state_in(type)&.back_type)
+        end
+
+        # Whether `type`, what `ivar` holds, is a hash memo's record: itself,
+        # or kept by the object a class body set `ivar` to (`forwarded_hash`).
+        def hash_held?(constr, singleton, ivar, type)
+          type.is_a?(AST::Types::Record) || (ObjectStates.state_in(type) && !forwarded_hash(constr, singleton, ivar).nil?)
         end
 
         # What a memo still `nil` builds: the object `Klass.new` does, or, where
@@ -197,7 +213,7 @@ module Steep
           env = constr.context.type_env
           value_memos(constr, singleton).filter_map do |ivar, owner, method_name|
             type = env[ivar]
-            next unless type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Name::Singleton) || type.is_a?(AST::Types::Record)
+            next unless type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Name::Singleton) || hash_held?(constr, singleton, ivar, type)
             next if type == env.declared_instance_variable_types[ivar]
 
             [ivar, type] if written_only_through?(constr, singleton, ivar, owner, method_name)
@@ -292,8 +308,9 @@ module Steep
         def after_class_call(constr, call, exit, reached)
           return constr if constr.method_context
 
+          singleton = constr.self_type #: AST::Types::Name::Singleton
           moved = memo_values(constr).select do |ivar, type|
-            type.is_a?(AST::Types::Nil) || (type.is_a?(AST::Types::Record) && (reached || may_store?(constr, constr.self_type, call, ivar)))
+            type.is_a?(AST::Types::Nil) || (hash_held?(constr, singleton, ivar, type) && (reached || may_store?(constr, singleton, call, ivar)))
           end
           moved = moved.merge(yielded_memos(constr, reached)) if reached
           return constr if moved.empty?
@@ -309,10 +326,10 @@ module Steep
         # check left there (`left`), or none.
         def stored_through(constr, singleton, ivars, call, left)
           ivars.filter_map do |ivar, type|
-            next [ivar, type] unless type.is_a?(AST::Types::Record) && may_store?(constr, singleton, call, ivar)
+            next [ivar, type] unless hash_held?(constr, singleton, ivar, type) && may_store?(constr, singleton, call, ivar)
 
             value = left&.[](ivar)
-            [ivar, value] if value.is_a?(AST::Types::Record)
+            [ivar, value] if value && hash_held?(constr, singleton, ivar, value)
           end.to_h
         end
 
@@ -324,10 +341,22 @@ module Steep
           value_memos(constr, singleton).any? do |held, _, method_name|
             next false unless held == ivar
 
-            closure = constr.constructor_bindings.storing_closure(method_name, ivar)
+            closure = storing_closure(constr, ivar, method_name)
             closure.nil? || closure.methods.include?(call.method_name) || (closure.constructs && call.method_name == :new) ||
               called_implicitly?(constr, closure.methods)
           end
+        end
+
+        # The methods that may store into the hash a memo keeps in `ivar`: by
+        # the hash's own methods, or by those of the object `ivar` holds that
+        # forward to it.
+        def storing_closure(constr, ivar, method_name)
+          registry = constr.constructor_bindings
+          state = ObjectStates.state_in(constr.context.type_env[ivar])
+          nested = state && ForwardedHash.nested(constr, state.back_type)
+          return registry.storing_closure(method_name, ivar) unless state && nested
+
+          registry.forwarded_storing_closure(ivar)
         end
 
         # A method the runtime may call with no send written for it: one of
@@ -460,15 +489,17 @@ module Steep
 
         # A use a method returns (`Use#forwarded_by`) is made wherever that
         # method is called, where only a read is followed (`handed_back?`).
-        def confined?(constr, singleton, instance, name, forwarders = Set[])
+        # A call of one of `stores` is followed wherever it is made, as a
+        # hash memo's store is (`may_store?`).
+        def confined?(constr, singleton, instance, name, forwarders = Set[], stores: Set[])
           Specializations::Receivers.uses_on(constr, name, singleton).all? do |use|
             forwarder = use.forwarded_by
-            next forwarder == name || forwarders.include?(forwarder) || confined?(constr, singleton, instance, forwarder, forwarders | [name]) if forwarder
+            next forwarder == name || forwarders.include?(forwarder) || confined?(constr, singleton, instance, forwarder, forwarders | [name], stores: stores) if forwarder
             next false if use.kind == :escape
             next constr.constructor_bindings.replayed_everywhere?(use.called) if use.kind == :yielded
 
             effect = ObjectStates.method_effect(constr, instance, use.called) or next false
-            effect.reads_only || (use.kind == :statement && forwarders.empty?)
+            effect.reads_only || (use.kind == :statement && forwarders.empty?) || (forwarders.empty? && stores.include?(use.called))
           end
         end
 

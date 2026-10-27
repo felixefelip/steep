@@ -29,9 +29,23 @@ module Steep
         # A call made on an element leaves the hash holding it as the call's
         # check left it.
         def after(constr, receiver, method_name, arguments, node)
+          constr = forwarded_store(constr, receiver, method_name, arguments)
           state = followed(constr, receiver) or return constr
 
           left_by(constr, receiver, ObjectStates.changed(constr, state, method_name, arguments, node))
+        end
+
+        # A store through a method of the object a forwarded hash memo holds
+        # (`ForwardedHash.store`) leaves the record it keeps as `stored` would.
+        def forwarded_store(constr, receiver, method_name, arguments)
+          singleton = constr.self_type
+          return constr unless receiver.type == :ivar && singleton.is_a?(AST::Types::Name::Singleton)
+
+          ivar = ClassMemos.forwarded_hash(constr, singleton, receiver.children[0]) or return constr
+          state = ObjectStates.state_in(constr.context.type_env[ivar]) or return constr
+          indexes = ForwardedHash.store(constr, state.back_type, ForwardedHash.nested(constr, state.back_type), method_name) or return constr
+          left = stored(constr, receiver, record_of(constr, ivar), ivar, arguments.values_at(*indexes)) or return constr
+          with_record(constr, ivar, left[1])
         end
 
         # The element `node` reads, as the env holds it, where the hash follows
@@ -47,12 +61,24 @@ module Steep
         # The hash holding `left` as the element `receiver` reads.
         def left_by(constr, receiver, left)
           _, ivar, key = element_of(constr, receiver)
-          record = constr.context.type_env[ivar] #: AST::Types::Record
-          record = AST::Types::Record.new(elements: record.elements.merge(key => left), required_keys: record.required_keys)
+          record = record_of(constr, ivar) or raise
+          constr = with_record(constr, ivar, AST::Types::Record.new(elements: record.elements.merge(key => left), required_keys: record.required_keys))
           constr.update_type_env do |env|
-            env = env.refine_types(instance_variable_types: { ivar => record })
             env.pure_method_calls.key?(receiver) ? env.refine_types(pure_call_types: { receiver => left }) : env.invalidate_pure_node(receiver)
           end
+        end
+
+        # The record of the hash memo `ivar` holds: itself, or the one the
+        # object it holds keeps (`ForwardedHash`).
+        def record_of(constr, ivar)
+          held = constr.context.type_env[ivar]
+          held.is_a?(AST::Types::Record) ? held : ForwardedHash.record(constr, held)
+        end
+
+        def with_record(constr, ivar, record)
+          held = constr.context.type_env[ivar]
+          record = ForwardedHash.with_record(constr, held, record) if ObjectStates.state_in(held)
+          constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => record }) }
         end
 
         # The record `stored` leaves where the value is an object `Klass.new`
@@ -122,8 +148,10 @@ module Steep
         end
 
         def missing?(constr, ivar, key)
-          record = constr.context.type_env[ivar]
-          record.is_a?(AST::Types::Nil) || (record.is_a?(AST::Types::Record) && !record.elements.key?(key))
+          return true if constr.context.type_env[ivar].is_a?(AST::Types::Nil)
+
+          record = record_of(constr, ivar)
+          !record.nil? && !record.elements.key?(key)
         end
 
         def built(constr, call)
@@ -132,8 +160,8 @@ module Steep
         end
 
         def held(constr, ivar, key)
-          record = constr.context.type_env[ivar]
-          ObjectStates.state_in(record.elements[key]) if record.is_a?(AST::Types::Record)
+          record = record_of(constr, ivar)
+          ObjectStates.state_in(record.elements[key]) if record
         end
 
         def literal_key?(type)
@@ -150,11 +178,17 @@ module Steep
           [memo, ivar].all? do |name|
             Specializations::Receivers.uses_on(constr, name, singleton).all? do |use|
               next false if use.kind == :escape || use.kind == :yielded || !use.element_calls.empty?
-              next KEY_QUERIES.include?(use.called) unless TypeInference::ClassMemoAnalyzer::KEY_READS.include?(use.called)
+              next KEY_QUERIES.include?(use.called) || forwarded_store?(constr, ivar, use.called) unless TypeInference::ClassMemoAnalyzer::KEY_READS.include?(use.called)
 
               use.value.all? { |element_use| element_use_kept?(constr, singleton, memo, instance, element_use, true, Set[]) }
             end
           end
+        end
+
+        def forwarded_store?(constr, ivar, method_name)
+          state = ObjectStates.state_in(constr.context.type_env[ivar]) or return false
+          nested = ForwardedHash.nested(constr, state.back_type) or return false
+          !ForwardedHash.store(constr, state.back_type, nested, method_name).nil?
         end
 
         # A call that changes an element is followed (`after`) on `memo[:key]`

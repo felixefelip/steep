@@ -34,6 +34,19 @@ module Steep
           [*found.first, builds] if found.size == 1
         end
 
+        def stored_element(args_node, body)
+          body = body.children[0] while body&.type == :begin && body.children.size == 1
+          return unless body&.type == :send && body.children.size == 4
+
+          memo, method_name, key, value = body.children
+          return unless memo&.type == :ivar && method_name == :[]= && key.type == :lvar && value.type == :lvar
+
+          positional = args_node.children.take_while { |param| %i[arg optarg].include?(param.type) }.map { |param| param.children[0] }
+          key_index = positional.index(key.children[0]) or return
+          value_index = positional.index(value.children[0]) or return
+          [memo.children[0], key_index, value_index]
+        end
+
         def elements(body)
           memos = Set[] #: Set[Symbol]
           calls = Set[] #: Set[Symbol]

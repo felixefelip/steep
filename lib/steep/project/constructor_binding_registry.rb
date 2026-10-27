@@ -41,6 +41,7 @@ module Steep
         @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
         @class_body_storing = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
         @storing_closure = {} #: Hash[[Symbol, Symbol], StoringClosure?]
+        @forwarded_closures = {} #: Hash[Symbol, StoringClosure?]
         @initializing = Set[] #: Set[Symbol]
       end
 
@@ -177,6 +178,15 @@ module Steep
         @storing_closure[[memo.to_sym, ivar.to_sym]]
       end
 
+      # `storing_closure` for the object a class body keeps in `ivar`, where
+      # it forwards to a hash it keeps (`ObjectStates::ForwardedHash`): a call
+      # of any method of the project's that stores into an ivar's hash may
+      # be one of its stores.
+      def forwarded_storing_closure(ivar)
+        index_uses unless @uses
+        @forwarded_closures[ivar.to_sym]
+      end
+
       # Every call the project makes of `name`, one of `keyed_memo_names`
       # (`TypeInference::ClassMemoAnalyzer.calls`).
       def calls_of(name)
@@ -289,12 +299,18 @@ module Steep
         calls_named(keyed_memo_names)
         @storing_closure = hashes.to_h { |memo, ivar| [[memo, ivar], closure_of_stores(memo, ivar)] }
         @class_body_storing = @storing_closure.transform_values { |closure| class_body_storing_methods(closure) }
+        @forwarded_closures = forwarded_closures
         @initializing = initializing_methods
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.block_calls(node, names: yielders).each { |name, kinds| (@block_calls[name] ||= []).concat(kinds) }
         end
+      end
+
+      def forwarded_closures
+        stores = HASH_STORES | @methods.each_value.flat_map { |methods| methods.filter_map { |name, bodies| name if bodies.any? { |body| body&.stores_element } } }
+        @born_objects.each_value.flat_map(&:keys).uniq.to_h { |ivar| [ivar, closure_of_stores(ivar, ivar, stores)] }
       end
 
       def initializing_methods
@@ -341,12 +357,12 @@ module Steep
 
       # Each store into the hash is a use of the memo or its ivar on `self`
       # (`ClassMemoAnalyzer::Use`).
-      def stores_into(memo, ivar)
-        [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| HASH_STORES.include?(use.called) }
+      def stores_into(memo, ivar, names)
+        [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| names.include?(use.called) }
       end
 
-      def closure_of_stores(memo, ivar)
-        stores = stores_into(memo, ivar)
+      def closure_of_stores(memo, ivar, names = HASH_STORES)
+        stores = stores_into(memo, ivar, names)
         return if stores.any? { |use| use.kind != :statement && !use.within }
 
         storing = stores.filter_map(&:within).to_set

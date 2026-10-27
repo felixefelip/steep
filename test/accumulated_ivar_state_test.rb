@@ -773,6 +773,77 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def forwarding_map(extra = "")
+    <<~RUBY
+      class Map
+        def initialize
+          @backend = {}
+        end
+
+        def [](key) = @backend[key]
+
+        def []=(key, value)
+          @backend[key] = value
+        end
+
+        def key?(key) = @backend.key?(key)
+      #{extra.gsub(/^/, "  ")}
+      end
+    RUBY
+  end
+
+  def forwarding_map_rbs(rbs, extra = "")
+    <<~RBS + held_by_ivar(rbs).sub("self.@instances: Hash[Symbol, Inflector::Rules]", "self.@instances: Map")
+      class Map
+        @backend: Hash[Symbol, Inflector::Rules]
+        def initialize: () -> void
+        def []: (Symbol key) -> Inflector::Rules?
+        def []=: (Symbol key, Inflector::Rules value) -> Inflector::Rules
+        def key?: (Symbol key) -> bool
+        #{extra}
+      end
+    RBS
+  end
+
+  def by_map(born: "@instances = Map.new", reads: "instance(:en)", body: "", map: "") = forwarding_map(map) + by_ivar(born: born, reads: reads, body: body)
+
+  def test_a_hash_an_object_an_ivar_holds_keeps_its_objects
+    fallback = "def self.instance_or_fallback(locale) = @instances.key?(locale) ? @instances[locale] : instance(locale)"
+    {
+      "read through the method that stores it" => by_map,
+      "read by key" => by_map(reads: "@instances[:en]"),
+      "read through a fallback" => by_map(reads: "instance_or_fallback(:en)", body: fallback),
+      "born by a memo" => by_map(born: "@instances ||= Map.new"),
+      "next to a store through another forwarder" => by_map(map: "def put(key, value) = (@backend[key] = value)", body: "def self.preset = @instances.put(:fr, Rules.new)")
+    }.each do |label, ruby|
+      rbs = forwarding_map_rbs(BY_IVAR_RBS.sub("def self.wipe:", "def self.preset: () -> untyped\n  def self.wipe:"), "def put: (Symbol key, Inflector::Rules value) -> Inflector::Rules")
+      rbs = rbs.sub("self.@instances: Map", "self.@instances: Map?") if label == "born by a memo"
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs), label
+    end
+  end
+
+  def test_declines_a_hash_an_object_an_ivar_holds_that_something_else_may_change
+    methods = "def self.reset: () -> untyped\n  def self.all: () -> untyped\n  class Other\n    def self.go: () -> untyped\n  end\n  def self.wipe:"
+    map_methods = "def put: (Symbol key, Inflector::Rules value) -> Inflector::Rules\n  def clear: () -> untyped\n  def taint: () -> untyped"
+    rbs = forwarding_map_rbs(BY_IVAR_RBS.sub("def self.wipe:", methods), map_methods)
+    put = "def put(key, value) = (@backend[key] = value)"
+    rewrite = "def clear = (@backend = {})"
+    taint = "def taint = @backend[:en].singular(/posts\\z/, \"article\")"
+    through_other = "class Other\n  def self.go = Inflector.reset\nend\nOther.go"
+    {
+      "set again by a method" => by_map(body: "def self.reset = (@instances = Map.new)\nreset"),
+      "stored again by a method" => by_map(body: "def self.reset = (@instances[:en] = Rules.new)\nreset"),
+      "stored again through another forwarder by a method another class calls" => by_map(map: put, body: "def self.reset = @instances.put(:en, Rules.new)\n#{through_other}"),
+      "rewritten by a method of the object" => by_map(map: rewrite, body: "def self.reset = @instances.clear\n#{through_other}"),
+      "an element changed by a method of the object another class calls" => by_map(map: taint, body: "def self.reset = @instances.taint\n#{through_other}"),
+      "handed out" => by_map(body: "def self.all = @instances\nall[:en].clear")
+    }.each do |label, ruby|
+      written = chunks(ruby, rbs: rbs).flatten
+      refute_includes written, "def post_ids; []; end", label
+      refute_includes written, "def category_ids; []; end", label
+    end
+  end
+
   ACROSS_RBS = KEYED_RBS.sub("  def self.has_many_like: (Symbol name) -> untyped\nend\n", <<~RBS)
       def self.singularize: (String word) -> String
     end
