@@ -380,6 +380,17 @@ module Steep
           end
         end
 
+        # Whether every class `receiver` may be has `ancestor` above it, so
+        # `receiver < ancestor` holds: a subclass keeps its superclass's ancestors.
+        def descends?(receiver, ancestor)
+          receiver = deep_expand_alias(receiver)
+          return false unless receiver.is_a?(Name::Singleton) && receiver.name != ancestor.name
+
+          definition_builder.ancestor_builder.instance_ancestors(receiver.name).ancestors.any? { |entry| entry.name == ancestor.name }
+        rescue RBS::BaseError
+          false
+        end
+
         def deep_expand_alias(type, recursive: Set.new)
           case type
           when AST::Types::Name::Alias

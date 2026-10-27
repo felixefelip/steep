@@ -10,14 +10,16 @@ module Steep
         new(entries).dump
       end
 
-      def self.write(path, entries, method_entry_facts: {}, argument_entry_facts: {})
-        new(entries, method_entry_facts: method_entry_facts, argument_entry_facts: argument_entry_facts).write(path)
+      def self.write(path, entries, **sections)
+        new(entries, **sections).write(path)
       end
 
-      def initialize(entries, method_entry_facts: {}, argument_entry_facts: {})
+      def initialize(entries, method_entry_facts: {}, argument_entry_facts: {}, unreached_definitions: Set[], conditional_definitions: Set[])
         @entries = entries
         @method_entry_facts = method_entry_facts
         @argument_entry_facts = argument_entry_facts
+        @unreached_definitions = unreached_definitions
+        @conditional_definitions = conditional_definitions
       end
 
       def dump
@@ -43,6 +45,8 @@ module Steep
         }
         document["method_entry_facts"] = method_entry_rows unless @method_entry_facts.empty?
         document["argument_entry_facts"] = argument_entry_rows unless @argument_entry_facts.empty?
+        document["unreached_definitions"] = @unreached_definitions.sort unless @unreached_definitions.empty?
+        document["conditional_definitions"] = @conditional_definitions.sort unless @conditional_definitions.empty?
         document
       end
 

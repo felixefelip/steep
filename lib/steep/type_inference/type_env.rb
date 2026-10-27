@@ -254,6 +254,19 @@ module Steep
         end
       end
 
+      # `[type, name]` of the constant `node` names, or nil where it names none,
+      # resolved the way `constant` resolves a name.
+      def constant_of(node)
+        return unless node.is_a?(Parser::AST::Node) && node.type == :const
+
+        parent, name = node.children
+        case parent&.type
+        when nil then constant(name, false)
+        when :cbase then constant(name, true)
+        when :const then (owner = constant_of(parent)&.last) && constant(owner, name)
+        end
+      end
+
       def annotated_constant(name)
         constant_types[name]
       end

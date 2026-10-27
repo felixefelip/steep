@@ -1691,6 +1691,117 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  P23_RBS = <<~RBS
+    class P23Backend
+      @entries: Hash[Symbol, Symbol]
+      def initialize: () -> void
+      def []: (Symbol key) -> Symbol?
+      def []=: (Symbol key, Symbol value) -> Symbol
+    end
+    class P23Store < P23Backend
+      @lock: Integer
+      def initialize: () -> void
+    end
+    class P23Use
+      def stored: () -> untyped
+    end
+  RBS
+
+  def p23_source(condition)
+    <<~RUBY
+      class P23Backend
+        def initialize
+          @entries = {}
+        end
+
+        def [](key)
+          @entries[key]
+        end
+
+        def []=(key, value)
+          @entries[key] = value
+        end
+      end
+
+      class P23Store < P23Backend
+        def initialize
+          @lock = 1
+          super
+        end
+
+        unless #{condition}
+          def []=(key, value)
+            value
+          end
+        end
+      end
+
+      class P23Use
+        def stored
+          store = P23Store.new
+          store[:a] = :x
+          store[:a]
+        end
+      end
+    RUBY
+  end
+
+  def test_a_def_in_a_class_body_branch_the_hierarchy_rules_out_defines_nothing
+    {
+      "defined?(P23Backend) and self < P23Backend" => ":x",
+      "ENV[\"JAVA\"]" => "(::Symbol | nil)"
+    }.each do |condition, expected|
+      in_tmpdir do
+        write("sig/store.rbs", P23_RBS)
+        write("app/store.rb", p23_source(condition))
+        types = specialized_body_types("app/store.rb")
+
+        assert_equal expected, types.fetch("stored"), condition
+      end
+    end
+  end
+
+  P24_RBS = <<~RBS
+    class P24Base
+      def tag: (String name) -> String
+    end
+    class P24Sub < P24Base
+    end
+    class P24Use
+      def tagged: () -> untyped
+    end
+  RBS
+
+  def test_a_call_runs_a_def_in_a_class_body_branch_only_where_the_branch_is_taken
+    {
+      "defined?(P24Base) and self < P24Base" => '"a"',
+      "false" => '"a?"',
+      "ENV[\"JAVA\"]" => "::String"
+    }.each do |condition, expected|
+      in_tmpdir do
+        write("sig/tag.rbs", P24_RBS)
+        write("app/tag.rb", <<~RUBY)
+          class P24Base
+            def tag(name) = name
+          end
+
+          class P24Sub < P24Base
+            unless #{condition}
+              def tag(name) = name + "?"
+            end
+          end
+
+          class P24Use
+            def tagged = P24Sub.new.tag("a")
+          end
+        RUBY
+        types = specialized_body_types("app/tag.rb")
+
+        assert_equal expected, types.fetch("tagged"), condition
+      end
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)
