@@ -15,6 +15,13 @@ gems:
     ignore: true
   - name: prism
   - name: rainbow
+  - name: concurrent-ruby
+    source:
+      type: git
+      name: ruby/gem_rbs_collection
+      remote: https://github.com/ruby/gem_rbs_collection.git
+      revision: 9e17daa08b1710667699a208981cffd21dbf15f6
+      repo_dir: gems
   - name: listen
   - name: json
   - name: fileutils
