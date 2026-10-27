@@ -1475,6 +1475,100 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  P21_RBS = <<~RBS
+    class P21Backend
+      @backend: Hash[Symbol, Symbol]
+      def initialize: () -> void
+      def []: (Symbol key) -> Symbol?
+      def []=: (Symbol key, Symbol value) -> Symbol
+    end
+    class P21Locked < P21Backend
+      @write_lock: Thread::Mutex
+      def initialize: () -> void
+      def []=: (Symbol key, Symbol value) -> Symbol
+    end
+    class P21Use
+      def stored: () -> untyped
+    end
+  RBS
+
+  def p21_source(runs: "yield")
+    <<~RUBY
+      class Thread::Mutex
+        def synchronize
+          raise ThreadError, "must be called with a block" unless block_given?
+          lock
+          begin
+            #{runs}
+          ensure
+            unlock
+          end
+        end
+      end
+
+      class P21Backend
+        def initialize
+          @backend = {}
+        end
+
+        def [](key) = @backend[key]
+
+        def []=(key, value)
+          @backend[key] = value
+        end
+      end
+
+      class P21Locked < P21Backend
+        def initialize
+          @write_lock = Thread::Mutex.new
+          super
+        end
+
+        def []=(key, value)
+          @write_lock.synchronize { super }
+        end
+      end
+
+      class P21Use
+        def stored
+          map = P21Locked.new
+          map[:a] = :x
+          map[:a]
+        end
+      end
+    RUBY
+  end
+
+  def test_a_store_a_block_s_super_makes_holds_where_the_method_runs_the_block_once
+    in_tmpdir do
+      write("sig/map.rbs", P21_RBS)
+      write("app/map.rb", p21_source)
+      assert_equal ":x", specialized_body_types("app/map.rb").fetch("stored")
+    end
+  end
+
+  def test_declines_a_store_in_a_block_a_method_may_not_run_once
+    {
+      "maybe" => "yield if locked?",
+      "twice" => "yield\n      yield",
+      "never" => "nil"
+    }.each do |label, runs|
+      in_tmpdir do
+        write("sig/map.rbs", P21_RBS)
+        write("app/map.rb", p21_source(runs: runs))
+        assert_equal "(::Symbol | nil)", specialized_body_types("app/map.rb").fetch("stored"), label
+      end
+    end
+  end
+
+  def test_declines_a_store_in_a_block_handed_to_a_method_only_core_declares
+    in_tmpdir do
+      write("sig/map.rbs", P21_RBS)
+      write("app/map.rb", p21_source.sub(/class Thread::Mutex.*?^end\n/m, ""))
+      assert_equal "(::Symbol | nil)", specialized_body_types("app/map.rb").fetch("stored")
+    end
+  end
+
   P22_RBS = <<~RBS
     class P22Backend
       @backend: Hash[Symbol, Symbol]

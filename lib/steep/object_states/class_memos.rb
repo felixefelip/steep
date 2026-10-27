@@ -497,9 +497,10 @@ module Steep
             next forwarder == name || forwarders.include?(forwarder) || confined?(constr, singleton, instance, forwarder, forwarders | [name], stores: stores) if forwarder
             next false if use.kind == :escape
             next constr.constructor_bindings.replayed_everywhere?(use.called) if use.kind == :yielded
+            next true if forwarders.empty? && stores.include?(use.called)
 
             effect = ObjectStates.method_effect(constr, instance, use.called) or next false
-            effect.reads_only || (use.kind == :statement && forwarders.empty?) || (forwarders.empty? && stores.include?(use.called))
+            effect.reads_only || (use.kind == :statement && forwarders.empty?)
           end
         end
 
