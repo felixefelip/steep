@@ -107,6 +107,17 @@ module Steep
           end
         end
 
+        # Whether `arguments` hand `self` on: `self` itself, or the class
+        # object `self` is among `handed`.
+        def hands_self?(constr, arguments, handed)
+          singleton = constr.self_type
+          return handed.include?(singleton.name) if singleton.is_a?(AST::Types::Name::Singleton)
+
+          LocalReach.argument_values(arguments).any? do |value|
+            constr.typing.has_type?(value) && constr.typing.type_of(node: value).is_a?(AST::Types::Self)
+          end
+        end
+
         # The class objects among `arguments`, `self` included.
         def handed_classes(constr, arguments)
           LocalReach.argument_values(arguments).filter_map do |argument|

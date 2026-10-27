@@ -80,6 +80,8 @@ module Steep
       #   handed nothing.
       # - `stores_element`: `[ivar, key index, value index]` where its body is
       #   exactly `@ivar[key] = value`, both positional parameters.
+      # - `block_super`: `[ivar, method]` where its body is exactly
+      #   `@ivar.method { super }`.
       # - `hands_back_elements`: `[memo, calls]` where every value it returns
       #   is an element of `memo` read or stored as above under any key, or
       #   one of `calls`, made on `self`; `memo` is nil where it reads none.
@@ -108,7 +110,7 @@ module Steep
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
-        :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :hands_back_elements, :keyed_memo, :outside_state,
+        :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
         keyword_init: true
       )
 
@@ -351,6 +353,7 @@ module Steep
           hands_back: HandedBack.calls(body),
           hands_back_element: HandedBack.element(args_node, body),
           stores_element: HandedBack.stored_element(args_node, body),
+          block_super: HandedBack.block_super(body),
           hands_back_elements: HandedBack.elements(body),
           keyed_memo: HandedBack.keyed_memo(args_node, body),
           outside_state: outside || !consts.empty?,

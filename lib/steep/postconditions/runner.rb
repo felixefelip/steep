@@ -1096,7 +1096,8 @@ module Steep
               # empty ever since — the same #100 facts the comment above
               # describes, lost for any method defined in two places.
               const_establishments: existing.const_establishments.merge(entry.const_establishments),
-              delegates_to_instance: existing.delegates_to_instance || entry.delegates_to_instance
+              delegates_to_instance: existing.delegates_to_instance || entry.delegates_to_instance,
+              runs_block: existing.runs_block && entry.runs_block
             )
           else
             by_key[key] = entry

@@ -154,6 +154,7 @@ module Steep
         effects["may_write"] = entry.may_write_ivars.map(&:to_s).sort unless entry.may_write_ivars.empty?
         # felixefelip/steep#68 item 2: halt-check getter link.
         effects["returns_ivar"] = entry.returns_ivar.to_s if entry.returns_ivar
+        effects["runs_block"] = "once" if entry.runs_block
         row["effects"] = effects unless effects.empty?
 
         # felixefelip/steep#68 item 2: self-methods proven non-nil on the
