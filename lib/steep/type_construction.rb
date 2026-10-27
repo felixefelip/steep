@@ -2786,78 +2786,14 @@ module Steep
             if cond
               types, envs = TypeInference::CaseWhen.type_check(constr, node, interpreter, hint: hint, condition: condition)
             else
-              branch_results = [] #: Array[Pair]
-
-              condition_constr = constr
-
-              whens.each do |when_clause|
-                when_clause_constr = condition_constr
-                body_envs = [] #: Array[TypeInference::TypeEnv]
-
-                # @type var tests: Array[Parser::AST::Node]
-                # @type var body: Parser::AST::Node?
-                *tests, body = when_clause.children
-
-                branch_reachable = false
-
-                tests.each do |test|
-                  _, condition_constr = condition_constr.synthesize(test, condition: true)
-                  truthy, falsy = interpreter.eval(env: condition_constr.context.type_env, node: test)
-                  truthy_env = truthy.env
-                  falsy_env = falsy.env
-
-                  condition_constr = condition_constr.update_type_env { falsy_env }
-                  body_envs << truthy_env
-
-                  branch_reachable ||= !truthy.unreachable
-                end
-
-                branch_result =
-                  if body
-                    when_clause_constr
-                      .update_type_env {|env| env.join(*body_envs) }
-                      .for_branch(body)
-                      .tap {|constr| typing.cursor_context.set_node_context(body, constr.context) }
-                      .synthesize(body, hint: hint)
-                  else
-                    Pair.new(type: AST::Builtin.nil_type, constr: when_clause_constr)
-                  end
-
-                branch_results << branch_result
-
-                unless branch_reachable
-                  typing.add_dead_clause(when_clause)
-                  unless branch_result.type.is_a?(AST::Types::Bot)
-                    typing.add_error(
-                      Diagnostic::Ruby::UnreachableValueBranch.new(
-                        node: when_clause,
-                        type: branch_result.type,
-                        location: when_clause.location.keyword || raise
-                      )
-                    )
-                  end
-                end
-              end
-
-              if els
-                branch_results << condition_constr.synthesize(els, hint: hint)
-              else
-                branch_results << Pair.new(type: AST::Builtin.nil_type, constr: condition_constr)
-              end
-
-              branch_results.reject! do |result|
-                result.type.is_a?(AST::Types::Bot)
-              end
-
-              types = branch_results.map(&:type)
-              envs = branch_results.map {|result| result.constr.context.type_env }
+              types, envs = TypeInference::CaseWhen.type_check_conditions(constr, node, interpreter, hint: hint)
             end
 
             constr = constr.update_type_env do |env|
-              env.join(*envs)
+              envs.empty? ? env : env.join(*envs)
             end
 
-            add_typing(node, type: union_type_unify(*types), constr: constr)
+            add_typing(node, type: types.empty? ? AST::Types::Bot.instance : union_type_unify(*types), constr: constr)
           end
 
         when :rescue
@@ -5939,7 +5875,7 @@ module Steep
       # namespace this read sits in — is refused rather than answered with this
       # file's value.
       if node.type == :const
-        initializer, written_as = source.constants[node]
+        initializer, written_as = source.constants[node] || constructor_bindings.constant_literal(node.children[1])
         # The walk keys by the bare name; only the CHECKER knows which constant
         # a bare read resolved to. `RESERVED` read inside `module Other` is not
         # `Owner::RESERVED` just because this file writes one of those, and the
@@ -5958,7 +5894,7 @@ module Steep
             collection_value?(built) ? built : literal_operand_type(initializer, AST::Builtin.any_type)
           end
 
-        if written_out_value?(recovered) &&
+        if (written_out_value?(recovered) || recovered.is_a?(AST::Types::Literal)) &&
            check_relation(sub_type: recovered, super_type: inferred_type).success?
           return recovered
         end

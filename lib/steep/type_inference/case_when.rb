@@ -68,6 +68,62 @@ module Steep
       include NodeHelper
       extend NodeHelper
 
+      # `[types, envs]` of the branches a `case` with no subject may take: each
+      # `when` whose tests may hold, and the `else` where every test may fail.
+      # A test that always holds leaves the clauses after it checked but not
+      # joined, as `if` does with a branch its condition rules out; only a
+      # clause whose own tests never hold is reported.
+      def self.type_check_conditions(constr, node, logic, hint:)
+        _, *whens, els = node.children
+        typing = constr.typing
+        results = [] #: Array[TypeConstruction::Pair]
+        condition_constr = constr
+        falls_through = true
+
+        whens.each do |when_clause|
+          clause_constr = condition_constr
+          entered = falls_through
+          body_envs = [] #: Array[TypeEnv]
+          *tests, body = when_clause.children
+          reachable = false
+
+          tests.each do |test|
+            _, condition_constr = condition_constr.synthesize(test, condition: true)
+            truthy, falsy = logic.eval(env: condition_constr.context.type_env, node: test)
+            condition_constr = condition_constr.update_type_env { falsy.env }
+            body_envs << truthy.env
+            reachable ||= !truthy.unreachable
+            falls_through &&= !falsy.unreachable
+          end
+
+          result =
+            if body
+              clause_constr
+                .update_type_env {|env| env.join(*body_envs) }
+                .for_branch(body)
+                .tap {|constr| typing.cursor_context.set_node_context(body, constr.context) }
+                .synthesize(body, hint: hint)
+            else
+              TypeConstruction::Pair.new(type: AST::Builtin.nil_type, constr: clause_constr)
+            end
+
+          if entered && reachable
+            results << result
+          else
+            typing.add_dead_clause(when_clause)
+            if entered && !result.type.is_a?(AST::Types::Bot)
+              typing.add_error(Diagnostic::Ruby::UnreachableValueBranch.new(node: when_clause, type: result.type, location: when_clause.location.keyword || raise))
+            end
+          end
+        end
+
+        otherwise = els ? condition_constr.synthesize(els, hint: hint) : TypeConstruction::Pair.new(type: AST::Builtin.nil_type, constr: condition_constr)
+        results << otherwise if falls_through
+        results.reject! {|result| result.type.is_a?(AST::Types::Bot) }
+
+        [results.map(&:type), results.map {|result| result.constr.context.type_env }]
+      end
+
       def self.type_check(constr, node, logic, hint:, condition:)
         case_when = new(node, logic) do |condition_node|
           constr.synthesize(condition_node)

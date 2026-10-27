@@ -34,6 +34,11 @@ module Steep
     # — but a BLOCK still takes the elements somewhere it does not follow.
     CLOSURES = %i[block numblock].freeze
 
+    # Values no mention can change: a read hands the object itself, and there
+    # is nothing in it to mutate. A string is one only where its file freezes
+    # its literals.
+    SCALARS = %i[sym int float true false nil].freeze
+
     class << self
       include NodeHelper
 
@@ -44,7 +49,7 @@ module Steep
       # actually resolved to: `RESERVED` read inside `module Other` is not
       # `Owner::RESERVED` just because this file writes one of those.
       def analyze(node)
-        found = assignments(node)
+        found = assignments(node) { |casgn| initializer_of(casgn) }
         # A regexp literal is frozen, so nothing a read hands one to can change
         # the pattern; only a collection needs the walk that strikes.
         patterns = found.select { |_, (value, _)| value.type == :regexp }
@@ -63,7 +68,27 @@ module Steep
         reads
       end
 
+      # `[{ name => [value node, qualified name] }, every name the file writes]`
+      # for the constants this file writes once as a scalar (`SCALARS`).
+      #
+      # A scalar needs no strike, so what is left to know is that no OTHER file
+      # writes the name — which is why this answers for the project's index
+      # (`Project::ConstructorBindingRegistry#constant_literal`) rather than for
+      # the checker of this file alone.
+      def scalars(node, frozen_strings:)
+        found = assignments(node) { |casgn| scalar_of(casgn.children[2], frozen_strings) }
+        written = [] #: Array[Symbol]
+        each_node(node) { |child| written << child.children[1] if child.type == :casgn }
+        [found, written]
+      end
+
       private
+
+      def scalar_of(value, frozen_strings)
+        return unless value.is_a?(Parser::AST::Node)
+
+        value if SCALARS.include?(value.type) || (value.type == :str && frozen_strings)
+      end
 
       # `{ name => [value node, qualified name] }` for every constant this file
       # writes once, unconditionally, in the body of its own namespace.
@@ -85,7 +110,7 @@ module Steep
 
           name = casgn.children[1]
           usable = !found.key?(name) && casgn.children[0].nil?
-          value = usable ? initializer_of(casgn) : nil
+          value = usable ? yield(casgn) : nil
           found[name] = value ? [value, ["", *nesting, name].join("::")] : nil
         end
 

@@ -43,6 +43,8 @@ module Steep
         @storing_closure = {} #: Hash[[Symbol, Symbol], StoringClosure?]
         @forwarded_closures = {} #: Hash[Symbol, StoringClosure?]
         @initializing = Set[] #: Set[Symbol]
+        @constant_literals = {} #: Hash[Symbol, [::Parser::AST::Node, String]]
+        @constant_writes = Hash.new(0) #: Hash[Symbol, Integer]
       end
 
       # @return self
@@ -128,6 +130,13 @@ module Steep
       # nil for one this cannot read.
       def method_bodies(class_name)
         methods_of(class_name)
+      end
+
+      # `[value node, qualified name]` for a constant the project writes once,
+      # as a scalar (`Constants.scalars`), by its bare name: the checker
+      # compares the qualified name with the constant a read resolved to.
+      def constant_literal(name)
+        @constant_literals[name] if @constant_writes[name] == 1
       end
 
       # Whether any class of the project defines one of `names`.
@@ -251,6 +260,7 @@ module Steep
         end
         merge_bodies(@methods, scan.methods)
         merge_bodies(@singleton_methods, scan.singleton_methods)
+        ingest_constants(node, content)
         @nodes << node
         @uses = nil
         @defined_names = nil
@@ -407,6 +417,16 @@ module Steep
 
       def methods_of(class_name)
         @methods[class_name.to_s.delete_prefix("::")] || {}
+      end
+
+      def ingest_constants(node, content)
+        scalars, written = Constants.scalars(node, frozen_strings: frozen_strings?(content))
+        @constant_literals.merge!(scalars)
+        written.each { |name| @constant_writes[name] += 1 }
+      end
+
+      def frozen_strings?(content)
+        content.each_line.take_while { |line| line.start_with?("#") || line.strip.empty? }.any? { |line| line.match?(/frozen_string_literal:\s*true/i) }
       end
 
       def ruby_source?(path)
