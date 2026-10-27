@@ -1655,6 +1655,42 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  P25_RBS = <<~RBS
+    class P25Base
+      def self.tag: (String name) -> String
+    end
+    class P25Sub < P25Base
+    end
+    class P25Use
+      def base: () -> untyped
+      def sub: () -> untyped
+    end
+  RBS
+
+  def test_a_call_answers_with_the_return_recorded_for_the_body_it_runs
+    in_tmpdir do
+      write("sig/tag.rbs", P25_RBS)
+      write("app/tag.rb", <<~RUBY)
+        class P25Base
+          def self.tag(name) = name
+        end
+
+        class P25Sub < P25Base
+          def self.tag(name) = name + "?"
+        end
+
+        class P25Use
+          def base = P25Base.tag("a")
+          def sub = P25Sub.tag("a")
+        end
+      RUBY
+      types = specialized_body_types("app/tag.rb")
+
+      assert_equal '"a"', types.fetch("base")
+      assert_equal '"a?"', types.fetch("sub")
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)
