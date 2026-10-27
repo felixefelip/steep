@@ -52,10 +52,9 @@ module Steep
         store = constr.specializations
         return call if store.empty? || block
 
-        key = method_key(call.method_decls) or return call
+        key = body_key(constr, call, node) or return call
         arguments = call_site_arguments(constr, node, call) or return call
         type = store.call_return_type(key, arguments, factory: constr.checker.factory) or return call
-        return call unless body_key(constr, call, node)
 
         call.with_return_type(ObjectStates.initialize_call?(call) ? constructed(type, call.return_type) : type)
       end
