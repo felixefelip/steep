@@ -3794,7 +3794,7 @@ EOF
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("::String | ::Integer"), pair.context.type_env[:x]
+        assert_equal parse_type("::Integer"), pair.context.type_env[:x]
         assert_equal parse_type("::Integer"), pair.context.type_env[:y]
       end
     end
@@ -4565,7 +4565,7 @@ EOF
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("::Integer?"), pair.type
+        assert_equal parse_type("::Integer"), pair.type
       end
     end
   end

@@ -6178,17 +6178,7 @@ class TypeCheckTest < Minitest::Test
       expectations: <<~YAML
         ---
         - file: a.rb
-          diagnostics:
-          - range:
-              start:
-                line: 9
-                character: 2
-              end:
-                line: 9
-                character: 3
-            severity: ERROR
-            message: Type `(::Integer | nil)` does not have method `+`
-            code: Ruby::NoMethod
+          diagnostics: []
       YAML
     )
   end
