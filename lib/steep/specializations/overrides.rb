@@ -72,19 +72,23 @@ module Steep
         method = definition.methods[decl.method_name.method_name] or return nil
         return nil unless method.defined_in == decl.method_def.defined_in
 
-        source_key(definition, decl.method_name.method_name) || key
+        found = source_key(definition, decl.method_name.method_name)
+        found || key unless found == :conditional
       rescue RBS::BaseError
         nil
       end
 
+      # The key of the nearest body the source defines, or `:conditional` where
+      # that body is defined in a branch its class body may not take.
       def source_key(definition, method_name)
         definition.ancestors.ancestors.each do |ancestor|
           owner = ancestor.name.to_s.delete_prefix("::")
-          if ancestor.is_a?(RBS::Definition::Ancestor::Singleton)
-            return "#{owner}.#{method_name}" if method_name == :new ? @registry.initializers_for(owner).any? : ObjectStates.ancestor_defines?(@registry, ancestor, method_name)
-          elsif ObjectStates.ancestor_defines?(@registry, ancestor, method_name)
-            return "#{owner}##{method_name}"
-          end
+          singleton = ancestor.is_a?(RBS::Definition::Ancestor::Singleton)
+          constructs = singleton && method_name == :new
+          next unless constructs ? @registry.initializers_for(owner).any? : ObjectStates.ancestor_defines?(@registry, ancestor, method_name)
+          return :conditional if constructs ? @registry.conditional?(owner, :initialize) : @registry.conditional?(owner, method_name, singleton: singleton)
+
+          return "#{owner}#{singleton ? "." : "#"}#{method_name}"
         end
         nil
       end

@@ -692,7 +692,7 @@ module Steep
               truthy_result.unreachable! unless truthy_type
 
               falsy_result = Result.new(type: FALSE, env: falsy_env, unreachable: false)
-              falsy_result.unreachable! unless falsy_type
+              falsy_result.unreachable! unless falsy_type && !factory.descends?(receiver_type.is_a?(AST::Types::Self) ? self_type : receiver_type, arg_type)
 
               [truthy_result, falsy_result]
             end

@@ -59,12 +59,14 @@ module Steep
       end
 
       def write(entries)
-        facts = @method_entry_facts || {}
-        arg_facts = @argument_entry_facts || {}
-        if entries.empty? && facts.empty? && arg_facts.empty?
+        sidecar = {
+          method_entry_facts: @method_entry_facts || {}, argument_entry_facts: @argument_entry_facts || {},
+          unreached_definitions: @definitions&.unreached || Set[], conditional_definitions: @definitions&.conditional || Set[]
+        }
+        if entries.empty? && sidecar.each_value.all?(&:empty?)
           output_path.delete if output_path.file?
         else
-          Writer.write(output_path, entries, method_entry_facts: facts, argument_entry_facts: arg_facts)
+          Writer.write(output_path, entries, **sidecar)
         end
       end
 
@@ -686,6 +688,7 @@ module Steep
             record_branch_envs: true
           )
 
+          (@definitions ||= UnreachedDefinitions.new).add(source, typing)
           out.concat(Inferrer.infer(source, typing, subtyping))
           sequences.concat(MethodEntryInferrer.sequences(source, typing))
           @defined_method_keys.merge(MethodEntryInferrer.defined_method_keys(source))

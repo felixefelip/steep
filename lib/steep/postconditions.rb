@@ -55,6 +55,8 @@ module Steep
         merged = {} #: Hash[[String, Symbol], Entry]
         merged_entry_facts = {} #: Hash[[String, Symbol], untyped]
         merged_arg_facts = {} #: Hash[[String, Symbol], untyped]
+        unreached = Set[] #: Set[String]
+        conditional = Set[] #: Set[String]
         sources = []
 
         paths.each do |path|
@@ -74,17 +76,28 @@ module Steep
           sub.argument_entry_facts.each do |key, rows|
             (merged_arg_facts[key] ||= []).concat(rows)
           end
+          unreached.merge(sub.unreached_definitions)
+          conditional.merge(sub.conditional_definitions)
           sources << absolute.to_s
         rescue Psych::Exception, LoadError => e
           Steep.logger.warn { "[postconditions] failed to parse #{absolute}: #{e.message}" }
         end
 
-        Store.new(entries: merged, source: sources.join(", "), method_entry_facts: merged_entry_facts, argument_entry_facts: merged_arg_facts)
+        Store.new(entries: merged, source: sources.join(", "), method_entry_facts: merged_entry_facts, argument_entry_facts: merged_arg_facts,
+                  unreached_definitions: unreached, conditional_definitions: conditional)
       end
     end
 
     class Store
       attr_reader :entries, :source
+
+      # `"Class#method"` / `"Class.method"` for each method a class body
+      # defines only in a branch it never takes (`UnreachedDefinitions`).
+      attr_reader :unreached_definitions
+
+      # The same keys for each method it defines only in a branch it may or may
+      # not take, so that either its body or an ancestor's may run.
+      attr_reader :conditional_definitions
 
       def self.empty
         new(entries: {}, source: nil, method_entry_facts: {}, argument_entry_facts: {})
@@ -107,7 +120,9 @@ module Steep
           entries: index,
           source: source,
           method_entry_facts: parse_method_entry_facts(raw),
-          argument_entry_facts: parse_argument_entry_facts(raw)
+          argument_entry_facts: parse_argument_entry_facts(raw),
+          unreached_definitions: ((raw && raw["unreached_definitions"]) || []).grep(String).to_set,
+          conditional_definitions: ((raw && raw["conditional_definitions"]) || []).grep(String).to_set
         )
       end
 
@@ -173,15 +188,17 @@ module Steep
 
       attr_reader :method_entry_facts, :argument_entry_facts
 
-      def initialize(entries:, source:, method_entry_facts: {}, argument_entry_facts: {})
+      def initialize(entries:, source:, method_entry_facts: {}, argument_entry_facts: {}, unreached_definitions: Set[], conditional_definitions: Set[])
         @entries = entries
         @source = source
         @method_entry_facts = method_entry_facts
         @argument_entry_facts = argument_entry_facts
+        @unreached_definitions = unreached_definitions
+        @conditional_definitions = conditional_definitions
       end
 
       def empty?
-        @entries.empty? && @method_entry_facts.empty? && @argument_entry_facts.empty?
+        @entries.empty? && @method_entry_facts.empty? && @argument_entry_facts.empty? && @unreached_definitions.empty? && @conditional_definitions.empty?
       end
 
       def lookup_instance(type_name, method_name)

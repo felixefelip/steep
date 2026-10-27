@@ -3150,7 +3150,9 @@ module Steep
 
         when :defined?
           type_any_rec(node, only_children: true)
-          add_typing(node, type: AST::Builtin.optional(AST::Builtin::String.instance_type))
+          # A constant the program declares is one `defined?` finds.
+          defined = context.type_env.constant_of(node.children[0]) ? AST::Types::Literal.new(value: "constant") : nil
+          add_typing(node, type: defined || AST::Builtin.optional(AST::Builtin::String.instance_type))
 
         when :gvasgn
           yield_self do

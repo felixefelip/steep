@@ -10,10 +10,15 @@ module Steep
       # (`ObjectStates::Constructed`).
       def self.definitions(source)
         result = {} #: Hash[String, Parser::AST::Node]
-        node = source.node
-        walk_defs(node, [], source) { |key, def_node| result[key] = def_node } if node
+        each_definition(source) { |key, def_node| result[key] = def_node }
         result.to_a.each { |key, def_node| result[constructor_key(key)] ||= def_node if key.end_with?("#initialize") }
         result
+      end
+
+      # Every `def` in `source`, keyed as a call site resolving to it keys
+      # itself, a key once for each definition.
+      def self.each_definition(source, &block)
+        walk_defs(source.node, [], source, &block) if source.node
       end
 
       def self.constructor_key(initializer_key)

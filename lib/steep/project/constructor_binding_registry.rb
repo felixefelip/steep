@@ -45,10 +45,12 @@ module Steep
         @initializing = Set[] #: Set[Symbol]
         @constant_literals = {} #: Hash[Symbol, [::Parser::AST::Node, String]]
         @constant_writes = Hash.new(0) #: Hash[Symbol, Integer]
+        @postconditions = nil #: (^() -> Postconditions::Store)?
       end
 
       # @return self
       def build(project)
+        @postconditions = -> { project.postconditions }
         loader = Services::FileLoader.new(base_dir: project.base_dir)
         paths = project.targets.flat_map { |target| loader.each_path_in_target(target).to_a }.uniq
         paths.each { |relative_path| ingest(project.absolute_path(relative_path)) }
@@ -86,7 +88,8 @@ module Steep
       # module), as `TypeInference::ConstructorBindingAnalyzer::Body`,
       # nil for one it cannot read. More than one: which runs is load order.
       def initializers_for(class_name)
-        @initializers[class_name.to_s.delete_prefix("::")] || []
+        name = class_name.to_s.delete_prefix("::")
+        unreached?("#{name}#initialize") ? [] : @initializers[name] || []
       end
 
       # What `class_name#method_name` does to the object it runs on, read off
@@ -146,12 +149,12 @@ module Steep
       end
 
       def singleton_method_bodies(class_name)
-        @singleton_methods[class_name.to_s.delete_prefix("::")] || {}
+        reached(@singleton_methods, class_name, ".")
       end
 
       # `body_of` for a method of the class object itself.
       def singleton_body_of(class_name, method_name)
-        bodies = (@singleton_methods[class_name.to_s.delete_prefix("::")] || {})[method_name.to_sym] or return nil
+        bodies = singleton_method_bodies(class_name)[method_name.to_sym] or return nil
         bodies.first if bodies.size == 1
       end
 
@@ -230,7 +233,7 @@ module Steep
       # Whether the project may define `method_name` in `class_name` at all, on
       # its instances or, with `singleton`, on the class object.
       def defines?(class_name, method_name, singleton: false)
-        methods = singleton ? @singleton_methods[class_name.to_s.delete_prefix("::")] || {} : methods_of(class_name)
+        methods = singleton ? singleton_method_bodies(class_name) : methods_of(class_name)
         methods.key?(method_name.to_sym)
       end
 
@@ -416,8 +419,33 @@ module Steep
       end
 
       def methods_of(class_name)
-        @methods[class_name.to_s.delete_prefix("::")] || {}
+        reached(@methods, class_name, "#")
       end
+
+      # The methods `table` holds for `class_name`, but those it defines only
+      # in a branch its class body never takes
+      # (`Postconditions::UnreachedDefinitions`).
+      def reached(table, class_name, separator)
+        name = class_name.to_s.delete_prefix("::")
+        methods = table[name] || {}
+        return methods if unreached_definitions.empty?
+
+        methods.reject { |method_name, _| unreached?("#{name}#{separator}#{method_name}") }
+      end
+
+      def unreached?(key) = unreached_definitions.include?(key)
+
+      public
+
+      # Whether `owner` defines `method_name` only in a branch its class body
+      # may or may not take, so the body an ancestor defines may run instead.
+      def conditional?(owner, method_name, singleton: false)
+        @postconditions&.call&.conditional_definitions&.include?("#{owner.to_s.delete_prefix("::")}#{singleton ? "." : "#"}#{method_name}") || false
+      end
+
+      private
+
+      def unreached_definitions = @postconditions&.call&.unreached_definitions || Set[]
 
       def ingest_constants(node, content)
         scalars, written = Constants.scalars(node, frozen_strings: frozen_strings?(content))
