@@ -10,18 +10,21 @@ module Steep
     #   klass.tag(:a)    # klass: singleton(Base) may be Child
     #
     # A call that may run another body is not specialized: what Base's body
-    # returns for `(:a)` is not what the call returns.
+    # returns for `(:a)` is not what the call returns. Where every class the
+    # receiver may be runs the same body, the call is keyed by that body, which
+    # is the source's answer and not the signature's: an override the RBS does
+    # not redeclare still runs, and a method the RBS places on a class whose
+    # source inherits it runs the ancestor's body.
     #
-    # `definitions`: the methods the project defines in source, by key
-    # (`Collector.definitions`). An override that has no signature of its own is
-    # visible only there; a check reading a sidecar has none, and sees the
-    # overrides the signatures declare.
+    # Which body runs is `ObjectStates.resolved_body`'s question, so the source
+    # it reads is the same: the project's `ConstructorBindingRegistry`, which a
+    # check reading a sidecar has as well as the run that wrote it.
     class Overrides
       SUBCLASSES = ObjectSpace::WeakKeyMap.new
 
-      def initialize(factory:, definitions:)
+      def initialize(factory:, registry:)
         @factory = factory
-        @definitions = definitions
+        @registry = registry
       end
 
       # The key the call's body is recorded under, or nil where the call does
@@ -33,26 +36,28 @@ module Steep
         return nil unless call.is_a?(TypeInference::MethodCall::Typed)
 
         key = Specializations.method_key(call.method_decls) or return nil
-        return key unless @definitions.empty? || @definitions.include?(key)
         return key if node.type == :super
 
-        key if runs_declared_body?(call, key, node, exact_self, self_type)
+        run_key(call, key, node, exact_self, self_type)
       end
 
       private
 
-      def runs_declared_body?(call, key, node, exact_self, self_type)
-        receiver = call.receiver_type
+      def run_key(call, key, node, exact_self, self_type)
+        state = ObjectStates.state_in(call.receiver_type)
+        receiver = state&.back_type || call.receiver_type
         receiver = exact_self || self_type if receiver.is_a?(AST::Types::Self)
-        return true unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
+        return key unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
 
-        names = exact_receiver?(node, exact_self) ? [receiver.name] : [receiver.name, *subclasses(receiver.name)]
-        names.all? { |name| runs?(name, receiver.is_a?(AST::Types::Name::Singleton), call.method_decls.first, key) }
+        names = state || exact_receiver?(node, exact_self) ? [receiver.name] : [receiver.name, *subclasses(receiver.name)]
+        keys = names.map { |name| ran_key(name, receiver.is_a?(AST::Types::Name::Singleton), call.method_decls.first, key) }.uniq
+        keys.first if keys.size == 1
       end
 
       # A class object named by a constant, or `self` where it is one class.
       # Any other receiver of type `singleton(Base)` or `Base` may be a
-      # subclass's.
+      # subclass's; one whose state a constructor fixed (`ObjectState`) is the
+      # class it was built as.
       def exact_receiver?(node, exact_self)
         send = Accumulators::LAMBDA_BODIES.include?(node.type) ? node.children[0] : node
         receiver = send.children[0]
@@ -61,27 +66,25 @@ module Steep
         receiver.type == :const
       end
 
-      def runs?(name, singleton, decl, key)
+      def ran_key(name, singleton, decl, key)
         builder = @factory.definition_builder
         definition = singleton ? builder.build_singleton(name) : builder.build_instance(name)
-        method = definition.methods[decl.method_name.method_name] or return false
-        return false unless method.defined_in == decl.method_def.defined_in
+        method = definition.methods[decl.method_name.method_name] or return nil
+        return nil unless method.defined_in == decl.method_def.defined_in
 
-        source = nearest_source_key(name, singleton, decl.method_name.method_name)
-        source.nil? || source == key
+        source_key(definition, decl.method_name.method_name) || key
       rescue RBS::BaseError
-        false
+        nil
       end
 
-      def nearest_source_key(name, singleton, method_name)
-        return nil if @definitions.empty?
-
-        builder = @factory.definition_builder.ancestor_builder
-        ancestors = singleton ? builder.singleton_ancestors(name) : builder.instance_ancestors(name)
-        ancestors.ancestors.each do |ancestor|
+      def source_key(definition, method_name)
+        definition.ancestors.ancestors.each do |ancestor|
           owner = ancestor.name.to_s.delete_prefix("::")
-          key = ancestor.is_a?(RBS::Definition::Ancestor::Singleton) ? "#{owner}.#{method_name}" : "#{owner}##{method_name}"
-          return key if @definitions.include?(key)
+          if ancestor.is_a?(RBS::Definition::Ancestor::Singleton)
+            return "#{owner}.#{method_name}" if method_name == :new ? @registry.initializers_for(owner).any? : ObjectStates.ancestor_defines?(@registry, ancestor, method_name)
+          elsif ObjectStates.ancestor_defines?(@registry, ancestor, method_name)
+            return "#{owner}##{method_name}"
+          end
         end
         nil
       end
