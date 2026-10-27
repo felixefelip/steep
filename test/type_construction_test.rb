@@ -5437,6 +5437,33 @@ EOF
     end
   end
 
+  def test_super_drops_the_method_block_on_an_overload_taking_none
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer) -> nil
+         | () { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(key)
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_super_correct_block
     with_checker <<-EOF do |checker|
 class TestSuper

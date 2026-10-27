@@ -86,7 +86,9 @@ module Steep
     #
     def deconstruct_sendish_and_block_nodes: (*Parser::AST::Node) -> [Parser::AST::Node, Parser::AST::Node?]?
 
-    def with_method_block: (Parser::AST::Node super_node, Interface::Shape::Entry super_method) -> Array[untyped]
+    def with_method_block: (Parser::AST::Node super_node) -> Array[untyped]
+
+    def method_block_pass?: (Parser::AST::Node block_pass, Parser::AST::Node call) -> bool
 
     def explicit_super: (Parser::AST::Node zsuper, Parser::AST::Node def_node) -> Parser::AST::Node?
 
