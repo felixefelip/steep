@@ -5261,6 +5261,39 @@ EOF
     end
   end
 
+  def test_defined_finds_a_constant_named_through_its_namespace
+    with_checker <<-EOF do |checker|
+module Outer
+  module Inner
+    class Leaf
+    end
+  end
+
+  class Host
+  end
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module Outer
+  class Host
+    defined?(Inner::Leaf)
+    defined?(::Outer::Inner::Leaf)
+    defined?(Inner::Missing)
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        found, absolute, missing = dig(source.node, 1, 2).children
+        assert_equal parse_type('"constant"'), typing.type_of(node: found)
+        assert_equal parse_type('"constant"'), typing.type_of(node: absolute)
+        assert_equal parse_type("::String?"), typing.type_of(node: missing)
+      end
+    end
+  end
+
   def test_bare_super_is_typed_as_the_explicit_super_it_stands_for
     with_checker <<-EOF do |checker|
 class TestSuper
