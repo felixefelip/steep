@@ -70,8 +70,7 @@
     message: |-
       Cannot find compatible overloading of method `-` of type `(::Object & ::Issue332::_TimeDurationExtensions & ::Issue332::TimeDurationExtensions)`
       Method types:
-        def -: (::Issue332::Duration) -> ::Time
-             | (::Numeric) -> ::Time
+        def -: (::Numeric) -> ::Time
              | (::Time) -> ::Float
     code: Ruby::UnresolvedOverloading
 - file: lambda.rb
