@@ -1716,7 +1716,7 @@ module Steep
                   receiver_type: self_type,
                   method_name: method_context!.name || raise("method context must have a name"),
                   method: super_method,
-                  arguments: node.children,
+                  arguments: with_method_block(node, super_method),
                   block_params: nil,
                   block_body: nil,
                   tapp: nil,
