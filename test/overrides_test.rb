@@ -41,11 +41,11 @@ class OverridesTest < Minitest::Test
     end
   RUBY
 
-  def test_a_call_on_a_class_overriding_the_method_without_a_signature_is_not_specialized_with_the_parents_body
+  def test_a_call_on_a_class_overriding_the_method_without_a_signature_is_specialized_with_its_own_body
     rbs = "class Base\n  def self.tag: (Symbol name) -> String\n  def self.use: () -> untyped\nend\nclass Child < Base\nend\n"
     ruby = BASE_RUBY.sub("class Child", "class Base\n  def self.use = Child.tag(:a)\nend\nclass Child")
 
-    assert_equal({}, run_specializations(rbs, ruby))
+    assert_equal({ "Child.tag" => { "(:a)" => '"a?"' } }, run_specializations(rbs, ruby))
   end
 
   def test_a_call_on_the_class_whose_body_it_runs_is_still_specialized

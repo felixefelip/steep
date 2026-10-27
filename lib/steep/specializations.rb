@@ -75,7 +75,7 @@ module Steep
       # The key of the body `call` runs, or nil where it may run another
       # (`Overrides`).
       def body_key(constr, call, node)
-        Overrides.new(factory: constr.checker.factory, definitions: constr.specializations.definitions)
+        Overrides.new(factory: constr.checker.factory, registry: constr.constructor_bindings)
           .body_key(call, node: node, exact_self: exact_self(constr), self_type: constr.self_type)
       end
 
@@ -766,7 +766,7 @@ module Steep
     end
 
     class Store
-      attr_reader :methods, :source, :active, :definitions
+      attr_reader :methods, :source, :active
 
       def self.empty
         new(methods: {}, source: nil, receivers: {})
@@ -804,16 +804,13 @@ module Steep
       # (`Typing#class_exits`).
       # `declarations`: what each method answers across all its calls
       # (`CallSiteUnions`), as RBS.
-      # `definitions`: the methods the project defines in source, in a run that
-      # read the source (`Overrides`).
       # `receivers`: the types the receiver of each call naming a reader was
       # given (`Receivers`), as RBS, by site.
       # `reads`: where to record each question a check asks and the answer it
       # got (`Reads`).
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, definitions: Set[], receivers:, reads: nil)
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, receivers:, reads: nil)
         @methods = methods
         @receivers = receivers
-        @definitions = definitions
         @declarations = declarations
         @memo = {}.compare_by_identity
         @source = source
@@ -948,7 +945,7 @@ module Steep
       def with(active:, reads:)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
-          class_exits: @class_exits, declarations: @declarations, definitions: @definitions, receivers: @receivers, reads: reads
+          class_exits: @class_exits, declarations: @declarations, receivers: @receivers, reads: reads
         )
       end
 

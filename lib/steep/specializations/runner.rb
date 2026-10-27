@@ -70,7 +70,6 @@ module Steep
         @demanding = Set[] #: Set[[String, String]]
         @class_exits = {} #: Hash[RBS::TypeName, Hash[Symbol, AST::Types::t]]
         @declarations = {} #: Hash[String, String]
-        @definition_keys = Set[] #: Set[String]
         @overrides = nil
         @receivers = {} #: Hash[String, Array[String]]
         @unknown_receivers = Set[] #: Set[String]
@@ -130,21 +129,20 @@ module Steep
         context = load_target(target) or return
 
         writers = code_writers(context)
-        @definition_keys = context.sources.each_value.flat_map { |source| Collector.definitions(source).keys }.to_set
         @factory = context.subtyping.factory
-        @overrides = Overrides.new(factory: @factory, definitions: @definition_keys)
+        @overrides = Overrides.new(factory: @factory, registry: @project.constructor_binding_registry)
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
         @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, definitions: @definition_keys, receivers: @receivers), locations, writers)
+        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers), locations, writers)
         definitions.merge!(collected)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          harvest_evals(context, Store.new(methods: {}, source: nil, definitions: @definition_keys, receivers: @receivers), locations, definitions, writers)
+          harvest_evals(context, Store.new(methods: {}, source: nil, receivers: @receivers), locations, definitions, writers)
           return
         end
 
@@ -405,8 +403,7 @@ module Steep
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) },
-          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, definitions: @definition_keys,
-          receivers: @receivers
+          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, receivers: @receivers
         )
       end
 

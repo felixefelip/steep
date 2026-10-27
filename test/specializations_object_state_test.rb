@@ -1475,6 +1475,92 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  P22_RBS = <<~RBS
+    class P22Backend
+      @backend: Hash[Symbol, Symbol]
+      def initialize: () -> void
+      def []: (Symbol key) -> Symbol?
+      def []=: (Symbol key, Symbol value) -> Symbol
+    end
+    class P22Map < P22Backend
+      @lock: Integer
+      def initialize: () -> void
+    end
+    class P22Use
+      def plain: () -> untyped
+      def stored: () -> untyped
+    end
+  RBS
+
+  def p22_source(store:, initialize: "def initialize\n  @lock = 1\n  super\nend")
+    <<~RUBY
+      class P22Backend
+        def initialize
+          @backend = {}
+        end
+
+        def [](key)
+          @backend[key]
+        end
+
+        def []=(key, value)
+          @backend[key] = value
+        end
+      end
+
+      class P22Map < P22Backend
+      #{initialize.gsub(/^/, "  ")}
+      #{store && "def []=(key, value)\n  #{store}\nend".gsub(/^/, "  ")}
+      end
+
+      class P22Use
+        def plain
+          map = P22Backend.new
+          map[:a] = :x
+          map[:a]
+        end
+
+        def stored
+          map = P22Map.new
+          map[:a] = :x
+          map[:a]
+        end
+      end
+    RUBY
+  end
+
+  def test_a_call_runs_the_override_the_source_defines_where_the_rbs_declares_none
+    {
+      "super" => ":x",
+      "value" => "nil",
+      "@backend[key] = value" => ":x"
+    }.each do |store, expected|
+      in_tmpdir do
+        write("sig/map.rbs", P22_RBS)
+        write("app/map.rb", p22_source(store: store))
+        types = specialized_body_types("app/map.rb")
+
+        assert_equal expected, types.fetch("stored"), store
+      end
+    end
+  end
+
+  def test_a_call_the_rbs_places_on_a_class_runs_the_body_its_source_inherits
+    in_tmpdir do
+      write("sig/map.rbs", P22_RBS.sub("      def initialize: () -> void\n    end\n    class P22Use", <<~RBS.chomp))
+              def initialize: () -> void
+              def []: (Symbol key) -> Symbol?
+              def []=: (Symbol key, Symbol value) -> Symbol
+            end
+            class P22Use
+      RBS
+      write("app/map.rb", p22_source(store: nil))
+      types = specialized_body_types("app/map.rb")
+
+      assert_equal ":x", types.fetch("stored")
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)
