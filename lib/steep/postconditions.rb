@@ -238,6 +238,9 @@ module Steep
       attr_reader :returns_ivar, :conditional_returns
       # felixefelip/steep#68 item 3: { "Const.attr" => { gate_ivar:, type: } }.
       attr_reader :conditional_const_returns
+      # Whether the method runs the block it is handed exactly once before it
+      # returns (`Postconditions::RunsBlock`).
+      attr_reader :runs_block
 
       def self.parse(row, source:)
         return nil unless row.is_a?(Hash)
@@ -249,6 +252,7 @@ module Steep
         when_false = Branch.parse(row["when_false"], source: source)
         may_write = parse_may_write(row["effects"])
         returns_ivar = parse_returns_ivar(row["effects"])
+        runs_block = row["effects"].is_a?(Hash) && row["effects"]["runs_block"] == "once"
         conditional_returns = parse_conditional_returns(row["conditional_returns"], source: source)
         conditional_const_returns = parse_conditional_const_returns(row["conditional_const_returns"], source: source)
         # `unconditional:` fires at every call site of the method, with no
@@ -265,7 +269,7 @@ module Steep
         #     another caller ivar.
         unconditional = Branch.parse(row["unconditional"], source: source)
         return nil unless when_true || when_false || unconditional || may_write.any? ||
-                          returns_ivar || conditional_returns.any? || conditional_const_returns.any?
+                          returns_ivar || conditional_returns.any? || conditional_const_returns.any? || runs_block
 
         new(
           class_name: klass.to_s,
@@ -276,7 +280,8 @@ module Steep
           may_write_ivars: may_write,
           returns_ivar: returns_ivar,
           conditional_returns: conditional_returns,
-          conditional_const_returns: conditional_const_returns
+          conditional_const_returns: conditional_const_returns,
+          runs_block: runs_block
         )
       end
 
@@ -343,7 +348,7 @@ module Steep
         end
       end
 
-      def initialize(class_name:, method_name:, when_true:, when_false:, unconditional: nil, may_write_ivars: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {})
+      def initialize(class_name:, method_name:, when_true:, when_false:, unconditional: nil, may_write_ivars: Set[], returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, runs_block: false)
         @class_name = class_name
         @method_name = method_name
         @when_true = when_true
@@ -353,6 +358,7 @@ module Steep
         @returns_ivar = returns_ivar
         @conditional_returns = conditional_returns
         @conditional_const_returns = conditional_const_returns
+        @runs_block = runs_block
       end
     end
 

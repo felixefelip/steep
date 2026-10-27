@@ -80,7 +80,7 @@ module Steep
           # dropping it before the fixpoint breaks the link it exists to carry.
           # Unlike `unconditional_call_deps` this costs little — the edge only
           # exists when a method's VALUE is a call it also handed its block to.
-          if ivars.empty? && when_true_ivars.empty? && when_true_methods.empty? && returns_establishes.empty? &&
+          if !(runs_block = RunsBlock.once?(def_node, @typing)) && ivars.empty? && when_true_ivars.empty? && when_true_methods.empty? && returns_establishes.empty? &&
              may_write.empty? && self_call_deps.empty? && returns_ivar.nil? &&
              conditional_returns.empty? && conditional_const_returns.empty? &&
              establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance &&
@@ -124,7 +124,8 @@ module Steep
             conditional_const_returns: conditional_const_returns,
             establishes_consts: establishes_consts,
             const_establishments: const_establishments,
-            delegates_to_instance: delegates_to_instance
+            delegates_to_instance: delegates_to_instance,
+            runs_block: runs_block
           )
         end
         results.concat(AttrWriterInferrer.new(@definition_builder).entries(@source.node))
@@ -2183,8 +2184,11 @@ module Steep
       # `{ index => { attr => type } }`: what this method always leaves in the
       # object it was handed at that position.
       attr_reader :param_establishments
+      # Whether it runs the block it is handed exactly once before it returns
+      # (`RunsBlock`).
+      attr_reader :runs_block
 
-      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_methods: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_deps: {}, param_establishments: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false)
+      def initialize(class_name:, method_name:, singleton:, ivars: {}, self_type_string: nil, when_true_ivars: {}, when_true_methods: {}, when_true_self_type_string: nil, returns_establishes: [], may_write_ivars: Set[], self_call_deps: Set[], unconditional_call_deps: Set[], when_true_consts: {}, when_true_call_deps: Set[], disjunction_chains: [], when_true_block_truthy: false, block_forward_deps: Set[], block_disjunction: [], conditional_block_truthy: nil, block_call_establishments: [], param_call_deps: {}, param_establishments: {}, self_arg_calls: {}, halts_via_param: nil, returns_ivar: nil, conditional_returns: {}, conditional_const_returns: {}, establishes_consts: {}, const_establishments: {}, delegates_to_instance: false, runs_block: false)
         @class_name = class_name
         @method_name = method_name
         @singleton = singleton
@@ -2215,6 +2219,7 @@ module Steep
         @establishes_consts = establishes_consts
         @const_establishments = const_establishments
         @delegates_to_instance = delegates_to_instance
+        @runs_block = runs_block
       end
 
       # A copy with `may_write_ivars` replaced — the Runner's fixpoint result.
@@ -2237,7 +2242,7 @@ module Steep
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: establishes_consts, const_establishments: const_establishments,
-          delegates_to_instance: delegates_to_instance
+          delegates_to_instance: delegates_to_instance, runs_block: runs_block
         )
       end
 
@@ -2262,7 +2267,7 @@ module Steep
           returns_ivar: returns_ivar, conditional_returns: conditional_returns,
           conditional_const_returns: conditional_const_returns,
           establishes_consts: consts, const_establishments: const_establishments,
-          delegates_to_instance: delegates_to_instance
+          delegates_to_instance: delegates_to_instance, runs_block: runs_block
         )
       end
 
@@ -2276,7 +2281,7 @@ module Steep
           returns_establishes.empty? && param_establishments.empty? &&
           may_write_ivars.empty? && returns_ivar.nil? && conditional_returns.empty? &&
           conditional_const_returns.empty? && establishes_consts.empty? &&
-          const_establishments.empty? && !when_true_block_truthy && conditional_block_truthy.nil?
+          const_establishments.empty? && !when_true_block_truthy && conditional_block_truthy.nil? && !runs_block
       end
 
       # The Runner's fixpoint proving the fact one link further along the chain.

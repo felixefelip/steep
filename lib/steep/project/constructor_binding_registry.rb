@@ -309,7 +309,7 @@ module Steep
       end
 
       def forwarded_closures
-        stores = HASH_STORES | @methods.each_value.flat_map { |methods| methods.filter_map { |name, bodies| name if bodies.any? { |body| body&.stores_element } } }
+        stores = HASH_STORES | @methods.each_value.flat_map { |methods| methods.filter_map { |name, bodies| name if bodies.any? { |body| body&.stores_element || body&.block_super } } }
         @born_objects.each_value.flat_map(&:keys).uniq.to_h { |ivar| [ivar, closure_of_stores(ivar, ivar, stores)] }
       end
 

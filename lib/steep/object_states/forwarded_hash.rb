@@ -38,10 +38,35 @@ module Steep
       end
 
       # `[key index, value index]` where `method_name` stores into the hash
-      # `instance` keeps in `nested`.
+      # `instance` keeps in `nested`: itself, or by a `super` in a block
+      # handed to a method that runs it once (`BlockRun`, felixefelip/steep#370).
       def store(constr, instance, nested, method_name)
-        ivar, key_index, value_index = ObjectStates.resolved_body(constr, instance, method_name)&.last&.stores_element
-        [key_index, value_index] if ivar == nested
+        owner, body = ObjectStates.resolved_body(constr, instance, method_name)
+        store_of(constr, instance, nested, method_name, owner, body)
+      end
+
+      def store_of(constr, instance, nested, method_name, owner, body)
+        ivar, key_index, value_index = body&.stores_element
+        return [key_index, value_index] if ivar == nested
+
+        holder, runner = body&.block_super
+        held = holder && constr.checker.factory.definition_builder.build_instance(instance.name).instance_variables[holder] or return
+        return unless BlockRun.runs_once?(constr, constr.checker.factory.type(held.type), runner)
+
+        reached = super_body(constr, instance, owner, method_name) or return
+        store_of(constr, instance, nested, method_name, *reached)
+      rescue RBS::BaseError
+        nil
+      end
+
+      # The body a `super` in `owner`'s `method_name` reaches, on `instance`.
+      def super_body(constr, instance, owner, method_name)
+        registry = constr.constructor_bindings
+        ancestors = constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors
+        index = ancestors.index { |ancestor| ancestor.name == owner } or return
+        ancestor = ancestors.drop(index + 1).find { |candidate| ObjectStates.ancestor_defines?(registry, candidate, method_name) } or return
+        bodies = ObjectStates.ancestor_bodies(registry, ancestor)[method_name]
+        [ancestor.name, bodies.first] if bodies&.size == 1
       end
 
       # Every method of `instance` that stores into the hash it keeps in
@@ -49,7 +74,7 @@ module Steep
       def store_names(constr, instance, nested)
         registry = constr.constructor_bindings
         constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.flat_map do |ancestor|
-          registry.method_bodies(ancestor.name.to_s).filter_map { |name, bodies| name if bodies.all? { |body| body&.stores_element&.first == nested } }
+          registry.method_bodies(ancestor.name.to_s).keys.select { |name| store(constr, instance, nested, name) }
         end.to_set
       rescue RBS::BaseError
         Set[]

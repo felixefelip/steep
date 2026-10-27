@@ -47,6 +47,13 @@ module Steep
           [memo.children[0], key_index, value_index]
         end
 
+        def block_super(body)
+          return unless body&.type == :block && body.children[2]&.type == :zsuper && body.children[1].children.empty?
+
+          receiver, method_name, *arguments = body.children[0].children
+          [receiver.children[0], method_name] if receiver&.type == :ivar && arguments.empty?
+        end
+
         def elements(body)
           memos = Set[] #: Set[Symbol]
           calls = Set[] #: Set[Symbol]

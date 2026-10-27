@@ -132,13 +132,14 @@ module Steep
       # a block; this covers a block, an untyped receiver and the correlated
       # paths.
       def after_call(constr, node:, method_name:, receiver:, receiver_type:, arguments:)
+        handed = ClassStates.handed_classes(constr, arguments)
+        on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
+        reaches_self = on_self || ClassStates.hands_self?(constr, arguments, handed)
+        constr = BlockRun.after(constr, node, receiver_type, method_name) unless reaches_self
         if (variable = receiver && HeldIvar.variable(constr, receiver)) && holds_state?(receiver_type)
           constr = HeldIvar.refine_variable(constr, receiver, left(constr, receiver_type, constr.context.type_env[variable], method_name, arguments, node))
         end
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver
-        handed = ClassStates.handed_classes(constr, arguments)
-        on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
-        reaches_self = on_self || hands_self?(constr, arguments, handed)
         exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
         constr = HeldIvar.moved(self_moved(constr, exit), exit) if reaches_self
         call = recorded_call(constr, node)
@@ -165,15 +166,6 @@ module Steep
 
         call = recorded_call(constr, node)
         constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node) || Supers.core_initializer?(call, node) || (on_self && ArrayMutation.elements_only?(call, constr))
-      end
-
-      def hands_self?(constr, arguments, handed)
-        singleton = constr.self_type
-        return handed.include?(singleton.name) if singleton.is_a?(AST::Types::Name::Singleton)
-
-        LocalReach.argument_values(arguments).any? do |value|
-          constr.typing.has_type?(value) && constr.typing.type_of(node: value).is_a?(AST::Types::Self)
-        end
       end
 
       # A call on `self`, or one handed `self`, from a body checked under its

@@ -844,6 +844,77 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def locked_map(runs: "yield")
+    <<~RUBY
+      class Thread::Mutex
+        def synchronize
+          raise ThreadError, "must be called with a block" unless block_given?
+          lock
+          begin
+            #{runs}
+          ensure
+            unlock
+          end
+        end
+      end
+
+      class Backend
+        def initialize
+          @backend = {}
+        end
+
+        def [](key) = @backend[key]
+
+        def []=(key, value)
+          @backend[key] = value
+        end
+
+        def key?(key) = @backend.key?(key)
+      end
+
+      class Map < Backend
+        def initialize
+          super
+          @write_lock = Thread::Mutex.new
+        end
+
+        def []=(key, value)
+          @write_lock.synchronize { super }
+        end
+      end
+    RUBY
+  end
+
+  def locked_map_rbs
+    <<~RBS + held_by_ivar(BY_IVAR_RBS).sub("self.@instances: Hash[Symbol, Inflector::Rules]", "self.@instances: Map")
+      class Backend
+        @backend: Hash[Symbol, Inflector::Rules]
+        def initialize: () -> void
+        def []: (Symbol key) -> Inflector::Rules?
+        def []=: (Symbol key, Inflector::Rules value) -> Inflector::Rules
+        def key?: (Symbol key) -> bool
+      end
+      class Map < Backend
+        @write_lock: Thread::Mutex
+        def initialize: () -> void
+        def []=: (Symbol key, Inflector::Rules value) -> Inflector::Rules
+      end
+    RBS
+  end
+
+  def test_an_object_that_stores_through_a_block_s_super_keeps_its_hash_s_objects
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(locked_map + by_ivar(born: "@instances = Map.new"), rbs: locked_map_rbs)
+  end
+
+  def test_declines_an_object_that_stores_through_a_block_a_method_may_not_run_once
+    {
+      "a block run maybe" => locked_map(runs: "yield if locked?"),
+      "a method only core declares" => locked_map.sub(/class Thread::Mutex.*?^end\n/m, "")
+    }.each do |label, map|
+      assert_equal [[nil], [nil]], chunks(map + by_ivar(born: "@instances = Map.new"), rbs: locked_map_rbs), label
+    end
+  end
+
   ACROSS_RBS = KEYED_RBS.sub("  def self.has_many_like: (Symbol name) -> untyped\nend\n", <<~RBS)
       def self.singularize: (String word) -> String
     end
