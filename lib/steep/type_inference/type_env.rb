@@ -263,7 +263,7 @@ module Steep
         case parent&.type
         when nil then constant(name, false)
         when :cbase then constant(name, true)
-        when :const then (owner = constant_of(parent)&.last) && constant(owner, name)
+        when :const then (owner = constant_of(parent)&.at(1)) && constant(owner, name)
         end
       end
 
