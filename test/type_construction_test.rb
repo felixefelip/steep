@@ -5464,6 +5464,33 @@ EOF
     end
   end
 
+  def test_super_in_an_overloading_method_reaches_the_parent_s
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer) -> nil | ...
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(key)
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        call = typing.call_of(node: typing.explicit_super_of(node: dig(source.node, 2, 2)))
+        assert_equal ["(::Integer) { () -> nil } -> nil"], call.method_decls.map { |decl| decl.method_type.to_s }
+      end
+    end
+  end
+
   def test_super_correct_block
     with_checker <<-EOF do |checker|
 class TestSuper

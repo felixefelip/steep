@@ -354,7 +354,7 @@ module Steep
 
       super_method = if definition
                        if (this_method = definition.methods[method_name])
-                         if module_context&.class_name == this_method.defined_in
+                         if module_context&.class_name == this_method.implemented_in
                            this_method.super_method
                          else
                            this_method
