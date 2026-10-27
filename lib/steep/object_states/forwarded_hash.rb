@@ -64,9 +64,8 @@ module Steep
         registry = constr.constructor_bindings
         ancestors = constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors
         index = ancestors.index { |ancestor| ancestor.name == owner } or return
-        ancestor = ancestors.drop(index + 1).find { |candidate| ObjectStates.ancestor_defines?(registry, candidate, method_name) } or return
-        bodies = ObjectStates.ancestor_bodies(registry, ancestor)[method_name]
-        [ancestor.name, bodies.first] if bodies&.size == 1
+        ancestor = ObjectStates.defining_ancestor(registry, ancestors.drop(index + 1), method_name) or return
+        ObjectStates.sole_body(registry, ancestor, method_name)
       end
 
       # Every method of `instance` that stores into the hash it keeps in

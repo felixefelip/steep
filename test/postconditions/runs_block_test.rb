@@ -21,6 +21,9 @@ class PostconditionsRunsBlockTest < Minitest::Test
       def rescued: () { () -> untyped } -> untyped
       def guarded: () { () -> untyped } -> untyped
       def counted: () { () -> untyped } -> untyped
+      def cased: (Symbol k) { () -> untyped } -> untyped
+      def partial: (Symbol k) { () -> untyped } -> untyped
+      def tested: (Symbol k) { () -> untyped } -> untyped
     end
   RBS
 
@@ -70,6 +73,27 @@ class PostconditionsRunsBlockTest < Minitest::Test
         @count = 1
         yield
       end
+
+      def cased(k)
+        case k
+        when :a then yield
+        when :b then raise ArgumentError
+        else yield
+        end
+      end
+
+      def partial(k)
+        case k
+        when :a then yield
+        end
+      end
+
+      def tested(k)
+        case k
+        when yield then yield
+        else yield
+        end
+      end
     end
   RUBY
 
@@ -80,12 +104,15 @@ class PostconditionsRunsBlockTest < Minitest::Test
         construction.synthesize(source.node)
         entries = Steep::Postconditions::Inferrer.infer(source, typing, checker)
         store = Steep::Postconditions::Store.from_hash(YAML.safe_load(Steep::Postconditions::Writer.dump(entries)), source: "test")
-        return %i[synchronize guarded counted maybe twice never looped early rescued].to_h { |name| [name, store.lookup_instance("RBLock", name)&.runs_block || false] }
+        return %i[synchronize guarded counted cased maybe twice never looped early rescued partial tested].to_h { |name| [name, store.lookup_instance("RBLock", name)&.runs_block || false] }
       end
     end
   end
 
   def test_a_method_runs_its_block_once_where_every_way_out_but_a_raise_passes_one_yield
-    assert_equal({ synchronize: true, guarded: true, counted: true, maybe: false, twice: false, never: false, looped: false, early: false, rescued: false }, runs_block)
+    assert_equal({
+      synchronize: true, guarded: true, counted: true, cased: true,
+      maybe: false, twice: false, never: false, looped: false, early: false, rescued: false, partial: false, tested: false
+    }, runs_block)
   end
 end

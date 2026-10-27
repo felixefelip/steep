@@ -17,7 +17,6 @@ module Steep
     # normal exit, so it has nothing to count.
     module RunsBlock
       NEVER = :never
-      JUMPS = %i[return next break redo retry].freeze
 
       module_function
 
@@ -35,7 +34,8 @@ module Steep
         case node.type
         when :yield then counted?(node.children) ? nil : 1
         when :begin, :kwbegin, :ensure then sequence(node.children, typing)
-        when :if then conditional(node, typing)
+        when :if then conditional(node.children[0], node.children.drop(1), typing)
+        when :case then conditional(node.children[0], case_branches(node), typing)
         else counted?(node) ? nil : 0
         end
       end
@@ -49,8 +49,7 @@ module Steep
         end
       end
 
-      def conditional(node, typing)
-        predicate, *branches = node.children
+      def conditional(predicate, branches, typing)
         return unless yields(predicate, typing) == 0
 
         counts = branches.map { |branch| yields(branch, typing) or return }.uniq - [NEVER]
@@ -59,12 +58,22 @@ module Steep
         counts.first if counts.size == 1
       end
 
+      # A `when`'s tests run before its body, and a test that runs a block
+      # counts as one this does not follow. A missing `else` is a branch that
+      # runs nothing.
+      def case_branches(node)
+        *whens, otherwise = node.children.drop(1)
+        return [nil] if whens.any? { |clause| counted?(clause.children[0...-1]) }
+
+        whens.map { |clause| clause.children.last } << otherwise
+      end
+
       # Whether `node` holds a `yield` or a jump, which this does not follow.
       def counted?(node)
         return node.any? { |child| counted?(child) } if node.is_a?(Array)
         return false unless node.is_a?(::Parser::AST::Node)
 
-        node.type == :yield || JUMPS.include?(node.type) || node.children.any? { |child| counted?(child) }
+        node.type == :yield || Accumulators::JUMPS.include?(node.type) || node.children.any? { |child| counted?(child) }
       end
     end
   end

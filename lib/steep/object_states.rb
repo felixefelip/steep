@@ -413,12 +413,22 @@ module Steep
         owner = definition.methods[method_name]&.implemented_in or return nil
         ancestors = definition.ancestors.ancestors
         index = ancestors.index { |ancestor| ancestor.name == owner } or return nil
-        return nil if ancestors.take(index).any? { |ancestor| ancestor_defines?(registry, ancestor, method_name) }
+        return nil if defining_ancestor(registry, ancestors.take(index), method_name)
 
-        body = ancestor_bodies(registry, ancestors[index])[method_name]
-        body&.size == 1 ? [owner, body.first] : nil
+        sole_body(registry, ancestors[index], method_name)
       rescue RBS::BaseError
         nil
+      end
+
+      # The first of `ancestors` whose source defines `method_name`.
+      def defining_ancestor(registry, ancestors, method_name)
+        ancestors.find { |ancestor| ancestor_defines?(registry, ancestor, method_name) }
+      end
+
+      # `[ancestor's name, body]` where `ancestor` defines `method_name` once.
+      def sole_body(registry, ancestor, method_name)
+        bodies = ancestor_bodies(registry, ancestor)[method_name]
+        [ancestor.name, bodies.first] if bodies&.size == 1
       end
 
       # The bodies an ancestor contributes to the methods of the object it is

@@ -80,15 +80,14 @@ module Steep
           # dropping it before the fixpoint breaks the link it exists to carry.
           # Unlike `unconditional_call_deps` this costs little — the edge only
           # exists when a method's VALUE is a call it also handed its block to.
-          if !(runs_block = RunsBlock.once?(def_node, @typing)) && ivars.empty? && when_true_ivars.empty? && when_true_methods.empty? && returns_establishes.empty? &&
+          runs_block = RunsBlock.once?(def_node, @typing)
+          next if !runs_block && ivars.empty? && when_true_ivars.empty? && when_true_methods.empty? && returns_establishes.empty? &&
              may_write.empty? && self_call_deps.empty? && returns_ivar.nil? &&
              conditional_returns.empty? && conditional_const_returns.empty? &&
              establishes_consts.empty? && const_establishments.empty? && !delegates_to_instance &&
              !when_true_block_truthy && block_forward_deps.empty? && block_disjunction.empty? &&
              block_call_establishments.empty? && param_call_deps.empty? && self_arg_calls.empty? &&
              param_establishments.empty?
-            next
-          end
 
           method_name = def_node.children[0]
           self_type_string = marker_self_type_for(class_name, method_name, singleton: singleton) unless ivars.empty?

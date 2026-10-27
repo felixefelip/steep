@@ -30,7 +30,7 @@ Project/ClassLengthCeiling:
   Max: 400
   Ceilings:
     "lib/steep/type_construction.rb": 3841
-    "lib/steep/postconditions/inferrer.rb": 1047
+    "lib/steep/postconditions/inferrer.rb": 1046
     "lib/steep/subtyping/check.rb": 963
     "lib/steep/type_inference/logic_type_interpreter.rb": 759
     "lib/steep/server/master.rb": 731

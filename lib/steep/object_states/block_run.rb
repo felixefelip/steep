@@ -9,9 +9,10 @@ module Steep
     #   end
     #
     # One a method may run any other number of times leaves each ivar it
-    # changes at its declaration. Only where the call is made on another object
-    # and is not handed `self`: its body then has no way to change `self`
-    # around the block.
+    # changes as it was before the call or as one pass left it, the rule a
+    # `while` body follows. Only where the call is made on another object and
+    # is not handed `self`: its body then has no way to change `self` around
+    # the block.
     module BlockRun
       module_function
 
@@ -25,8 +26,12 @@ module Steep
 
         once = !Tap.jumps?(node.children[2]) && runs_once?(constr, receiver_type, method_name)
         constr.update_type_env do |env|
-          env.refine_types(instance_variable_types: changed.to_h { |ivar| [ivar, once ? left[ivar] : ObjectStates.declared_ivar(constr, ivar)] })
+          env.refine_types(instance_variable_types: changed.to_h { |ivar| [ivar, once ? left[ivar] : either(entered, left, ivar)] })
         end
+      end
+
+      def either(entered, left, ivar)
+        AST::Types::Union.build(types: [entered[ivar] || entered.declared_instance_variable_type(ivar) || AST::Builtin.nil_type, left[ivar]])
       end
 
       def runs_once?(constr, receiver_type, method_name)
