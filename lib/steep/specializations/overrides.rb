@@ -41,6 +41,20 @@ module Steep
         run_key(call, key, node, exact_self, self_type)
       end
 
+      def subclasses(name)
+        env = @factory.env
+        children = (SUBCLASSES[env] ||= direct_subclasses(env))
+        found = [] #: Array[RBS::TypeName]
+        queue = children.fetch(name, []).dup
+        while (child = queue.shift)
+          next if found.include?(child)
+
+          found << child
+          queue.concat(children.fetch(child, []))
+        end
+        found
+      end
+
       private
 
       def run_key(call, key, node, exact_self, self_type)
@@ -91,20 +105,6 @@ module Steep
           return "#{owner}#{singleton ? "." : "#"}#{method_name}"
         end
         nil
-      end
-
-      def subclasses(name)
-        env = @factory.env
-        children = (SUBCLASSES[env] ||= direct_subclasses(env))
-        found = [] #: Array[RBS::TypeName]
-        queue = children.fetch(name, []).dup
-        while (child = queue.shift)
-          next if found.include?(child)
-
-          found << child
-          queue.concat(children.fetch(child, []))
-        end
-        found
       end
 
       def direct_subclasses(env)

@@ -33,14 +33,31 @@ module Steep
 
       # nil where `self` may be any subclass: in a class method checked under
       # its declaration rather than for one call site.
-      # The class a call is specialized for: the one a singleton method runs
-      # on (`Arguments.receiver_self`), where its body may observe
-      # which one that is, or reaches an ivar of the class object, which is
-      # that class's own (`ClassStates.reach`).
+      # The class a call is specialized for: the one its receiver is
+      # (`Arguments.receiver_self`), where the body may observe which one that
+      # is, or, for a class object, reaches an ivar of it, which is that
+      # class's own (`ClassStates.reach`).
+      #
+      # An instance method is keyed only where it runs a body the receiver's
+      # class inherits, which every class an instance of it may be runs alike:
+      # its own body already has that class as `self`.
       def keyed_self(constr, call)
         receiver = Arguments.receiver_self(call, exact_self(constr)) or return nil
         reach = ObjectStates::ClassStates.reach(constr, call)
-        receiver if reach.observes_self || !reach.ivars.empty?
+        return receiver if receiver.is_a?(AST::Types::Name::Singleton) && (reach.observes_self || !reach.ivars.empty?)
+
+        receiver if reach.observes_self && inherited_alike?(constr, receiver, reach.methods)
+      end
+
+      # `methods` starts with the one called, as `ClassStates.reach` lists them.
+      def inherited_alike?(constr, receiver, methods)
+        owners = ->(type) { methods.map { |name| ObjectStates.resolved_body(constr, type, name)&.first } }
+        expected = owners.(receiver)
+        return false if expected.first.nil? || expected.first == receiver.name
+
+        Overrides.new(factory: constr.checker.factory, registry: constr.constructor_bindings).subclasses(receiver.name).all? do |name|
+          owners.(AST::Types::Name::Instance.new(name: name, args: [])) == expected
+        end
       end
 
       # `call` with the return type recorded for the argument tuple this call site
@@ -48,9 +65,11 @@ module Steep
       #
       # A call that takes a block is left alone: the recorded return was computed
       # for the arguments only, and a block can decide the return type on its own.
+      # So is a `recv.name = value`, which evaluates to `value` whatever the
+      # setter's body returns.
       def specialized_call(constr, node, call, block:)
         store = constr.specializations
-        return call if store.empty? || block
+        return call if store.empty? || block || call.method_name.match?(/\w=\z/)
 
         key = body_key(constr, call, node) or return call
         arguments = call_site_arguments(constr, node, call) or return call
@@ -89,9 +108,10 @@ module Steep
 
       def exact_self(constr)
         type = constr.self_type
-        return nil unless type.is_a?(AST::Types::Name::Singleton)
+        return nil unless type.is_a?(AST::Types::Name::Singleton) || type.is_a?(AST::Types::Name::Instance)
 
-        method_context = constr.context.method_context or return type
+        method_context = constr.context.method_context
+        return type.is_a?(AST::Types::Name::Singleton) ? type : nil unless method_context
         def_node = method_context.node or return nil
         type if constr.specialization_arguments(def_node)&.self_type == type
       end
@@ -210,7 +230,39 @@ module Steep
           positionals << argument_type(arg, typing, exact_self)
         end
 
-        new(positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, class_states: class_states, self_type: self_type, block: block)
+        new(
+          positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, class_states: class_states, self_type: self_type, block: block,
+          narrows_classes: narrows_classes?(call, positionals, keywords)
+        )
+      end
+
+      # Whether an argument is an instance of a class narrower than the
+      # parameter it lands in: a call passing a `Counter` where `Counter |
+      # Printer` is declared fixes which visitor the body calls back.
+      def self.narrows_classes?(call, positionals, keywords)
+        params = call.is_a?(TypeInference::MethodCall::Typed) ? call.actual_method_type.type.params : nil
+        return false unless params
+
+        declared = [] #: Array[AST::Types::t]
+        params.positional_params&.each do |param|
+          break if param.is_a?(Interface::Function::Params::PositionalParams::Rest)
+
+          declared << param.type
+        end
+        keyword_params = params.keyword_params
+        pairs = positionals.zip(declared) + keywords.map { |name, type| [type, keyword_params.requireds[name] || keyword_params.optionals[name]] }
+        pairs.any? { |type, param| narrower_class?(type, param) }
+      end
+
+      def self.narrower_class?(type, declared)
+        type = ObjectStates.state_in(type)&.back_type || type
+        return false unless type.is_a?(AST::Types::Name::Instance)
+
+        case declared
+        when AST::Types::Union then declared != type
+        when AST::Types::Name::Instance then declared.name != type.name
+        else false
+        end
       end
 
       # The keywords a call writes, by name, or nil where one is not a plain
@@ -247,20 +299,24 @@ module Steep
         { keywords: named, keyword_rest: AST::Types::Record.new(elements: rest, required_keys: rest.keys.to_set) }
       end
 
-      # The class a call's receiver is, where it names exactly one:
+      # The class a call's receiver is, where it names exactly one, as a class
+      # object or as an instance:
       #
       #   class Base
       #     def self.generated_methods = const_set(:GeneratedMethods, Module.new)
+      #     def introduce = speak("hello")
       #   end
       #
       #   Widget.generated_methods   # Widget::GeneratedMethods, not Base's
       #   Base.generated_methods     # Base::GeneratedMethods
+      #   Dog.new.introduce          # Dog#speak, not Cat's
       def self.receiver_self(call, exact_self)
         return nil unless call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.size == 1
 
         receiver = call.receiver_type
         receiver = exact_self if receiver.is_a?(AST::Types::Self)
-        return nil unless receiver.is_a?(AST::Types::Name::Singleton)
+        receiver = ObjectStates.state_in(receiver)&.back_type || receiver
+        return nil unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
 
         receiver
       end
@@ -400,8 +456,9 @@ module Steep
         AST::Types::Record.new(elements: elements, required_keys: elements.keys.to_set)
       end
 
-      def initialize(positionals:, keywords:, self_ivars:, class_states:, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil)
+      def initialize(positionals:, keywords:, self_ivars:, class_states:, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil, narrows_classes: false)
         @positionals = positionals
+        @narrows_classes = narrows_classes
         @block = block
         @keywords = keywords
         @keyword_rest = keyword_rest
@@ -470,7 +527,8 @@ module Steep
           self_type: @self_type,
           self_ivars: @self_ivars,
           class_states: @class_states,
-          block: @block
+          block: @block,
+          narrows_classes: @narrows_classes
         )
       end
 
@@ -484,7 +542,8 @@ module Steep
           self_type: self_type,
           self_ivars: @self_ivars,
           class_states: @class_states,
-          block: @block
+          block: @block,
+          narrows_classes: @narrows_classes
         )
       end
 
@@ -498,7 +557,8 @@ module Steep
           self_type: @self_type,
           self_ivars: self_ivars,
           class_states: @class_states,
-          block: @block
+          block: @block,
+          narrows_classes: @narrows_classes
         )
       end
 
@@ -520,7 +580,8 @@ module Steep
           self_type: @self_type,
           self_ivars: @self_ivars,
           class_states: @class_states,
-          block: @block
+          block: @block,
+          narrows_classes: @narrows_classes
         )
       end
 
@@ -542,7 +603,8 @@ module Steep
           self_type: @self_type,
           self_ivars: @self_ivars,
           class_states: @class_states,
-          block: @block
+          block: @block,
+          narrows_classes: @narrows_classes
         )
       end
 
@@ -606,7 +668,7 @@ module Steep
       end
 
       def fixes_a_value?
-        !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
+        @narrows_classes || !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
       end
 
       def empty?
