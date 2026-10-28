@@ -50,7 +50,7 @@ module Steep
       # `@x = …` and `@x ||= …` set one, the assignment.
       JOIN_BIRTHS = proc { |_, *hows| hows.include?(:ivasgn) ? :ivasgn : :or_asgn }
 
-      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :class_bodies, :mixin_bodies, :declared, :born_hashes, :born_objects, keyword_init: true)
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :conditional_methods, :aliases, :class_bodies, :mixin_bodies, :declared, :born_hashes, :born_objects, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
       #
@@ -65,8 +65,10 @@ module Steep
       # - `self_sends`: the methods it calls on `self`;
       # - `exposes_self`: whether `self` may reach anything but those calls,
       #   a block included (felixefelip/steep#205, stage 2);
-      # - `iterations`: where the only blocks that may are each handed to an
-      #   iteration over an ivar, those as `[ivar, method]`; nil otherwise;
+      # - `exposes_self_besides_return`, `returns_self`, `returned_sends`:
+      #   where its value may be `self` (`SelfReturns`);
+      # - `iterations`: where the only blocks that may are each handed to a
+      #   method called on an ivar, those as `[ivar, method]`; nil otherwise;
       # - `ivar_uses`: each mention of an ivar it reads, as a
       #   `ClassMemoAnalyzer::Use`;
       # - `returns`: the ivar it returns, when its body is exactly that.
@@ -109,7 +111,7 @@ module Steep
       #   returns as a reader (`returns`).
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
-        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
+        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
         :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
         keyword_init: true
       )
@@ -127,6 +129,8 @@ module Steep
         @initializers = {} #: Hash[String, Array[Body?]]
         @methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
         @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
+        @conditional_methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
+        @aliases = {} #: Hash[String, Hash[Symbol, Symbol]]
         @class_bodies = Hash.new(0) #: Hash[String, Integer]
         @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
         @declared = Set[] #: Set[String]
@@ -137,7 +141,7 @@ module Steep
       def scan(node)
         walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
         Scan.new(
-          readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods,
+          readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods, conditional_methods: @conditional_methods, aliases: @aliases,
           class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared, born_hashes: @born_hashes,
           born_objects: @born_objects
         )
@@ -216,12 +220,29 @@ module Steep
 
       # Every instance method this class body may define, as its `Body` when
       # that is certain. Where the constant may name two classes, which one
-      # has the method is not known, so it reads none.
+      # has the method is not known, so it reads none. An alias the body makes
+      # is recorded with the name it copies.
+      #
+      # One defined in a branch of the class body is read as well, apart: what
+      # it may do, whether or not it is defined.
       def register_methods(body, names:)
-        each_method_definition(body, direct: true) do |mname, method_body|
+        each_method_definition(body, direct: true) do |mname, method_body, aliased|
           method_body = nil unless names.size == 1
           names.each { |name| ((@methods[name] ||= {})[mname] ||= []) << method_body }
+          (@aliases[names.first] ||= {})[mname] = aliased if aliased && names.size == 1
         end
+        return unless names.size == 1
+
+        each_branch(body) do |branch|
+          each_method_definition(branch, direct: true) do |mname, method_body, aliased|
+            ((@conditional_methods[names.first] ||= {})[mname] ||= []) << method_body
+            (@aliases[names.first] ||= {})[mname] = aliased if aliased
+          end
+        end
+      end
+
+      def each_branch(body, &block)
+        each_stmt(body) { |stmt| stmt.children.drop(1).each { |branch| yield branch if branch } if stmt.type == :if }
       end
 
       # Every method this class body may define on the class object, as for
@@ -270,14 +291,14 @@ module Steep
           yield mname, (direct ? method_body(args, mbody) : nil)
           each_method_definition(mbody, direct: false, &block)
         when :alias
-          new_name = node.children[0]
-          yield new_name.children[0], nil if new_name.type == :sym
+          new_name, old_name = node.children
+          yield new_name.children[0], nil, (old_name.children[0] if direct && old_name.type == :sym) if new_name.type == :sym
         when :send
           receiver, mname, *args = node.children
           if receiver.nil? && %i[private public protected module_function].include?(mname)
             args.each { |arg| each_method_definition(arg, direct: direct, &block) }
           else
-            macro_definitions(mname, args, direct: direct).each { |name, body| yield name, body } if receiver.nil?
+            macro_definitions(mname, args, direct: direct).each { |name, body, aliased| yield name, body, aliased } if receiver.nil?
             node.children.each { |child| each_method_definition(child, direct: false, &block) }
           end
         else
@@ -292,7 +313,7 @@ module Steep
         definitions =
           case mname
           when :alias_method, :define_method
-            names.take(1).map { |name| [name, nil] }
+            names.take(1).map { |name| [name, nil, (names[1] if mname == :alias_method && direct)] }
           when :attr_reader
             names.map { |name| [name, attr_reader_body(name)] }
           when :attr_accessor
@@ -307,7 +328,8 @@ module Steep
 
       def attr_reader_body(name)
         Body.new(
-          bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: :"@#{name}",
+          bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, exposes_self_besides_return: false, returns_self: false, returned_sends: Set[], ivar_uses: {},
+          returns: :"@#{name}",
           empties: Set[], rebuilds: Set[], handed: Set[], consts: Set[], calls: false
         )
       end
@@ -315,7 +337,8 @@ module Steep
       def attr_writer_body(name)
         ivar = :"@#{name}"
         Body.new(
-          bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, ivar_uses: {}, returns: nil,
+          bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, exposes_self_besides_return: false, returns_self: false, returned_sends: Set[], ivar_uses: {},
+          returns: nil,
           empties: Set[], rebuilds: Set[], handed: Set[], consts: Set[], calls: false
         )
       end
@@ -347,6 +370,7 @@ module Steep
           super_args: super_args(args_node, body),
           self_sends: self_sends,
           exposes_self: !self.class.self_exposures(body).empty?,
+          **SelfReturns.facts(body),
           iterations: self_iterations(body),
           ivar_uses: ClassMemoAnalyzer.uses(body, names: ivars).to_h,
           returns: single_ivar_reader(body),
@@ -377,7 +401,7 @@ module Steep
         found
       end
 
-      # `[ivar, method]` for each block handed to an iteration over an ivar,
+      # `[ivar, method]` for each block handed to a method called on an ivar,
       # where those are the only way `self` may reach anything but a call made
       # on it.
       def self_iterations(node, parent = nil, found = [])
@@ -386,7 +410,7 @@ module Steep
 
         if %i[block numblock].include?(node.type)
           receiver, method_name = node.children[0].children
-          return unless node.children[0].type == :send && receiver&.type == :ivar && CollectionReaders::ITERATIONS.include?(method_name)
+          return unless node.children[0].type == :send && receiver&.type == :ivar
 
           found << [receiver.children[0], method_name]
         end

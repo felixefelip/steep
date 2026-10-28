@@ -14,14 +14,17 @@ module Steep
     #   end
     #
     # Every way out but a raise passes one `yield`. A branch typed `bot` has no
-    # normal exit, so it has nothing to count.
+    # normal exit, so it has nothing to count. A method that names its block
+    # may keep it and run it again later, so it never counts.
     module RunsBlock
       NEVER = :never
 
       module_function
 
       def once?(def_node, typing)
-        body = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
+        args, body = def_node.type == :defs ? def_node.children.drop(2) : def_node.children.drop(1)
+        return false if args.children.any? { |param| param.type == :blockarg }
+
         yields(body, typing) == 1
       end
 

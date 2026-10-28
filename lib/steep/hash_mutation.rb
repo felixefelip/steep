@@ -34,8 +34,11 @@ module Steep
 
     STORES = Set["::Hash#[]=", "::Hash#store"].freeze
 
-    # What a local holding a record follows: a store, or `delete` of a key.
-    WRITES = (STORES | ["::Hash#delete"]).freeze
+    CLEARS = Set["::Hash#clear"].freeze
+
+    # What a local holding a record follows: a store, `delete` of a key, or
+    # `clear`.
+    WRITES = (STORES | CLEARS | ["::Hash#delete"]).freeze
 
     ENTRIES = (READS | WRITES).to_h { |key| [key, true] }.freeze
 
@@ -189,13 +192,16 @@ module Steep
       # The writes made to `ivar`'s hash, by the methods of `instance` and on
       # what the readers that answer it do, where no method of `instance` but
       # `initialize` assigns `ivar` or lets its hash out, and every other use
-      # of either only reads the hash. Nil otherwise.
+      # of either only reads the hash. Nil otherwise. A method its class body
+      # may not define makes what its body does where it is; an alias of a
+      # body the source defines, what that body makes under its own name.
       def writes_to(constr, instance, ivar)
         registry = constr.constructor_bindings
         writes = [] #: Array[TypeInference::ClassMemoAnalyzer::Use]
-        constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.each do |ancestor|
-          registry.method_bodies(ancestor.name.to_s).each do |name, bodies|
-            next if name == :initialize || registry.initializing?(name)
+        ancestors = constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors
+        ancestors.each_with_index do |ancestor, index|
+          registry.possible_bodies(ancestor.name.to_s).each do |name, bodies|
+            next if Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name) || copies_source_body?(registry, ancestors.drop(index), name)
 
             bodies.each do |body|
               made = body_writes(constr, instance, ivar, name, body) or return
@@ -208,6 +214,11 @@ module Steep
         nil
       end
 
+      def copies_source_body?(registry, ancestors, name)
+        copied = registry.aliased(ancestors.first.name, name) or return false
+        !ObjectStates.defining_ancestor(registry, ancestors, copied).nil?
+      end
+
       def body_writes(constr, instance, ivar, name, body)
         return unless body
         if body.returns == ivar
@@ -218,7 +229,7 @@ module Steep
         literal_methods = constr.literal_method_registry
         own = body.ivar_uses.fetch(ivar, [])
         return unless own.all? { |use| use.kind != :yielded && use_within?(literal_methods, use, [*READS, *WRITES]) }
-        return if body.exposes_self && !own.all? { |use| reading_use?(constr, use) }
+        return if body.exposes_self_besides_return && !own.all? { |use| reading_use?(constr, use) }
 
         own.select { |use| use_within?(literal_methods, use, WRITES) }
       end
@@ -274,8 +285,10 @@ module Steep
 
       # `record` where the write `use` may or may not have run: the key it
       # names holding what it held or `value`, or no longer required where it
-      # deletes it. Nil for a write by any other key.
+      # deletes it; no key required where it clears the hash. Nil for a write
+      # by any other key.
       def widened_by(record, use, value)
+        return AST::Types::Record.new(elements: record.elements, required_keys: Set[]) if use.called == :clear
         key = use.key or return
         current = record.elements[key]
         return AST::Types::Record.new(elements: record.elements, required_keys: record.required_keys - [key]) if use.called == :delete
@@ -349,6 +362,7 @@ module Steep
 
       def moved(constr, record, keys, arguments, fresh:)
         return [stored(constr, record, arguments, fresh: fresh), (fresh_record(constr, arguments[1]) if fresh)] if CollectionMutation.only?(constr, keys, STORES)
+        return [AST::Types::Record.new(elements: {}, required_keys: Set[]), nil] if CollectionMutation.only?(constr, keys, CLEARS) && arguments.empty?
 
         deleted(constr, record, arguments)
       end

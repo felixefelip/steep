@@ -39,8 +39,7 @@ module Steep
       # `arguments_key` builds: its check kept `self`, or no body
       # of its `initialize` chain hands `self` on.
       def fresh_chain?(constr, instance, chain, arguments_key)
-        key = "#{instance.name.to_s.delete_prefix("::")}.new"
-        return true if arguments_key && constr.specializations.keeps_self?(key, arguments_key)
+        return true if arguments_key && constr.specializations.keeps_self?(ObjectStates.constructor_key(chain), arguments_key)
 
         chain.none? { |_, body| body && ObjectStates.exposes_self?(constr, instance, body, [:initialize]) }
       end
