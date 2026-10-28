@@ -142,6 +142,20 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
     assert_nil found[:stored_first].keyed_memo
   end
 
+  def test_an_element_handed_back_under_an_optional_parameter_reads_its_literal_default_where_the_call_leaves_it_out
+    found = bodies(<<~RUBY)
+      class Fallbacks
+        def literal(locale = :en) = (@rules[locale] ||= Rules.new)
+        def computed(locale = current) = @rules[locale]
+        def required_after(locale = :en, scope) = @rules[locale]
+      end
+    RUBY
+
+    assert_equal [:@rules, 0, true, Steep::AST::Types::Literal.new(value: :en)], found[:literal].hands_back_element
+    assert_equal [:@rules, 0, false, nil], found[:computed].hands_back_element
+    assert_nil found[:required_after].hands_back_element
+  end
+
   def test_a_body_reading_a_constant_a_global_a_class_variable_or_its_class_reads_outside_state
     found = bodies(<<~RUBY)
       class Fallbacks < Hash

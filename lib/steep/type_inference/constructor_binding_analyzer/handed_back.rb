@@ -18,7 +18,8 @@ module Steep
         end
 
         def element(args_node, body)
-          positional = args_node.children.take_while { |param| %i[arg optarg].include?(param.type) }.map { |param| param.children[0] }
+          params = positional_params(args_node) or return
+          positional = params.map { |param| param.children[0] }
           found = Set[] #: Set[[Symbol, Integer]]
           builds = true
           Accumulators::ReturnedValues.each_value(body) do |node|
@@ -31,7 +32,26 @@ module Steep
             found << [name, index]
             builds &&= node.type == :or_asgn && fresh_object?(node.children[1])
           end
-          [*found.first, builds] if found.size == 1
+          return unless found.size == 1
+
+          memo, index = found.first
+          [memo, index, builds, omitted_key(params, index)]
+        end
+
+        # The key a call that leaves out the parameter at `index` reads: its
+        # default, written as a literal.
+        def omitted_key(params, index)
+          param = params[index]
+          Specializations::Collector.default_type(param.children[1]) if param.type == :optarg
+        end
+
+        # The leading positional parameters, each at the position of the
+        # argument a call hands it, which a required one after an optional
+        # one would not be.
+        def positional_params(args_node)
+          params = args_node.children.take_while { |param| %i[arg optarg].include?(param.type) }
+          first_optional = params.index { |param| param.type == :optarg }
+          params unless first_optional && params.drop(first_optional).any? { |param| param.type == :arg }
         end
 
         def stored_element(args_node, body)
@@ -41,7 +61,7 @@ module Steep
           memo, method_name, key, value = body.children
           return unless memo&.type == :ivar && method_name == :[]= && key.type == :lvar && value.type == :lvar
 
-          positional = args_node.children.take_while { |param| %i[arg optarg].include?(param.type) }.map { |param| param.children[0] }
+          positional = positional_params(args_node)&.map { |param| param.children[0] } or return
           key_index = positional.index(key.children[0]) or return
           value_index = positional.index(value.children[0]) or return
           [memo.children[0], key_index, value_index]

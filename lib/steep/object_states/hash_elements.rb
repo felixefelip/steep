@@ -135,16 +135,23 @@ module Steep
 
           receiver, method_name, *arguments = node.children
           if method_name == :[] && arguments.size == 1 && (memo = TypeInference::ConstructorBindingAnalyzer::HandedBack.memo_name(receiver))
-            key_node = arguments[0]
+            key = argument_type(constr, arguments[0])
           elsif ObjectStates.on_self?(node)
-            memo, index, builds = ObjectStates.resolved_body(constr, singleton, method_name)&.last&.hands_back_element
-            key_node = index && arguments[index]
+            memo, index, builds, omitted = ObjectStates.resolved_body(constr, singleton, method_name)&.last&.hands_back_element
+            key = index && (arguments.size > index ? argument_type(constr, arguments[index]) : positional?(arguments) && omitted)
           end
-          return unless memo && key_node && constr.typing.has_type?(key_node)
+          return unless memo && key
 
-          key = constr.typing.type_of(node: key_node)
           ivar = literal_key?(key) && ClassMemos.tracked_hash_named(constr, singleton, memo) or return
           [memo, ivar, key.value, builds]
+        end
+
+        def argument_type(constr, node)
+          constr.typing.type_of(node: node) if constr.typing.has_type?(node)
+        end
+
+        def positional?(arguments)
+          arguments.none? { |argument| %i[splat block_pass].include?(argument.type) }
         end
 
         def missing?(constr, ivar, key)
