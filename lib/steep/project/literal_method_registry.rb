@@ -22,7 +22,7 @@ module Steep
       CORE_CLASSES = Set[
         "String", "Integer", "Symbol", "Array", "Hash", "Enumerable", "Set", "Kernel",
         "Object", "Module", "Class", "Method", "UnboundMethod", "Regexp",
-        "Comparable", "BasicObject"
+        "Comparable", "BasicObject", "NilClass"
       ]
 
       # Scanning never reads the registry, only adds to it, so what one source
