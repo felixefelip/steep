@@ -113,6 +113,21 @@ module Steep
           end
         end
 
+        class ImportClassVariableDefinition
+          attr_reader :definition, :factory
+
+          def initialize(definition, factory)
+            @definition = definition
+            @factory = factory
+          end
+
+          def call(env)
+            return env unless definition
+
+            env.with_instance_variable_declarations(definition.class_variables.transform_values { |cvar| factory.type(cvar.type) })
+          end
+        end
+
         class ImportConstantAnnotations < AnnotationsBase
           def call(env)
             constant_types = annotations.const_type_annotations.transform_values do |const|

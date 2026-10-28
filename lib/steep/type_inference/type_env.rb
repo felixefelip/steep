@@ -150,7 +150,7 @@ module Steep
           case
           when local_variable_name?(name)
             local_variable_types[name]&.[](0)
-          when instance_variable_name?(name)
+          when instance_variable_name?(name), class_variable_name?(name)
             instance_variable_types[name]
           when global_name?(name)
             global_types[name]
@@ -225,7 +225,7 @@ module Steep
           invalidated_nodes.merge(invalidated_pure_nodes(Parser::AST::Node.new(:lvar, [name])))
         end
         instance_variable_types.each_key do |name|
-          invalidated_nodes.merge(invalidated_pure_nodes(Parser::AST::Node.new(:ivar, [name])))
+          invalidated_nodes.merge(invalidated_pure_nodes(variable_node(name)))
         end
 
         pure_call_updates = pure_node_invalidation(invalidated_nodes)
@@ -492,6 +492,14 @@ module Steep
 
       def instance_variable_name?(name)
         name.start_with?(/@[^@]/)
+      end
+
+      def class_variable_name?(name)
+        name.start_with?("@@")
+      end
+
+      def variable_node(name)
+        Parser::AST::Node.new(class_variable_name?(name) ? :cvar : :ivar, [name])
       end
 
       def global_name?(name)
