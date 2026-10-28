@@ -436,6 +436,7 @@ module Steep
           end
         end,
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory),
+        TypeInference::TypeEnvBuilder::Command::ImportClassVariableDefinition.new(definition, checker.factory),
         *ivar_import_commands_for_type(self_type, except_definition: definition),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annots).merge!
       ).build(type_env)
@@ -1188,6 +1189,7 @@ module Steep
         TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(checker.factory),
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(module_context.module_definition, checker.factory),
+        TypeInference::TypeEnvBuilder::Command::ImportClassVariableDefinition.new(module_context.module_definition, checker.factory),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annots).merge!,
         TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annots)
       ).build(TypeInference::TypeEnv.new(module_const_env))
@@ -1288,6 +1290,7 @@ module Steep
         TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annots),
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(singleton_definition, checker.factory),
+        TypeInference::TypeEnvBuilder::Command::ImportClassVariableDefinition.new(singleton_definition, checker.factory),
       ).build(TypeInference::TypeEnv.new(class_const_env))
 
       class_body_context = TypeInference::Context.new(
@@ -1408,7 +1411,8 @@ module Steep
           TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(checker.factory),
           TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annots),
           TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots),
-          TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(instance_definition, checker.factory)
+          TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(instance_definition, checker.factory),
+          TypeInference::TypeEnvBuilder::Command::ImportClassVariableDefinition.new(instance_definition, checker.factory)
         ).build(TypeInference::TypeEnv.new(context.type_env.constant_env))
 
       body_context = TypeInference::Context.new(
@@ -1616,7 +1620,7 @@ module Steep
             end
           end
 
-        when :ivasgn
+        when :ivasgn, :cvasgn
           name = node.children[0]
           rhs = node.children[1]
 
@@ -3120,7 +3124,7 @@ module Steep
               type, constr = synthesize(rhs, hint: hint)
               type, constr = constr.lvasgn(asgn, type)
               constr.add_typing(node, type: type)
-            when :ivasgn
+            when :ivasgn, :cvasgn
               type, constr = ObjectStates::ClassMemos.or_assigned(self, node, hint)
               constr.add_typing(node, type: type)
             when :gvasgn
@@ -3283,51 +3287,8 @@ module Steep
             add_typing node, type: AST::Builtin.any_type
           end
 
-        when :cvasgn
-          name, rhs = node.children
-
-          type, constr = synthesize(rhs, hint: hint)
-
-          var_type =
-            if class_vars = module_context.class_variables
-              if ty = class_vars[name]
-                checker.factory.type(ty)
-              end
-            end
-
-          if var_type
-            result = constr.check_relation(sub_type: type, super_type: var_type)
-
-            if result.success?
-              add_typing node, type: type, constr: constr
-            else
-              fallback_to_any node do
-                Diagnostic::Ruby::IncompatibleAssignment.new(
-                  node: node,
-                  lhs_type: var_type,
-                  rhs_type: type,
-                  result: result
-                )
-              end
-            end
-          else
-            fallback_to_any(node)
-          end
-
         when :cvar
-          name = node.children[0] #: Symbol
-          var_type =
-            if cvs = module_context.class_variables
-              if ty = cvs[name]
-                checker.factory.type(ty)
-              end
-            end
-
-          if var_type
-            add_typing node, type: var_type
-          else
-            fallback_to_any node
-          end
+          context.type_env[node.children[0]]&.then { |type| add_typing(node, type: type) } || fallback_to_any(node)
 
         when :alias
           add_typing node, type: AST::Builtin.nil_type
@@ -3622,7 +3583,7 @@ module Steep
           assignment_passed = true
         end
       else
-        typing.add_error(Diagnostic::Ruby::UnknownInstanceVariable.new(node: node, name: name))
+        typing.add_error(node.type == :cvasgn ? Diagnostic::Ruby::FallbackAny.new(node: node) : Diagnostic::Ruby::UnknownInstanceVariable.new(node: node, name: name))
       end
 
       # Phase 1 of felixefelip/steep#16: when the declared ivar type is a
@@ -3640,7 +3601,7 @@ module Steep
         # is reassigned, any pure_method_calls cached on `@name` are stale and
         # must be dropped so subsequent `@name.foo` doesn't reuse the previous
         # type.
-        env = env.invalidate_pure_node(::Parser::AST::Node.new(:ivar, [name]))
+        env = env.invalidate_pure_node(env.variable_node(name))
         narrowed ? env.refine_types(instance_variable_types: { name => narrowed }) : env
       end.add_typing(node, type: rhs_type)
     end

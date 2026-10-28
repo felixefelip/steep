@@ -7117,6 +7117,47 @@ end
     end
   end
 
+  def test_class_variable_narrows_as_an_assignment_or_memo_leaves_it
+    with_checker <<-'RBS' do |checker|
+class Box
+  @@count: Integer?
+  @@size: Integer?
+
+  def self.count: () -> Integer
+  def self.size: () -> Integer
+  def self.unset: () -> Integer
+end
+    RBS
+      source = parse_ruby(<<-'RUBY')
+class Box
+  def self.count
+    @@count = 1
+    @@count + 1
+  end
+
+  def self.size
+    @@size ||= 1
+    @@size + 1
+  end
+
+  def self.unset
+    @@count + 1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal 1, typing.errors.size
+        assert_any!(typing.errors) do |error|
+          assert_instance_of Diagnostic::Ruby::NoMethod, error
+          assert_equal 13, error.node.loc.line
+        end
+      end
+    end
+  end
+
   def test_flow_sensitive_untyped
     with_checker do |checker|
       source = parse_ruby(<<-RUBY)
