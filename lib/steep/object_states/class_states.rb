@@ -165,6 +165,7 @@ module Steep
 
           receiver = call.receiver_type
           receiver = constr.self_type if receiver.is_a?(AST::Types::Self)
+          receiver = ObjectStates.state_in(receiver)&.back_type || receiver
           return reach unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
 
           reach.methods << call.method_name
@@ -187,14 +188,15 @@ module Steep
           end
         end
 
-        # Whether `sent`, called on `self` in a class method `owner` defines,
-        # runs another body on `receiver`, a subclass of `owner`, than on `owner`
+        # Whether `sent`, called on `self` in a method `owner` defines, runs
+        # another body on `receiver`, a subclass of `owner`, than on `owner`
         # itself: the body then depends on which class it runs on.
         def overridden?(constr, receiver, owner, sent, sent_owner)
-          return false unless receiver.is_a?(AST::Types::Name::Singleton) && owner && owner != receiver.name
+          return false unless owner && owner != receiver.name
           return false unless constr.checker.factory.env.class_decls[owner].is_a?(RBS::Environment::ClassEntry)
 
-          ObjectStates.resolved_body(constr, AST::Types::Name::Singleton.new(name: owner), sent)&.first != sent_owner
+          on_owner = receiver.is_a?(AST::Types::Name::Singleton) ? AST::Types::Name::Singleton.new(name: owner) : AST::Types::Name::Instance.new(name: owner, args: [])
+          ObjectStates.resolved_body(constr, on_owner, sent)&.first != sent_owner
         end
 
         # `self`'s ivars a body leaves known: its memos' objects as they stand,

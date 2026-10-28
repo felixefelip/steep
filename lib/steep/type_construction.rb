@@ -322,7 +322,7 @@ module Steep
 
       if method_type && (arguments = specialization_arguments(node))
         method_type = arguments.substitute(method_type)
-        self_type = arguments.self_type if arguments.self_type
+        self_type = specialized_self = arguments.self_type if arguments.self_type
       end
 
       unless method_type
@@ -481,7 +481,7 @@ module Steep
           module_context: module_context,
           block_context: nil,
           break_context: nil,
-          self_type: annots.self_type || self_type,
+          self_type: specialized_self || annots.self_type || self_type,
           type_env: type_env,
           call_context: call_context,
           variable_context: variable_context
