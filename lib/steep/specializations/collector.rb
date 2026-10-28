@@ -37,7 +37,8 @@ module Steep
       end
 
       # `{ "Foo#bar" => Set[Arguments] }` for the call sites in `typing` that
-      # resolve to one method and fix at least one argument to a literal.
+      # resolve to one method and fix at least one argument to a literal, under
+      # each body the call may run.
       def self.call_sites(typing, overrides:)
         result = {} #: Hash[String, Set[Arguments]]
 
@@ -58,15 +59,15 @@ module Steep
       #
       # `every_call`: also yield, with nil arguments, each project method a call
       # reaches that no tuple describes — through a receiver resolving to
-      # several methods, one that may run another body (`Overrides`), with an
-      # error, or in a shape `Arguments` declines.
+      # several methods, one that may run a body the source does not name
+      # (`Overrides#runs`), with an error, or in a shape `Arguments` declines.
       def self.each_call_site(typing, overrides:, every_call: false, &block)
         typing.pass_typings.each { |pass| each_call_site(pass, overrides: overrides, every_call: every_call, &block) }
 
         each_call(typing, every_call) do |node, call|
-          key = overrides.body_key(call, node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node))
-          arguments = key && call_node?(node) && Arguments.recorded(node, typing)
-          next yield key, arguments, node if arguments
+          runs = overrides.runs(call, node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node))
+          arguments = runs && call_node?(node) && Arguments.recorded(node, typing)
+          next runs.each_key { |key| yield key, arguments, node } if arguments
           next unless every_call && call.respond_to?(:method_decls)
 
           call.method_decls.map { |decl| decl.method_name.to_s.delete_prefix("::") }.uniq.each { |called| yield called, nil, node }

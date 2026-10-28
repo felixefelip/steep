@@ -55,7 +55,7 @@ module Steep
         expected = owners.(receiver)
         return false if expected.first.nil? || expected.first == receiver.name
 
-        Overrides.new(factory: constr.checker.factory, registry: constr.constructor_bindings).subclasses(receiver.name).all? do |name|
+        overrides(constr).subclasses(receiver.name).all? do |name|
           owners.(AST::Types::Name::Instance.new(name: name, args: [])) == expected
         end
       end
@@ -69,9 +69,13 @@ module Steep
       # setter's body returns.
       def specialized_call(constr, node, call, block:)
         store = constr.specializations
-        return call if store.empty? || block || call.method_name.match?(/\w=\z/)
+        return call if block || call.method_name.match?(/\w=\z/)
 
-        key = body_key(constr, call, node) or return call
+        runs = overrides(constr).runs(call, node: node, exact_self: exact_self(constr), self_type: constr.self_type) or return call
+        return overridden_call(constr, node, call, runs) if runs.size > 1
+        return call if store.empty?
+
+        key = runs.keys.first
         arguments = call_site_arguments(constr, node, call) or return call
         type = store.call_return_type(key, arguments, factory: constr.checker.factory) or return call
 
@@ -90,11 +94,38 @@ module Steep
         AST::Types::ObjectState.new(back_type: built, ivars: state.ivars)
       end
 
+      # What a call that may run several bodies returns: what any of them
+      # returns for the arguments, the receiver's own as the call resolved it.
+      # A body without a record for them returns what its class declares, and
+      # one that returns only what the receiver's own does adds nothing.
+      def overridden_call(constr, node, call, runs)
+        return call if ObjectStates.initialize_call?(call)
+
+        store = constr.specializations
+        arguments = call_site_arguments(constr, node, call) unless store.empty?
+        own, *others = runs.map.with_index do |(key, receiver), index|
+          recorded = arguments && store.call_return_type(key, arguments, factory: constr.checker.factory)
+          recorded || (index.zero? ? call.return_type : declared_return(constr, receiver, call.method_name)) or return call
+        end
+        others.reject! { |type| constr.check_relation(sub_type: type, super_type: own).success? }
+
+        call.with_return_type(AST::Types::Union.build(types: [own, *others]))
+      end
+
+      def declared_return(constr, receiver, method_name)
+        method = constr.calculate_interface(receiver, method_name, private: true) or return nil
+        returns = method.method_types.map { |method_type| method_type.type_params.empty? ? method_type.type.return_type : (return nil) }
+        AST::Types::Union.build(types: returns)
+      end
+
       # The key of the body `call` runs, or nil where it may run another
       # (`Overrides`).
       def body_key(constr, call, node)
-        Overrides.new(factory: constr.checker.factory, registry: constr.constructor_bindings)
-          .body_key(call, node: node, exact_self: exact_self(constr), self_type: constr.self_type)
+        overrides(constr).body_key(call, node: node, exact_self: exact_self(constr), self_type: constr.self_type)
+      end
+
+      def overrides(constr)
+        Overrides.new(checker: constr.checker, registry: constr.constructor_bindings)
       end
 
       # The arguments `call`, being typed at `node`, is specialized under.

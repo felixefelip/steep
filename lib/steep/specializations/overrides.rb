@@ -9,12 +9,13 @@ module Steep
     #   Child.tag(:a)    # resolves to Base's declaration when Child has none
     #   klass.tag(:a)    # klass: singleton(Base) may be Child
     #
-    # A call that may run another body is not specialized: what Base's body
-    # returns for `(:a)` is not what the call returns. Where every class the
-    # receiver may be runs the same body, the call is keyed by that body, which
-    # is the source's answer and not the signature's: an override the RBS does
-    # not redeclare still runs, and a method the RBS places on a class whose
-    # source inherits it runs the ancestor's body.
+    # A call that may run another body is not keyed by one: what Base's body
+    # returns for `(:a)` is not all the call returns, and
+    # `Specializations.overridden_call` answers it from each body. Where every
+    # class the receiver may be runs the same body, the call is keyed by that
+    # body, which is the source's answer and not the signature's: an override
+    # the RBS does not redeclare still runs, and a method the RBS places on a
+    # class whose source inherits it runs the ancestor's body.
     #
     # Which body runs is `ObjectStates.resolved_body`'s question, so the source
     # it reads is the same: the project's `ConstructorBindingRegistry`, which a
@@ -22,8 +23,9 @@ module Steep
     class Overrides
       SUBCLASSES = ObjectSpace::WeakKeyMap.new
 
-      def initialize(factory:, registry:)
-        @factory = factory
+      def initialize(checker:, registry:)
+        @checker = checker
+        @factory = checker.factory
         @registry = registry
       end
 
@@ -33,12 +35,20 @@ module Steep
       # `exact_self`: the class `self` is where the call is made, where that is
       # one class (`Specializations.exact_self`).
       def body_key(call, node:, exact_self:, self_type:)
+        runs = runs(call, node: node, exact_self: exact_self, self_type: self_type) or return nil
+        runs.keys.first if runs.size == 1
+      end
+
+      # The bodies the call may run, keyed as `body_key` keys one, each with the
+      # first class the receiver may be that runs it; the receiver's own body
+      # first. nil where one of them is not a body the source names.
+      def runs(call, node:, exact_self:, self_type:)
         return nil unless call.is_a?(TypeInference::MethodCall::Typed)
 
         key = Specializations.method_key(call.method_decls) or return nil
-        return key if node.type == :super
+        return { key => call.receiver_type } if node.type == :super
 
-        run_key(call, key, node, exact_self, self_type)
+        run_keys(call, key, node, exact_self, self_type)
       end
 
       def subclasses(name)
@@ -57,15 +67,35 @@ module Steep
 
       private
 
-      def run_key(call, key, node, exact_self, self_type)
+      def run_keys(call, key, node, exact_self, self_type)
         state = ObjectStates.state_in(call.receiver_type)
         receiver = state&.back_type || call.receiver_type
         receiver = exact_self || self_type if receiver.is_a?(AST::Types::Self)
-        return key unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
+        return { key => receiver } unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
 
+        singleton = receiver.is_a?(AST::Types::Name::Singleton)
         names = state || exact_receiver?(node, exact_self) ? [receiver.name] : [receiver.name, *subclasses(receiver.name)]
-        keys = names.map { |name| ran_key(name, receiver.is_a?(AST::Types::Name::Singleton), call.method_decls.first, key) }.uniq
-        keys.first if keys.size == 1
+        names.each_with_object({}) do |name, runs| #$ Hash[String, AST::Types::t]
+          type = name == receiver.name ? receiver : class_type(name, singleton)
+          next unless type.equal?(receiver) || admits?(receiver, type)
+
+          ran = ran_key(name, singleton, call.method_decls.first, key) or return nil
+          runs[ran] ||= type
+        end
+      end
+
+      # Whether a receiver of type `receiver` may hold an instance of the
+      # subclass `type`: a `Hash[Symbol, String]` never holds a subclass of
+      # `Hash[Symbol, Array[Symbol]]`.
+      def admits?(receiver, type)
+        return true unless receiver.is_a?(AST::Types::Name::Instance) && !receiver.args.empty?
+
+        relation = Subtyping::Relation.new(sub_type: type, super_type: receiver)
+        @checker.check(relation, self_type: nil, instance_type: nil, class_type: nil, constraints: Subtyping::Constraints.empty).success?
+      end
+
+      def class_type(name, singleton)
+        singleton ? AST::Types::Name::Singleton.new(name: name) : @factory.instance_type(name)
       end
 
       # A class object named by a constant, or `self` where it is one class.
@@ -84,10 +114,10 @@ module Steep
         builder = @factory.definition_builder
         definition = singleton ? builder.build_singleton(name) : builder.build_instance(name)
         method = definition.methods[decl.method_name.method_name] or return nil
-        return nil unless method.defined_in == decl.method_def.defined_in
-
         found = source_key(definition, decl.method_name.method_name)
-        found || key unless found == :conditional
+        return nil if found == :conditional
+
+        method.defined_in == decl.method_def.defined_in ? found || key : found
       rescue RBS::BaseError
         nil
       end
