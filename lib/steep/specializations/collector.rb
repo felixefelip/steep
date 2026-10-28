@@ -214,8 +214,7 @@ module Steep
         "#{prefix}::#{node.children[1]}"
       end
 
-      private_class_method :each_call, :call_node?, :walk_defs, :walk_block_defs, :implemented_modules, :walk_sclass_defs,
-                           :const_name, :default_type
+      private_class_method :each_call, :call_node?, :walk_defs, :walk_block_defs, :implemented_modules, :walk_sclass_defs, :const_name
     end
   end
 end

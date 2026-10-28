@@ -75,11 +75,12 @@ module Steep
       # - `hands_back`: the methods it calls on `self` with nothing, where
       #   every value it returns is one of those calls; a `yield` answers only
       #   a caller that hands a block.
-      # - `hands_back_element`: `[memo, index, builds]` where every value it
-      #   returns is what a memo called on `self` holds under the positional
-      #   parameter at `index`, read (`memo[key]`) or stored if missing
-      #   (`memo[key] ||= value`); `builds` where each stores `Klass.new`
-      #   handed nothing.
+      # - `hands_back_element`: `[memo, index, builds, omitted]` where every
+      #   value it returns is what a memo called on `self` holds under the
+      #   positional parameter at `index`, read (`memo[key]`) or stored if
+      #   missing (`memo[key] ||= value`); `builds` where each stores
+      #   `Klass.new` handed nothing; `omitted` the key a call that leaves
+      #   the parameter out reads, where its default is a literal.
       # - `stores_element`: `[ivar, key index, value index]` where its body is
       #   exactly `@ivar[key] = value`, both positional parameters.
       # - `block_super`: `[ivar, method]` where its body is exactly

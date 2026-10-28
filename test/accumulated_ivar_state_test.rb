@@ -844,6 +844,20 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def with_default_key(ruby, rbs)
+    ruby = ruby.sub("def self.instance(locale) =", "def self.instance(locale = :en) =").gsub("instance(:en).singular", "instance.singular")
+    [ruby, rbs.sub("def self.instance: (Symbol locale)", "def self.instance: (?Symbol locale)")]
+  end
+
+  def test_a_call_that_leaves_the_key_out_reads_the_element_under_its_default
+    {
+      "a hash an ivar holds" => with_default_key(by_ivar(reads: "instance"), held_by_ivar(BY_IVAR_RBS)),
+      "a hash an object an ivar holds keeps" => with_default_key(by_map(reads: "instance"), forwarding_map_rbs(BY_IVAR_RBS))
+    }.each do |label, (ruby, rbs)|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs), label
+    end
+  end
+
   def locked_map(runs: "yield")
     <<~RUBY
       class Thread::Mutex
