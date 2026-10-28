@@ -34,6 +34,9 @@ module Steep
     # with the value the program computes, and the entry's own key says nothing
     # about it — so the entry declares them and they are checked alongside it.
     #
+    # `module_function` marks a method whose answer does not depend on the
+    # receiver, so a call folds whatever `self` is.
+    #
     # `native` answers in place of calling `method`, for a core method that is
     # Ruby in some versions and C in others. The provenance check below refuses
     # a method written in Ruby, because this process cannot claim to model it —
@@ -43,7 +46,7 @@ module Steep
     # IS does not change between the two: membership by `hash`/`eql?`, which
     # `native` computes with `Hash#key?` on the same elements, under the same
     # preflight and the same `depends_on`.
-    Entry = _ = Struct.new(:method, :arity, :preflight, :depends_on, :native, keyword_init: true)
+    Entry = _ = Struct.new(:method, :arity, :preflight, :depends_on, :native, :module_function, keyword_init: true)
 
     # The element classes a dispatching fold is allowed to see. Not a
     # convenience: `depends_on` has to be a FINITE list, and it can only be
@@ -78,6 +81,16 @@ module Steep
     FLATTEN_METHODS = (
       %w[String Symbol Comparable Object Kernel BasicObject].product(
         %w[to_ary respond_to? respond_to_missing? method_missing]
+      ).map { |owner, name| "::#{owner}##{name}" }
+    ).freeze
+
+    # What `Kernel#Array` asks an argument that is not an Array: `to_ary`, then
+    # `to_a`, through the same probes `join` makes. An Array is answered as it
+    # is, without a call.
+    ARRAY_CONVERSION_LEAVES = [::String, ::Symbol, ::NilClass].freeze
+    ARRAY_CONVERSION_METHODS = (
+      %w[String Symbol NilClass Comparable Object Kernel BasicObject].product(
+        %w[to_ary to_a respond_to? respond_to_missing? method_missing]
       ).map { |owner, name| "::#{owner}##{name}" }
     ).freeze
 
@@ -132,17 +145,17 @@ module Steep
       # (`StringMutation::IN_PLACE`), whose call was dispatched against the
       # widened receiver and so never reached `fold` with its literal.
       def fold_key(key:, receiver_type:, argument_types:, override_registry:)
-        return nil unless operand?(receiver_type)
+        entry = ENTRIES[key] or return nil
+        return nil unless entry.module_function || operand?(receiver_type)
         return nil unless argument_types.all? { |type| operand?(type) }
 
-        entry = ENTRIES[key] or return nil
         return nil if override_registry.blocked?(key)
         return nil if entry.depends_on&.any? { |dependency| override_registry.blocked?(dependency) }
         source_location = entry.method.source_location
         return nil if source_location && !source_location.first.start_with?("<internal:") && !entry.native
         return nil unless entry.arity === argument_types.size
 
-        receiver = operand_value(receiver_type)
+        receiver = operand_value(receiver_type) unless entry.module_function
         arguments = argument_types.map { |type| operand_value(type) }
         return nil unless within_input_budget?(receiver, arguments)
         return nil unless entry.preflight.call(receiver, arguments)
@@ -361,6 +374,10 @@ module Steep
       receiver.to_a.to_h { |element| [element, true] }.key?(arguments.first)
     end
     FREEZE = ->(_receiver, arguments) { arguments.empty? }
+    KERNEL_ARRAY = lambda do |_receiver, arguments|
+      argument = arguments.first
+      arguments.size == 1 && (argument.is_a?(::Array) || ARRAY_CONVERSION_LEAVES.any? { |klass| argument.is_a?(klass) })
+    end
     ARRAY_INCLUDE = lambda do |receiver, arguments|
       arguments.size == 1 && COMPARABLE[arguments.first] && receiver.all?(&COMPARABLE)
     end
@@ -490,6 +507,10 @@ module Steep
       # from there it answers for a literal as readily as for a collection,
       # which is right: `freeze` hands back exactly what it was given.
       "::Kernel#freeze" => Entry.new(method: ::Kernel.instance_method(:freeze), arity: 0, preflight: FREEZE),
+      "::Kernel#Array" => Entry.new(
+        method: ::Kernel.instance_method(:Array), arity: 1, preflight: KERNEL_ARRAY,
+        depends_on: ARRAY_CONVERSION_METHODS, module_function: true
+      ),
       "::Set#include?" => Entry.new(
         method: ::Set.instance_method(:include?), arity: 1, preflight: SET_INCLUDE,
         depends_on: EQUALITY_METHODS + HASH_METHODS, native: SET_MEMBER

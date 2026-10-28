@@ -43,4 +43,29 @@ class ArrayTupleFoldsTest < Minitest::Test
     refute_match(/\A\[/, types.fetch("uniq"))
     refute_match(/\A\[/, types.fetch("difference"))
   end
+
+  def test_kernel_array_folds_a_literal_nil_or_a_tuple
+    types = types_of({
+      "tuple" => "Array([locale, :en])",
+      "literal" => "result = []\nArray(locale).each { |tag| result << tag }\nresult.join(\",\")",
+      "nil" => "result = [:x]\nArray(nil).each { |tag| result << tag }\nresult.join(\",\")"
+    })
+
+    assert_equal "[:fr, :en]", types.fetch("tuple")
+    assert_equal '"fr"', types.fetch("literal")
+    assert_equal '"x"', types.fetch("nil")
+  end
+
+  def test_kernel_array_declines_an_argument_it_would_convert_by_an_unwatched_call
+    types = types_of({ "integer" => "result = []\nArray(1).each { |tag| result << tag }\nresult" })
+
+    refute_equal "[1]", types.fetch("integer")
+  end
+
+  def test_kernel_array_declines_where_the_project_redefines_the_conversion
+    looped = ->(argument) { { "looped" => "result = [:x]\nArray(#{argument}).each { |tag| result << tag }\nresult.join(\",\")" } }
+
+    refute_equal '"x,fr"', types_of(looped.(:locale), reopen: "class Symbol\n  def to_a = [:y]\nend\n").fetch("looped")
+    refute_equal '"x"', types_of(looped.(:nil), reopen: "class NilClass\n  def to_a = [:y]\nend\n").fetch("looped")
+  end
 end
