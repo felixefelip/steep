@@ -137,7 +137,9 @@ module Steep
         reaches_self = on_self || ClassStates.hands_self?(constr, arguments, handed)
         constr = BlockRun.after(constr, node, receiver_type, method_name) unless reaches_self
         if (variable = receiver && HeldIvar.variable(constr, receiver)) && holds_state?(receiver_type)
-          constr = HeldIvar.refine_variable(constr, receiver, left(constr, receiver_type, constr.context.type_env[variable], method_name, arguments, node))
+          left = left(constr, receiver_type, constr.context.type_env[variable], method_name, arguments, node)
+          left = settled(constr, left) if ReturnedSelf.aliased?(constr, node, receiver_type, method_name)
+          constr = HeldIvar.refine_variable(constr, receiver, left)
         end
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver
         exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
@@ -314,6 +316,13 @@ module Steep
       # - a `super` that may not run, or reaches a body with no source but a
       #   core class's (`BasicObject#initialize`, `Array#initialize`: C, which
       #   writes no ivar, and ends the chain).
+      #
+      # One the class body defines only in a branch it never takes is not
+      # there to run, whatever the RBS declares.
+      # The key `Klass.new` is recorded under: the class whose `initialize` the
+      # chain starts at.
+      def constructor_key(chain) = "#{chain.first[0].to_s.delete_prefix("::")}.new"
+
       def initialize_chain(constr, instance)
         registry = constr.constructor_bindings
         definition = constr.checker.factory.definition_builder.build_instance(instance.name)
@@ -330,6 +339,10 @@ module Steep
           return nil if skipped.any? { |name| !registry.initializers_for(name.to_s).empty? }
 
           initializers = registry.initializers_for(owner.to_s)
+          if initializers.empty? && registry.unreached?("#{owner.to_s.delete_prefix("::")}#initialize")
+            method = method.super_method or return nil
+            next
+          end
           if initializers.empty?
             return nil unless Project::LiteralMethodRegistry::CORE_CLASSES.include?(owner.to_s.delete_prefix("::"))
             chain << [owner, nil]
@@ -354,7 +367,7 @@ module Steep
       # method this calls on `self`. One with no body to read may: `itself`,
       # `tap` and `define_singleton_method` hand it on.
       def exposes_self?(constr, instance, body, visiting)
-        return true if body.exposes_self && !core_iterations?(constr, instance, body.iterations)
+        return true if body.exposes_self && !BlockRun.in_place?(constr, instance, body.iterations)
 
         body.self_sends.any? do |name|
           next false if visiting.include?(name)
@@ -362,22 +375,6 @@ module Steep
           _, callee = resolved_body(constr, instance, name)
           callee.nil? || exposes_self?(constr, instance, callee, [*visiting, name])
         end
-      end
-
-      # Whether each `[ivar, method]` is, on the type `instance` declares the
-      # ivar with, an iteration of the core's, which runs its block and keeps
-      # nothing of it.
-      def core_iterations?(constr, instance, iterations)
-        return false if iterations.nil? || iterations.empty? || !instance.is_a?(AST::Types::Name::Instance)
-
-        variables = constr.checker.factory.definition_builder.build_instance(instance.name).instance_variables
-        iterations.all? do |ivar, method_name|
-          declared = variables[ivar] or next false
-          keys = MethodIdentity.keys(constr, constr.checker.factory.type(declared.type), method_name, private: false)
-          !keys.empty? && keys.all? { |key| IterationIntrinsics.entry(key, override_registry: constr.literal_method_registry) }
-        end
-      rescue RBS::BaseError
-        false
       end
 
       # What `method_name` does to an instance of `instance`: the ivars it may
@@ -403,8 +400,9 @@ module Steep
       # `[owner, body]` for the `method_name` an instance of `type` runs, or
       # the class object `type` names when it is a singleton. Which one runs is
       # the RBS definition's answer, as for `initialize`
-      # (felixefelip/steep#230). Nil when a Ruby method of that name the RBS
-      # does not place would run first.
+      # (felixefelip/steep#230), down to the ancestor whose source defines it
+      # where the RBS places it on a class that inherits it. Nil when a Ruby
+      # method of that name the RBS does not place would run first.
       def resolved_body(constr, type, method_name)
         registry = constr.constructor_bindings
         singleton = type.is_a?(AST::Types::Name::Singleton)
@@ -415,7 +413,8 @@ module Steep
         index = ancestors.index { |ancestor| ancestor.name == owner } or return nil
         return nil if defining_ancestor(registry, ancestors.take(index), method_name)
 
-        sole_body(registry, ancestors[index], method_name)
+        source = defining_ancestor(registry, ancestors.drop(index), method_name) or return nil
+        sole_body(registry, source, method_name)
       rescue RBS::BaseError
         nil
       end

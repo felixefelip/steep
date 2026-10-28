@@ -167,15 +167,14 @@ module Steep
           chain = ObjectStates.initialize_chain(constr, instance) or return
           empties = chain.flat_map { |_, body| body ? body.empties.to_a : [] }
           ivars = empties.select { |ivar| collection_confined?(constr, instance, ivar) }.to_h { |ivar| [ivar, AST::Types::Tuple.new(types: [])] }
-          AST::Types::ObjectState.new(back_type: instance, ivars: built_objects(constr, instance).merge(ivars))
+          AST::Types::ObjectState.new(back_type: instance, ivars: built_objects(constr, instance, chain).merge(ivars))
         end
 
         # The objects, the values no call can change and the hashes the checker
         # follows that `Klass.new` called with nothing leaves in its ivars, as
         # its check recorded them (`Constructed`).
-        def built_objects(constr, instance)
-          key = "#{instance.name.to_s.delete_prefix("::")}.new"
-          constructed = ObjectStates.state_in(constr.specializations.return_type(key, "()", factory: constr.checker.factory))
+        def built_objects(constr, instance, chain)
+          constructed = ObjectStates.state_in(constr.specializations.return_type(ObjectStates.constructor_key(chain), "()", factory: constr.checker.factory))
           constructed&.ivars&.select do |ivar, value|
             ObjectStates.state_in(value) || ObjectStates.fixed?(value) || HashMutation.held(constr, instance, ivar, value, followed: true)
           end || {}

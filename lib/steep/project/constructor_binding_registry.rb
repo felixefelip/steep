@@ -28,8 +28,7 @@ module Steep
       def initialize
         @entries = {} #: Hash[String, Hash[Symbol, Integer]]
         @initializers = {} #: Hash[String, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]
-        @methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
-        @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
+        start_method_tables
         @nodes = [] #: Array[::Parser::AST::Node]
         @class_bodies = Hash.new(0) #: Hash[String, Integer]
         @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
@@ -135,6 +134,24 @@ module Steep
         methods_of(class_name)
       end
 
+      # Each body `method_bodies` lists, with those defined in a branch of the
+      # class body read as written: what a body may do where it runs, whether
+      # or not it is defined. A method also left with a body this cannot read
+      # keeps it.
+      def possible_bodies(class_name)
+        conditional = @conditional_methods.fetch(class_name.to_s.delete_prefix("::"), {})
+        method_bodies(class_name).to_h do |method_name, bodies|
+          read = conditional.fetch(method_name, [])
+          [method_name, bodies.count(&:nil?) == read.size ? bodies.compact + read : bodies]
+        end
+      end
+
+      # The method `class_name#method_name` copies where it is an alias its
+      # class body makes, by the name it was made from.
+      def aliased(class_name, method_name)
+        @aliases.dig(class_name.to_s.delete_prefix("::"), method_name)
+      end
+
       # `[value node, qualified name]` for a constant the project writes once,
       # as a scalar (`Constants.scalars`), by its bare name: the checker
       # compares the qualified name with the constant a read resolved to.
@@ -206,9 +223,13 @@ module Steep
         @calls.fetch(name.to_sym, [])
       end
 
+      # What runs only on an object being built: `new` runs `initialize`, and
+      # `dup` and `clone` run the copy hooks on the copy they made.
+      INITIALIZERS = %i[initialize initialize_copy initialize_dup initialize_clone].freeze
+
       # Whether `name` runs only while an object is initialized: every call
-      # the project makes of it is made on `self` by an `initialize`, or by
-      # another method that does.
+      # the project makes of it is made on `self` by one of `INITIALIZERS`, or
+      # by another method that does.
       def initializing?(name)
         index_uses unless @uses
         @initializing.include?(name.to_sym)
@@ -261,8 +282,7 @@ module Steep
         [[@born_hashes, scan.born_hashes], [@born_objects, scan.born_objects]].each do |index, scanned|
           scanned.each { |class_name, ivars| (index[class_name] ||= {}).merge!(ivars, &TypeInference::ConstructorBindingAnalyzer::JOIN_BIRTHS) }
         end
-        merge_bodies(@methods, scan.methods)
-        merge_bodies(@singleton_methods, scan.singleton_methods)
+        ingest_methods(scan)
         ingest_constants(node, content)
         @nodes << node
         @uses = nil
@@ -287,6 +307,21 @@ module Steep
           names = found.each_value.flat_map { |uses| uses.flat_map { |use| use.enum_for(:each_forwarder).to_a } }.to_set - indexed
         end
         found
+      end
+
+      # The tables `ingest_methods` merges each scan's methods into.
+      def start_method_tables
+        @methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
+        @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
+        @conditional_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
+        @aliases = {} #: Hash[String, Hash[Symbol, Symbol]]
+      end
+
+      def ingest_methods(scan)
+        merge_bodies(@methods, scan.methods)
+        merge_bodies(@singleton_methods, scan.singleton_methods)
+        merge_bodies(@conditional_methods, scan.conditional_methods)
+        scan.aliases.each { |class_name, aliases| (@aliases[class_name] ||= {}).merge!(aliases) }
       end
 
       def merge_bodies(index, scanned)
@@ -328,16 +363,17 @@ module Steep
 
       def initializing_methods
         reached = Set[] #: Set[Symbol]
-        sends = @initializers.each_value.flat_map { |bodies| bodies.flat_map { |body| body&.self_sends.to_a } }
+        copies = @methods.each_value.flat_map { |methods| INITIALIZERS.flat_map { |name| methods.fetch(name, []) } }
+        sends = (@initializers.values.flatten + copies).flat_map { |body| body&.self_sends.to_a }
         until sends.empty?
-          names = sends.to_set - reached - [:initialize]
+          names = sends.to_set - reached - INITIALIZERS
           reached.merge(names)
           sends = @methods.each_value.flat_map { |methods| names.flat_map { |name| methods.fetch(name, []).flat_map { |body| body&.self_sends.to_a } } }
         end
         calls = reached.to_h { |name| [name, calls_named([name])] }
         loop do
           kept = reached.select do |name|
-            calls[name].all? { |call| call.on_self && !call.singleton && (call.enclosing == :initialize || reached.include?(call.enclosing)) }
+            calls[name].all? { |call| call.on_self && !call.singleton && (INITIALIZERS.include?(call.enclosing) || reached.include?(call.enclosing)) }
           end.to_set
           return kept if kept == reached
 
@@ -433,9 +469,11 @@ module Steep
         methods.reject { |method_name, _| unreached?("#{name}#{separator}#{method_name}") }
       end
 
-      def unreached?(key) = unreached_definitions.include?(key)
-
       public
+
+      # Whether `key` (`"Owner#method"`) is defined only in a branch its
+      # class body never takes.
+      def unreached?(key) = unreached_definitions.include?(key)
 
       # Whether `owner` defines `method_name` only in a branch its class body
       # may or may not take, so the body an ancestor defines may run instead.
