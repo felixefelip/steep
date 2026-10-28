@@ -130,7 +130,7 @@ module Steep
 
         writers = code_writers(context)
         @factory = context.subtyping.factory
-        @overrides = Overrides.new(factory: @factory, registry: @project.constructor_binding_registry)
+        @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry)
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
