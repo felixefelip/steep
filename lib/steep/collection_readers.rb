@@ -16,7 +16,7 @@ module Steep
     # of the receiver, so a constant is still the value it was written with
     # after one of these: `(KEYWORDS + EXTRA).to_set` reads both and changes
     # neither.
-    WHOLE = %i[join size length empty? count include? intersect? + - & | to_set flatten].freeze
+    WHOLE = %i[join size length empty? count include? intersect? + - & | to_set flatten uniq compact].freeze
 
     # Answer with an ELEMENT, which the caller may then change in place:
     #

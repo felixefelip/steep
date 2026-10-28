@@ -192,7 +192,7 @@ module Steep
       # and there is nothing to gain by refusing one depth.
       def operand?(type)
         case type
-        when AST::Types::Literal, AST::Types::RegexpLiteral, AST::Types::RangeLiteral then true
+        when AST::Types::Literal, AST::Types::RegexpLiteral, AST::Types::RangeLiteral, AST::Types::Nil then true
         when AST::Types::Name::Singleton then MODULE_RECEIVERS.key?(type.name.to_s)
         when AST::Types::Tuple, AST::Types::FiniteSet then type.types.all? { |element| operand?(element) }
         else false
@@ -207,6 +207,7 @@ module Steep
         when AST::Types::RegexpLiteral then ::Regexp.new(type.value.source, type.value.options, timeout: REGEXP_TIMEOUT)
         when AST::Types::RangeLiteral then type.value
         when AST::Types::Name::Singleton then MODULE_RECEIVERS.fetch(type.name.to_s)
+        when AST::Types::Nil then nil
         else type.value
         end
       end
@@ -343,6 +344,13 @@ module Steep
     # `+` walks its two operands and copies them; nothing is compared, nothing
     # is dispatched.
     ARRAY_CONCAT = ->(_receiver, arguments) { arguments.size == 1 && arguments.first.is_a?(::Array) }
+    # `uniq` and `-` tell elements apart by `hash`/`eql?`; `compact` only
+    # asks which ones are `nil`, in C.
+    ARRAY_UNIQ = ->(receiver, arguments) { arguments.empty? && receiver.all?(&COMPARABLE) }
+    ARRAY_DIFFERENCE = lambda do |receiver, arguments|
+      other = arguments.first
+      arguments.size == 1 && other.is_a?(::Array) && receiver.all?(&COMPARABLE) && other.all?(&COMPARABLE)
+    end
     # `to_set` and `Set#include?` both answer through `hash`/`eql?`, so both
     # confine their elements to the classes those can be watched on.
     SET_BUILD = ->(receiver, arguments) { arguments.empty? && receiver.all?(&COMPARABLE) }
@@ -463,6 +471,9 @@ module Steep
         depends_on: EQUALITY_METHODS + HASH_METHODS
       ),
       "::Array#+" => Entry.new(method: Array.instance_method(:+), arity: 1, preflight: ARRAY_CONCAT),
+      "::Array#uniq" => Entry.new(method: Array.instance_method(:uniq), arity: 0, preflight: ARRAY_UNIQ, depends_on: HASH_METHODS),
+      "::Array#-" => Entry.new(method: Array.instance_method(:-), arity: 1, preflight: ARRAY_DIFFERENCE, depends_on: HASH_METHODS),
+      "::Array#compact" => Entry.new(method: Array.instance_method(:compact), arity: 0, preflight: ALWAYS),
       # `freeze` answers the receiver, which is what makes it worth an entry: a
       # collection constant is written `[…].freeze`, and without this the fold
       # stops one call short of the value it just built.
