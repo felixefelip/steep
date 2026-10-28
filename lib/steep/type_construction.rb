@@ -499,65 +499,6 @@ module Steep
       )
     end
 
-    # The type of one pushed element, read from the NODE.
-    #
-    # A literal written as a statement's argument widens to its class by the
-    # time anything asks the typing — and a push from an earlier statement may
-    # not be in this typing at all, since each check builds its own. The syntax
-    # is the same either way, and it is exact.
-    #
-    # Only a literal counts: an array holding anything else has no contents to
-    # state, which is the right answer for `parts << some_value`.
-    def accumulated_element_type(node)
-      inferred = typing.has_type?(node) ? typing.type_of(node: node) : AST::Builtin.any_type
-      type = literal_operand_type(node, inferred)
-
-      type if type.is_a?(AST::Types::Literal)
-    end
-
-    # The types of an accumulator's contents, in order, or nil where any one of
-    # them is not a literal. A `Loop` stands for one run of its pushes per pass,
-    # and the passes are the ones `record_iterations` checked; a loop it did not
-    # expand has no count, so the contents have none either. A `Branch` stands
-    # for the pushes of the arm the check left reachable — per pass, inside a
-    # loop — and one whose condition stayed open has no contents to give.
-    def accumulated_element_types(elements, pass = nil, types = [])
-      elements.each do |element|
-        case element
-        when Accumulators::Loop
-          passes = typing.iterations_of(node: element.block) or return nil
-
-          passes.each do |each_pass|
-            accumulated_element_types(element.values, each_pass, types) or return nil
-          end
-        when Accumulators::Arrived
-          arrived = arrived_types(element) or return nil
-          types.concat(arrived)
-        when Accumulators::Built
-          built = built_types(element) or return nil
-          types.concat(built)
-        when Accumulators::Branch
-          arm = pass ? pass[element.node] : typing.arm_of(node: element.node)
-
-          case arm
-          when :then
-            accumulated_element_types(element.then_values, pass, types) or return nil
-          when :else
-            accumulated_element_types(element.else_values, pass, types) or return nil
-          else
-            return nil
-          end
-        else
-          type = pass ? pass[element] : accumulated_element_type(element)
-          return nil unless type.is_a?(AST::Types::Literal)
-
-          types << type
-        end
-      end
-
-      types
-    end
-
     # What a parameter was handed by the call this body is being checked for,
     # or nil when it is checked for none — the ordinary check, where the
     # parameter holds whatever any caller passes.
@@ -607,7 +548,7 @@ module Steep
         values = argument.type == :kwargs ? argument.children.filter_map { |pair| pair.children[1] if pair.type == :pair } : [argument]
 
         values.each do |value|
-          types = handed[value]&.then { |elements| accumulated_element_types(elements) } or next
+          types = handed[value]&.then { |elements| Accumulators::Contents.types(self, elements) } or next
 
           typing.add_vouched(value, AST::Types::Tuple.new(types: types))
         end
@@ -689,12 +630,13 @@ module Steep
 
         record = {}.compare_by_identity #: Typing::iteration_pass
         Accumulators.each_entry(entries) do |value|
-          if value.is_a?(Accumulators::Branch)
+          case value
+          when Accumulators::Branch
             record[value.node] = pass.typing.arm_of(node: value.node)
+          when Accumulators::Spliced
+            record[value] = Accumulators::Contents.spliced_type(pass, value.node)
           else
-            type = pass.typing.has_type?(value) ? pass.typing.type_of(node: value) : AST::Builtin.any_type
-            type = pass.literal_operand_type(value, type)
-            record[value] = (type if type.is_a?(AST::Types::Literal))
+            record[value] = Accumulators::Contents.element_type(pass, value)
           end
         end
         record
@@ -949,7 +891,7 @@ module Steep
       return nil unless node.type == :send
 
       elements = source.accumulators.at_reads[node] or return nil
-      types = accumulated_element_types(elements) or return nil
+      types = Accumulators::Contents.types(self, elements) or return nil
 
       AST::Types::Tuple.new(types: types)
     end
@@ -961,18 +903,28 @@ module Steep
     def accumulated_final_types(node)
       # A loop or a conditional completes a local as a `<<` does: the block or
       # `if` node is the statement.
-      return nil unless node.type == :send || node.type == :block || node.type == :if
+      return nil unless node.type == :send || node.type == :block || node.type == :if || node.type == :op_asgn
 
       entries = source.accumulators.final[node] or return nil
 
       types = {} #: Hash[Symbol, AST::Types::t]
       entries.each do |name, elements|
-        element_types = accumulated_element_types(elements) or next
+        element_types = Accumulators::Contents.types(self, elements) or next
 
         types[name] = AST::Types::Tuple.new(types: element_types)
       end
 
       types.empty? ? nil : types
+    end
+
+    # The last push into an array this body builds gives the local the tuple
+    # it is worth from there on — so `return parts` hands back what went into
+    # it, and not `Array[untyped]`. Only the LAST: a tuple makes
+    # `Array[Elem]#<<` demand the first element's type, and a push after that
+    # would stop type-checking.
+    def with_accumulated_finals(node)
+      finals = accumulated_final_types(node) or return self
+      update_type_env { |env| env.refine_types(local_variable_types: finals) }
     end
 
     # The argument types a specialization pass is checking this body under
@@ -1652,6 +1604,8 @@ module Steep
               new_node = node.updated(:lvasgn, [lhs.children[0], send_node])
 
               type, constr = synthesize(new_node, hint: hint)
+
+              constr = constr.with_accumulated_finals(node)
 
               constr.add_typing(node, type: type)
 
@@ -2764,12 +2718,8 @@ module Steep
               end
 
             # A decided conditional can be the last push into an array, as a
-            # `<<` can — see the same refinement in `:send`.
-            if (finals = constr.accumulated_final_types(node))
-              constr = constr.update_type_env do |env|
-                env.refine_types(local_variable_types: finals)
-              end
-            end
+            # `<<` can.
+            constr = constr.with_accumulated_finals(node)
 
             add_typing(node, type: node_type, constr: constr)
           end
@@ -4265,16 +4215,7 @@ module Steep
 
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
 
-            # The last push into an array this body builds gives the local the
-            # tuple it is worth from there on — so `return parts` hands back
-            # what went into it, and not `Array[untyped]`. Only the LAST: a
-            # tuple makes `Array[Elem]#<<` demand the first element's type, and
-            # a push after that would stop type-checking.
-            if (finals = constr.accumulated_final_types(node))
-              constr = constr.update_type_env do |env|
-                env.refine_types(local_variable_types: finals)
-              end
-            end
+            constr = constr.with_accumulated_finals(node)
 
             # Phase 1: type subtraction on attribute write for intersection
             # receivers (issue felixefelip/steep#1). When an attribute write

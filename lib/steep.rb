@@ -485,6 +485,8 @@ end
 require "steep/collection_readers"
 require "steep/accumulators"
 require "steep/accumulators/returned_values"
+require "steep/accumulators/appends"
+require "steep/accumulators/contents"
 require "steep/unrolled_each"
 require "steep/local_assignments"
 require "steep/constants"

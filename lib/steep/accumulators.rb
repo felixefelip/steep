@@ -133,6 +133,19 @@ module Steep
     # one it is the checker says, and only for a call in `FRESH`.
     Built = Struct.new(:node)
 
+    # The elements of the array `node` evaluates to, copied in by `key`:
+    # `parts.push(*more)`, `parts.concat(more)`, `parts += more`. Copied, so
+    # `more` stays its own array; which elements it holds the checker says.
+    Spliced = Struct.new(:node, :key)
+
+    # What `elements` become once `key` has run over them in place, which is
+    # what `fold_key` would answer for its copy (`RESHAPES`).
+    Reshaped = Struct.new(:key, :fold_key, :elements)
+
+    # The in-place methods a statement may run on a local, keyed by the one
+    # that answers what they leave in it.
+    RESHAPES = { uniq!: "::Array#uniq", compact!: "::Array#compact" }.freeze
+
     # The calls whose array is new on every call and held by nothing else, so a
     # local born from one is as private as one born from `[]`. Keyed like the
     # intrinsic tables, by the method the call resolved to.
@@ -305,6 +318,8 @@ module Steep
             each_entry(entry.else_values, &block)
           when Loop
             each_entry(entry.values, &block)
+          when Reshaped
+            each_entry(entry.elements, &block)
           end
         end
       end
@@ -452,9 +467,12 @@ module Steep
               contents[name] = contents.fetch(name) + [entry]
               pushed << name
             end
-          elsif (push = push_onto(statement, contents))
+          elsif (push = Appends.push_onto(statement, contents))
             name, values = push
             contents[name] = contents.fetch(name) + values
+            pushed << name
+          elsif (name = Appends.reshaped_local(statement, contents))
+            contents[name] = [Appends.reshape(statement, contents.fetch(name))]
             pushed << name
           end
 
@@ -582,11 +600,12 @@ module Steep
           read(statement, found, {}, nil)
         end
 
-        # A loop is expanded by the checker where the BLOCK is checked, and a
-        # conditional decided where the `if` is — both in this body and not at
-        # the call, so a caller has nothing to expand them with, and a summary
-        # that left them out would miscount.
-        return nil if found.each_value.any? { |pushes| pushes&.any? { |entry| entry.is_a?(Loop) || entry.is_a?(Branch) } }
+        # A loop is expanded by the checker where the BLOCK is checked, a
+        # conditional decided where the `if` is, and a spliced array typed where
+        # it is written — all in this body and not at the call, so a caller has
+        # nothing to answer them with, and a summary that left them out would
+        # miscount.
+        return nil if found.each_value.any? { |pushes| pushes && enum_for(:each_entry, pushes).any? { |entry| entry.is_a?(Loop) || entry.is_a?(Branch) || entry.is_a?(Spliced) } }
 
         summary = names.map { |name| found[name]&.any? ? found[name] : nil }
         summary.any? ? summary : nil
@@ -685,9 +704,14 @@ module Steep
           return
         end
 
-        if (push = push_onto(statement, found))
+        if (push = Appends.push_onto(statement, found))
           name, values = push
           found[name] = found[name] + values
+          return
+        end
+
+        if (name = Appends.reshaped_local(statement, found))
+          found[name] = [Appends.reshape(statement, found[name])]
           return
         end
 
@@ -893,27 +917,6 @@ module Steep
           CollectionReaders.element?(node) && node.children[0]&.type == :lvar
       end
 
-      # `[name, [value, …]]` where this statement pushes onto a watched local.
-      # More than one value for `parts << a << b`: `<<` hands back the array it
-      # was called on, so each link of the chain pushes onto the same one.
-      def push_onto(statement, found)
-        values = [] #: Array[untyped]
-        node = statement
-
-        while node.is_a?(Parser::AST::Node) && node.type == :send && node.children[1] == :<< && node.children.size == 3
-          values.unshift(node.children[2])
-          node = node.children[0]
-        end
-
-        return nil if values.empty?
-        return nil unless node&.type == :lvar
-
-        name = node.children[0]
-        return nil unless found[name]
-
-        [name, values]
-      end
-
       # `{ name => Loop }` where this statement is an `each` over a collection,
       # whose body pushes onto watched locals in a straight line of its own —
       # and mentions them nowhere else. Anything short of that is a closure like
@@ -1027,9 +1030,9 @@ module Steep
         mentioned = Set.new #: Set[Symbol]
 
         lines.each do |line|
-          if (push = push_onto(line, found))
+          if (push = Appends.push_onto(line, found))
             name, values = push
-            values.each { |value| mentioned.merge(names_in(value, watched)) }
+            values.each { |value| mentioned.merge(names_in(value.is_a?(Spliced) ? value.node : value, watched)) }
 
             (pushes[name] ||= []).concat(values)
           elsif (branched = branch_in(line, found, watched))

@@ -313,9 +313,9 @@ module Steep
     STRING_SLICE = lambda do |_receiver, arguments|
       arguments.all?(Integer) || (arguments.size == 1 && arguments.first.is_a?(::Range))
     end
-    # On a copy, as `sub!`: what an array holds once a value is pushed onto it
-    # (`ArrayMutation::IN_PLACE`).
-    ARRAY_PUSH = ->(method_name) { ->(receiver, arguments) { receiver.dup.public_send(method_name, *arguments) } }
+    # On a copy, as `sub!`: what an in-place method answers, and leaves in the
+    # array it runs on (`ArrayMutation::IN_PLACE`, `Accumulators::RESHAPES`).
+    ARRAY_IN_PLACE = ->(method_name) { ->(receiver, arguments) { receiver.dup.public_send(method_name, *arguments) } }
     INTEGER_BINARY = ->(_receiver, arguments) { arguments.first.is_a?(Integer) }
     INTEGER_DIVISION = lambda do |_receiver, arguments|
       divisor = arguments.first
@@ -423,10 +423,10 @@ module Steep
       # `Inflections::Uncountables#to_regex`.
       "::Regexp.escape" => Entry.new(method: ::Regexp.singleton_class.instance_method(:escape), arity: 1, preflight: STRING_AFFIX),
       "::String#delete_suffix" => Entry.new(method: String.instance_method(:delete_suffix), arity: 1, preflight: STRING_AFFIX),
-      "::Array#prepend" => Entry.new(method: Array.instance_method(:prepend), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:prepend)),
-      "::Array#unshift" => Entry.new(method: Array.instance_method(:unshift), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:unshift)),
-      "::Array#push" => Entry.new(method: Array.instance_method(:push), arity: 0.., preflight: ALWAYS, native: ARRAY_PUSH.(:push)),
-      "::Array#<<" => Entry.new(method: Array.instance_method(:<<), arity: 1, preflight: ALWAYS, native: ARRAY_PUSH.(:<<)),
+      "::Array#prepend" => Entry.new(method: Array.instance_method(:prepend), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:prepend)),
+      "::Array#unshift" => Entry.new(method: Array.instance_method(:unshift), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:unshift)),
+      "::Array#push" => Entry.new(method: Array.instance_method(:push), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:push)),
+      "::Array#<<" => Entry.new(method: Array.instance_method(:<<), arity: 1, preflight: ALWAYS, native: ARRAY_IN_PLACE.(:<<)),
       # A String literal is a `String` itself, never a subclass, so `to_s` is
       # the receiver unchanged. `Delegation.generate` writes it once the name
       # is already a string — `method_name.to_s` under `prefix:`.
@@ -474,6 +474,8 @@ module Steep
       "::Array#uniq" => Entry.new(method: Array.instance_method(:uniq), arity: 0, preflight: ARRAY_UNIQ, depends_on: HASH_METHODS),
       "::Array#-" => Entry.new(method: Array.instance_method(:-), arity: 1, preflight: ARRAY_DIFFERENCE, depends_on: HASH_METHODS),
       "::Array#compact" => Entry.new(method: Array.instance_method(:compact), arity: 0, preflight: ALWAYS),
+      "::Array#uniq!" => Entry.new(method: Array.instance_method(:uniq!), arity: 0, preflight: ARRAY_UNIQ, depends_on: HASH_METHODS, native: ARRAY_IN_PLACE.(:uniq!)),
+      "::Array#compact!" => Entry.new(method: Array.instance_method(:compact!), arity: 0, preflight: ALWAYS, native: ARRAY_IN_PLACE.(:compact!)),
       # `freeze` answers the receiver, which is what makes it worth an entry: a
       # collection constant is written `[…].freeze`, and without this the fold
       # stops one call short of the value it just built.

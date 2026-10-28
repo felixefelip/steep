@@ -1691,9 +1691,7 @@ class TypeCheckTest < Minitest::Test
               "def #{name}"
             end
 
-            # Not only `<<`: the local holds what `map` declares, so `push`
-            # neither errors nor leaves the tuple stale. ["A", "B", "C"] at
-            # runtime.
+            # Not only `<<`: `push` is followed the same way.
             def pushed_by_name
               upcased = ["a", "b"].map(&:upcase)
               upcased.push("C")
@@ -1732,7 +1730,7 @@ class TypeCheckTest < Minitest::Test
 
       assert_equal "::String", actual.fetch("reassigned_in_a_block")
       assert_equal "::String", actual.fetch("reassigned_in_a_loop")
-      assert_equal "::Array[::String]", actual.fetch("pushed_by_name")
+      assert_equal '["A", "B", "C"]', actual.fetch("pushed_by_name")
       assert_equal "(bool | nil)", actual.fetch("read_under_a_modifier")
 
       assert_empty typing.errors.reject { |error| error.is_a?(Diagnostic::Ruby::UnreachableBranch) }.map(&:header_line)
