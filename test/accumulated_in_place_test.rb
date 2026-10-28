@@ -52,6 +52,16 @@ class AccumulatedInPlaceTest < Minitest::Test
     assert_equal "[:fr, :en]", types.fetch("splat")
   end
 
+  def test_a_loop_over_a_literal_that_holds_a_parameter_counts_its_passes
+    types = types_of({
+      "push" => "result = []\n[locale, :en].each { |tag| result << tag }\nresult.join(\",\")",
+      "aliased" => "other = [:x]\nresult = []\n[other].each { |tag| tag << :y\nresult << :z }\nother.join(\",\")"
+    })
+
+    assert_equal '"fr,en"', types.fetch("push")
+    refute_equal '"x"', types.fetch("aliased")
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 

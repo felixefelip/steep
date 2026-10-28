@@ -942,7 +942,6 @@ module Steep
         # The collection may be a local this vouches for — that is a READ, and
         # its contents are the count. Named any other way it is a mention.
         over = looped_local(statement, found)
-        return nil if !over && mentions?(collection, watched)
 
         lines = statements(body)
         return nil if lines.empty?
@@ -950,6 +949,8 @@ module Steep
 
         pushes, mentioned = pushes_in(lines, found, watched)
         return nil if pushes.empty?
+
+        mentioned.merge(names_in(collection, watched)) unless over
         # Pushing onto the array being run over: one more pass per push, which
         # is no count at all.
         return nil if over && pushes.key?(over)
