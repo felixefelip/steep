@@ -218,6 +218,25 @@ module Steep
         type.map_type { |child| widen_literals(child) }
       end
 
+      # Whether `type` only adds to what `previous` knew: a state that learned
+      # an ivar, a state over the plain instance it was, a union that lost
+      # members or whose members did.
+      def refines?(type, previous)
+        return true if type == previous
+        if type.is_a?(AST::Types::Union) || previous.is_a?(AST::Types::Union)
+          return union_members(type).all? { |member| union_members(previous).any? { |other| refines?(member, other) } }
+        end
+        return false unless type.is_a?(AST::Types::ObjectState)
+        return type.back_type == previous unless previous.is_a?(AST::Types::ObjectState)
+
+        type.back_type == previous.back_type &&
+          previous.ivars.all? { |ivar, value| type.ivars.key?(ivar) && refines?(type.ivars.fetch(ivar), value) }
+      end
+
+      def union_members(type)
+        type.is_a?(AST::Types::Union) ? type.types : [type]
+      end
+
       # `"Foo#bar"` / `"Foo.bar"` for a resolved call, matching how a `def` in the
       # source keys itself. nil when the call resolves to more than one
       # declaration — the argument tuple then names no single body to specialize.
