@@ -51,6 +51,18 @@ module Steep
         run_keys(call, key, node, exact_self, self_type)
       end
 
+      # Whether an instance typed `name` may run a body the source writes on
+      # one of its subclasses rather than `name`'s own.
+      def overridden?(name)
+        subclasses(name).any? { |subclass| !@registry.method_bodies(subclass).empty? }
+      end
+
+      # `instance` as the class it was built as, where an instance of a
+      # subclass could run another body.
+      def exact(instance)
+        overridden?(instance.name) ? AST::Types::ObjectState.new(back_type: instance, ivars: {}) : instance
+      end
+
       def subclasses(name)
         env = @factory.env
         children = (SUBCLASSES[env] ||= direct_subclasses(env))

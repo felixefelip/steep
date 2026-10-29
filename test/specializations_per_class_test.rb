@@ -66,9 +66,9 @@ class SpecializationsPerClassTest < Minitest::Test
     end
   end
 
-  def test_runner_does_not_key_an_inherited_instance_method_by_a_class_whose_subclass_overrides_what_it_calls
+  def test_runner_keys_an_inherited_instance_method_by_a_class_whose_subclass_overrides_what_it_calls_only_where_built_as_it
     in_tmpdir do
-      write("sig/animals.rbs", ANIMALS_RBS + "class Puppy < Dog\n  def speak: (String greeting) -> \"yip\"\nend\n")
+      write("sig/animals.rbs", ANIMALS_RBS + "class Puppy < Dog\n  def speak: (String greeting) -> \"yip\"\nend\nclass Caller\n  def any: (Dog dog) -> untyped\n  def built: () -> untyped\nend\n")
       write("app/animals.rb", ANIMALS_RUBY + <<~RUBY)
         class Puppy < Dog
           def speak(greeting)
@@ -76,12 +76,15 @@ class SpecializationsPerClassTest < Minitest::Test
           end
         end
 
-        Dog.new.introduce
+        class Caller
+          def any(dog) = dog.introduce
+          def built = Dog.new.introduce
+        end
       RUBY
 
       methods = Specializations::Runner.run(setup_project)
 
-      assert_nil methods["Animal#introduce"]
+      assert_equal({ "() on ::Dog" => '"woof"' }, methods["Animal#introduce"])
     end
   end
 

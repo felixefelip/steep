@@ -46,7 +46,13 @@ module Steep
         reach = ObjectStates::ClassStates.reach(constr, call)
         return receiver if receiver.is_a?(AST::Types::Name::Singleton) && (reach.observes_self || !reach.ivars.empty?)
 
-        receiver if reach.observes_self && inherited_alike?(constr, receiver, reach.methods)
+        receiver if reach.observes_self && (inherited_alike?(constr, receiver, reach.methods) || built_as?(constr, call.receiver_type, receiver))
+      end
+
+      # Whether a constructor fixed the receiver as `receiver` where a subclass
+      # could otherwise be `self` in its body (`Overrides#exact`).
+      def built_as?(constr, receiver_type, receiver)
+        ObjectStates.state_in(receiver_type) && overrides(constr).overridden?(receiver.name)
       end
 
       # `methods` starts with the one called, as `ClassStates.reach` lists them.
@@ -445,6 +451,8 @@ module Steep
       def self.argument_type(arg, typing, exact_self)
         written = written_literal(arg, typing) || written_record(arg, typing, exact_self) and return written
         type = typing.type_of(node: arg)
+        return AST::Types::ObjectState.new(back_type: exact_self, ivars: {}) if arg.type == :self && exact_self.is_a?(AST::Types::Name::Instance)
+
         type = type.subst(Interface::Substitution.build([], self_type: exact_self)) if exact_self
         vouched = typing.vouched_of(node: arg)
         # A local is vouched for IN PLACE of its declared type; a call only while
