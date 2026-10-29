@@ -401,7 +401,7 @@ module Steep
     end
 
     def add_unwidened(node, types)
-      unwidened[node] = types
+      unwidened[node] = types.merge(unwidened.fetch(node, {}))
     end
 
     def unwidened_of(node:)

@@ -614,7 +614,7 @@ module Steep
       #
       # Only the locals the body is entered with carry over. One born in the
       # body is bound anew on every pass, and the parameter is the next element.
-      env = UnrolledEach.starting_env(self, entry)
+      env = UnrolledEach.starting_env(self, entry, (block_body && typing.unwidened_of(node: block_body)) || {})
       carried = env.local_variable_types.keys
 
       passes = collection.types.map do |element|
@@ -2932,7 +2932,7 @@ module Steep
 
             if var_type
               if body
-                constr = StringMutation.widen_mutated_in(constr, body)
+                constr = AssignedLiterals.widen_changed_in(constr, body)
                 body_constr = constr.update_type_env do |type_env|
                   type_env = type_env.assign_local_variables({ var_name => var_type })
                   pins = type_env.pin_local_variables(nil)
@@ -2968,7 +2968,7 @@ module Steep
             # A loop runs its condition and body any number of times, so a
             # mutation anywhere in it is seen from the first pass after
             # (felixefelip/steep#207) — as for a block.
-            _, constr = StringMutation.widen_mutated_in(self, node).synthesize(cond, condition: true).to_ary
+            _, constr = AssignedLiterals.widen_changed_in(self, node).synthesize(cond, condition: true).to_ary
 
             interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions, self_type: self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
@@ -3011,7 +3011,7 @@ module Steep
           yield_self do
             cond, body = node.children
 
-            _, cond_constr, = StringMutation.widen_mutated_in(self, node).synthesize(cond)
+            _, cond_constr, = AssignedLiterals.widen_changed_in(self, node).synthesize(cond)
 
             if body
               for_loop =
@@ -4575,7 +4575,7 @@ module Steep
       # one, or one inside its block on a variable from out here — widens the
       # String literal that variable was typed by.
       if block_body
-        constr = StringMutation.widen_mutated_in(constr, block_body, shadowed: StringMutation.block_parameter_names(block_params))
+        constr = AssignedLiterals.widen_changed_in(constr, block_body, shadowed: StringMutation.block_parameter_names(block_params))
       end
       if receiver
         unwidened_receiver_type = receiver_type
