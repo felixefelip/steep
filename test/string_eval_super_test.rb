@@ -80,4 +80,63 @@ class StringEvalSuperTest < Minitest::Test
   def test_a_bare_super_passes_a_reassigned_parameter_not_the_argument
     assert_equal [nil, nil], has_many_chunks("name = :posts\n    super")
   end
+
+  def test_a_class_handed_through_a_super_keeps_the_memo_it_has_not_built
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          self.@generated_methods: Module?
+          def self.generated_methods: () -> Module
+          def self.define_reader: (Symbol name) -> untyped
+        end
+        class Widget < Base
+        end
+        class Macro
+          @model: untyped
+          def initialize: (untyped model) -> void
+        end
+        class Reflection < Macro
+          def initialize: (untyped model) -> void
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.generated_methods
+            @generated_methods ||= begin
+              mod = const_set(:GeneratedMethods, Module.new)
+              include mod
+              mod
+            end
+          end
+
+          def self.define_reader(name)
+            Reflection.new(self)
+            generated_methods.class_eval "def \#{name}; 1; end"
+          end
+        end
+
+        class Macro
+          def initialize(model)
+            @model = model
+          end
+        end
+
+        class Reflection < Macro
+          def initialize(model)
+            super
+          end
+        end
+
+        class Widget < Base
+          define_reader :size
+        end
+      RUBY
+
+      runner = Steep::Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.fetch("app/base.rb:29:2").map { |chunk| chunk&.source }
+
+      assert_equal ["module GeneratedMethods\nend", nil], chunks
+    end
+  end
 end

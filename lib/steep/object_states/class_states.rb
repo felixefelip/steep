@@ -58,7 +58,7 @@ module Steep
 
           receiver = call.is_a?(TypeInference::MethodCall::Typed) ? call.receiver_type : nil
           names = named_classes(constr, call)
-          handed = call.node.type == :send || call.node.type == :csend ? handed_classes(constr, call.node.children.drop(2)) : []
+          handed = handed_classes(constr, call_arguments(call.node))
           known.select do |name, _|
             (receiver.is_a?(AST::Types::Name::Singleton) && receiver.name == name) || handed.include?(name) || names.include?(name.to_s.delete_prefix("::"))
           end
@@ -115,6 +115,14 @@ module Steep
 
           LocalReach.argument_values(arguments).any? do |value|
             constr.typing.has_type?(value) && constr.typing.type_of(node: value).is_a?(AST::Types::Self)
+          end
+        end
+
+        def call_arguments(node)
+          case node.type
+          when :send, :csend then node.children.drop(2)
+          when :super then node.children
+          else []
           end
         end
 
