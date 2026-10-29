@@ -28,7 +28,8 @@ module Steep
     # `LITERAL_WIDTH` characters, and a tuple fixing no value specializes
     # nothing. A return widens as soon as it DISAGREES
     # with the generation before, because one that keeps moving is not
-    # converging on a value.
+    # converging on a value — unless it only refines it (`Specializations.refines?`),
+    # which an entry may do in `WIDEN_AFTER` generations.
     #
     # Widening is remembered per entry, so each side of one is bounded — a tuple
     # set that stops growing, a return that widens once and stays widened — and
@@ -134,6 +135,7 @@ module Steep
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
+        @refinements = Hash.new(0) #: Hash[[String, String], Integer]
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
         @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
@@ -199,7 +201,7 @@ module Steep
         discovered.each_with_object({}) do |(key, entries), result|
           settled = entries.filter_map do |tuple, type|
             previous = found.dig(key, tuple)
-            if widened.include?([key, tuple]) || (previous && previous != type)
+            if widened.include?([key, tuple]) || (previous && previous != type && !refinement?(key, tuple, type, previous))
               widened << [key, tuple]
               type = Specializations.widen_literals(type)
             end
@@ -209,6 +211,12 @@ module Steep
 
           result[key] = settled unless settled.empty?
         end
+      end
+
+      def refinement?(key, tuple, type, previous)
+        return false unless Specializations.refines?(type, previous)
+
+        (@refinements[[key, tuple]] += 1) <= WIDEN_AFTER
       end
 
       # The returns every known tuple produces, read under `store` — the

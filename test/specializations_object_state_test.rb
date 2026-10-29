@@ -1802,6 +1802,73 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  def test_a_return_that_learns_an_ivar_a_generation_later_keeps_its_literals
+    in_tmpdir do
+      write("sig/pick.rbs", <<~RBS)
+        class P26Abstract
+          @class_name: nil
+          def initialize: () -> void
+        end
+        class P26Macro < P26Abstract
+          @name: Symbol
+          @scope: untyped
+          attr_reader name: Symbol
+          def initialize: (Symbol name, untyped scope) -> void
+        end
+        class P26Assoc < P26Macro
+          @primary_key: nil
+          def initialize: (Symbol name, untyped scope) -> void
+        end
+        class P26Many < P26Assoc
+        end
+        class P26Factory
+          def self.create: (Symbol name, untyped scope) -> P26Many
+        end
+        class P26Use
+          def named: () -> Symbol
+        end
+      RBS
+      write("app/pick.rb", <<~RUBY)
+        class P26Abstract
+          def initialize
+            @class_name = nil
+          end
+        end
+
+        class P26Macro < P26Abstract
+          attr_reader :name
+
+          def initialize(name, scope)
+            super()
+            @name = name
+            @scope = scope
+          end
+        end
+
+        class P26Assoc < P26Macro
+          def initialize(name, scope)
+            super
+            @primary_key = nil
+          end
+        end
+
+        class P26Many < P26Assoc
+        end
+
+        class P26Factory
+          def self.create(name, scope) = P26Many.new(name, scope)
+        end
+
+        class P26Use
+          def named = P26Factory.create(:comments, nil).name
+        end
+      RUBY
+      types = specialized_body_types("app/pick.rb")
+
+      assert_equal ":comments", types.fetch("named")
+    end
+  end
+
   private
 
   def specialized_body_types(path, steepfile: STEEPFILE)
