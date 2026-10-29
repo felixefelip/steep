@@ -69,20 +69,20 @@ module Steep
       # `call` with the return type recorded for the argument tuple this call site
       # supplies (felixefelip/rbs_infer#345, stage S4), or `call` unchanged.
       #
-      # A call that takes a block is left alone: the recorded return was computed
-      # for the arguments only, and a block can decide the return type on its own.
-      # So is a `recv.name = value`, which evaluates to `value` whatever the
+      # A call that takes a block is keyed by what the block returns
+      # (`returned_arguments`), and left alone where that is not known. So is
+      # a `recv.name = value`, which evaluates to `value` whatever the
       # setter's body returns.
       def specialized_call(constr, node, call, block:)
         store = constr.specializations
-        return call if block || call.method_name.match?(/\w=\z/)
+        return call if call.method_name.match?(/\w=\z/)
 
         runs = overrides(constr).runs(call, node: node, exact_self: exact_self(constr), self_type: constr.self_type) or return call
-        return overridden_call(constr, node, call, runs) if runs.size > 1
+        return overridden_call(constr, node, call, runs, block) if runs.size > 1
         return call if store.empty?
 
         key = runs.keys.first
-        arguments = call_site_arguments(constr, node, call) or return call
+        arguments = returned_arguments(constr, node, call, block) or return call
         type = store.call_return_type(key, arguments, factory: constr.checker.factory) or return call
 
         call.with_return_type(ObjectStates.initialize_call?(call) ? constructed(type, call.return_type) : type)
@@ -104,11 +104,11 @@ module Steep
       # returns for the arguments, the receiver's own as the call resolved it.
       # A body without a record for them returns what its class declares, and
       # one that returns only what the receiver's own does adds nothing.
-      def overridden_call(constr, node, call, runs)
+      def overridden_call(constr, node, call, runs, block)
         return call if ObjectStates.initialize_call?(call)
 
         store = constr.specializations
-        arguments = call_site_arguments(constr, node, call) unless store.empty?
+        arguments = returned_arguments(constr, node, call, block) unless store.empty?
         own, *others = runs.map.with_index do |(key, receiver), index|
           recorded = arguments && store.call_return_type(key, arguments, factory: constr.checker.factory)
           recorded || (index.zero? ? call.return_type : declared_return(constr, receiver, call.method_name)) or return call
@@ -141,6 +141,24 @@ module Steep
           self_ivars: ObjectStates.call_ivars(constr, call), class_states: ObjectStates::ClassStates.of_call(constr, call),
           keyed_self: keyed_self(constr, call), exact_self: exact_self(constr)
         )
+      end
+
+      # The arguments what `call` returns is recorded under: a block it writes
+      # by the value it returns (`Arguments#yielded`).
+      def returned_arguments(constr, node, call, block)
+        arguments = call_site_arguments(constr, node, call)
+        block ? arguments&.yielded : arguments
+      end
+
+      # What a block written at a call returns, as its body was typed; nil
+      # for a block passed with `&`, and for a value that names the caller's
+      # type variables or `self`, which the callee's frame cannot spell.
+      def block_return(typing, block)
+        return nil unless Accumulators::LAMBDA_BODIES.include?(block.type)
+
+        body = block.children[2] or return AST::Builtin.nil_type
+        type = typing.type_of(node: body) if typing.has_type?(body)
+        type if type&.free_variables&.empty?
       end
 
       def exact_self(constr)
@@ -213,7 +231,7 @@ module Steep
       # parameter holds what the call passed: nothing, or a block.
       def param_type(param, arguments)
         return param.var_type unless arguments && param.is_a?(TypeInference::MethodParams::BlockParameter)
-        return AST::Builtin.nil_type unless arguments.block
+        return AST::Builtin.nil_type unless arguments.block || arguments.block_return
         return param.var_type unless param.type
 
         AST::Types::Proc.new(type: param.type, block: nil, self_type: param.self_type)
@@ -268,7 +286,8 @@ module Steep
         end
 
         new(
-          positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, class_states: class_states, self_type: self_type, block: block,
+          positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, class_states: class_states, self_type: self_type,
+          block: block, block_return: block && Specializations.block_return(typing, block),
           narrows_classes: narrows_classes?(call, positionals, keywords)
         )
       end
@@ -495,10 +514,11 @@ module Steep
         AST::Types::Record.new(elements: elements, required_keys: elements.keys.to_set)
       end
 
-      def initialize(positionals:, keywords:, self_ivars:, class_states:, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil, narrows_classes: false)
+      def initialize(positionals:, keywords:, self_ivars:, class_states:, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil, block_return: nil, narrows_classes: false)
         @positionals = positionals
         @narrows_classes = narrows_classes
         @block = block
+        @block_return = block_return
         @keywords = keywords
         @keyword_rest = keyword_rest
         @positional_defaults = positional_defaults
@@ -540,9 +560,18 @@ module Steep
       # (`ObjectStates::Yields`).
       attr_reader :block
 
+      # What the block written at the call returns there. Where the body only
+      # reads the block's value (`yield`), it keys the call in place of the
+      # block, as a value two calls can share (`yielded`).
+      attr_reader :block_return
+
       # The one every class shares is the one a declaration can hold.
       def tuples
-        [self, (without_self if self_type)].compact.select(&:literal?)
+        [self, (without_self if self_type)].compact.flat_map { |arguments| [arguments, arguments.yielded] }.compact.select(&:literal?)
+      end
+
+      def yielded
+        with(block: nil) if block && block_return
       end
 
       def without_self
@@ -557,47 +586,20 @@ module Steep
       end
 
       def with_values(values)
-        Arguments.new(
-          positionals: values.take(positionals.size),
-          keywords: keywords.keys.zip(values.drop(positionals.size)).to_h,
-          keyword_rest: @keyword_rest,
-          positional_defaults: @positional_defaults,
-          keyword_defaults: @keyword_defaults,
-          self_type: @self_type,
-          self_ivars: @self_ivars,
-          class_states: @class_states,
-          block: @block,
-          narrows_classes: @narrows_classes
-        )
+        with(positionals: values.take(positionals.size), keywords: keywords.keys.zip(values.drop(positionals.size)).to_h)
       end
 
-      def with_self(self_type)
-        Arguments.new(
-          positionals: @positionals,
-          keywords: @keywords,
-          keyword_rest: @keyword_rest,
-          positional_defaults: @positional_defaults,
-          keyword_defaults: @keyword_defaults,
-          self_type: self_type,
-          self_ivars: @self_ivars,
-          class_states: @class_states,
-          block: @block,
-          narrows_classes: @narrows_classes
-        )
-      end
+      def with_self(self_type) = with(self_type: self_type)
 
-      def with_self_ivars(self_ivars)
+      def with_self_ivars(self_ivars) = with(self_ivars: self_ivars)
+
+      def with(**changes)
         Arguments.new(
-          positionals: @positionals,
-          keywords: @keywords,
-          keyword_rest: @keyword_rest,
-          positional_defaults: @positional_defaults,
-          keyword_defaults: @keyword_defaults,
-          self_type: @self_type,
-          self_ivars: self_ivars,
-          class_states: @class_states,
-          block: @block,
-          narrows_classes: @narrows_classes
+          positionals: @positionals, keywords: @keywords, keyword_rest: @keyword_rest,
+          positional_defaults: @positional_defaults, keyword_defaults: @keyword_defaults,
+          self_type: @self_type, self_ivars: @self_ivars, class_states: @class_states,
+          block: @block, block_return: @block_return, narrows_classes: @narrows_classes,
+          **changes
         )
       end
 
@@ -610,17 +612,10 @@ module Steep
       def resolve_self(self_type)
         substitution = Interface::Substitution.build([], self_type: self_type)
 
-        Arguments.new(
+        with(
           positionals: @positionals.map { |type| type.subst(substitution) },
           keywords: @keywords.transform_values { |type| type.subst(substitution) },
-          keyword_rest: @keyword_rest&.subst(substitution),
-          positional_defaults: @positional_defaults,
-          keyword_defaults: @keyword_defaults,
-          self_type: @self_type,
-          self_ivars: @self_ivars,
-          class_states: @class_states,
-          block: @block,
-          narrows_classes: @narrows_classes
+          keyword_rest: @keyword_rest&.subst(substitution)
         )
       end
 
@@ -632,25 +627,12 @@ module Steep
       # `defaults` stays out of `key`, `==` and `hash`: they are a property of
       # the DEFINITION, so two calls that spell the same tuple cannot disagree
       # about them, and the send side computes its key from the call alone.
-      def with_defaults(positionals: {}, keywords: {})
-        Arguments.new(
-          positionals: @positionals,
-          keywords: @keywords,
-          keyword_rest: @keyword_rest,
-          positional_defaults: positionals,
-          keyword_defaults: keywords,
-          self_type: @self_type,
-          self_ivars: @self_ivars,
-          class_states: @class_states,
-          block: @block,
-          narrows_classes: @narrows_classes
-        )
-      end
+      def with_defaults(positionals: {}, keywords: {}) = with(positional_defaults: positionals, keyword_defaults: keywords)
 
       def key
         key = arguments_key
         key += "#{SELF_MARKER}#{self_type}" if self_type
-        key += "#{BLOCK_MARKER}#{block_key}" if block
+        key += block ? "#{BLOCK_MARKER}#{block_key}" : "#{BLOCK_RETURN_MARKER}#{block_return}" if block || block_return
         return key unless stateful?
 
         "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key].join(", ")}}"
@@ -683,8 +665,10 @@ module Steep
 
       BLOCK_MARKER = " &"
 
+      BLOCK_RETURN_MARKER = " &-> "
+
       def self.persistable_key?(key)
-        !key.include?(BLOCK_MARKER)
+        !key.gsub(BLOCK_RETURN_MARKER, "").include?(BLOCK_MARKER)
       end
 
       def block_key
@@ -707,7 +691,7 @@ module Steep
       end
 
       def fixes_a_value?
-        @narrows_classes || !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
+        @narrows_classes || (block_return && !block_return.is_a?(AST::Types::Any)) || !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
       end
 
       def empty?
@@ -727,7 +711,14 @@ module Steep
           keyword_params: substitute_keywords(function.params.keyword_params)
         )
 
-        method_type.with(type: function.with(params: params))
+        method_type.with(type: function.with(params: params), block: substitute_block(method_type.block))
+      end
+
+      # The block the body yields to returns what the call's block returned.
+      def substitute_block(block)
+        return block unless block && block_return && !self.block
+
+        Interface::Block.new(type: block.type.with(return_type: block_return), optional: false, self_type: block.self_type)
       end
 
       # What parameter `name` of `def_node` arrives holding at this call, as a
@@ -794,13 +785,14 @@ module Steep
 
       def ==(other)
         other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords && other.keyword_rest == keyword_rest &&
-          other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states && other.block.equal?(block)
+          other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states && other.block.equal?(block) &&
+          other.block_return == block_return
       end
 
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash ^ block.object_id.hash
+        positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash ^ block.object_id.hash ^ block_return.hash
       end
 
       private
