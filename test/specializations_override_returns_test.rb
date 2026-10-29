@@ -67,6 +67,56 @@ class SpecializationsOverrideReturnsTest < Minitest::Test
     end
   end
 
+  def test_a_base_instance_handing_itself_on_runs_only_the_base_body
+    in_tmpdir do
+      write("sig/shapes.rbs", <<~RBS)
+        class Shape
+          def paint: (Canvas canvas) -> Integer
+          def area: (Integer scale) -> Integer
+        end
+        class Circle < Shape
+          def area: (Integer scale) -> Integer
+        end
+        class Canvas
+          def draw: (Shape shape) -> Integer
+        end
+        class Caller
+          def base: () -> untyped
+          def circle: () -> untyped
+        end
+      RBS
+      write("app/shapes.rb", <<~RUBY)
+        class Shape
+          def paint(canvas) = canvas.draw(self)
+          def area(scale) = scale
+        end
+
+        class Circle < Shape
+          def area(scale) = scale * 3
+        end
+
+        class Canvas
+          def draw(shape) = shape.area(5)
+        end
+
+        class Caller
+          def base = Shape.new.paint(Canvas.new)
+          def circle = Circle.new.paint(Canvas.new)
+        end
+      RUBY
+      project = setup_project
+      3.times do
+        runner = Specializations::Runner.new(project)
+        runner.write(runner.run)
+        project.reload_specializations!
+      end
+
+      types = body_types(project, current_dir + "app/shapes.rb")
+
+      assert_equal ["5", "15"], types.values_at("base", "circle")
+    end
+  end
+
   def test_a_base_typed_call_returns_the_declared_return_of_each_override
     in_tmpdir do
       write("sig/shapes.rbs", <<~RBS)
