@@ -93,7 +93,7 @@ module Steep
 
           def_node = constr.method_context&.node or return call
           arguments = constr.specialization_arguments(def_node) or return call
-          call.with_return_type(arguments.block ? AST::Types::Literal.new(value: true) : AST::Types::Literal.new(value: false))
+          call.with_return_type(AST::Types::Literal.new(value: !!(arguments.block || arguments.block_return)))
         end
       end
     end
