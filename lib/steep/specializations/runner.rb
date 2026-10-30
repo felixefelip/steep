@@ -71,6 +71,7 @@ module Steep
         @demanding = Set[] #: Set[[String, String]]
         @class_exits = {} #: Hash[RBS::TypeName, Hash[Symbol, AST::Types::t]]
         @declarations = {} #: Hash[String, String]
+        @defined_methods = {} #: Hash[String, Hash[String, String]]
         @overrides = nil
         @receivers = {} #: Hash[String, Array[String]]
         @unknown_receivers = Set[] #: Set[String]
@@ -95,6 +96,7 @@ module Steep
         @exits = {}
         @class_exits = {}
         @declarations = {}
+        @defined_methods = {}
         @receivers = {}
         @unknown_receivers = Set[]
         @project.targets.each { |target| specialize_target(target, methods) }
@@ -122,7 +124,11 @@ module Steep
         else
           Evals::Writer.write(evals_output_path, @evals)
         end
+        HarvestedMethods.write(@project.absolute_path(HarvestedMethods::DEFAULT_OUTPUT_PATH), @defined_methods)
       end
+
+      # The methods `run` found defined with `define_method` (`HarvestedMethods#signatures`).
+      attr_reader :defined_methods
 
       private
 
@@ -184,6 +190,7 @@ module Steep
           (methods[key] ||= {}).merge!(writable.transform_values { |type| Specializations.sidecar_value(Specializations.sidecar_writable(type)) }) unless writable.empty?
         end
         @declarations.merge!(call_site_unions(context, store(found), found, baselines, callees, definitions))
+        @defined_methods.merge!(@harvested.signatures(@declarations))
 
         harvest_evals(context, store(found), locations, definitions, writers)
       end

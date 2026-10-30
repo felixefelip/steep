@@ -16,11 +16,33 @@ module Steep
     # so the locals it closes over hold what they hold there
     # (`DefinedMethods.check`).
     class HarvestedMethods
+      # What a run found defined, for the generator that declares it: a
+      # method no signature names cannot be called, so nothing would ever
+      # specialize it.
+      #
+      #     ---
+      #     version: 1
+      #     methods:
+      #       Base.__class_attr_pluralize:
+      #         params: "()"
+      #         returns: untyped
+      DEFAULT_OUTPUT_PATH = Pathname("sig/generated/.steep_defined_methods.yml").freeze
+      SCHEMA_VERSION = 1
+
+      def self.write(path, signatures)
+        return path.delete if signatures.empty? && path.file?
+        return if signatures.empty?
+
+        path.parent.mkpath
+        path.write(YAML.dump({ "version" => SCHEMA_VERSION, "methods" => signatures.sort.to_h }))
+      end
+
       def initialize
         @pending = {} #: Hash[String, Set[Arguments]]
         @blocks = {} #: Hash[String, [String, Integer]]
         @enclosing = {} #: Hash[[String, Integer], Parser::AST::Node]
         @definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
+        @nodes = {} #: Hash[String, Parser::AST::Node]
       end
 
       # Whether `key` is a method a block defines. A check keys the block by
@@ -44,6 +66,7 @@ module Steep
 
             path = sources.keys.find { |candidate| candidate.to_s == block.loc.expression.source_buffer.name } or next
             definitions[key] = [path, block]
+            @nodes[key] = block
             node_key = [path.to_s, block.loc.expression.begin_pos]
             @blocks[key] = node_key
             @enclosing[node_key] = enclosing_def(sources.fetch(path).node, block)
@@ -65,12 +88,32 @@ module Steep
         rounds
       end
 
+      # Each method found, with the parameters its block takes and what every
+      # call of it returns (`declarations`, `CallSiteUnions`), or `untyped`
+      # where that is not known.
+      def signatures(declarations)
+        @nodes.to_h do |key, block|
+          [key, { "params" => "(#{block.children[1].children.filter_map { |param| param_rbs(param) }.join(", ")})", "returns" => declarations[key] || "untyped" }]
+        end
+      end
+
       # The `def` a pruned check keeps for a block it substitutes.
       def kept_def(node_key)
         @enclosing[node_key]
       end
 
       private
+
+      PARAMS = {
+        arg: "untyped %s", procarg0: "untyped %s", optarg: "?untyped %s", restarg: "*untyped %s",
+        kwarg: "%s: untyped", kwoptarg: "?%s: untyped", kwrestarg: "**untyped %s"
+      }.freeze
+
+      def param_rbs(param)
+        format = PARAMS[param.type] or return nil
+        name = param.children[0]
+        format.include?("untyped %s") && !name.is_a?(Symbol) ? format.sub(" %s", "") : format % name
+      end
 
       def apart?(key, other)
         block = @blocks[key]

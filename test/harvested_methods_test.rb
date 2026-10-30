@@ -126,4 +126,34 @@ class HarvestedMethodsTest < Minitest::Test
       assert_equal ["::Integer"], methods.fetch("Base.__b").values.uniq
     end
   end
+
+  def test_a_store_no_signature_names_is_written_for_its_declaration
+    in_tmpdir do
+      project = store_project(
+        store_rbs: "",
+        attr_ruby: FORWARDED.sub("{ value }", "{ |given = nil, *rest, key:| value }"),
+        base_ruby: "def self.pluralize = 1\n  Attr.redefine(self, :__store, 1)"
+      )
+      runner = Steep::Specializations::Runner.new(project)
+      runner.write(runner.run)
+
+      expected = { "Base.__store" => { "params" => "(?untyped given, *untyped rest, key: untyped)", "returns" => "untyped" } }
+      assert_equal expected, runner.defined_methods
+      assert_equal({ "version" => 1, "methods" => expected }, YAML.safe_load((current_dir + "sig/generated/.steep_defined_methods.yml").read))
+    end
+  end
+
+  def test_a_declared_store_is_written_with_what_its_calls_return
+    in_tmpdir do
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped",
+        attr_ruby: FORWARDED,
+        base_ruby: "def self.pluralize = __store\n  Attr.redefine(self, :__store, 1)"
+      )
+      runner = Steep::Specializations::Runner.new(project)
+      runner.run
+
+      assert_equal({ "Base.__store" => { "params" => "()", "returns" => "::Integer" } }, runner.defined_methods)
+    end
+  end
 end
