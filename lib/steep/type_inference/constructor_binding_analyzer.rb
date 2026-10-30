@@ -272,15 +272,16 @@ module Steep
 
       # Yields each method name `node` may define on the class whose body it
       # is, with its `Body` when the definition always runs: a `def`, an
-      # `attr_*`, as a statement of the body or under a modifier
-      # (`private def x = @x`).
+      # `attr_*`, a `define_method` block (`DefinedMethods.literal`), as a
+      # statement of the body or under a modifier (`private def x = @x`).
       #
       # Anything else that may name a method counts, with no body this reads:
-      # an `alias`, `alias_method`, `define_method`, or a definition under a
+      # an `alias`, `alias_method`, any other `define_method`, or a definition under a
       # condition, inside a block (`class_eval do`) or inside another method.
       # A nested class, module or singleton body defines elsewhere.
       def each_method_definition(node, direct:, &block)
         return unless node.is_a?(::Parser::AST::Node)
+        return yield(defined, (method_body(node.children[1], node.children[2]) if direct)) if (defined = DefinedMethods.literal(node))
 
         case node.type
         when :class, :module, :sclass

@@ -150,7 +150,8 @@ module Steep
           body = node.type == :class ? node.children[2] : node.children[1]
           walk_defs(body, inner, source, &block)
         when :block
-          walk_block_defs(node, nesting, source, &block)
+          defined = DefinedMethods.literal(node) unless nesting.empty?
+          defined ? yield("#{nesting.join("::")}##{defined}", node) : walk_block_defs(node, nesting, source, &block)
         when :def
           yield "#{nesting.join("::")}##{node.children[0]}", node unless nesting.empty?
         when :defs
