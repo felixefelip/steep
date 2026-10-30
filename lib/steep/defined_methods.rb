@@ -90,15 +90,32 @@ module Steep
       private
 
       # The method body a found block is, checked after the call it is written
-      # at, in the env the call saw.
+      # at, in the env the call saw: under the arguments a run checks it with,
+      # or, where its frame is checked under its declaration, as each method
+      # it was found to be the body of.
       def harvested_check(constr, node, pair)
-        return pair unless node.type == :block && (arguments = constr.specialization_arguments(node))
+        return pair unless node.type == :block
 
-        key = constr.specializations.defined_method([constr.source.path.to_s, node.loc.expression.begin_pos]) or return pair
+        if (arguments = constr.specialization_arguments(node))
+          key = constr.specializations.defined_method([constr.source.path.to_s, node.loc.expression.begin_pos]) or return pair
+          return check_as(constr, node, pair, key, arguments.self_type)
+        end
+        frame = constr.method_context&.node
+        return pair if frame && constr.specialization_arguments(frame)
+
+        expression = node.loc.expression
+        keys = constr.specializations.body_methods("#{File.expand_path(expression.source_buffer.name)}:#{expression.line}:#{expression.column}")
+        keys&.each { |key| check_as(constr, node, pair, key, nil) }
+        pair
+      end
+
+      def check_as(constr, node, pair, key, self_type)
         owner, name, singleton = Specializations.method_key_parts(key)
         builder = constr.checker.factory.definition_builder
         definition = singleton ? builder.build_singleton(owner) : builder.build_instance(owner)
-        self_type = arguments.self_type || (singleton ? AST::Types::Name::Singleton.new(name: owner) : constr.checker.factory.instance_type(owner))
+        return pair unless definition.methods.key?(name)
+
+        self_type ||= singleton ? AST::Types::Name::Singleton.new(name: owner) : constr.checker.factory.instance_type(owner)
         captured = captured_locals(constr, node)
         _send_node, params, body = node.children
         child = constr.with_new_typing(pair.constr.typing.new_child)
