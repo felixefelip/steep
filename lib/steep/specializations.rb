@@ -1041,7 +1041,13 @@ module Steep
       # a singleton one, so a `@type instance:` annotation names the host and not
       # the module the body is written in. The node is what the pass asked about.
       def active_arguments(node_key)
-        @active[node_key]
+        @active[node_key] || defining(node_key)&.last
+      end
+
+      # The method a block substituted at `node_key` is checked as, where the
+      # run found it defining one (`HarvestedMethods`).
+      def defined_method(node_key)
+        defining(node_key)&.first&.last
       end
 
       def with_active(active) = with(active: active, reads: @reads)
@@ -1058,6 +1064,10 @@ module Steep
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
           class_exits: @class_exits, declarations: @declarations, receivers: @receivers, reads: reads
         )
+      end
+
+      def defining(node_key)
+        @active.find { |key, _| key.size == 3 && key.take(2) == node_key }
       end
 
       def read(name, *arguments, **options)

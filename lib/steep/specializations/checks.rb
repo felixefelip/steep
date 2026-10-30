@@ -27,7 +27,7 @@ module Steep
     # A generation whose store answers every question a check asked as it was
     # answered then is handed that check's outcome instead of checking again.
     class Checks
-      Outcome = Struct.new(:reads, :returns, :exits, :sites, :class_exits, keyword_init: true)
+      Outcome = Struct.new(:reads, :returns, :exits, :sites, :class_exits, :defined, keyword_init: true)
 
       # `returned`: the type a body returns in a typing, given its key and node.
       def initialize(overrides:, returned:)
@@ -51,7 +51,7 @@ module Steep
       private
 
       def outcome_of(typing, bodies, reads)
-        return Outcome.new(reads: reads, returns: {}, exits: {}, sites: {}, class_exits: {}) unless typing
+        return Outcome.new(reads: reads, returns: {}, exits: {}, sites: {}, class_exits: {}, defined: {}) unless typing
 
         Outcome.new(
           reads: reads,
@@ -61,7 +61,8 @@ module Steep
             [key, exit] if ObjectStates::KeptSelf.exit_kept?(arguments, exit)
           end.to_h,
           sites: Collector.call_sites(typing, overrides: @overrides),
-          class_exits: typing.class_exits
+          class_exits: typing.class_exits,
+          defined: bodies.each_value.reduce({}) { |found, (def_node, arguments)| found.merge(DefinedMethods.harvested(typing, def_node, arguments)) }
         )
       end
     end

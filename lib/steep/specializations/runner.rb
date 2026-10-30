@@ -133,6 +133,7 @@ module Steep
         @factory = context.subtyping.factory
         @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry)
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
+        @harvested = HarvestedMethods.new
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
         @refinements = Hash.new(0) #: Hash[[String, String], Integer]
@@ -240,7 +241,9 @@ module Steep
             (found[key] ||= {})[arguments.key] = type
           end
 
+          @harvested.adopt(outcomes, definitions, revealed, context.sources)
           outcomes.each_value do |outcome|
+            @harvested.remember(outcome.sites, definitions)
             outcome.sites.each { |key, arguments| (revealed[key] ||= Set.new).merge(arguments) if definitions.key?(key) }
           end
         end
@@ -400,7 +403,7 @@ module Steep
 
         begin
           path, def_node = definitions.fetch(key)
-          typing = type_check(context, store.with_reads(nil), context.sources.fetch(path), { node_key(path, def_node) => with_defaults(key, arguments, def_node) })
+          typing = type_check(context, store.with_reads(nil), context.sources.fetch(path), { node_key(path, def_node, key) => with_defaults(key, arguments, def_node) })
           record_exit(key, arguments, typing, def_node)
         ensure
           @demanding.delete(memo)
@@ -446,7 +449,7 @@ module Steep
           typing = file_check(context, store, source, {})
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
-            next unless definitions.key?(key)
+            next @harvested.remember({ key => Collector.tuples(key, arguments) }, definitions) unless definitions.key?(key)
 
             (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
@@ -509,7 +512,7 @@ module Steep
         lambda do |key, arguments|
           checked[[key, arguments]] ||= begin
             path, def_node = definitions.fetch(key)
-            type_check(context, store, context.sources.fetch(path), { node_key(path, def_node) => arguments })
+            type_check(context, store, context.sources.fetch(path), { node_key(path, def_node, key) => arguments })
           end
         end
       end
@@ -579,6 +582,7 @@ module Steep
           callees[path] = Collector.callees(typing, overrides: @overrides) if typing
         end
 
+        @harvested.remember(tuples, definitions)
         tuples.select! { |key, _| definitions.key?(key) }
         locations.select! { |key, _| definitions.key?(key) }
         [baselines, tuples, definitions, callees]
@@ -597,8 +601,8 @@ module Steep
         lists = tuples.transform_values(&:to_a)
         depth = lists.each_value.map(&:size).max || 0
 
-        (0...depth).map do |index|
-          lists.filter_map { |key, list| [key, list[index]] if list[index] }.to_h
+        (0...depth).flat_map do |index|
+          @harvested.separate(lists.filter_map { |key, list| [key, list[index]] if list[index] }.to_h)
         end
       end
 
@@ -609,7 +613,7 @@ module Steep
         active.group_by { |key, _| definitions.fetch(key).first }.to_h do |path, entries|
           bodies = entries.to_h do |key, arguments|
             def_node = definitions.fetch(key)[1]
-            [key, [def_node, arguments, node_key(path, def_node), with_defaults(key, arguments, def_node)]]
+            [key, [def_node, arguments, node_key(path, def_node, key), with_defaults(key, arguments, def_node)]]
           end
           outcome = @checks.outcome(bodies, store) { |logged, by_node| file_check(context, logged, context.sources.fetch(path), by_node) }
           @class_exits.merge!(outcome.class_exits)
@@ -621,7 +625,7 @@ module Steep
         paths = active.keys.filter_map { |key| definitions[key]&.first }.uniq
         by_node = active.to_h do |key, arguments|
           path, def_node = definitions.fetch(key)
-          [node_key(path, def_node), with_defaults(key, arguments, def_node)]
+          [node_key(path, def_node, key), with_defaults(key, arguments, def_node)]
         end
 
         paths.to_h do |path|
@@ -631,8 +635,8 @@ module Steep
 
       # What the checker matches a body by, since the name it would derive from
       # the self type is not always the name this pass keys the body under.
-      def node_key(path, def_node)
-        [path.to_s, def_node.loc.expression.begin_pos]
+      def node_key(path, def_node, key)
+        [path.to_s, def_node.loc.expression.begin_pos, *(key if @harvested.harvested?(key))]
       end
 
       # A check of a whole file at this run's top level, not one a demanded
@@ -673,7 +677,8 @@ module Steep
         return source if positions.empty?
 
         @pruned[[source.path, positions]] ||= Source::OnlyDefs.new(
-          source, Collector.definitions(source).each_value.select { |def_node| positions.include?(def_node.loc.expression.begin_pos) }
+          source, Collector.definitions(source).each_value.select { |def_node| positions.include?(def_node.loc.expression.begin_pos) } +
+                  positions.filter_map { |position| @harvested.kept_def([source.path.to_s, position]) }
         )
       end
 
