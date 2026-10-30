@@ -3394,7 +3394,7 @@ module Steep
             # @type var node: Parser::AST::Node & Parser::AST::_BlockNode
             type_lambda(node, params_node: params, body_node: body, type_hint: hint)
           else
-            type_send(node, send_node: send_node, block_params: params, block_body: body, unwrap: send_node.type == :csend, tapp: tapp, hint: hint)
+            DefinedMethods.check(self, node) || type_send(node, send_node: send_node, block_params: params, block_body: body, unwrap: send_node.type == :csend, tapp: tapp, hint: hint)
           end
         end
       when :numblock

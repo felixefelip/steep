@@ -512,7 +512,7 @@ module Steep
         include ResultPrinter
 
         def initialize(node:, expected:, actual:, result:)
-          super(node: node, location: node.loc.name) # steep:ignore NoMethod
+          super(node: node, location: node.type == :block ? node.children[0].loc.selector : node.loc.name) # steep:ignore NoMethod
           @expected = expected
           @actual = actual
           @result = result

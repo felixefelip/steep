@@ -248,14 +248,14 @@ module Steep
         # @type var args_node: ::Parser::AST::Node
         args_node =
           case node.type
-          when :def
+          when :def, :block
             node.children[1]
           when :defs
             node.children[2]
           else
             raise
           end
-        original = args_node.children #: Array[Parser::AST::Node]
+        original = DefinedMethods.params_of(args_node) #: Array[Parser::AST::Node]
         args = original.dup
 
         instance = new(args: original, method_type: method_type, forward_arg_type: nil)
