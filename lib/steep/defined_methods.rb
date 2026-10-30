@@ -3,23 +3,35 @@ module Steep
   # the method `def name(params) = body` would, and is checked as that method
   # rather than as a block of `Module#define_method`, whose signature gives
   # the block a `self` of `top`. The block is the method's body: its record
-  # and its exit are keyed by it, as a `def`'s are by the `def`.
+  # and its exit are keyed by it, as a `def`'s are by the `def`. Called on
+  # `singleton_class`, it defines a method of the class object, as
+  # `def self.name` does.
   #
   # A block that reads a local of the class body around it is left a block:
   # its body is not the method's alone.
   module DefinedMethods
     class << self
-      # The method's name, where `node` is that shape.
+      # `[name, singleton]` where `node` is that shape: the method's name, and
+      # whether it is defined on the class object.
       def literal(node)
         return nil unless node.type == :block
 
         send_node, params, body = node.children
         receiver, method_name, *arguments = send_node.children
-        return nil unless send_node.type == :send && receiver.nil? && method_name == :define_method
+        return nil unless send_node.type == :send && method_name == :define_method && (singleton = singleton_receiver(receiver)) != :other
         return nil unless arguments.size == 1 && %i[sym str].include?(arguments[0].type)
         return nil unless params.children.all? { |param| plain_param?(param) } && closed?(params, body)
 
-        arguments[0].children[0].to_sym
+        [arguments[0].children[0].to_sym, singleton]
+      end
+
+      # `[name, params, body]`, as a `def` node's children are, for a `def`
+      # or a `define_method` block on the side `singleton` says.
+      def def_parts(node, singleton:)
+        return node.children if node.type == :def && !singleton
+
+        name, on_singleton = literal(node)
+        [name, node.children[1], node.children[2]] if name && on_singleton == singleton
       end
 
       # `node` checked as the method it defines, or nil where it is not one
@@ -27,17 +39,20 @@ module Steep
       def check(constr, node)
         module_context = constr.module_context
         return nil if constr.method_context || !module_context
-        name = literal(node) or return nil
-        definition = module_context.instance_definition
-        return nil unless definition&.methods&.key?(name) && module_define_method?(constr)
+        name, singleton = literal(node)
+        return nil unless name
+        self_type, definition = singleton ? [module_context.module_type, module_context.module_definition] : [module_context.instance_type, module_context.instance_definition]
+        return nil if singleton && !module_context.instance_type.is_a?(AST::Types::Name::Instance)
+        return nil unless definition&.methods&.key?(name) && module_define_method?(constr, singleton)
 
         send_node, params, body = node.children
+        constr = constr.synthesize(send_node.children[0]).constr if send_node.children[0]
         constr = constr.synthesize(send_node.children[2]).constr
-        constr.with_method_constr(name, node, args: params.children, self_type: module_context.instance_type, definition: definition) do |method_constr|
+        constr.with_method_constr(name, node, args: params.children, self_type: self_type, definition: definition) do |method_constr|
           method_constr = method_constr.synthesize_children(params)
           ObjectStates.record_exit(method_constr, node, MethodBody.check(method_constr, node, body, setters: false)) if body
         end
-        module_context.defined_instance_methods << name
+        (singleton ? module_context.defined_module_methods : module_context.defined_instance_methods) << name
         constr = constr.add_typing(send_node, type: AST::Builtin::Symbol.instance_type).constr
         constr.add_typing(node, type: AST::Types::Literal.new(value: name))
       end
@@ -49,6 +64,16 @@ module Steep
       end
 
       private
+
+      # false for `self` or none, true for `singleton_class` on either,
+      # `:other` for any other receiver.
+      def singleton_receiver(receiver)
+        return false if receiver.nil? || receiver.type == :self
+        return :other unless receiver.type == :send && receiver.children[1] == :singleton_class && receiver.children.size == 2
+
+        inner = receiver.children[0]
+        inner.nil? || inner.type == :self ? true : :other
+      end
 
       def plain_param?(param)
         return param.children.size == 1 && param.children[0].is_a?(Symbol) if param.type == :procarg0
@@ -81,13 +106,15 @@ module Steep
         node.children.each { |child| locals(child, own, read) }
       end
 
-      # Whether `define_method` called on `self` is `Module`'s.
-      def module_define_method?(constr)
+      # Whether `define_method` called on `self`, or on its singleton class,
+      # is `Module`'s.
+      def module_define_method?(constr, singleton)
         self_type = constr.self_type
         return false unless self_type.is_a?(AST::Types::Name::Singleton)
 
-        method = constr.checker.factory.definition_builder.build_singleton(self_type.name).methods[:define_method]
-        method&.defined_in&.to_s == "::Module"
+        builder = constr.checker.factory.definition_builder
+        definition = singleton ? builder.build_instance(RBS::TypeName.parse("::Class")) : builder.build_singleton(self_type.name)
+        definition.methods[:define_method]&.defined_in&.to_s == "::Module"
       rescue RBS::BaseError
         false
       end

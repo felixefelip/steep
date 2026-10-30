@@ -259,13 +259,13 @@ module Steep
         each_stmt(body) do |stmt|
           case stmt.type
           when :defs
-            receiver, mname, args, mbody = stmt.children
-            yield mname, args, mbody if receiver.type == :self
+            yield(*stmt.children.drop(1)) if stmt.children[0].type == :self
           when :sclass
-            target, sbody = stmt.children
-            next unless target.type == :self
+            next unless stmt.children[0].type == :self
 
-            each_stmt(sbody) { |inner| yield(*inner.children) if inner.type == :def }
+            each_stmt(stmt.children[1]) { |inner| (parts = DefinedMethods.def_parts(inner, singleton: false)) && yield(*parts) }
+          when :block
+            (parts = DefinedMethods.def_parts(stmt, singleton: true)) && yield(*parts)
           end
         end
       end
@@ -281,7 +281,7 @@ module Steep
       # A nested class, module or singleton body defines elsewhere.
       def each_method_definition(node, direct:, &block)
         return unless node.is_a?(::Parser::AST::Node)
-        return yield(defined, (method_body(node.children[1], node.children[2]) if direct)) if (defined = DefinedMethods.literal(node))
+        return yield(defined, (method_body(node.children[1], node.children[2]) if direct)) if node.type == :block && (defined, = DefinedMethods.def_parts(node, singleton: false))
 
         case node.type
         when :class, :module, :sclass

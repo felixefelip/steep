@@ -26,6 +26,20 @@ class DefinedMethodsTest < Minitest::Test
     end
   RBS
 
+  FACTORY = <<~RBS
+    class Module
+      def define_method: (Symbol name) { (?) -> untyped } -> Symbol
+    end
+
+    class Object
+      def singleton_class: () -> Class
+    end
+
+    class Factory
+      def self.build: () -> Factory
+    end
+  RBS
+
   def test_a_define_method_block_is_checked_as_the_method
     with_checker(COUNTER) do |checker|
       source = parse_ruby(<<~'RUBY')
@@ -82,6 +96,42 @@ class DefinedMethodsTest < Minitest::Test
     end
   end
 
+  def test_a_define_method_block_on_the_singleton_class_is_checked_as_a_class_method
+    with_checker(FACTORY) do |checker|
+      source = parse_ruby(<<~'RUBY')
+        class Factory
+          singleton_class.define_method(:build) { new }
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Factory"), typing.type_of(node: dig(source.node, 2, 2))
+      end
+    end
+  end
+
+  def test_a_define_method_on_the_singleton_class_inside_class_self_stays_a_block
+    with_checker(FACTORY) do |checker|
+      source = parse_ruby(<<~'RUBY')
+        class Factory
+          class << self
+            singleton_class.define_method(:build) { "many" }
+          end
+          def self.build = new
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_a_call_to_a_defined_method_keeps_the_memo_it_does_not_build
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
@@ -122,6 +172,49 @@ class DefinedMethodsTest < Minitest::Test
       runner = Steep::Specializations::Runner.new(setup_project)
       runner.run
       chunks = runner.evals.fetch("app/base.rb:21:2").map { |chunk| chunk&.source }
+
+      assert_equal ["module GeneratedMethods\nend", nil], chunks
+    end
+  end
+
+  def test_a_call_to_a_method_defined_on_the_singleton_class_keeps_the_memo
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          self.@generated_methods: Module?
+          def self.generated_methods: () -> Module
+          def self.define_reader: (Symbol name) -> untyped
+          def self.pluralize: () -> bool
+        end
+        class Widget < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          singleton_class.define_method(:pluralize) { true }
+
+          def self.generated_methods
+            @generated_methods ||= begin
+              mod = const_set(:GeneratedMethods, Module.new)
+              include mod
+              mod
+            end
+          end
+
+          def self.define_reader(name)
+            pluralize
+            generated_methods.class_eval "def \#{name}; 1; end"
+          end
+        end
+
+        class Widget < Base
+          define_reader :size
+        end
+      RUBY
+
+      runner = Steep::Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.fetch("app/base.rb:19:2").map { |chunk| chunk&.source }
 
       assert_equal ["module GeneratedMethods\nend", nil], chunks
     end
