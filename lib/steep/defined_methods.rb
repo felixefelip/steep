@@ -59,23 +59,27 @@ module Steep
         constr.add_typing(node, type: AST::Types::Literal.new(value: name))
       end
 
-      # The methods `def_node`'s body defines where it is checked under
-      # `arguments`, as `{ key => block }`: a
-      # `define_method` on a receiver whose type names a class, with a name
-      # that is a literal there, and a block written there or handed in at the
-      # call.
-      def harvested(typing, def_node, arguments)
-        found = {} #: Hash[String, Parser::AST::Node]
-        each_define(Specializations::Evals.body_of(def_node)) do |node, send_node|
-          block = node.type == :block ? node : handed_block(send_node, def_node, arguments) or next
-          name = literal_name(typing, send_node.children[2]) or next
-          owner, singleton = definee(typing, send_node.children[0])
-          next unless owner
-          next unless module_call?(typing, node)
+      # A `define_method` on a receiver, with its block written there or
+      # handed on with `&`: the shape `definition` reads.
+      def define_call?(node)
+        send_node = node.type == :block ? node.children[0] : node
+        return false unless send_node.type == :send && send_node.children[1] == :define_method && send_node.children[0]
 
-          found["#{owner.to_s.delete_prefix("::")}#{singleton ? "." : "#"}#{name}"] = block
-        end
-        found
+        node.type == :block || send_node.children.last&.type == :block_pass
+      end
+
+      # `[key, block]` for the method a `define_call?` node defines in a body
+      # checked under `arguments`, where its receiver's type names a class,
+      # its name is a literal there, and its block is written there or is the
+      # block the call handed the body.
+      def definition(typing, node, def_node, arguments)
+        send_node = node.type == :block ? node.children[0] : node
+        block = node.type == :block ? node : handed_block(send_node, def_node, arguments) or return nil
+        name = literal_name(typing, send_node.children[2]) or return nil
+        owner, singleton = definee(typing, send_node.children[0])
+        return nil unless owner && module_call?(typing, node)
+
+        ["#{owner.to_s.delete_prefix("::")}#{singleton ? "." : "#"}#{name}", block]
       end
 
       # The parameters of a method, as the block writes them: `|name|` is
@@ -137,25 +141,13 @@ module Steep
         node.children.any? { |child| assigned_in_block?(child, local, inner) }
       end
 
-      def each_define(node, &block)
-        return unless node.is_a?(Parser::AST::Node)
-        return if %i[def defs class module sclass].include?(node.type)
-
-        send_node = node.type == :block ? node.children[0] : node
-        if send_node.type == :send && send_node.children[1] == :define_method && send_node.children[0]
-          yield node, send_node if node.type == :block || send_node.children.last&.type == :block_pass
-          return if node.type == :block
-        end
-        node.children.each { |child| each_define(child, &block) }
-      end
-
       def handed_block(send_node, def_node, arguments)
         handed = send_node.children.last
-        return nil unless handed.type == :block_pass && handed.children[0]&.type == :lvar
+        return nil unless handed&.type == :block_pass && handed.children[0]&.type == :lvar
 
         args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
         param = args.children.find { |arg| arg.type == :blockarg } or return nil
-        block = arguments.block
+        block = arguments&.block
         block if param.children[0] == handed.children[0].children[0] && block.is_a?(Parser::AST::Node) && block.type == :block
       end
 

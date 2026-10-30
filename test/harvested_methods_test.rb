@@ -19,7 +19,7 @@ class HarvestedMethodsTest < Minitest::Test
       end
       module Attr
         def self.redefine: (untyped owner, Symbol name, Integer value) -> void
-        def self.redefine_method: (untyped owner, Symbol name) { (?) -> untyped } -> void
+        def self.redefine_method: (untyped owner, Symbol | String name) { (?) -> untyped } -> void
       end
     RBS
     write("app/attr.rb", attr_ruby)
@@ -154,6 +154,34 @@ class HarvestedMethodsTest < Minitest::Test
       runner.run
 
       assert_equal({ "Base.__store" => { "params" => "()", "returns" => "::Integer" } }, runner.defined_methods)
+    end
+  end
+
+  def test_only_what_a_call_site_runs_for_certain_defines_a_method
+    in_tmpdir do
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped",
+        attr_ruby: <<~'RUBY',
+          module Attr
+            def self.redefine(owner, name, value)
+              redefine_method(owner, name) { value } if owner.frozen?
+              redefine_method(owner.singleton_class, name) { value }
+              redefine_method(owner.singleton_class, "#{name}=") do |new_value|
+                Attr.redefine(self, name, new_value)
+              end
+            end
+
+            def self.redefine_method(owner, name, &block)
+              owner.define_method(name, &block)
+            end
+          end
+        RUBY
+        base_ruby: "def self.pluralize = __store\n  Attr.redefine(self, :__store, 1)"
+      )
+      runner = Steep::Specializations::Runner.new(project)
+      runner.run
+
+      assert_equal ["Base.__store", "Base.__store="], runner.defined_methods.keys.sort
     end
   end
 end

@@ -1,7 +1,8 @@
 module Steep
   module Specializations
-    # The methods a specialized body defines with `define_method`, found where
-    # its receiver, name and block are only known under a call's arguments:
+    # The methods a call site defines with `define_method`, found by following
+    # it through the frames it runs, where the receiver, name and block are
+    # only known under each frame's arguments:
     #
     #   def self.redefine(owner, name, value)
     #     redefine_method(owner.singleton_class, name) { value }
@@ -56,23 +57,22 @@ module Steep
         tuples.each { |key, arguments| (@pending[key] ||= Set.new).merge(arguments) unless definitions.key?(key) }
       end
 
-      # Adds the definitions `outcomes` found to `definitions`, and the tuples
-      # remembered for each to `tuples`.
-      def adopt(outcomes, definitions, tuples, sources)
+      # Adds the methods `found` (`key => block`) to `definitions`, and the
+      # tuples remembered for each to `tuples`.
+      def adopt(found, definitions, tuples, sources)
         @definitions = definitions
-        outcomes.each_value do |outcome|
-          outcome.defined.each do |key, block|
-            next if definitions.key?(key)
+        found.each do |key, block|
+          next if definitions.key?(key)
 
-            path = sources.keys.find { |candidate| candidate.to_s == block.loc.expression.source_buffer.name } or next
-            definitions[key] = [path, block]
-            @nodes[key] = block
-            node_key = [path.to_s, block.loc.expression.begin_pos]
-            @blocks[key] = node_key
-            @enclosing[node_key] = enclosing_def(sources.fetch(path).node, block)
-            (tuples[key] ||= Set.new).merge(@pending.delete(key) || [])
-          end
+          path = sources.keys.find { |candidate| candidate.to_s == block.loc.expression.source_buffer.name } or next
+          definitions[key] = [path, block]
+          @nodes[key] = block
+          node_key = [path.to_s, block.loc.expression.begin_pos]
+          @blocks[key] = node_key
+          @enclosing[node_key] = enclosing_def(sources.fetch(path).node, block)
+          (tuples[key] ||= Set.new).merge(@pending.delete(key) || [])
         end
+        self
       end
 
       # `round` split so that a block is checked as one method at a time, and
@@ -94,6 +94,53 @@ module Steep
       def signatures(declarations)
         @nodes.to_h do |key, block|
           [key, { "params" => "(#{block.children[1].children.filter_map { |param| param_rbs(param) }.join(", ")})", "returns" => declarations[key] || "untyped" }]
+        end
+      end
+
+      # The methods the call sites of a method that defines one (`definers`)
+      # define there, as `key => block`, read by following each call through
+      # the frames it runs, the way the eval harvest reads what it writes: only
+      # what a call site runs for certain defines a method, and a block's body
+      # is deferred. `check` types the bodies `{ key => arguments }` names.
+      def harvest(locations, definitions, definers, overrides:, rounds:, check:)
+        found = {} #: Hash[String, Parser::AST::Node]
+        defining = locations.select { |key, _| definitions.key?(key) && definers.include?(key) }
+        rounds.call(defining.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
+          typings = check.call(active)
+          active.each do |key, arguments|
+            path, def_node = definitions.fetch(key)
+            typing = typings[path] or next
+
+            walk = Walk.new(definitions, definers, overrides, check)
+            walk.defined_in(typing, def_node, arguments, Set[key], found)
+          end
+        end
+        found
+      end
+
+      Walk = Struct.new(:definitions, :definers, :overrides, :check) do
+        def defined_in(typing, def_node, arguments, reading, found)
+          Evals.effects(typing, def_node, definers, overrides: overrides, defines: true).each do |effect|
+            next unless effect.certain
+
+            if effect.kind == :define
+              key, block = DefinedMethods.definition(typing, effect.node, def_node, arguments)
+              found[key] ||= block if key
+            elsif effect.kind == :frame && !reading.include?(effect.callee)
+              entered(typing, effect, reading, found)
+            end
+          end
+        end
+
+        def entered(typing, effect, reading, found)
+          path, callee_node = definitions[effect.callee]
+          return unless path
+          callee = Arguments.recorded(effect.node, typing) or return
+          frame_self = typing.self_type_of_call(node: effect.node) or return
+          callee = callee.resolve_self(frame_self)
+          callee = callee.with_self(frame_self) if Evals.on_self?(effect.node.type == :block ? effect.node.children[0] : effect.node)
+          inner = check.call({ effect.callee => callee })[path] or return
+          defined_in(inner, callee_node, callee, reading | [effect.callee], found)
         end
       end
 

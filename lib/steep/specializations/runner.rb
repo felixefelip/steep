@@ -87,8 +87,9 @@ module Steep
       attr_reader :declarations
 
       # The classes each typed receiver of a reader may be (`Receivers`), by
-      # site. Filled by `run`.
-      attr_reader :receivers
+      # site, and the methods found defined with `define_method`
+      # (`HarvestedMethods#signatures`). Filled by `run`.
+      attr_reader :receivers, :defined_methods
 
       def run
         methods = {} #: Hash[String, Hash[String, String]]
@@ -127,8 +128,6 @@ module Steep
         HarvestedMethods.write(@project.absolute_path(HarvestedMethods::DEFAULT_OUTPUT_PATH), @defined_methods)
       end
 
-      # The methods `run` found defined with `define_method` (`HarvestedMethods#signatures`).
-      attr_reader :defined_methods
 
       private
 
@@ -136,6 +135,7 @@ module Steep
         context = load_target(target) or return
 
         writers = code_writers(context)
+        @definers = code_writers(context, defines: true)
         @factory = context.subtyping.factory
         @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry)
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
@@ -146,12 +146,14 @@ module Steep
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
         @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers), locations, writers)
+        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers), locations, writers | @definers)
         definitions.merge!(collected)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          harvest_evals(context, Store.new(methods: {}, source: nil, receivers: @receivers), locations, definitions, writers)
+          empty = Store.new(methods: {}, source: nil, receivers: @receivers)
+          @defined_methods.merge!(@harvested.adopt(harvest_defines(context, empty, locations, definitions), definitions, {}, context.sources).signatures({}))
+          harvest_evals(context, empty, locations, definitions, writers)
           return
         end
 
@@ -165,6 +167,7 @@ module Steep
           exits = @exits.transform_values(&:dup)
           class_exits = @class_exits.dup
           discovered, revealed = specialize(context, store(found), baselines, tuples, definitions)
+          @harvested.adopt(harvest_defines(context, store(found), locations, definitions), definitions, revealed, context.sources)
           discovered = settle(found, discovered, baselines, widened)
           grown = grow(tuples, revealed, generation)
           # Both have to settle, not just the returns: a generation that finds no
@@ -181,7 +184,7 @@ module Steep
           paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits))
           found = discovered
           demanded.clear
-          tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers), generation)
+          tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers | @definers), generation)
           generation += 1
         end
 
@@ -248,7 +251,6 @@ module Steep
             (found[key] ||= {})[arguments.key] = type
           end
 
-          @harvested.adopt(outcomes, definitions, revealed, context.sources)
           outcomes.each_value do |outcome|
             @harvested.remember(outcome.sites, definitions)
             outcome.sites.each { |key, arguments| (revealed[key] ||= Set.new).merge(arguments) if definitions.key?(key) }
@@ -267,7 +269,7 @@ module Steep
       # Rounds, like `specialize`: two macros in one file are read by one check,
       # and only two tuples of the SAME macro cost two.
       def harvest_evals(context, store, locations, definitions, writers)
-        writing = locations.select { |key, _| definitions.key?(key) }
+        writing = locations.select { |key, _| definitions.key?(key) && writers.include?(key) }
         return if writing.empty?
 
         rounds(writing.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
@@ -322,6 +324,10 @@ module Steep
         end
         inner = check_definitions(context, store, { effect.callee => arguments }, definitions)[path] or return [nil]
         eval_sources(context, store, inner, callee_node, definitions, writers, reading | [effect.callee], self_target)
+      end
+
+      def harvest_defines(context, store, locations, definitions)
+        @harvested.harvest(locations, definitions, @definers, overrides: @overrides, rounds: method(:rounds), check: ->(active) { check_definitions(context, store, active, definitions) })
       end
 
       # A call omitting an optional parameter does not leave it open: the body
@@ -432,13 +438,13 @@ module Steep
       # of trees already parsed, so a project without the idiom pays this and
       # nothing else. A method that calls one of them writes code too, so the
       # set grows until no call adds one.
-      def code_writers(context)
+      def code_writers(context, defines: false)
         writers = Set[] #: Set[String]
         definitions = context.sources.each_value.flat_map { |source| Collector.definitions(source).to_a }
 
         loop do
           grown = definitions.filter_map do |key, def_node|
-            key if !writers.include?(key) && Evals.writes_code?(def_node, writers)
+            key if !writers.include?(key) && Evals.writes_code?(def_node, writers, defines: defines)
           end
           break if grown.empty?
 
