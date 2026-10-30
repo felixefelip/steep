@@ -69,13 +69,16 @@ module Steep
         # out on its own. `kind` is `"module"` for a target declared as one.
         Chunk = Struct.new(:source, :target, :kind, keyword_init: true)
 
-        Walk = Struct.new(:writers, :typing, :overrides, :method_name, keyword_init: true)
+        # `defines`: a walk for the methods a body defines with `define_method`
+        # (`:define`), which also follows a writer called with a block — the
+        # block is what the method may be defined from.
+        Walk = Struct.new(:writers, :typing, :overrides, :method_name, :defines, keyword_init: true)
 
         # Whether the method writes code, directly or through a method it calls.
         # The gate that keeps a project without the idiom from paying for a
         # single extra check, so it reads the AST and nothing else.
-        def writes_code?(def_node, writers = Set[])
-          walk = Walk.new(writers: writers, typing: nil, method_name: method_name(def_node))
+        def writes_code?(def_node, writers = Set[], defines: false)
+          walk = Walk.new(writers: writers, typing: nil, method_name: method_name(def_node), defines: defines)
           each_effect(body_of(def_node), nil, true, walk) { return true }
           false
         end
@@ -105,10 +108,10 @@ module Steep
         # each carrying the flow's verdict. A macro that evals once and then
         # calls a writer writes both, and the class gets them in the order it is
         # written.
-        def effects(typing, def_node, writers, overrides:)
+        def effects(typing, def_node, writers, overrides:, defines: false)
           flow = Flow.new(typing)
           result = [] #: Array[Effect]
-          walk = Walk.new(writers: writers, typing: typing, overrides: overrides, method_name: method_name(def_node))
+          walk = Walk.new(writers: writers, typing: typing, overrides: overrides, method_name: method_name(def_node), defines: defines)
 
           each_effect(body_of(def_node), flow, true, walk) do |effect|
             result << effect
@@ -218,6 +221,10 @@ module Steep
         # before it writes into it.
         def each_effect(node, flow, certain, walk, &block)
           return unless node.is_a?(Parser::AST::Node)
+          if walk.defines && node.type == :block && (effect = write_at(node, certain, walk))
+            node.children[0].children.each { |child| each_effect(child, flow, certain, walk, &block) }
+            return yield effect
+          end
           return if DEFERRED.include?(node.type)
 
           if (effect = write_at(node, certain, walk))
@@ -240,6 +247,8 @@ module Steep
 
         def write_at(node, certain, walk)
           node = walk.typing.explicit_super_of(node: node) || node if node.type == :zsuper && walk.typing
+          return Effect.new(kind: :define, node: node, certain: certain) if walk.defines && DefinedMethods.define_call?(node)
+
           if (kind = written_kind(node, walk))
             Effect.new(kind: kind, node: node, certain: certain)
           elsif (callee = called_writer(node, walk))
@@ -253,10 +262,11 @@ module Steep
         # typing knows what it names, so the callee is keyed as every call site
         # is: by its declaration. Without a typing, any writer of that name.
         def called_writer(node, walk)
-          return nil if walk.writers.empty? || !CALLS.include?(node.type)
-          return named_writers(node, walk).first unless walk.typing
+          send_node = node.type == :block ? node.children[0] : node
+          return nil if walk.writers.empty? || !CALLS.include?(send_node.type)
+          return named_writers(send_node, walk).first unless walk.typing
 
-          key = node.type == :send ? resolved_send_key(node, walk) : super_key(node, walk.typing)
+          key = send_node.type == :send ? resolved_send_key(node, walk) : super_key(node, walk.typing)
           key if key && walk.writers.include?(key)
         end
 

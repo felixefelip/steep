@@ -73,12 +73,7 @@ module Steep
         end
 
         def enclosing_key(path, node)
-          range = node.loc.expression or return nil
-          enclosing = @definitions_by_path[path].select do |_, def_node|
-            def_range = def_node.loc.expression
-            def_range.begin_pos <= range.begin_pos && range.end_pos <= def_range.end_pos
-          end
-          enclosing.min_by { |_, def_node| def_node.loc.expression.size }&.first
+          Collector.enclosing(@definitions_by_path[path], node)&.first
         end
       end
 
