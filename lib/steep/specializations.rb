@@ -237,6 +237,13 @@ module Steep
         type.is_a?(AST::Types::Union) ? type.types : [type]
       end
 
+      # `"Base.__store"` as `[::Base, :__store, true]`: the owner, the method,
+      # and whether it is the class object's.
+      def method_key_parts(key)
+        owner, separator, name = key.rpartition(/[.#]/)
+        [RBS::TypeName.parse("::#{owner}"), name.to_sym, separator == "."]
+      end
+
       # `"Foo#bar"` / `"Foo.bar"` for a resolved call, matching how a `def` in the
       # source keys itself. nil when the call resolves to more than one
       # declaration — the argument tuple then names no single body to specialize.

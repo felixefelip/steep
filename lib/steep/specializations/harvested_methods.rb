@@ -69,7 +69,7 @@ module Steep
           @nodes[key] = block
           node_key = [path.to_s, block.loc.expression.begin_pos]
           @blocks[key] = node_key
-          @enclosing[node_key] = enclosing_def(sources.fetch(path).node, block)
+          @enclosing[node_key] = Collector.enclosing(Collector.definitions(sources.fetch(path)).to_a, block)&.last
           (tuples[key] ||= Set.new).merge(@pending.delete(key) || [])
         end
         self
@@ -172,17 +172,6 @@ module Steep
 
       def writes?(block, key)
         block && @definitions[key]&.last.equal?(@enclosing[block])
-      end
-
-      def enclosing_def(node, block, enclosing = nil)
-        return nil unless node.is_a?(Parser::AST::Node)
-        return enclosing if node.equal?(block)
-
-        enclosing = node if node.type == :def || node.type == :defs
-        node.children.each do |child|
-          found = enclosing_def(child, block, enclosing) and return found
-        end
-        nil
       end
     end
   end

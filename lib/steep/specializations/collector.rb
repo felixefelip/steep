@@ -21,6 +21,17 @@ module Steep
         walk_defs(source.node, [], source, &block) if source.node
       end
 
+      # `[key, def_node]` for the innermost of `definitions` (`[key, def_node]`
+      # pairs of one file) whose range holds `node`.
+      def self.enclosing(definitions, node)
+        range = node.loc.expression or return nil
+        enclosing = definitions.select do |_, def_node|
+          def_range = def_node.loc.expression
+          def_range.begin_pos <= range.begin_pos && range.end_pos <= def_range.end_pos
+        end
+        enclosing.min_by { |_, def_node| def_node.loc.expression.size }
+      end
+
       def self.constructor_key(initializer_key)
         "#{initializer_key.delete_suffix("#initialize")}.new"
       end

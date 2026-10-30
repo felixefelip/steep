@@ -128,7 +128,6 @@ module Steep
         HarvestedMethods.write(@project.absolute_path(HarvestedMethods::DEFAULT_OUTPUT_PATH), @defined_methods)
       end
 
-
       private
 
       def specialize_target(target, methods)
@@ -341,7 +340,7 @@ module Steep
       end
 
       def fresh_ivars(key)
-        name = RBS::TypeName.parse("::#{key.delete_suffix(".new")}")
+        name, = Specializations.method_key_parts(key)
         @factory.definition_builder.build_instance(name).instance_variables.keys.to_h { |ivar| [ivar, AST::Builtin.nil_type] }
       rescue RBS::BaseError
         {}

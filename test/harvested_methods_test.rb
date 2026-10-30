@@ -18,7 +18,7 @@ class HarvestedMethodsTest < Minitest::Test
       class Widget < Base
       end
       module Attr
-        def self.redefine: (untyped owner, Symbol name, Integer value) -> void
+        def self.redefine: (untyped owner, Symbol name, 1 | 2 value) -> void
         def self.redefine_method: (untyped owner, Symbol | String name) { (?) -> untyped } -> void
       end
     RBS
@@ -83,11 +83,11 @@ class HarvestedMethodsTest < Minitest::Test
       )
       methods = Steep::Specializations::Runner.new(project).run
 
-      assert_equal ["::Integer"], methods.fetch("Base.__store").values.uniq
+      assert_equal ["(1 | 2)"], methods.fetch("Base.__store").values.uniq
     end
   end
 
-  def test_a_local_another_block_of_the_frame_assigns_is_read_as_untyped
+  def test_a_local_another_block_of_the_frame_assigns_is_read_widened
     in_tmpdir do
       project = store_project(
         store_rbs: "def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped",
@@ -108,7 +108,7 @@ class HarvestedMethodsTest < Minitest::Test
       runner = Steep::Specializations::Runner.new(project)
       methods = runner.run
 
-      refute methods.key?("Base.__store")
+      assert_equal ["::Integer"], methods.fetch("Base.__store").values.uniq
       assert_equal ["module GeneratedMethods\nend", nil], runner.evals.fetch("app/base.rb:20:2").map { |chunk| chunk&.source }
     end
   end
@@ -122,8 +122,8 @@ class HarvestedMethodsTest < Minitest::Test
       )
       methods = Steep::Specializations::Runner.new(project).run
 
-      assert_equal ["::Integer"], methods.fetch("Base.__a").values.uniq
-      assert_equal ["::Integer"], methods.fetch("Base.__b").values.uniq
+      assert_equal ["(1 | 2)"], methods.fetch("Base.__a").values.uniq
+      assert_equal ["(1 | 2)"], methods.fetch("Base.__b").values.uniq
     end
   end
 
@@ -153,7 +153,7 @@ class HarvestedMethodsTest < Minitest::Test
       runner = Steep::Specializations::Runner.new(project)
       runner.run
 
-      assert_equal({ "Base.__store" => { "params" => "()", "returns" => "::Integer" } }, runner.defined_methods)
+      assert_equal({ "Base.__store" => { "params" => "()", "returns" => "(1 | 2)" } }, runner.defined_methods)
     end
   end
 
@@ -182,6 +182,49 @@ class HarvestedMethodsTest < Minitest::Test
       runner.run
 
       assert_equal ["Base.__store", "Base.__store="], runner.defined_methods.keys.sort
+    end
+  end
+
+  def test_a_block_parameter_of_the_same_name_does_not_assign_the_local
+    in_tmpdir do
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped\n  def self.__other: (untyped) -> untyped",
+        attr_ruby: FORWARDED.sub("redefine_method(owner.singleton_class, name) { value }", "redefine_method(owner.singleton_class, name) { value }\n    redefine_method(owner.singleton_class, :__other) { |value| value = 2 }"),
+        base_ruby: "def self.pluralize = __store\n  Attr.redefine(self, :__store, 1)"
+      )
+      methods = Steep::Specializations::Runner.new(project).run
+
+      assert_equal ["(1 | 2)"], methods.fetch("Base.__store").values.uniq
+    end
+  end
+
+  def defined_keys(attr_ruby: FORWARDED, base_ruby: "def self.pluralize = 1\n  Attr.redefine(self, :__store, 1)", store_rbs: "")
+    runner = Steep::Specializations::Runner.new(store_project(store_rbs: store_rbs, attr_ruby: attr_ruby, base_ruby: base_ruby))
+    runner.run
+    runner.defined_methods.keys
+  end
+
+  def test_a_block_forwarded_anonymously_defines_the_method
+    in_tmpdir do
+      attr_ruby = FORWARDED.sub("def self.redefine_method(owner, name, &block)\n    owner.define_method(name, &block)", "def self.redefine_method(owner, name, &)\n    owner.define_method(name, &)")
+
+      assert_equal ["Base.__store"], defined_keys(attr_ruby: attr_ruby)
+    end
+  end
+
+  def test_a_proc_a_local_holds_defines_the_method
+    in_tmpdir do
+      attr_ruby = FORWARDED.sub("redefine_method(owner.singleton_class, name) { value }", "reader = proc { value }\n    owner.singleton_class.define_method(name, &reader)")
+
+      assert_equal ["Base.__store"], defined_keys(attr_ruby: attr_ruby)
+    end
+  end
+
+  def test_a_define_method_on_the_implicit_receiver_defines_the_method_on_self
+    in_tmpdir do
+      base_ruby = "def self.pluralize = 1\n  def self.def_store(name, value) = define_method(name) { value }\n  def_store(:__store, 1)"
+
+      assert_equal ["Base#__store"], defined_keys(base_ruby: base_ruby, store_rbs: "def self.def_store: (Symbol name, untyped value) -> untyped")
     end
   end
 end
