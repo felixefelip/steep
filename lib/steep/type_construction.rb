@@ -4029,9 +4029,8 @@ module Steep
 
       selves = correlated_branch_selves(receiver, receiver_type) or return nil
 
-      # Every branch is checked in its own child typing, and only one of them is
-      # kept: they type the same node, and a saved child is the answer for it.
-      # Which one is arbitrary and says nothing about the others — a branch that
+      # Every branch is checked in its own child typing. They type the same
+      # nodes, so one is saved with the others joined into it; a branch that
       # failed has already made the whole thing return nil.
       results = selves.map do |branch, self_type|
         child = typing.new_child
@@ -4059,7 +4058,7 @@ module Steep
 
       pair, child = results.last
       pair or return nil
-      child.save!
+      child.tap { _1.join_branches!(results[...-1].map(&:last)) }.save!
 
       # The refinement is the branch's, not the caller's: it ends with the call,
       # exactly as a postcondition's refinement ends with its branch.
