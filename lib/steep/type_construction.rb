@@ -2203,7 +2203,7 @@ module Steep
             synthesize(child)
           end
 
-          add_typing(node, type: AST::Builtin::Symbol.instance_type)
+          add_typing(node, type: LiteralSyntax.symbol(node, typing) || AST::Builtin::Symbol.instance_type)
 
         when :class
           yield_self do

@@ -1,6 +1,7 @@
 module Steep
   # Values the source spells out as syntax, where the checker types the node as
-  # its class: a regexp, a range of integers, a string with interpolations.
+  # its class: a regexp, a range of integers, a string or symbol with
+  # interpolations.
   # Each interpolation counts only when what it splices in is a literal.
   module LiteralSyntax
     # The flags a literal can carry without changing what its source means.
@@ -25,6 +26,12 @@ module Steep
       strings = texts(node.children, typing) or return nil
 
       AST::Types::Union.build(types: strings.map { |text| AST::Types::Literal.new(value: text) })
+    end
+
+    def self.symbol(node, typing)
+      names = texts(node.children, typing) or return nil
+
+      AST::Types::Union.build(types: names.map { |name| AST::Types::Literal.new(value: name.to_sym) })
     end
 
     # `1..-1` with each end an integer written out, or left open.

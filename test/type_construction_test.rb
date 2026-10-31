@@ -4038,6 +4038,40 @@ EOF
     end
   end
 
+  def test_dsym_folds_each_literal_a_part_admits
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: :admin | :guest
+kind = (_ = nil)
+x = :"role_#{kind}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type(":role_admin | :role_guest"), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_dsym_stays_a_symbol_when_a_part_is_not_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var name: String
+name = (_ = nil)
+x = :"__class_attr_#{name}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Symbol"), pair.context.type_env[:x]
+      end
+    end
+  end
+
   def test_literal_bool_argument_keeps_its_literal
     with_checker(<<~RBS) do |checker|
       class Slots
