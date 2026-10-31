@@ -2485,7 +2485,7 @@ module Steep
                 .for_branch(right_node)
                 .synthesize(right_node, hint: hint, condition: true).to_ary
 
-            right_truthy, right_falsy = interpreter.eval(env: right_context.type_env, node: right_node)
+            right_truthy, right_falsy = interpreter.eval(env: right_context.type_env, node: right_node).each { _1.unreachable! if left_truthy.unreachable }
 
             case
             when left_truthy.unreachable
@@ -2544,7 +2544,7 @@ module Steep
                 .for_branch(right_node)
                 .synthesize(right_node, hint: left_truthy.type, condition: true).to_ary
 
-            right_truthy, right_falsy = interpreter.eval(env: right_context.type_env, node: right_node)
+            right_truthy, right_falsy = interpreter.eval(env: right_context.type_env, node: right_node).each { _1.unreachable! if left_falsy.unreachable }
 
             case
             when left_falsy.unreachable
