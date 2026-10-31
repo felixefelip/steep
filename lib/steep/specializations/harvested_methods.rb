@@ -27,6 +27,10 @@ module Steep
       #       Base.__class_attr_pluralize:
       #         params: "()"
       #         returns: untyped
+      #         block: lib/class_attribute.rb:12:8
+      #
+      # `block` is the block that is the method's body, which an ordinary
+      # check then reads as that method (`DefinedMethods.check`).
       DEFAULT_OUTPUT_PATH = Pathname("sig/generated/.steep_defined_methods.yml").freeze
       SCHEMA_VERSION = 1
 
@@ -38,12 +42,37 @@ module Steep
         path.write(YAML.dump({ "version" => SCHEMA_VERSION, "methods" => signatures.sort.to_h }))
       end
 
-      def initialize
+      # `{ site => [method key] }` for the blocks a run found to be method
+      # bodies, as `Store#body_methods` reads them.
+      def self.bodies(base_dir)
+        path = base_dir + DEFAULT_OUTPUT_PATH
+        return {} unless path.file?
+
+        methods = YAML.safe_load(path.read)&.fetch("methods", nil)
+        return {} unless methods.is_a?(Hash)
+
+        methods.each_with_object({}) do |(key, signature), result| #$ Hash[String, Array[String]]
+          block = signature.is_a?(Hash) && signature["block"]
+          (result[File.expand_path(block, base_dir.to_s)] ||= []) << key if block.is_a?(String)
+        end.transform_values(&:sort)
+      rescue Psych::Exception
+        {}
+      end
+
+      def initialize(base_dir)
+        @base_dir = base_dir
         @pending = {} #: Hash[String, Set[Arguments]]
         @blocks = {} #: Hash[String, [String, Integer]]
         @enclosing = {} #: Hash[[String, Integer], Parser::AST::Node]
         @definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @nodes = {} #: Hash[String, Parser::AST::Node]
+      end
+
+      # The methods each adopted block is the body of, by the block's site.
+      def bodies
+        @nodes.each_with_object({}) do |(key, block), result| #$ Hash[String, Array[String]]
+          (result[site(block)] ||= []) << key
+        end.transform_values(&:sort)
       end
 
       # Whether `key` is a method a block defines. A check keys the block by
@@ -93,7 +122,8 @@ module Steep
       # where that is not known.
       def signatures(declarations)
         @nodes.to_h do |key, block|
-          [key, { "params" => "(#{block.children[1].children.filter_map { |param| param_rbs(param) }.join(", ")})", "returns" => declarations[key] || "untyped" }]
+          params = "(#{block.children[1].children.filter_map { |param| param_rbs(param) }.join(", ")})"
+          [key, { "params" => params, "returns" => declarations[key] || "untyped", "block" => relative_site(block) }]
         end
       end
 
@@ -104,7 +134,10 @@ module Steep
       # is deferred. `check` types the bodies `{ key => arguments }` names.
       def harvest(locations, definitions, definers, overrides:, rounds:, check:)
         found = {} #: Hash[String, Parser::AST::Node]
-        defining = locations.select { |key, _| definitions.key?(key) && definers.include?(key) }
+        defining = locations.filter_map do |key, by_arguments|
+          handed = by_arguments.reject { |arguments, _| arguments.hands_self? }
+          [key, handed] if definitions.key?(key) && definers.include?(key) && !handed.empty?
+        end.to_h
         rounds.call(defining.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
           typings = check.call(active)
           active.each do |key, arguments|
@@ -160,6 +193,15 @@ module Steep
         format = PARAMS[param.type] or return nil
         name = param.children[0]
         format.include?("untyped %s") && !name.is_a?(Symbol) ? format.sub(" %s", "") : format % name
+      end
+
+      def site(block)
+        expression = block.loc.expression
+        "#{File.expand_path(expression.source_buffer.name)}:#{expression.line}:#{expression.column}"
+      end
+
+      def relative_site(block)
+        Pathname(site(block)).relative_path_from(Pathname(@base_dir).expand_path).to_s
       end
 
       def apart?(key, other)

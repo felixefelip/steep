@@ -188,7 +188,7 @@ class CallSiteUnionsTest < Minitest::Test
   def check_body(return_type, &block)
     with_checker(format(BODY_RBS, return_type), with_stdlib: true) do |checker|
       source = parse_ruby(BODY_RUBY)
-      store = Steep::Specializations::Store.from_hash({ "declarations" => { "Tags.tag" => '("a!" | "b!")' } }, source: nil, base_dir: Pathname("/"))
+      store = Steep::Specializations::Store.from_hash({ "declarations" => { "Tags.tag" => '("a!" | "b!")' } }, source: nil, base_dir: Pathname("/"), bodies: {})
       with_standard_construction(checker, source, specializations: store) do |construction, typing|
         construction.synthesize(source.node)
         yield typing, source.node.children[2].children[3]
@@ -220,7 +220,7 @@ class CallSiteUnionsTest < Minitest::Test
       def_node = source.node.children[2]
       arguments = Steep::Specializations::Arguments.new(positionals: [parse_type(":a")], keywords: {}, self_ivars: {}, class_states: {})
       store = Steep::Specializations::Store
-        .from_hash({ "declarations" => { "Tags.tag" => '("a!" | "b!")' } }, source: nil, base_dir: Pathname("/"))
+        .from_hash({ "declarations" => { "Tags.tag" => '("a!" | "b!")' } }, source: nil, base_dir: Pathname("/"), bodies: {})
         .with_active({ [source.path.to_s, def_node.loc.expression.begin_pos] => arguments })
       with_standard_construction(checker, source, specializations: store) do |construction, typing|
         construction.synthesize(source.node)
@@ -235,7 +235,7 @@ class CallSiteUnionsTest < Minitest::Test
 
     with_checker(rbs, with_stdlib: true) do |checker|
       source = parse_ruby(ruby)
-      store = Steep::Specializations::Store.from_hash({ "declarations" => { "Base.tag" => '("a!" | "b!")' } }, source: nil, base_dir: Pathname("/"))
+      store = Steep::Specializations::Store.from_hash({ "declarations" => { "Base.tag" => '("a!" | "b!")' } }, source: nil, base_dir: Pathname("/"), bodies: {})
       with_standard_construction(checker, source, specializations: store) do |construction, typing|
         construction.synthesize(source.node)
 
@@ -255,7 +255,7 @@ class CallSiteUnionsTest < Minitest::Test
 
     with_checker(rbs, with_stdlib: true) do |checker|
       source = parse_ruby("Tags.tag(Tags.pick)\n")
-      store = Steep::Specializations::Store.from_hash(entries, source: nil, base_dir: Pathname("/"))
+      store = Steep::Specializations::Store.from_hash(entries, source: nil, base_dir: Pathname("/"), bodies: {})
       with_standard_construction(checker, source, specializations: store) do |construction, typing|
         construction.synthesize(source.node)
 
@@ -270,7 +270,7 @@ class CallSiteUnionsTest < Minitest::Test
 
     with_checker(rbs, with_stdlib: true) do |checker|
       source = parse_ruby("Tags.tag(Tags.pick)\n")
-      store = Steep::Specializations::Store.from_hash(entries, source: nil, base_dir: Pathname("/"))
+      store = Steep::Specializations::Store.from_hash(entries, source: nil, base_dir: Pathname("/"), bodies: {})
       with_standard_construction(checker, source, specializations: store) do |construction, typing|
         construction.synthesize(source.node)
 

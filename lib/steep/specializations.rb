@@ -21,11 +21,12 @@ module Steep
 
     class << self
       def load(base_dir, path: DEFAULT_SIDECAR_PATH)
+        bodies = HarvestedMethods.bodies(base_dir)
         absolute = base_dir + path
-        return Store.empty unless absolute.file?
+        return Store.empty(bodies: bodies) unless absolute.file?
 
         raw = YAML.safe_load(absolute.read, aliases: true)
-        Store.from_hash(raw, source: absolute.to_s, base_dir: base_dir)
+        Store.from_hash(raw, source: absolute.to_s, base_dir: base_dir, bodies: bodies)
       rescue Psych::Exception, LoadError => exn
         Steep.logger.warn { "[specializations] failed to parse #{absolute}: #{exn.message}" }
         Store.empty
@@ -591,6 +592,13 @@ module Steep
       # block, as a value two calls can share (`yielded`).
       attr_reader :block_return
 
+      # Whether a `self` is handed on as the body wrote it: the self of a body
+      # checked under its declaration, which each frame reaching the call
+      # decides (`resolve_self`).
+      def hands_self?
+        [*@positionals, *@keywords.values, *@keyword_rest].any? { |type| type.free_variables.include?(AST::Types::Self.instance) }
+      end
+
       # The one every class shares is the one a declaration can hold.
       def tuples
         [self, (without_self if self_type)].compact.flat_map { |arguments| [arguments, arguments.yielded] }.compact.select(&:literal?)
@@ -886,12 +894,14 @@ module Steep
     class Store
       attr_reader :methods, :source, :active
 
-      def self.empty
-        new(methods: {}, source: nil, receivers: {})
+      def self.empty(bodies: {})
+        new(methods: {}, source: nil, receivers: {}, bodies: bodies)
       end
 
       # `base_dir`: what the sites under `receivers` are relative to.
-      def self.from_hash(raw, source:, base_dir:)
+      # `bodies`: the methods each block was found to be the body of, by site
+      # (`HarvestedMethods.bodies`).
+      def self.from_hash(raw, source:, base_dir:, bodies:)
         version = raw && raw["version"]
         if version && version != SCHEMA_VERSION
           Steep.logger.warn { "[specializations] unsupported sidecar version #{version} (expected #{SCHEMA_VERSION}); ignoring #{source}" }
@@ -911,7 +921,7 @@ module Steep
         end.to_h
         exits = ((raw && raw["exits"]) || {}).select { |key, entries| key.is_a?(String) && entries.is_a?(Hash) }
 
-        new(methods: methods, source: source, declarations: declarations, receivers: receivers, exits: exits)
+        new(methods: methods, source: source, declarations: declarations, receivers: receivers, exits: exits, bodies: bodies)
       end
 
       # `typed`: returns a run computed, as types, read ahead of `methods`.
@@ -924,11 +934,13 @@ module Steep
       # (`CallSiteUnions`), as RBS.
       # `receivers`: the types the receiver of each call naming a reader was
       # given (`Receivers`), as RBS, by site.
+      # `bodies`: the methods each block was found to be the body of, by site.
       # `reads`: where to record each question a check asks and the answer it
       # got (`Reads`).
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, receivers:, reads: nil)
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, receivers:, bodies:, reads: nil)
         @methods = methods
         @receivers = receivers
+        @bodies = bodies
         @declarations = declarations
         @memo = {}.compare_by_identity
         @source = source
@@ -968,6 +980,10 @@ module Steep
           types = @receivers[site]&.map { |raw| parse(site, raw, factory: factory) or break nil }
           types && AST::Types::Union.build(types: types)
         end
+      end
+
+      def body_methods(site)
+        read(:body_methods, site) { @bodies[site] }
       end
 
       def class_exit(name, ivar)
@@ -1069,7 +1085,7 @@ module Steep
       def with(active:, reads:)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
-          class_exits: @class_exits, declarations: @declarations, receivers: @receivers, reads: reads
+          class_exits: @class_exits, declarations: @declarations, receivers: @receivers, bodies: @bodies, reads: reads
         )
       end
 

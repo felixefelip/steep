@@ -137,7 +137,7 @@ class HarvestedMethodsTest < Minitest::Test
       runner = Steep::Specializations::Runner.new(project)
       runner.write(runner.run)
 
-      expected = { "Base.__store" => { "params" => "(?untyped given, *untyped rest, key: untyped)", "returns" => "untyped" } }
+      expected = { "Base.__store" => { "params" => "(?untyped given, *untyped rest, key: untyped)", "returns" => "untyped", "block" => "app/attr.rb:3:4" } }
       assert_equal expected, runner.defined_methods
       assert_equal({ "version" => 1, "methods" => expected }, YAML.safe_load((current_dir + "sig/generated/.steep_defined_methods.yml").read))
     end
@@ -153,7 +153,7 @@ class HarvestedMethodsTest < Minitest::Test
       runner = Steep::Specializations::Runner.new(project)
       runner.run
 
-      assert_equal({ "Base.__store" => { "params" => "()", "returns" => "(1 | 2)" } }, runner.defined_methods)
+      assert_equal({ "Base.__store" => { "params" => "()", "returns" => "(1 | 2)", "block" => "app/attr.rb:3:4" } }, runner.defined_methods)
     end
   end
 
@@ -182,6 +182,44 @@ class HarvestedMethodsTest < Minitest::Test
       runner.run
 
       assert_equal ["Base.__store", "Base.__store="], runner.defined_methods.keys.sort
+    end
+  end
+
+  def test_a_self_handed_on_from_a_class_method_is_the_class_that_hands_it
+    in_tmpdir do
+      base_ruby = "def self.pluralize = __store\n  def self.setup = Attr.redefine(self, :__store, 1)\n  setup"
+
+      assert_equal ["Base.__store"], defined_keys(base_ruby: base_ruby, store_rbs: "def self.__store: () -> untyped\n  def self.setup: () -> untyped")
+    end
+  end
+
+  def test_an_ordinary_check_reads_a_found_block_as_the_method_it_defines
+    in_tmpdir do
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped",
+        attr_ruby: <<~'RUBY',
+          module Attr
+            def self.redefine(owner, name, value)
+              redefine_method(owner.singleton_class, name) { value }
+              redefine_method(owner.singleton_class, "#{name}=") do |new_value|
+                Attr.redefine(self, name, new_value)
+              end
+            end
+
+            def self.redefine_method(owner, name, &block)
+              owner.define_method(name, &block)
+            end
+          end
+        RUBY
+        base_ruby: "def self.pluralize = __store\n  Attr.redefine(self, :__store, 1)"
+      )
+      runner = Steep::Specializations::Runner.new(project)
+      runner.write(runner.run)
+      project.reload_specializations!
+
+      typing = checked(project, current_dir + "app/attr.rb")
+      call = typing.method_calls.keys.find { |node| node.children[1] == :redefine && node.children[2]&.type == :self }
+      assert_equal "singleton(::Base)", typing.self_type_of_call(node: call).to_s
     end
   end
 

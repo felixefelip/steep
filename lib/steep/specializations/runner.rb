@@ -138,19 +138,19 @@ module Steep
         @factory = context.subtyping.factory
         @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry)
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
-        @harvested = HarvestedMethods.new
+        @harvested = HarvestedMethods.new(@project.base_dir)
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
         @refinements = Hash.new(0) #: Hash[[String, String], Integer]
         demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
         @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
-        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers), locations, writers | @definers)
+        baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers, bodies: {}), locations, writers | @definers)
         definitions.merge!(collected)
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
-          empty = Store.new(methods: {}, source: nil, receivers: @receivers)
+          empty = Store.new(methods: {}, source: nil, receivers: @receivers, bodies: {})
           @defined_methods.merge!(@harvested.adopt(harvest_defines(context, empty, locations, definitions), definitions, {}, context.sources).signatures({}))
           harvest_evals(context, empty, locations, definitions, writers)
           return
@@ -426,7 +426,7 @@ module Steep
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) },
-          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, receivers: @receivers
+          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies
         )
       end
 
