@@ -2268,6 +2268,29 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_a_heredoc_flattened_with_tr_is_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval <<~CODE.tr("\\n", ";")
+              def \#{name}
+                1
+              end
+            CODE
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content;  1;end;"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
   def test_a_default_naming_an_earlier_parameter_takes_its_value
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
