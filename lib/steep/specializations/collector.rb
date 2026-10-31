@@ -104,40 +104,62 @@ module Steep
         node.type == :send || Accumulators::LAMBDA_BODIES.include?(node.type)
       end
 
+      # A default that reads a parameter written before it: what that parameter
+      # holds at the call, by position or by name.
+      ParameterRead = Data.define(:index, :keyword)
+
       # The values a definition gives the parameters a call may leave out, by
-      # position and by name, for the ones written as a literal. Anything else —
-      # a call, a constant, an expression — is left to the declaration, since a
-      # default this cannot read is not one it may guess at.
+      # position and by name, for the ones written as a literal or as a read of
+      # an earlier parameter. Anything else — a call, a constant, an expression —
+      # is left to the declaration, since a default this cannot read is not one
+      # it may guess at.
       def self.defaults(def_node)
         args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
-        positionals = {} #: Hash[Integer, AST::Types::t]
-        keywords = {} #: Hash[Symbol, AST::Types::t]
+        positionals = {} #: Hash[Integer, AST::Types::t | ParameterRead]
+        keywords = {} #: Hash[Symbol, AST::Types::t | ParameterRead]
         return [positionals, keywords] unless args
 
-        index = 0
-        args.children.each do |arg|
-          case arg.type
-          when :arg, :procarg0
-            index += 1
-          when :optarg
-            type = default_type(arg.children[1])
-            positionals[index] = type if type
-            index += 1
-          when :kwoptarg
-            type = default_type(arg.children[1])
-            keywords[arg.children[0]] = type if type
-          end
+        each_parameter_read(args) do |arg, read, earlier|
+          next unless %i[optarg kwoptarg].include?(arg.type)
+
+          default = default_type(arg.children[1], earlier) or next
+          read.keyword ? keywords[read.keyword] = default : positionals[read.index] = default
         end
 
         [positionals, keywords]
       end
 
-      def self.default_type(node)
+      # A position past a rest parameter no longer names one argument, so a
+      # default cannot read that parameter by position.
+      def self.each_parameter_read(args)
+        index = 0
+        past_rest = false
+        earlier = {} #: Hash[Symbol, ParameterRead]
+        args.children.each do |arg|
+          name = arg.children[0]
+          case arg.type
+          when :arg, :procarg0, :optarg
+            read = ParameterRead.new(index: index, keyword: nil)
+            index += 1
+          when :kwarg, :kwoptarg
+            read = ParameterRead.new(index: nil, keyword: name)
+          when :restarg
+            past_rest = true
+          end
+          next unless read
+
+          yield arg, read, earlier
+          earlier[name] = read unless past_rest && !read.keyword
+        end
+      end
+
+      def self.default_type(node, earlier)
         case node&.type
         when :true then AST::Types::Literal.new(value: true)
         when :false then AST::Types::Literal.new(value: false)
         when :nil then AST::Builtin.nil_type
         when :sym, :str, :int then AST::Types::Literal.new(value: node.children[0])
+        when :lvar then earlier[node.children[0]]
         end
       end
 

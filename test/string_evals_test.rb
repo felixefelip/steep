@@ -2268,6 +2268,121 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_a_heredoc_flattened_with_tr_is_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval <<~CODE.tr("\\n", ";")
+              def \#{name}
+                1
+              end
+            CODE
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content;  1;end;"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  def test_a_default_naming_an_earlier_parameter_takes_its_value
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, ?accessor: bool, ?reader: bool, ?writer: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, accessor: true, reader: accessor, writer: accessor)
+            class_eval "def \#{name}; end" if reader
+            class_eval "def \#{name}=(value); end" if writer
+          end
+        end
+
+        class Article < Base
+          slot :size, writer: false
+          slot :color, accessor: false, writer: true
+        end
+      RUBY
+
+      evals = evals_of(setup_project)
+
+      assert_equal ["def size; end"], evals.fetch("app/base.rb:9:2")
+      assert_equal ["def color=(value); end"], evals.fetch("app/base.rb:10:2")
+    end
+  end
+
+  def test_a_positional_default_naming_an_earlier_parameter_takes_its_value
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, ?Symbol reader) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, reader = name)
+            class_eval "def \#{reader}; @\#{name}; end"
+          end
+        end
+
+        class Article < Base
+          slot :size
+          slot :color, :hue
+        end
+      RUBY
+
+      evals = evals_of(setup_project)
+
+      assert_equal ["def size; @size; end"], evals.fetch("app/base.rb:8:2")
+      assert_equal ["def hue; @color; end"], evals.fetch("app/base.rb:9:2")
+    end
+  end
+
+  def test_a_class_the_macro_runs_on_is_not_a_singleton_class
+    in_tmpdir do
+      write("sig/class.rbs", <<~RBS)
+        class Class
+          # @rbs_infer |...
+          def slot: (Symbol name) -> void
+        end
+
+        class Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Class
+          def slot(name)
+            if singleton_class?
+              class_eval "def on_singleton; end"
+            else
+              class_eval "def \#{name}; end"
+            end
+          end
+        end
+
+        class Base
+          slot :size
+        end
+      RUBY
+
+      assert_equal ["def size; end"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
   def test_arrays_a_multiple_assignment_starts_are_followed
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)

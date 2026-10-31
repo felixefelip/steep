@@ -223,6 +223,37 @@ class HarvestedMethodsTest < Minitest::Test
     end
   end
 
+  def test_a_found_block_reports_only_what_the_method_it_defines_finds
+    in_tmpdir do
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped",
+        attr_ruby: <<~'RUBY',
+          module Attr
+            def self.redefine(owner, name, value)
+              redefine_method(owner.singleton_class, name) { value }
+              redefine_method(owner.singleton_class, "#{name}=") do |new_value|
+                pluralize
+                1 + ""
+                Attr.redefine(self, name, new_value)
+              end
+            end
+
+            def self.redefine_method(owner, name, &block)
+              owner.define_method(name, &block)
+            end
+          end
+        RUBY
+        base_ruby: "def self.pluralize = __store\n  Attr.redefine(self, :__store, 1)"
+      )
+      runner = Steep::Specializations::Runner.new(project)
+      runner.write(runner.run)
+      project.reload_specializations!
+
+      typing = checked(project, current_dir + "app/attr.rb")
+      assert_equal [[6, "1 + \"\""]], typing.errors.map { |error| [error.location.line, error.location.source] }
+    end
+  end
+
   def test_a_block_parameter_of_the_same_name_does_not_assign_the_local
     in_tmpdir do
       project = store_project(

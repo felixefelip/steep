@@ -397,6 +397,32 @@ class LiteralMethodRegistryTest < Minitest::Test
     assert registry.blocked?("::Array#join")
   end
 
+  def test_a_string_eval_in_an_instance_method_of_a_core_class_lands_on_self
+    registry = registry_for(<<~RUBY)
+      class Class
+        def slot(name)
+          class_eval "def \#{name}; 1; end"
+        end
+      end
+    RUBY
+
+    refute registry.blocked?("::Class#singleton_class?")
+    refute registry.blocked?("::Class#const_get")
+  end
+
+  def test_a_string_eval_whose_self_is_the_core_class_still_taints_it
+    [
+      'class_eval "def slot; end"',
+      "def self.build = class_eval(\"def build; end\")",
+      "class << self\n  def install = module_eval(\"def install; end\")\nend",
+      "def slot\n  Class.class_eval(\"def build; end\")\nend"
+    ].each do |body|
+      registry = registry_for("class Class\n#{body}\nend\n")
+
+      assert registry.blocked?("::Class#singleton_class?"), body
+    end
+  end
+
   # A source ingested again, into the same registry or a copy of it, replays
   # what its first scan found rather than parsing it again — and ends exactly
   # where scanning it again would, deferred mixins included.
