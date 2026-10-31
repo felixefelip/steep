@@ -103,6 +103,30 @@ module Steep
       def reads_arguments?(send_node)
         send_node.type == :send && ARGUMENT_READS.include?(send_node.children[1])
       end
+
+      # The children of `node` that read a local array as a collection, copying
+      # its elements out and keeping none of the array: `*parts` written in an
+      # array literal, and a local on the right of a `+`.
+      def operands(node)
+        case node.type
+        when :array then node.children.select { |child| child.type == :splat && child.children[0]&.type == :lvar }
+        when :send then binary?(node) ? node.children.drop(2).select { |argument| argument.type == :lvar } : []
+        else []
+        end
+      end
+
+      def operand?(node, child)
+        operands(node).any? { |operand| operand.equal?(child) }
+      end
+
+      # `[site, local]` for each place `node` reads a local array: the receiver
+      # of a reader, at the call, and each of its `operands`, at the local.
+      def read_sites(node)
+        sites = operands(node).map { |operand| operand.type == :splat ? operand.children[0] : operand }.map { |local| [local, local] }
+        reader = node.type == :send && (METHODS.include?(node.children[1]) || Accumulators::BLOCK_READS.include?(node.children[1]))
+        sites << [node, node.children[0]] if reader && node.children[0]&.type == :lvar
+        sites
+      end
     end
   end
 end

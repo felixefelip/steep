@@ -889,7 +889,7 @@ module Steep
     # Read off the source, which holds one analysis for the whole file — this
     # construction is one of many over it.
     def accumulated_type(node)
-      return nil unless node.type == :send
+      return nil unless node.type == :send || node.type == :lvar
 
       elements = source.accumulators.at_reads[node] or return nil
       types = Accumulators::Contents.types(self, elements) or return nil
@@ -5721,6 +5721,7 @@ module Steep
     def literal_operand_type(node, inferred_type)
       return inferred_type if inferred_type.is_a?(AST::Types::Literal) || inferred_type.is_a?(AST::Types::RegexpLiteral)
       return built_here_only(inferred_type) unless node.is_a?(::Parser::AST::Node)
+      return accumulated_type(node) if node.type == :lvar && accumulated_type(node)
 
       # An array written out in the source is exact information the same way a
       # string is, and the element types are NOT where it survives: `["a#{b}",
@@ -5728,7 +5729,8 @@ module Steep
       # into the union. So the tuple is read off the nodes, one element at a
       # time, through this same recovery.
       if node.type == :array
-        elements = node.children.map do |child|
+        elements = node.children.flat_map do |child|
+          next literal_operand_type(child.children[0], AST::Builtin.any_type).then { |splatted| splatted.is_a?(AST::Types::Tuple) ? splatted.types : [nil] } if child.type == :splat
           # An element the checker has not reached yet is still a node, and a
           # node that spells a value out needs nothing else to be read. Only an
           # interpolation needs the type, and one of those simply declines here
@@ -5809,10 +5811,8 @@ module Steep
         case node.type
         when :int, :str, :sym, :def then node.children[0]
         when :defs then node.children[1]
-        when :true
-          true
-        when :false
-          false
+        when :true then true
+        when :false then false
         when :begin
           if node.children.one?
             nested = literal_operand_type(node.children[0], inferred_type)

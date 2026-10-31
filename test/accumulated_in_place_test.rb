@@ -56,6 +56,24 @@ class AccumulatedInPlaceTest < Minitest::Test
     assert_equal "::String", types.fetch("splat")
   end
 
+  def test_a_splat_or_plus_of_the_local_reads_its_elements
+    types = types_of({
+      "splat" => "result = []\nresult << locale\n[\"a\", *result, \"z\"].join(\";\")",
+      "plus" => "result = []\nresult << locale\n([\"a\"] + result + [\"z\"]).join(\";\")",
+      "loop" => "result = []\n[:x, :y].each { |tag| result << tag }\n[*result, locale].join(\";\")",
+      "literal" => "[\"a\", *[locale, :b]].join(\";\")",
+      "held_whole" => "result = []\nresult << locale\nother = [result]\nother.first << :b\nresult.join(\";\")",
+      "copied" => "result = []\nresult << locale\ncopy = [*result]\nresult << :b\ncopy.join(\";\")"
+    })
+
+    assert_equal '"a;fr;z"', types.fetch("splat")
+    assert_equal '"a;fr;z"', types.fetch("plus")
+    assert_equal '"x;y;fr"', types.fetch("loop")
+    assert_equal '"a;fr;b"', types.fetch("literal")
+    assert_equal "::String", types.fetch("held_whole")
+    assert_equal "::String", types.fetch("copied")
+  end
+
   def test_a_loop_splices_once_per_element
     types = types_of({
       "plus_assign" => "result = []\n[:fr, :en].each { |tag| result += [tag] }\nresult.join(\",\")",

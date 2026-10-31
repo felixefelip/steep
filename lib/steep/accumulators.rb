@@ -97,10 +97,6 @@ module Steep
   # callee does more than append to — is a body this does not have, and the
   # local goes away as before.
   module Accumulators
-    # Shared with `Constants`, which vouches for a value on the same terms. See
-    # `CollectionReaders` for why a call is on the list or is not.
-    READERS = CollectionReaders::METHODS
-
     SCOPES = LocalReach::SCOPES
 
     # What the array holds when a closure is WRITTEN is not what it holds when
@@ -386,13 +382,9 @@ module Steep
             end
 
             LocalReach.each_node(statement) do |child|
-              next unless child.type == :send
-              next unless READERS.include?(child.children[1]) || BLOCK_READS.include?(child.children[1])
-
-              receiver = child.children[0]
-              next unless receiver&.type == :lvar && contents.key?(receiver.children[0])
-
-              at_reads[child] = contents.fetch(receiver.children[0])
+              CollectionReaders.read_sites(child).each do |site, local|
+                at_reads[site] = contents.fetch(local.children[0]) if contents.key?(local.children[0])
+              end
             end
           end
 
@@ -1166,7 +1158,7 @@ module Steep
           return
         end
 
-        node.children.each { |child| strike(child, found, closure: closure) }
+        node.children.each { |child| strike(child, found, closure: closure) unless !closure && CollectionReaders.operand?(node, child) }
       end
     end
 
