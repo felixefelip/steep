@@ -770,7 +770,7 @@ class TypeCheckTest < Minitest::Test
       assert_equal %q(["n"]), actual.fetch(%q(["n"]))
       assert_equal "::Array[::String]", actual.fetch(%q(["o", "p"]))
       assert_equal "::Array[::String]", actual.fetch(%q([name, "q"]))
-      assert_equal "untyped", actual.fetch("[]")
+      assert_equal "::Array[untyped]", actual.fetch("[]")
     end
   end
 

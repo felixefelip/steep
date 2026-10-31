@@ -42,6 +42,20 @@ class AccumulatedInPlaceTest < Minitest::Test
     assert_equal "[:fr]", types.fetch("unchanged")
   end
 
+  def test_each_local_a_multiple_assignment_gives_an_array_is_followed
+    types = types_of({
+      "both" => "result, other = [], [:x]\nresult << locale\nother << :y\n\"\#{result.join(\",\")}/\#{other.join(\",\")}\"",
+      "loop" => "result, other = [], []\n[:fr, :en].each { |tag| result << tag }\nresult.join(\",\")",
+      "aliased" => "result, other = [], []\nother = result\nother << locale\nresult.join(\",\")",
+      "splat" => "result, *other = [], []\nresult << locale\nresult.join(\",\")"
+    })
+
+    assert_equal '"fr/x,y"', types.fetch("both")
+    assert_equal '"fr,en"', types.fetch("loop")
+    assert_equal "::String", types.fetch("aliased")
+    assert_equal "::String", types.fetch("splat")
+  end
+
   def test_a_loop_splices_once_per_element
     types = types_of({
       "plus_assign" => "result = []\n[:fr, :en].each { |tag| result += [tag] }\nresult.join(\",\")",

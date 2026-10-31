@@ -408,14 +408,6 @@ module Steep
 
       private
 
-      # A value a local can be born from as a `Built`: a call, with or without
-      # a block.
-      def built_call?(node)
-        return false unless node.is_a?(Parser::AST::Node)
-
-        node.type == :send || (node.type == :block && node.children[0].type == :send)
-      end
-
       # Replays one body, yielding each statement with the name it pushes onto
       # (nil where it pushes onto nothing) and the contents of every readable
       # local as they stand AFTER that push. Yields nothing for a body this
@@ -445,10 +437,11 @@ module Steep
           readable.each { |name, ends| ended << name if ends == index }
           ended.each { |name| contents.delete(name) }
 
-          if (seed = seed_from(statement)) && readable.key?(seed[0]) && !ended.include?(seed[0])
+          seeds = Births.seeds(statement).select { |name, _| readable.key?(name) && !ended.include?(name) }
+          unless seeds.empty?
             # The value is read before the name holds it.
             yield statement, [], contents
-            contents[seed[0]] = seed[1]
+            seeds.each { |name, elements| contents[name] = elements }
             next
           end
 
@@ -498,7 +491,7 @@ module Steep
         literal = ->(node) do
           # An empty literal is the one the checker already asks to be
           # annotated, and a tuple of nothing is not an answer to that.
-          yield node if array_literal?(node) && !node.children.empty?
+          yield node if Births.array_literal?(node) && !node.children.empty?
         end
 
         ReturnedValues.each_value(body, &literal)
@@ -652,19 +645,6 @@ module Steep
         built.empty? ? nil : built
       end
 
-      # `[name, elements]` where this statement is a local born from an array
-      # literal, or from a call (`Built`) the checker may vouch for.
-      def seed_from(statement)
-        return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :lvasgn
-
-        name, value = statement.children
-        return [name, value.children.dup] if array_literal?(value)
-        return [name, [Built.new(value)]] if built_call?(value)
-
-        nil
-      end
-
-
       # The local a body hands back, for `parts` or `return parts` written last.
       def returned_local(statement)
         return nil unless statement.is_a?(Parser::AST::Node)
@@ -690,8 +670,7 @@ module Steep
           found[name] = nil if found[name] && mentions?(statement, [name])
         end
 
-        if (seed = seed_from(statement))
-          name, elements = seed
+        unless (seeds = Births.seeds(statement)).empty?
           # What the value names is read like any other statement: a local an
           # element is taken from, or one handed to the call, is reachable
           # under the new name too.
@@ -700,7 +679,7 @@ module Steep
           # A second assignment is a different array from here on; the
           # statements before it read the first one, in the order `replay`
           # walks them. Unless the first was already beyond reading.
-          found[name] = found.key?(name) && found[name].nil? ? nil : elements
+          seeds.each { |name, elements| found[name] = found.key?(name) && found[name].nil? ? nil : elements }
           return
         end
 
@@ -1089,11 +1068,6 @@ module Steep
         end
 
         false
-      end
-
-      def array_literal?(node)
-        node.is_a?(Parser::AST::Node) && node.type == :array &&
-          node.children.none? { |child| child.type == :splat }
       end
 
       # An element read whose answer is KEPT under another name: that name can

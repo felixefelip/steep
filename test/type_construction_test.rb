@@ -3968,6 +3968,22 @@ end
     end
   end
 
+  def test_masgn_keeps_an_empty_array_an_array
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+a, b = [], [:x]
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Array[untyped]"), pair.context.type_env[:a]
+        assert_equal parse_type("::Array[::Symbol]"), pair.context.type_env[:b]
+      end
+    end
+  end
+
   def test_dstr_folds_when_every_part_is_literal
     with_checker do |checker|
       source = parse_ruby(<<'EOF')
