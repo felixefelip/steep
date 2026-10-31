@@ -53,6 +53,15 @@ class ReflectionIntrinsicsTest < Minitest::Test
     end
   end
 
+  def test_a_class_named_by_its_constant_is_not_a_singleton_class
+    with_probe_factory do |factory|
+      meta = Steep::AST::Types::MetaClass.new(name: RBS::TypeName.parse("::ProbeBase"))
+
+      assert_equal Steep::AST::Types::Literal.new(value: false), fold("::Module#singleton_class?", singleton("::ProbeBase"), Registry.new, factory)
+      assert_equal Steep::AST::Types::Literal.new(value: true), fold("::Module#singleton_class?", meta, Registry.new, factory)
+    end
+  end
+
   # The class that shadows a reflection is the RECEIVER's, so the chain walked
   # is the receiver's own. `Foo.method(:x)` reaches `def self.method` before it
   # reaches Kernel's, and a signature never mentions it.
@@ -244,13 +253,14 @@ class ReflectionIntrinsicsTest < Minitest::Test
   def test_watched_keys_and_dispatched_names
     assert_equal(
       ["::Kernel#method", "::Kernel#respond_to?", "::Kernel#singleton_class", "::Method#parameters",
-       "::Module#const_get", "::Module#const_set", "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::UnboundMethod#parameters"],
+       "::Module#const_get", "::Module#const_set", "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::Module#singleton_class?",
+       "::UnboundMethod#parameters"],
       Steep::ReflectionIntrinsics.watched_keys.to_a.sort
     )
     assert_equal ["::Method#parameters"], Steep::ReflectionIntrinsics.method_keys_for("Method")
     assert_equal(
       [:const_get, :const_set, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
-       :singleton_class],
+       :singleton_class, :singleton_class?],
       Steep::ReflectionIntrinsics.dispatched_names.to_a.sort
     )
   end
