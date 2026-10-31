@@ -857,7 +857,7 @@ module Steep
           case param
           when Interface::Function::Params::PositionalParams::Required,
                Interface::Function::Params::PositionalParams::Optional
-            type = positionals[index] || @positional_defaults[index]
+            type = positionals[index] || positional_default(index)
             index += 1
             type ? param.map_type { type } : param
           when Interface::Function::Params::PositionalParams::Rest
@@ -886,8 +886,19 @@ module Steep
 
       def substitute_keyword_hash(hash)
         hash.each_key.with_object({}) do |name, result|
-          result[name] = keywords.fetch(name) { @keyword_defaults.fetch(name, hash[name]) }
+          result[name] = keywords.fetch(name) { keyword_default(name) || hash[name] }
         end
+      end
+
+      def positional_default(index) = arrived_default(@positional_defaults[index])
+
+      def keyword_default(name) = arrived_default(@keyword_defaults[name])
+
+      def arrived_default(default)
+        return default unless default.is_a?(Collector::ParameterRead)
+        return keywords.fetch(default.keyword) { keyword_default(default.keyword) } if default.keyword
+
+        positionals[default.index] || positional_default(default.index)
       end
     end
 
