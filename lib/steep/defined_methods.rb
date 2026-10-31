@@ -98,23 +98,35 @@ module Steep
 
         if (arguments = constr.specialization_arguments(node))
           key = constr.specializations.defined_method([constr.source.path.to_s, node.loc.expression.begin_pos]) or return pair
-          return check_as(constr, node, pair, key, arguments.self_type)
+          return check_as(constr, node, pair, [key], arguments.self_type)
         end
         frame = constr.method_context&.node
         return pair if frame && constr.specialization_arguments(frame)
 
         expression = node.loc.expression
-        keys = constr.specializations.body_methods("#{File.expand_path(expression.source_buffer.name)}:#{expression.line}:#{expression.column}")
-        keys&.each { |key| check_as(constr, node, pair, key, nil) }
+        keys = constr.specializations.body_methods("#{File.expand_path(expression.source_buffer.name)}:#{expression.line}:#{expression.column}") or return pair
+        check_as(constr, node, pair, keys, nil)
+      end
+
+      # The frame's check of the block runs with a self the block never has,
+      # so what it reports inside the block gives way to the methods' checks.
+      def check_as(constr, node, pair, keys, self_type)
+        builder = constr.checker.factory.definition_builder
+        methods = keys.filter_map do |key|
+          owner, name, singleton = Specializations.method_key_parts(key)
+          definition = singleton ? builder.build_singleton(owner) : builder.build_instance(owner)
+          [owner, name, singleton, definition] if definition.methods.key?(name)
+        end
+        return pair if methods.empty?
+
+        inside = node.loc.begin.end_pos...node.loc.end.begin_pos
+        pair.constr.typing.errors.reject! { |error| (position = error.location&.begin_pos) && inside.cover?(position) }
+        methods.each { |method| check_method(constr, node, pair, method, self_type) }
         pair
       end
 
-      def check_as(constr, node, pair, key, self_type)
-        owner, name, singleton = Specializations.method_key_parts(key)
-        builder = constr.checker.factory.definition_builder
-        definition = singleton ? builder.build_singleton(owner) : builder.build_instance(owner)
-        return pair unless definition.methods.key?(name)
-
+      def check_method(constr, node, pair, method, self_type)
+        owner, name, singleton, definition = method
         self_type ||= singleton ? AST::Types::Name::Singleton.new(name: owner) : constr.checker.factory.instance_type(owner)
         captured = captured_locals(constr, node)
         _send_node, params, body = node.children

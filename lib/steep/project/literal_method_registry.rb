@@ -91,6 +91,9 @@ module Steep
         # Whether the body being walked is a `class << self`, where instance
         # syntax writes singleton methods.
         @singleton_side = false
+        # Whether it is an instance method's body, where `self` is an instance
+        # of the class written around it rather than that class.
+        @instance_method = false
         @blocked = Set[] #: Set[String]
         # Reflections whose owner could not be read at all, blocked by name
         # rather than by key.
@@ -375,6 +378,14 @@ module Steep
         @singleton_side = previous
       end
 
+      def scan_self(instance_method:)
+        previous = @instance_method
+        @instance_method = instance_method
+        yield
+      ensure
+        @instance_method = previous
+      end
+
       def scan(node, nesting, forced_owner = nil)
         return unless node.is_a?(::Parser::AST::Node)
 
@@ -384,12 +395,12 @@ module Steep
           owner = absolute ? name : [*nesting, name].compact.join("::")
           body = node.type == :class ? node.children[2] : node.children[1]
           @modules << owner
-          scan_side(false) { scan(body, owner.split("::"), nil) }
+          scan_side(false) { scan_self(instance_method: false) { scan(body, owner.split("::"), nil) } }
         when :def
           owner = forced_owner || nesting.join("::")
           block_method(owner, node.children[0], singleton: @singleton_side)
           note_hook(owner, node.children[0])
-          scan(node.children[2], nesting, forced_owner)
+          scan_self(instance_method: !@singleton_side) { scan(node.children[2], nesting, forced_owner) }
         when :defs
           # `def self.included(base)` — the common spelling of a hook, and one
           # the instance-method branch above never sees. It is also where a
@@ -409,7 +420,7 @@ module Steep
             # foldable anywhere rather than in a class this cannot point at.
             block_method_everywhere(node.children[1])
           end
-          scan(node.children[3], nesting, forced_owner)
+          scan_self(instance_method: false) { scan(node.children[3], nesting, forced_owner) }
         when :sclass
           # `class << self` writes singleton methods with instance-method
           # syntax, so the bodies below have to know which side they are on.
@@ -418,7 +429,7 @@ module Steep
         when :block
           send_node, _args, body = node.children
           if (owner = eval_owner(send_node, nesting))
-            scan(body, owner.split("::"), owner)
+            scan_self(instance_method: false) { scan(body, owner.split("::"), owner) }
           elsif (owner = refinement_owner(send_node, nesting))
             scan(body, owner.split("::"), owner)
           else
@@ -438,9 +449,11 @@ module Steep
             # for the call. The names are kept unresolved: which constant each
             # denotes depends on modules this may not have read yet.
             @mixins << [target, method_name, arguments.map { |argument| const_name(argument) }, nesting.dup]
-          elsif EVAL_METHODS.include?(method_name) && target && !arguments.empty?
+          elsif EVAL_METHODS.include?(method_name) && target && !arguments.empty? && !(receiver.nil? && @instance_method)
             # String/evaluated forms are opaque to the AST. Any method in the
-            # target's lookup table could be replaced.
+            # target's lookup table could be replaced. Inside an instance
+            # method the eval runs on `self`, a module the class around it is
+            # the class of, and lands where each call site's does.
             #
             # A core class only, deliberately. Evaling a string INTO ITSELF is
             # what a plain-Ruby macro does — example75 and example76 in

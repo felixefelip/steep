@@ -171,6 +171,28 @@ class StringFoldTest < Minitest::Test
     end
   end
 
+  def test_tr_folds
+    check(<<~'RUBY') do |pair|
+      # @type var code: "def a\n  1\nend"
+      code = _ = "def a\n  1\nend"
+      x = code.tr("\n", ";")
+    RUBY
+      assert_equal parse_type('"def a;  1;end"'), pair.context.type_env[:x]
+    end
+  end
+
+  def test_tr_with_an_argument_that_is_not_a_literal_does_not_fold
+    check(<<~'RUBY') do |pair|
+      # @type var code: "def a\nend"
+      code = _ = "def a\nend"
+      # @type var separator: String
+      separator = _ = ";"
+      x = code.tr("\n", separator)
+    RUBY
+      assert_equal parse_type("::String"), pair.context.type_env[:x]
+    end
+  end
+
   def test_sub_with_a_replacement_hash_does_not_fold
     check(<<~'RUBY') do |pair|
       # @type var word: "posts"

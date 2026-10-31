@@ -314,6 +314,7 @@ module Steep
     # nothing was substituted — with no second question to disagree with it.
     STRING_SUB_BANG = ->(receiver, arguments) { receiver.dup.sub!(*arguments) }
     STRING_AFFIX = ->(_receiver, arguments) { arguments.first.is_a?(String) }
+    STRING_TR = ->(_receiver, arguments) { arguments.all?(String) }
     ARRAY_FLATTEN = lambda do |receiver, arguments|
       leaves = ->(value) { value.is_a?(::Array) ? value.all?(&leaves) : FLATTEN_LEAVES.any? { |klass| value.is_a?(klass) } }
       (arguments.empty? || (arguments.size == 1 && arguments.first.is_a?(Integer))) && receiver.all?(&leaves)
@@ -440,6 +441,7 @@ module Steep
       # `Inflections::Uncountables#to_regex`.
       "::Regexp.escape" => Entry.new(method: ::Regexp.singleton_class.instance_method(:escape), arity: 1, preflight: STRING_AFFIX),
       "::String#delete_suffix" => Entry.new(method: String.instance_method(:delete_suffix), arity: 1, preflight: STRING_AFFIX),
+      "::String#tr" => Entry.new(method: String.instance_method(:tr), arity: 2, preflight: STRING_TR),
       "::Array#prepend" => Entry.new(method: Array.instance_method(:prepend), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:prepend)),
       "::Array#unshift" => Entry.new(method: Array.instance_method(:unshift), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:unshift)),
       "::Array#push" => Entry.new(method: Array.instance_method(:push), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:push)),

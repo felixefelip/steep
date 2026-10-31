@@ -42,7 +42,7 @@ module Steep
         # default, written as a literal.
         def omitted_key(params, index)
           param = params[index]
-          Specializations::Collector.default_type(param.children[1]) if param.type == :optarg
+          Specializations::Collector.default_type(param.children[1], {}) if param.type == :optarg
         end
 
         # The leading positional parameters, each at the position of the
