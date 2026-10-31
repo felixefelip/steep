@@ -2268,6 +2268,36 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_an_array_built_in_a_loop_splatted_into_a_literal_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (*Symbol names) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(*names)
+            methods = []
+            names.each do |name|
+              methods << "def \#{name}; end"
+            end
+            class_eval(["class << self", *methods, "end"].join(";"))
+          end
+        end
+
+        class Article < Base
+          slot :size
+        end
+      RUBY
+
+      assert_equal ["class << self;def size; end;end"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
   # `class_methods do … end` puts the def lexically in the concern and the
   # methods on its `ClassMethods`. `@implements`, injected from the module
   # self-type sidecar, is what says so — without reading it the def is keyed
