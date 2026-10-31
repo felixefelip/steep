@@ -599,6 +599,16 @@ module Steep
 
       AST::Types::MetaClass.new(name: receiver.name)
     end
+    # A class or module named by its constant is never a singleton class;
+    # what `singleton_class` answers always is.
+    SINGLETON_CLASS_PREDICATE = lambda do |receiver, argument_types, _factory, _override_registry|
+      next nil unless argument_types.empty?
+
+      case receiver
+      when AST::Types::Name::Singleton then AST::Types::Literal.new(value: false)
+      when AST::Types::MetaClass then AST::Types::Literal.new(value: true)
+      end
+    end
     INSTANCE_METHOD = lambda do |receiver, argument_types, factory, _override_registry|
       unbound_method_object(receiver, argument_types, factory, public_only: false)
     end
@@ -657,6 +667,9 @@ module Steep
       # RESOLVED to, and this is where the core declares it.
       "::Kernel#singleton_class" => Entry.new(
         method: ::Kernel.instance_method(:singleton_class), handler: SINGLETON_CLASS
+      ),
+      "::Module#singleton_class?" => Entry.new(
+        method: ::Module.instance_method(:singleton_class?), handler: SINGLETON_CLASS_PREDICATE
       ),
       "::Module#instance_method" => Entry.new(
         method: ::Module.instance_method(:instance_method), handler: INSTANCE_METHOD

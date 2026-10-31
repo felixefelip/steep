@@ -2329,6 +2329,37 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_a_class_the_macro_runs_on_is_not_a_singleton_class
+    in_tmpdir do
+      write("sig/class.rbs", <<~RBS)
+        class Class
+          # @rbs_infer |...
+          def slot: (Symbol name) -> void
+        end
+
+        class Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Class
+          def slot(name)
+            if singleton_class?
+              class_eval "def on_singleton; end"
+            else
+              class_eval "def \#{name}; end"
+            end
+          end
+        end
+
+        class Base
+          slot :size
+        end
+      RUBY
+
+      assert_equal ["def size; end"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
   # `class_methods do … end` puts the def lexically in the concern and the
   # methods on its `ClassMethods`. `@implements`, injected from the module
   # self-type sidecar, is what says so — without reading it the def is keyed
