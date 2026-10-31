@@ -546,6 +546,19 @@ module Steep
       typing.each(&block)
     end
 
+    # `others` checked the same nodes as this typing, each under its own
+    # branch: a node or call `self` is typed by every branch, and a fact about
+    # a call is kept only where each branch recorded the same one.
+    def join_branches!(others)
+      others.reverse_each do |other|
+        other.each_typing { |node, type| typing[node] = AST::Types::Union.build(types: [type, typing[node]].compact) }
+        other.call_self_types.each { |node, type| call_self_types[node] = AST::Types::Union.build(types: [type, call_self_types[node]].compact) }
+        [[call_exact_selves, other.call_exact_selves], [call_keyed_selves, other.call_keyed_selves], [call_self_ivars, other.call_self_ivars], [call_class_states, other.call_class_states]].each do |mine, theirs|
+          mine.delete_if { |node, fact| theirs[node] != fact }
+        end
+      end
+    end
+
     def save!
       raise "Unexpected save!" unless parent
       raise "Parent modified since #new_child: parent.last_update=#{parent.last_update}, parent_last_update=#{parent_last_update}" unless parent.last_update == parent_last_update
