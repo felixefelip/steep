@@ -7720,6 +7720,38 @@ a + 1
     end
   end
 
+  def test_logic_or_whose_left_always_holds_narrows_by_the_left_alone
+    with_checker(<<-RBS) do |checker|
+    RBS
+      source = parse_ruby(<<-RUBY)
+a = 1
+return unless a.is_a?(Integer) || a.is_a?(String)
+a
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, _typing|
+        type, _ = construction.synthesize(source.node)
+        assert_equal parse_type("::Integer"), type
+      end
+    end
+  end
+
+  def test_logic_and_whose_left_never_holds_narrows_by_the_left_alone
+    with_checker(<<-RBS) do |checker|
+    RBS
+      source = parse_ruby(<<-RUBY)
+a = 1
+return if !a.is_a?(Integer) && !a.is_a?(String)
+a
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, _typing|
+        type, _ = construction.synthesize(source.node)
+        assert_equal parse_type("::Integer"), type
+      end
+    end
+  end
+
   def test_logic_type_no_escape
     with_checker(<<-RBS) do |checker|
     RBS
