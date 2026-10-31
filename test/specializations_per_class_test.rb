@@ -164,4 +164,53 @@ class SpecializationsPerClassTest < Minitest::Test
       assert_equal "::Item", body_types(project, current_dir + "app/box.rb").fetch("fill")
     end
   end
+
+  def test_runner_keys_a_self_handed_down_two_calls_as_the_class_that_handed_it
+    in_tmpdir do
+      write("sig/app.rbs", <<~RBS)
+        class Post
+          def self.has_many: (Symbol name) -> untyped
+        end
+        class Builder
+          def self.build: (untyped model, Symbol name) -> untyped
+          def self.create: (untyped model, Symbol name) -> untyped
+          def self.macro: () -> Symbol
+        end
+        class HasMany < Builder
+          def self.macro: () -> Symbol
+        end
+      RBS
+      write("app/app.rb", <<~RUBY)
+        class Builder
+          def self.build(model, name)
+            macro
+            create(model, name)
+          end
+
+          def self.create(model, name)
+            model
+          end
+
+          def self.macro = :base
+        end
+
+        class HasMany < Builder
+          def self.macro = :has_many
+        end
+
+        class Post
+          def self.has_many(name)
+            HasMany.build(self, name)
+          end
+
+          has_many :comments
+        end
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ "(singleton(::Post), :comments)" => "singleton(::Post)", "(self, :comments)" => "self" }, methods.fetch("Builder.create"))
+      assert_equal({ "(:comments) on singleton(::Post)" => "singleton(::Post)", "(:comments)" => "self" }, methods.fetch("Post.has_many"))
+    end
+  end
 end
