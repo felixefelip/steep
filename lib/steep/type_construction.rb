@@ -7660,7 +7660,7 @@ module Steep
       if node.children.empty?
         if hint
           array = AST::Builtin::Array.instance_type(AST::Builtin.any_type)
-          if check_relation(sub_type: array, super_type: hint).success?
+          if !hint.is_a?(AST::Types::Any) && check_relation(sub_type: array, super_type: hint).success?
             add_typing node, type: unwrap(hint)
           else
             add_typing node, type: array

@@ -2383,6 +2383,37 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_arrays_a_multiple_assignment_starts_are_followed
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (*Symbol names) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(*names)
+            readers, writers = [], []
+            names.each do |name|
+              readers << "def \#{name}; end"
+              writers << "def \#{name}=(value); end"
+            end
+            class_eval(readers.join(";") + ";" + writers.join(";"))
+          end
+        end
+
+        class Article < Base
+          slot :size
+        end
+      RUBY
+
+      assert_equal ["def size; end;def size=(value); end"], evals_of(setup_project).fetch("app/base.rb:13:2")
+    end
+  end
+
   def test_an_array_built_in_a_loop_splatted_into_a_literal_is_read
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
