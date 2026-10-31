@@ -157,6 +157,26 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_an_interpolated_symbol_held_in_a_local_is_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            namespaced_name = :"__rich_text_\#{name}"
+            class_eval "def \#{name}; \#{namespaced_name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content; __rich_text_content; end"], evals_of(setup_project).fetch("app/base.rb:9:2")
+    end
+  end
+
   # The branch the call site does not take defines nothing there, and a checker
   # that narrows the condition is what says which one that is.
   def test_a_branch_the_call_site_does_not_take_is_not_recorded
