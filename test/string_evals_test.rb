@@ -2291,6 +2291,67 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def test_a_default_naming_an_earlier_parameter_takes_its_value
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, ?accessor: bool, ?reader: bool, ?writer: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, accessor: true, reader: accessor, writer: accessor)
+            class_eval "def \#{name}; end" if reader
+            class_eval "def \#{name}=(value); end" if writer
+          end
+        end
+
+        class Article < Base
+          slot :size, writer: false
+          slot :color, accessor: false, writer: true
+        end
+      RUBY
+
+      evals = evals_of(setup_project)
+
+      assert_equal ["def size; end"], evals.fetch("app/base.rb:9:2")
+      assert_equal ["def color=(value); end"], evals.fetch("app/base.rb:10:2")
+    end
+  end
+
+  def test_a_positional_default_naming_an_earlier_parameter_takes_its_value
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, ?Symbol reader) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, reader = name)
+            class_eval "def \#{reader}; @\#{name}; end"
+          end
+        end
+
+        class Article < Base
+          slot :size
+          slot :color, :hue
+        end
+      RUBY
+
+      evals = evals_of(setup_project)
+
+      assert_equal ["def size; @size; end"], evals.fetch("app/base.rb:8:2")
+      assert_equal ["def hue; @color; end"], evals.fetch("app/base.rb:9:2")
+    end
+  end
+
   # `class_methods do … end` puts the def lexically in the concern and the
   # methods on its `ClassMethods`. `@implements`, injected from the module
   # self-type sidecar, is what says so — without reading it the def is keyed
