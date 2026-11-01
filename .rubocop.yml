@@ -36,7 +36,7 @@ Project/ClassLengthCeiling:
     "lib/steep/server/master.rb": 731
     "lib/steep/accumulators.rb": 526
     "lib/steep/interface/builder.rb": 607
-    "lib/steep/source.rb": 574
+    "lib/steep/source.rb": 564
     "lib/steep/postconditions/runner.rb": 526
     "lib/steep/signature/validator.rb": 489
     "lib/steep/services/goto_service.rb": 473

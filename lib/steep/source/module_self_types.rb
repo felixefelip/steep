@@ -195,6 +195,16 @@ module Steep
           end
         end
 
+        # The parsed nodes `Source.attach_scope_annotations` gives an entry's
+        # annotations: `deepest_scope_node`, and every other declaration of the
+        # module it names, by its full path, as `find_target_scopes` does.
+        def scope_nodes(node, anchor)
+          target = deepest_scope_node(node, anchor) or return []
+          paths = {}.compare_by_identity #: Hash[Parser::AST::Node, String]
+          scope_paths(node, nil, paths)
+          paths.select { |_, path| path == paths[target] }.keys
+        end
+
         # Annotates each block call named `call`, for every `blocks` spec
         # (`{ "call" => ..., "implements" => ..., "self" => ..., "in" => ...,
         # "method" => ... }`): `# @implements <implements>` on the opener line, and — when
@@ -365,6 +375,34 @@ module Steep
         def relative(path)
           prefix = "#{Dir.pwd}/"
           path.start_with?(prefix) ? path[prefix.length..] : path
+        end
+
+        def scope_paths(node, nesting, paths)
+          return unless node.is_a?(Parser::AST::Node)
+
+          if node.type == :class || node.type == :module
+            name = node.children[0].loc.expression.source.delete_prefix("::")
+            nesting = paths[node] = [nesting, name].compact.join("::")
+          end
+          node.children.each { |child| scope_paths(child, nesting, paths) }
+        end
+
+        # The DEEPEST `class`/`module` whose name is `anchor`: a name written in
+        # two scopes is meant as the inner one, since that is the one a nested
+        # declaration adds.
+        def deepest_scope_node(node, anchor, depth = 0, found = nil)
+          return found unless node.is_a?(Parser::AST::Node)
+
+          if node.type == :class || node.type == :module
+            name = node.children[0]
+            if name.is_a?(Parser::AST::Node) && name.type == :const && name.children[1].to_s == anchor
+              found = [depth, node] if found.nil? || depth > found[0]
+            end
+          end
+
+          node.children.each { |child| found = deepest_scope_node(child, anchor, depth + 1, found) }
+
+          depth.zero? ? found&.last : found
         end
 
         # The innermost ModuleNode/ClassNode named `anchor`, or nil.
