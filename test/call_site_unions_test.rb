@@ -125,6 +125,24 @@ class CallSiteUnionsTest < Minitest::Test
     assert_equal({ "Tags.tag" => '("a!" | "b!")', "Tags.both" => '("a!" | "b!")' }, declarations(rbs, ruby))
   end
 
+  def test_a_call_inside_a_body_is_read_with_the_defaults_of_what_that_call_omits
+    rbs = <<~RBS
+      class Tags
+        def self.tag: (Symbol name, untyped suffix) -> String
+        def self.labelled: (Symbol name, ?untyped suffix) -> String
+      end
+    RBS
+    ruby = <<~'RUBY'
+      class Tags
+        def self.tag(name, suffix) = suffix ? "#{name}#{suffix}" : "#{name}!"
+        def self.labelled(name, suffix = nil) = tag(name, suffix)
+        labelled(:a)
+      end
+    RUBY
+
+    assert_equal({ "Tags.tag" => '"a!"', "Tags.labelled" => '"a!"' }, declarations(rbs, ruby))
+  end
+
   WRITER_RBS = <<~RBS
     module Writer
       def self.generate: (singleton(Peel) owner, (:human_name | :nick) method) -> untyped

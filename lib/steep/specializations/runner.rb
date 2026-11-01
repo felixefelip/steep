@@ -524,7 +524,7 @@ module Steep
         lambda do |key, arguments|
           checked[[key, arguments]] ||= begin
             path, def_node = definitions.fetch(key)
-            type_check(context, store, context.sources.fetch(path), { node_key(path, def_node, key) => arguments })
+            type_check(context, store, context.sources.fetch(path), { node_key(path, def_node, key) => with_defaults(key, arguments, def_node) })
           end
         end
       end
