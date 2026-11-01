@@ -46,6 +46,21 @@ class HeldLocalsTest < Minitest::Test
     RUBY
   end
 
+  def test_a_returned_parameter_is_held_up_to_its_return
+    locals = held_locals(parse(<<~RUBY))
+      def normalize(options, other)
+        options.delete(:counter_cache)
+        other = 1
+        return other if options.empty?
+        options
+      end
+    RUBY
+
+    assert locals.held_up_to_its_return?(:options)
+    refute locals.held?(:options)
+    refute locals.held_up_to_its_return?(:other)
+  end
+
   def test_returned_stored_or_interpolated
     assert_equal [], held(<<~RUBY)
       def run(a, b, c)

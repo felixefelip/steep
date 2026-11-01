@@ -17,6 +17,7 @@ module Steep
         @discarded = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @returned = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @receivers = Set[].compare_by_identity #: Set[::Parser::AST::Node]
+        @assignments = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node]
         body = def_node && (def_node.type == :defs ? def_node.children[3] : def_node.children[2])
         return unless body
 
@@ -32,6 +33,13 @@ module Steep
       # Neither left nor a receiver: something here takes it.
       def taken?(node) = !left?(node) && !receiver?(node)
 
+      # The ivar of `self` a statement assigns the value of `node` to, which
+      # then takes it alone.
+      def kept_in(node)
+        assignment = @assignments[node] or return
+        assignment.children[0] if @discarded.include?(assignment)
+      end
+
       private
 
       def walk(node)
@@ -43,6 +51,8 @@ module Steep
           node.children[0...-1].each { |child| @discarded << child }
         when *CALLS
           @receivers << node.children[0] if node.children[0].is_a?(::Parser::AST::Node)
+        when :ivasgn
+          @assignments[node.children[1]] = node if node.children[1]
         end
         node.children.each { |child| walk(child) }
       end
