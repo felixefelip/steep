@@ -110,6 +110,7 @@ class AccumulatedIvarStateTest < Minitest::Test
       "an element handed to a project method" => { body: "def self.log(text) = text\nrules.singulars.each { |(_, replacement)| log(replacement) }" },
       "the list kept under another name" => { body: "KEPT = rules.singulars" },
       "a method of the class that changes it, called" => { rules: "def clear = @singulars.clear", body: "rules.clear" },
+      "a method of the class that maps it in place, called" => { rules: 'def clear = @singulars.map! { |(rule, _)| "#{rule}" }', body: "rules.clear" },
       "a method of the class that changes an element, called" => {
         rules: 'def scramble = @singulars.each { |(_, replacement)| replacement << "zz" }', body: "rules.scramble"
       },
@@ -222,7 +223,8 @@ class AccumulatedIvarStateTest < Minitest::Test
       "it empties the list" => APPLY.sub("  result\nend", "  @singulars.clear\n  result\nend"),
       "its block changes an element" => APPLY.sub("{ |(rule, replacement)| ", '{ |(rule, replacement)| replacement << "zz"; '),
       "its block keeps an element" => APPLY.sub("{ |(rule, replacement)| ", "{ |(rule, replacement)| $kept = replacement; "),
-      "its block hands self on" => APPLY.sub("{ |(rule, replacement)| ", "{ |(rule, replacement)| $kept = self; ")
+      "its block hands self on" => APPLY.sub("{ |(rule, replacement)| ", "{ |(rule, replacement)| $kept = self; "),
+      "it maps the list in place" => APPLY.sub("  @singulars.each", '  @singulars.map! { |(rule, _)| "#{rule}" }' + "\n  @singulars.each")
     }.each do |label, apply|
       assert_equal [[nil], [nil]], chunks(walked_inside_rules(apply), rbs: apply_rbs), label
     end

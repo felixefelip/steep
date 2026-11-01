@@ -17,12 +17,15 @@ module Steep
     # hands back, `:filter_map` that value only where it is truthy, `:any`
     # whether it is truthy, up to the first that is.
     #
+    # `writes_elements` for one that stores each value back into the receiver:
+    # its value is a `map`'s, but it is no read of the collection.
+    #
     # `depends_on` as in `LiteralIntrinsics`: `Enumerable#filter_map` walks the
     # receiver by calling its `each`, so an `Array#each` the project replaced is
     # what the program runs instead. And it is reached through `Array`: a
     # `filter_map` the project writes on `Array` — reopened, or from a module
     # it includes — is found first and still resolves, by its RBS, here.
-    Entry = _ = Struct.new(:collect, :depends_on, keyword_init: true)
+    Entry = _ = Struct.new(:collect, :depends_on, :writes_elements, keyword_init: true)
 
     ENTRIES = {
       "::Array#each" => Entry.new(collect: :each),
@@ -31,6 +34,8 @@ module Steep
       # it was.
       "::Array#map" => Entry.new(collect: :map),
       "::Array#collect" => Entry.new(collect: :map),
+      "::Array#map!" => Entry.new(collect: :map, writes_elements: true),
+      "::Array#collect!" => Entry.new(collect: :map, writes_elements: true),
       "::Array#any?" => Entry.new(collect: :any),
       "::Enumerable#filter_map" => Entry.new(collect: :filter_map, depends_on: ["::Array#each", "::Array#filter_map"])
     }.freeze
@@ -45,6 +50,10 @@ module Steep
         return nil if entry.depends_on&.any? { |dependency| override_registry.blocked?(dependency) }
 
         entry
+      end
+
+      def reading_entry(key, override_registry:)
+        entry(key, override_registry: override_registry)&.then { |found| found unless found.writes_elements }
       end
 
       def watched_keys

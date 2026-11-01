@@ -134,14 +134,6 @@ module Steep
     # `more` stays its own array; which elements it holds the checker says.
     Spliced = Struct.new(:node, :key)
 
-    # What `elements` become once `key` has run over them in place, which is
-    # what `fold_key` would answer for its copy (`RESHAPES`).
-    Reshaped = Struct.new(:key, :fold_key, :elements)
-
-    # The in-place methods a statement may run on a local, keyed by the one
-    # that answers what they leave in it.
-    RESHAPES = { uniq!: "::Array#uniq", compact!: "::Array#compact" }.freeze
-
     # The calls whose array is new on every call and held by nothing else, so a
     # local born from one is as private as one born from `[]`. Keyed like the
     # intrinsic tables, by the method the call resolved to.
@@ -314,7 +306,7 @@ module Steep
             each_entry(entry.else_values, &block)
           when Loop
             each_entry(entry.values, &block)
-          when Reshaped
+          when Reshaped, Mapped
             each_entry(entry.elements, &block)
           end
         end
@@ -368,6 +360,9 @@ module Steep
                   (loops[entry.block] ||= []).concat(entry.values)
                 when Branch
                   next unless entry.node.equal?(statement)
+                when Mapped
+                  # Read where the call runs, before it changes the local.
+                  next at_reads[entry.block.children[0]] = entry.elements
                 else
                   next
                 end
@@ -452,13 +447,9 @@ module Steep
               contents[name] = contents.fetch(name) + [entry]
               pushed << name
             end
-          elsif (push = Appends.push_onto(statement, contents))
-            name, values = push
-            contents[name] = contents.fetch(name) + values
-            pushed << name
-          elsif (name = Appends.reshaped_local(statement, contents))
-            contents[name] = [Appends.reshape(statement, contents.fetch(name))]
-            pushed << name
+          elsif (changed = Appends.changed(statement, contents))
+            contents.merge!(changed)
+            pushed.concat(changed.keys)
           end
 
           yield statement, pushed, contents
@@ -675,14 +666,8 @@ module Steep
           return
         end
 
-        if (push = Appends.push_onto(statement, found))
-          name, values = push
-          found[name] = found[name] + values
-          return
-        end
-
-        if (name = Appends.reshaped_local(statement, found))
-          found[name] = [Appends.reshape(statement, found[name])]
+        if (changed = Appends.changed(statement, found))
+          found.merge!(changed)
           return
         end
 
