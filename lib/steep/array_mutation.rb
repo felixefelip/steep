@@ -78,7 +78,7 @@ module Steep
       # handed, as a use of a class's memo must (`ClassMemoAnalyzer::Use`).
       def reading_iteration?(constr, keys, block_params, block_body)
         registry = constr.literal_method_registry
-        return false if keys.empty? || !keys.all? { |key| IterationIntrinsics.entry(key, override_registry: registry) }
+        return false if keys.empty? || !keys.all? { |key| IterationIntrinsics.reading_entry(key, override_registry: registry) }
 
         calls = TypeInference::ClassMemoAnalyzer.element_calls_in(block_params, block_body) or return false
         ObjectStates::ClassMemos.reads_elements?(constr, calls)

@@ -27,6 +27,7 @@ module Steep
         when Built then concat(types, constr.built_types(element))
         when Spliced then concat(types, spliced(constr, element, pass ? pass[element] : spliced_type(constr, element.node)))
         when Reshaped then concat(types, types(constr, element.elements, pass)&.then { |before| reshaped(constr, element, before) })
+        when Mapped then concat(types, mapped(constr, element))
         when Branch then branch(constr, element, pass, types)
         else
           type = pass ? pass[element] : element_type(constr, element)
@@ -70,7 +71,7 @@ module Steep
 
       def operand_type(constr, node)
         typing = constr.typing
-        inferred = typing.has_type?(node) ? typing.type_of(node: node) : AST::Builtin.any_type
+        inferred = typing.recorded_type_of(node: node) || AST::Builtin.any_type
         constr.literal_operand_type(node, inferred)
       end
 
@@ -81,6 +82,11 @@ module Steep
         return nil unless tuple.is_a?(AST::Types::Tuple) && tuple.types.all? { |type| LiteralIntrinsics.fold_value?(type) }
 
         tuple.types
+      end
+
+      def mapped(constr, element)
+        tuple = constr.typing.vouched_of(node: element.block)
+        tuple.types if tuple.is_a?(AST::Types::Tuple) && tuple.types.all? { |type| LiteralIntrinsics.fold_value?(type) }
       end
 
       def reshaped(constr, element, before)

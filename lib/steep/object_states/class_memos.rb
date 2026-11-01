@@ -528,7 +528,7 @@ module Steep
         def collection_read?(constr, method_name)
           return true if CollectionReaders::WHOLE.include?(method_name)
 
-          keys = IterationIntrinsics::ENTRIES.keys.select { |key| key.end_with?("##{method_name}") }
+          keys = IterationIntrinsics::ENTRIES.filter_map { |key, entry| key if key.end_with?("##{method_name}") && !entry.writes_elements }
           !keys.empty? && keys.none? { |key| constr.literal_method_registry.blocked?(key) }
         end
 

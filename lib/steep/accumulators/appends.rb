@@ -1,5 +1,20 @@
 module Steep
   module Accumulators
+    # What `elements` become once `key` has run over them in place, which is
+    # what `fold_key` would answer for its copy (`RESHAPES`).
+    Reshaped = Struct.new(:key, :fold_key, :elements)
+
+    # The in-place methods a statement may run on a local, keyed by the one
+    # that answers what they leave in it.
+    RESHAPES = { uniq!: "::Array#uniq", compact!: "::Array#compact" }.freeze
+
+    # What `elements` become once `block`, a `map!` on the local, has stored
+    # what it hands back for each: the collection the checker computed for
+    # that call.
+    Mapped = Struct.new(:block, :elements)
+
+    MAPS = %i[map! collect!].freeze
+
     # The statements that add to a watched local, or run one of `RESHAPES` on
     # it, read off their shape alone. Which elements those add is the
     # checker's to say (`Contents`).
@@ -59,7 +74,20 @@ module Steep
         [name, [Spliced.new(value, "::Array#+")]]
       end
 
-      # The watched local this statement runs one of `RESHAPES` on.
+      # `{ name => entries }`, what the watched local this statement pushes
+      # onto or reshapes holds once it has run. A `MAPS` call counts only with
+      # a block that names no watched local.
+      def changed(statement, found)
+        if (push = push_onto(statement, found))
+          name, values = push
+          { name => found[name] + values }
+        elsif (name = reshaped_local(statement, found))
+          { name => [reshape(statement, found[name])] }
+        elsif (name = mapped_local(statement, found))
+          { name => [Mapped.new(statement, found[name])] }
+        end
+      end
+
       def reshaped_local(statement, found)
         return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :send
 
@@ -68,6 +96,17 @@ module Steep
 
         name = receiver.children[0]
         found[name] ? name : nil
+      end
+
+      def mapped_local(statement, found)
+        return nil unless statement.is_a?(Parser::AST::Node) && LAMBDA_BODIES.include?(statement.type)
+
+        call, _, body = statement.children
+        receiver, method_name, *arguments = call.children
+        return nil unless call.type == :send && arguments.empty? && MAPS.include?(method_name) && receiver&.type == :lvar
+
+        name = receiver.children[0]
+        found[name] && found.each_key.none? { |local| LocalReach.mentions(body, local).positive? } ? name : nil
       end
 
       def reshape(statement, elements)
