@@ -10,7 +10,7 @@ class HeldRecordKeptInAnIvarTest < Minitest::Test
   include ShellHelper
   include SpecializationsProjectHelper
 
-  def create_after(initialize_body, other_methods = "", subclass_body = "")
+  def create_after(initialize_body, other_methods = "", subclass_body = "", extra = "")
     in_tmpdir do
       write("sig/app.rbs", <<~RBS)
         class Macro
@@ -31,6 +31,11 @@ class HeldRecordKeptInAnIvarTest < Minitest::Test
         end
         class Model
           def self.has_records: (**untyped) -> untyped
+        end
+        class Lister
+          @kept: untyped
+          def self.list: (Hash[Symbol, untyped] options) -> untyped
+          def self.relist: (Hash[Symbol, untyped] options) -> untyped
         end
       RBS
       write("app/app.rb", <<~RUBY)
@@ -63,6 +68,8 @@ class HeldRecordKeptInAnIvarTest < Minitest::Test
           def self.has_records(**options) = Refl.create(options)
           has_records
         end
+
+        #{extra}
       RUBY
 
       Steep::Specializations::Runner.run(setup_project)["Refl.create"]
@@ -97,6 +104,35 @@ class HeldRecordKeptInAnIvarTest < Minitest::Test
 
   def test_a_write_through_a_reader_widens_the_record
     refute_equal({ "({  })" => "nil" }, create_after("@options = normalize(options)", "attr_reader :options\ndef mark = options[:through] = :posts"))
+  end
+
+  def handed_to_lister(list, relist = "nil", read = "Lister.list(options)")
+    lister = "class Lister\n  def self.list(options) = #{list}\n  def self.relist(options) = #{relist}\nend"
+    create_after("@options = normalize(options)", "attr_reader :options\ndef label = #{read}", "", lister)
+  end
+
+  def test_a_record_a_reader_hands_to_a_method_that_only_reads_it_is_followed
+    assert_equal({ "({  })" => "nil" }, handed_to_lister("options[:as]"))
+  end
+
+  def test_a_record_a_reader_hands_on_through_a_local_is_followed
+    assert_equal({ "({  })" => "nil" }, handed_to_lister("options[:as]", "nil", "(read = options\nLister.list(read))"))
+  end
+
+  def test_a_record_handed_to_a_method_that_writes_it_is_widened
+    refute_equal({ "({  })" => "nil" }, handed_to_lister("options[:through] = :posts"))
+  end
+
+  def test_a_record_handed_to_a_method_that_keeps_it_is_widened
+    refute_equal({ "({  })" => "nil" }, handed_to_lister("@kept = options"))
+  end
+
+  def test_a_record_handed_to_a_method_with_no_body_is_widened
+    refute_equal({ "({  })" => "nil" }, handed_to_lister("options[:as]", "nil", "Kernel.puts(options)"))
+  end
+
+  def test_a_record_handed_on_to_a_method_that_writes_it_is_widened
+    refute_equal({ "({  })" => "nil" }, handed_to_lister("relist(options)", "options[:through] = :posts"))
   end
 
   def test_a_record_answered_into_an_ivar_and_taken_again_is_not_followed

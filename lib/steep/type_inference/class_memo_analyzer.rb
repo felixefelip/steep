@@ -38,11 +38,16 @@ module Steep
       # the instance method, or with `singleton` the class method, whose body
       # makes it, and `owner` the module that defines that method, as written;
       # `in_class_body` where a statement of a class body makes it, outside
-      # any block; `on_self` where it is made on `self`.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self) do
+      # any block; `on_self` where it is made on `self`. `handed_to`: on an
+      # escape, `[method, index]` where the value is the positional argument
+      # `index` of a call of `method`, and `handed` what the bodies of the
+      # methods of that name do with that parameter, filled in by the registry
+      # (`ConstructorBindingRegistry#hand_on`).
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
           value&.each { |use| use.each_forwarder(&block) }
+          handed&.each { |use| use.each_forwarder(&block) }
         end
       end
       ESCAPE = Use.new(:escape, nil, Set[].freeze).freeze
@@ -108,6 +113,12 @@ module Steep
         new(Set[]).element_calls_in(params, body)
       end
 
+      # What the body of `def_node` does with its positional parameter
+      # `index`. Nil where the parameters do not say which one it is.
+      def self.parameter_uses(def_node, index)
+        new(Set[]).parameter_uses(def_node, index)
+      end
+
       def initialize(names, calls: false)
         @names = names
         @calls = calls
@@ -128,6 +139,18 @@ module Steep
         each_mention(body, nil, names).each_with_object(Set[]) do |(mention, parent), calls|
           read = element_read(mention, parent) or return
           calls << read if read.is_a?(Symbol)
+        end
+      end
+
+      def parameter_uses(def_node, index)
+        params = def_node.children[def_node.type == :def ? 1 : 2]
+        positional = params.children.take_while { |param| %i[arg optarg].include?(param.type) }
+        name = positional[index]&.children&.first or return
+        walk(def_node, nil, statement: false, in_statement: false, on_class: false)
+        each_mention(def_node.children.last, def_node, Set[name]).flat_map do |mention, parent|
+          return [ESCAPE] if mention.type == :lvasgn
+
+          value_uses(mention, parent, @statements.include?(parent)) || [ESCAPE]
         end
       end
 
@@ -225,7 +248,21 @@ module Steep
           []
         elsif passed_on?(node, parent)
           value_uses(parent, @parents[parent], @statements.include?(@parents[parent]))
+        elsif (handed = handed_use(node, parent))
+          [handed]
         end
+      end
+
+      # An escape that names the call and position `node` is handed to as a
+      # positional argument, where none before it is splatted.
+      def handed_use(node, parent)
+        return unless parent && %i[send csend].include?(parent.type)
+
+        arguments = parent.children.drop(2)
+        index = arguments.index { |argument| argument.equal?(node) } or return
+        return if arguments.take(index + 1).any? { |argument| %i[splat block_pass hash].include?(argument.type) }
+
+        ESCAPE.dup.tap { |use| use.handed_to = [parent.children[1], index] }
       end
 
       # Whether `parent`'s value may be `node`'s.
@@ -280,7 +317,11 @@ module Steep
         each_mention(scope, @parents[scope], Set[assignment.children[0]]).flat_map do |mention, parent|
           next [] if mention.equal?(assignment)
 
-          (parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(mention) && receiver_uses(mention, parent, false)) or return
+          if parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(mention)
+            receiver_uses(mention, parent, false) or return
+          else
+            [handed_use(mention, parent) || (return)]
+          end
         end
       end
 

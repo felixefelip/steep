@@ -291,6 +291,7 @@ module Steep
           uses = every ? registry.every_use_of(use.forwarded_by) : registry.uses_of(use.forwarded_by)
           return reading_uses?(constr, uses, use.forwarded_by, forwarders, every: every)
         end
+        return use.handed.all? { |handed| reading_use?(constr, handed, forwarders, every: every) } if use.handed
 
         use.kind != :yielded && use_within?(constr.literal_method_registry, use, READS, elements: true)
       end
