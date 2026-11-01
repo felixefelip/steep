@@ -38,9 +38,8 @@ module Steep
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
         @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
-        @class_body_storing = {} #: Hash[[Symbol, Symbol], Set[Symbol]?]
-        @storing_closure = {} #: Hash[[Symbol, Symbol], StoringClosure?]
-        @forwarded_closures = {} #: Hash[Symbol, StoringClosure?]
+        @hash_memos = Set[] #: Set[[Symbol, Symbol]]
+        @forwarded_stores = Set[] #: Set[Symbol]
         @initializing = Set[] #: Set[Symbol]
         @constant_literals = {} #: Hash[Symbol, [::Parser::AST::Node, String]]
         @constant_writes = Hash.new(0) #: Hash[Symbol, Integer]
@@ -186,7 +185,7 @@ module Steep
       # Every name `uses_of` answers for, and every one `calls_of` does.
       def used_names
         index_uses unless @uses
-        @uses.keys.to_set | keyed_memo_names
+        @uses.keys.to_set | @calls.keys
       end
 
       # Where a hash keeps a keyed memo (`Body#keyed_memo`), what builds its
@@ -201,19 +200,31 @@ module Steep
 
       # The calls that may run a store into the hash `memo` keeps in `ivar`
       # (`StoringClosure`); nil where a store may run from code no method name
-      # stands for.
-      def storing_closure(memo, ivar)
+      # stands for. `reaching` says whether a call of a method of the closure
+      # may run that method.
+      def storing_closure(memo, ivar, reaching:)
         index_uses unless @uses
-        @storing_closure[[memo.to_sym, ivar.to_sym]]
+        key = [memo.to_sym, ivar.to_sym]
+        closure_of_stores(*key, reaching: reaching) if @hash_memos.include?(key)
       end
 
       # `storing_closure` for the object a class body keeps in `ivar`, where
       # it forwards to a hash it keeps (`ObjectStates::ForwardedHash`): a call
       # of any method of the project's that stores into an ivar's hash may
       # be one of its stores.
-      def forwarded_storing_closure(ivar)
+      def forwarded_storing_closure(ivar, reaching:)
         index_uses unless @uses
-        @forwarded_closures[ivar.to_sym]
+        ivar = ivar.to_sym
+        closure_of_stores(ivar, ivar, @forwarded_stores, reaching: reaching) if @born_objects.each_value.any? { |ivars| ivars.key?(ivar) }
+      end
+
+      # The classes that define `method_name`, on their instances or, with
+      # `singleton`, on the class object, as `[class_name, singleton]`.
+      def owners_of(method_name)
+        name = method_name.to_sym
+        [[@methods, false], [@singleton_methods, true]].flat_map do |table, singleton|
+          table.filter_map { |class_name, methods| [class_name, singleton] if methods.key?(name) }
+        end
       end
 
       # Every call the project makes of `name`, one of `keyed_memo_names`
@@ -238,9 +249,8 @@ module Steep
       # The class methods that store into the hash `memo` keeps in `ivar`,
       # where every store is made by a class body on its own class; nil
       # otherwise.
-      def class_body_storing(memo, ivar)
-        index_uses unless @uses
-        @class_body_storing[[memo.to_sym, ivar.to_sym]]
+      def class_body_storing(memo, ivar, reaching:)
+        class_body_storing_methods(storing_closure(memo, ivar, reaching: reaching), reaching)
       end
 
       # Whether every call of `method_name`, a method that yields a memo, hands
@@ -345,9 +355,9 @@ module Steep
         names.merge(keyed_memo_names)
         @uses = uses_by_name(names)
         calls_named(keyed_memo_names)
-        @storing_closure = hashes.to_h { |memo, ivar| [[memo, ivar], closure_of_stores(memo, ivar)] }
-        @class_body_storing = @storing_closure.transform_values { |closure| class_body_storing_methods(closure) }
-        @forwarded_closures = forwarded_closures
+        @hash_memos = hashes.to_set
+        @forwarded_stores = forwarded_stores
+        scan_closures(hashes)
         @initializing = initializing_methods
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
@@ -356,9 +366,13 @@ module Steep
         end
       end
 
-      def forwarded_closures
-        stores = HASH_STORES | @methods.each_value.flat_map { |methods| methods.filter_map { |name, bodies| name if bodies.any? { |body| body&.stores_element || body&.block_super } } }
-        @born_objects.each_value.flat_map(&:keys).uniq.to_h { |ivar| [ivar, closure_of_stores(ivar, ivar, stores)] }
+      def scan_closures(hashes)
+        hashes.each { |memo, ivar| closure_of_stores(memo, ivar, reaching: EVERY_CALL) }
+        @born_objects.each_value.flat_map(&:keys).uniq.each { |ivar| closure_of_stores(ivar, ivar, @forwarded_stores, reaching: EVERY_CALL) }
+      end
+
+      def forwarded_stores
+        HASH_STORES | @methods.each_value.flat_map { |methods| methods.filter_map { |name, bodies| name if bodies.any? { |body| body&.stores_element || body&.block_super } } }
       end
 
       def initializing_methods
@@ -410,18 +424,23 @@ module Steep
         [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| names.include?(use.called) }
       end
 
-      def closure_of_stores(memo, ivar, names = HASH_STORES)
+      EVERY_CALL = ->(_call) { true }
+
+      # Grows past a call that escapes, so that `build` scans every name a
+      # closure `reaching` fewer calls may ask for: no node is left after it.
+      def closure_of_stores(memo, ivar, names = HASH_STORES, reaching:)
         stores = stores_into(memo, ivar, names)
         return if stores.any? { |use| use.kind != :statement && !use.within }
 
         storing = stores.filter_map(&:within).to_set
+        escaped = false
         loop do
           constructs = storing.include?(:initialize)
-          calls = calls_named(constructs ? storing | [:new] : storing)
-          return if calls.any? { |call| call.kind == :escape || !(call.in_class_body || call.enclosing) }
+          calls = calls_named(constructs ? storing | [:new] : storing).select(&reaching)
+          escaped ||= calls.any? { |call| call.kind == :escape || !(call.in_class_body || call.enclosing) }
 
           grown = calls.filter_map(&:enclosing).to_set - storing
-          return StoringClosure.new(storing - [:initialize], constructs) if grown.empty?
+          return (StoringClosure.new(storing - [:initialize], constructs) unless escaped) if grown.empty?
 
           storing |= grown
         end
@@ -429,10 +448,10 @@ module Steep
 
       # The closure, where each call of its methods is a statement of a class
       # body on its own class or is made by one of them on `self`.
-      def class_body_storing_methods(closure)
+      def class_body_storing_methods(closure, reaching)
         return unless closure && !closure.constructs
 
-        closure.methods if calls_named(closure.methods).all? { |call| call.kind == :statement || closure.methods.include?(call.within) }
+        closure.methods if calls_named(closure.methods).select(&reaching).all? { |call| call.kind == :statement || closure.methods.include?(call.within) }
       end
 
       HASH_STORES = HashMutation::STORES.to_set { |key| key.split("#").last.to_sym }.freeze
