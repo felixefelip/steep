@@ -904,7 +904,7 @@ module Steep
         return nil if lines.any? { |line| jumps?(line) }
 
         pushes, mentioned = pushes_in(lines, found, watched)
-        return nil if pushes.empty?
+        return nil if pushes.empty? && !over
 
         mentioned.merge(names_in(collection, watched)) unless over
         # Pushing onto the array being run over: one more pass per push, which

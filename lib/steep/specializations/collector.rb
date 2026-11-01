@@ -73,7 +73,7 @@ module Steep
       # several methods, one that may run a body the source does not name
       # (`Overrides#runs`), with an error, or in a shape `Arguments` declines.
       def self.each_call_site(typing, overrides:, every_call: false, &block)
-        typing.pass_typings.each { |pass| each_call_site(pass, overrides: overrides, every_call: every_call, &block) }
+        typing.pass_typings.each_value { |passes| passes.each { |pass| each_call_site(pass, overrides: overrides, every_call: every_call, &block) } }
 
         each_call(typing, every_call) do |node, call|
           runs = overrides.runs(call, node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node))

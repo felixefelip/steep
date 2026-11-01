@@ -62,7 +62,9 @@ module Steep
         # passes.
         #
         # `certain` is whether the call site's arguments decide it runs at all.
-        Effect = Struct.new(:kind, :node, :callee, :certain, keyword_init: true)
+        # `typing` is the check that typed `node`: a pass of a loop the checker
+        # unrolled has its own (`Typing#pass_typings_of`).
+        Effect = Struct.new(:kind, :node, :callee, :certain, :typing, keyword_init: true)
 
         # A chunk of source, and the class it lands on — nil for the class whose
         # body holds the macro call, which is the only one the consumer can work
@@ -225,7 +227,7 @@ module Steep
             node.children[0].children.each { |child| each_effect(child, flow, certain, walk, &block) }
             return yield effect
           end
-          return if DEFERRED.include?(node.type)
+          return if iterated(node, flow, certain, walk, &block) || DEFERRED.include?(node.type)
 
           if (effect = write_at(node, certain, walk))
             node.children.each { |child| each_effect(child, flow, certain, walk, &block) }
@@ -247,13 +249,43 @@ module Steep
 
         def write_at(node, certain, walk)
           node = walk.typing.explicit_super_of(node: node) || node if node.type == :zsuper && walk.typing
-          return Effect.new(kind: :define, node: node, certain: certain) if walk.defines && DefinedMethods.define_call?(node)
+          return Effect.new(kind: :define, node: node, certain: certain, typing: walk.typing) if walk.defines && DefinedMethods.define_call?(node)
 
           if (kind = written_kind(node, walk))
-            Effect.new(kind: kind, node: node, certain: certain)
+            Effect.new(kind: kind, node: node, certain: certain, typing: walk.typing)
           elsif (callee = called_writer(node, walk))
-            Effect.new(kind: :frame, node: node, callee: callee, certain: certain)
+            Effect.new(kind: :frame, node: node, callee: callee, certain: certain, typing: walk.typing)
           end
+        end
+
+        # A block an iteration over a collection the checker knows runs in
+        # place, once per element: each pass is read under the typing it was
+        # checked in. Without a typing, any block of an iteration's name.
+        def iterated(node, flow, certain, walk, &block)
+          body = node.children[2] if node.type == :block
+          return false unless body
+
+          send_node = node.children[0]
+          passes = walk.typing ? walk.typing.pass_typings_of(node: node) : ITERATIONS.include?(send_node.children[1]) && [nil]
+          return false unless passes
+
+          each_effect(send_node, flow, certain, walk, &block)
+          certain &&= !jumps?(body)
+          passes.each do |pass|
+            each_effect(body, pass && Flow.new(pass), certain, pass ? walk.dup.tap { |inner| inner.typing = pass } : walk, &block)
+          end
+          true
+        end
+
+        ITERATIONS = IterationIntrinsics::ENTRIES.keys.map { |key| key.split("#").last.to_sym }.uniq.freeze
+
+        # A pass that may stop early does not reach every statement after the
+        # jump.
+        def jumps?(node)
+          return false unless node.is_a?(Parser::AST::Node)
+          return true if %i[break next return].include?(node.type)
+
+          !DEFERRED.include?(node.type) && node.children.any? { |child| jumps?(child) }
         end
 
         # Which writer a call runs, as the checker resolved it. A constant is

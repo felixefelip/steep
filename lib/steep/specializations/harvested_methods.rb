@@ -157,10 +157,10 @@ module Steep
             next unless effect.certain
 
             if effect.kind == :define
-              key, block = DefinedMethods.definition(typing, effect.node, def_node, arguments)
+              key, block = DefinedMethods.definition(effect.typing, effect.node, def_node, arguments)
               found[key] ||= block if key
             elsif effect.kind == :frame && !reading.include?(effect.callee)
-              entered(typing, effect, reading, found)
+              entered(effect.typing, effect, reading, found)
             end
           end
         end
