@@ -147,10 +147,10 @@ class AccumulatedIvarStateTest < Minitest::Test
 
   def test_readers_of_the_same_names_on_another_class_leave_the_list_known
     ruby = source + "\nclass Catalog\n  def rules = []\n  def singulars = []\nend\n\nclass Dumper\n  def self.dump(catalog) = Kernel.puts(catalog.rules, catalog.singulars)\nend\n"
-    { "::Catalog" => [["def post_ids; []; end"], ["def category_ids; []; end"]], "untyped" => [[nil], [nil]] }.each do |receiver, expected|
+    %w[::Catalog untyped].each do |receiver|
       rbs = RBS + "class Catalog\n  def rules: () -> Array[untyped]\n  def singulars: () -> Array[untyped]\nend\nclass Dumper\n  def self.dump: (#{receiver} catalog) -> untyped\nend\n"
 
-      assert_equal expected, chunks(ruby, rbs: rbs), receiver
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs), receiver
     end
   end
 
@@ -736,6 +736,7 @@ class AccumulatedIvarStateTest < Minitest::Test
     class Other
       def self.ids_of: (Array[Symbol] names) -> Array[String]
       def self.id_name: (Symbol name) -> String
+      def self.untyped_of: (Symbol name) -> untyped
     end
   RBS
 
@@ -744,12 +745,17 @@ class AccumulatedIvarStateTest < Minitest::Test
       class Other
         def self.ids_of(names) = names.map { |name| id_name(name) }
         def self.id_name(name) = "\#{#{call}}_ids"
+        def self.untyped_of(name) = name
       end
     RUBY
   end
 
   def test_a_call_whose_receiver_no_storing_class_can_be_does_not_store
     assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(named_elsewhere("name.to_s.singularize"), rbs: NAMED_ELSEWHERE_RBS)
+  end
+
+  def test_a_call_on_an_untyped_receiver_does_not_store
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(named_elsewhere("untyped_of(name).singularize"), rbs: NAMED_ELSEWHERE_RBS)
   end
 
   def test_declines_a_call_whose_receiver_is_the_storing_class

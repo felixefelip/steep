@@ -50,7 +50,8 @@ module Steep
         end
 
         # Whether `call` may run the method of the project's it names: its
-        # receiver may be a value of a class that defines it.
+        # receiver may be a value of a class that defines it. A receiver typed
+        # `untyped` is taken as none of them.
         def reaches?(constr, call)
           owners = constr.constructor_bindings.owners_of(call.called)
           owners.empty? || owners.any? do |class_name, singleton|
@@ -74,6 +75,8 @@ module Steep
         def elsewhere?(constr, use, target)
           factory = constr.checker.factory
           type = use.at && constr.specializations.receiver_type(use.at, factory: factory) or return false
+          return true if type.is_a?(AST::Types::Any)
+
           target = factory.instance_type(target.name) if target.is_a?(AST::Types::Name::Instance)
           interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: constr.checker, typing: constr.typing, config: constr.builder_config)
           interpreter.type_case_select0(type, target)[0].empty?

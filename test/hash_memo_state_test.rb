@@ -117,10 +117,10 @@ class HashMemoStateTest < Minitest::Test
   def test_a_reader_of_the_same_name_on_another_class_leaves_the_hash_known
     ruby = RUBY + "\nclass Directory\n  def registry = {}\nend\n\nclass Lister\n  def self.dump(directory) = directory.registry.clear\nend\n"
 
-    { "::Directory" => ["def round; end"], "untyped" => [nil] }.each do |receiver, chunk|
+    %w[::Directory untyped].each do |receiver|
       rbs = RBS + "class Directory\n  def registry: () -> Hash[Symbol, Symbol]\nend\nclass Lister\n  def self.dump: (#{receiver} directory) -> untyped\nend\n"
 
-      assert_equal chunk, chunks(ruby, rbs: rbs)["app/app.rb:22:2"], receiver
+      assert_equal ["def round; end"], chunks(ruby, rbs: rbs)["app/app.rb:22:2"], receiver
     end
   end
 
