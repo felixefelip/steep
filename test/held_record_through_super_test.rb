@@ -9,7 +9,7 @@ class HeldRecordThroughSuperTest < Minitest::Test
   include ShellHelper
   include SpecializationsProjectHelper
 
-  def through(super_call)
+  def through(super_call, parent_body = "options.delete(:counter_cache)")
     in_tmpdir do
       write("sig/app.rbs", <<~RBS)
         class Macro
@@ -29,7 +29,7 @@ class HeldRecordThroughSuperTest < Minitest::Test
       write("app/app.rb", <<~RUBY)
         class Macro
           def initialize(options)
-            options.delete(:counter_cache)
+            #{parent_body}
             @klass = options[:anonymous_class]
           end
         end
@@ -69,5 +69,11 @@ class HeldRecordThroughSuperTest < Minitest::Test
 
     assert_equal({ "({  })" => "nil" }, create)
     assert_equal ["({  }) with {@klass: nil}"], parent.keys
+  end
+
+  def test_a_record_changed_after_super_inside_an_argument_of_a_store_on_it_is_followed_through_super
+    create, = through("super\noptions[:query_constraints] = options.delete(:foreign_key)", "options[:through] = :posts")
+
+    assert_equal({ "({  })" => ":posts" }, create)
   end
 end

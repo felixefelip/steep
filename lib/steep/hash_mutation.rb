@@ -473,10 +473,20 @@ module Steep
       end
 
       def entry?(constr, node, entries)
+        entries.include?(called_key(constr, node))
+      end
+
+      # A call on a local holding a record runs the `Hash` method of its name,
+      # known wherever the body asks, before the checker reaches the call or
+      # where it never does: the body has to decide the same everywhere.
+      def called_key(constr, node)
+        receiver = node.children[0]
+        return "::Hash##{node.children[1]}" if receiver&.type == :lvar && constr.context.type_env[receiver.children[0]].is_a?(AST::Types::Record)
+
         call = constr.typing.call_of(node: node)
-        call.is_a?(TypeInference::MethodCall::Typed) && entries.include?(MethodIdentity.key(call))
+        MethodIdentity.key(call) if call.is_a?(TypeInference::MethodCall::Typed)
       rescue Typing::UnknownNodeError
-        false
+        nil
       end
 
       # Each argument node with the slot it fills: its position among the
