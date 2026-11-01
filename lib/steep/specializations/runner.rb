@@ -491,28 +491,32 @@ module Steep
       end
 
       # The union of what each call returned, for each method in `found` whose
-      # every call is answered. Read under the settled findings, which is what
-      # the calls pass once every inner call has specialized.
+      # every call is answered and whose body does not already answer it, under
+      # the declarations and under the settled findings both. The calls are read
+      # under the settled findings, which is what they pass once every inner
+      # call has specialized.
       def call_site_unions(context, store, found, baselines, callees, definitions)
+        typings = Hash.new { |hash, path| hash[path] = type_check(context, store, context.sources.fetch(path), {}) }
         reader = CallSiteUnions::Reader.new(
           store: store, factory: context.subtyping.factory, definitions: definitions,
-          sites: call_site_reader(context, store, callees), check: body_checker(context, store, definitions)
+          sites: call_site_reader(typings, callees), check: body_checker(context, store, definitions)
         )
 
         found.each_key.filter_map do |key|
-          next if Collector.constructor?(key, definitions.fetch(key)[1])
+          path, def_node = definitions.fetch(key)
+          next if Collector.constructor?(key, def_node)
 
           union = reader.union(key) or next
           union = Specializations.rbs_writable(union)
-          [key, union.to_s] unless union.to_s == baselines[key]
+          answer = body_type(typings[path], def_node)
+          [key, union.to_s] unless union.to_s == baselines[key] && answer && union.to_s == Specializations.rbs_writable(answer).to_s
         end.to_h
       end
 
-      def call_site_reader(context, store, callees)
+      def call_site_reader(typings, callees)
         by_path = Hash.new do |hash, path|
           sites = Hash.new { |by_key, key| by_key[key] = [] } #: Hash[String, Array[untyped]]
-          typing = type_check(context, store, context.sources.fetch(path), {})
-          Collector.each_call_site(typing, overrides: @overrides, every_call: true) { |key, arguments, node| sites[key] << [path, node, arguments] }
+          Collector.each_call_site(typings[path], overrides: @overrides, every_call: true) { |key, arguments, node| sites[key] << [path, node, arguments] }
           hash[path] = sites
         end
 
@@ -524,7 +528,7 @@ module Steep
         lambda do |key, arguments|
           checked[[key, arguments]] ||= begin
             path, def_node = definitions.fetch(key)
-            type_check(context, store, context.sources.fetch(path), { node_key(path, def_node, key) => arguments })
+            type_check(context, store, context.sources.fetch(path), { node_key(path, def_node, key) => with_defaults(key, arguments, def_node) })
           end
         end
       end
