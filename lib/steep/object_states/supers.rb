@@ -5,6 +5,7 @@ module Steep
     module Supers
       def self.after(pair, node)
         constr = pair.constr
+        constr.record_vouched_arguments(node.children)
         pair.with(constr: ObjectStates.after_call(constr, node: node, method_name: constr.method_context!.name, receiver: nil, receiver_type: constr.self_type, arguments: node.children))
       end
 

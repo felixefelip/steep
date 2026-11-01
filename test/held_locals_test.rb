@@ -120,12 +120,32 @@ class HeldLocalsTest < Minitest::Test
     RUBY
   end
 
-  def test_a_bare_super_hands_every_parameter_on
-    assert_equal [:r], held(<<~RUBY)
-      def run(param)
+  def test_a_super_hands_each_parameter_on_once
+    assert_equal [:a, :b, :r], held(<<~RUBY)
+      def run(a, b)
         super
+        super(b)
         r = Reflection.new(:a)
         r.name
+      end
+    RUBY
+  end
+
+  def test_a_super_run_later_passing_a_nameless_parameter_or_inside_a_call_mentioning_it
+    assert_equal [], held(<<~RUBY)
+      def run(a)
+        [1].each { super }
+      end
+    RUBY
+    assert_equal [], held(<<~RUBY)
+      def run(a, *)
+        super
+      end
+    RUBY
+    assert_equal [:b], held(<<~RUBY)
+      def run(a, b)
+        Writer.pair(a, super)
+        super(b, a.name)
       end
     RUBY
   end

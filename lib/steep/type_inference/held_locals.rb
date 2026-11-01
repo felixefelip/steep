@@ -15,7 +15,9 @@ module Steep
     # that runs later), or reach it out of order (inside a loop, a `rescue`,
     # or twice in one call).
     class HeldLocals
-      CALLS = %i[send csend].freeze
+      include NodeHelper
+
+      CALLS = %i[send csend super].freeze
       LOOPS = [*LocalReach::REPEATS, :for].freeze
 
       # `reassigned`: the parameters the body assigns
@@ -71,6 +73,7 @@ module Steep
         @assignments = {} #: Hash[Symbol, Array[::Parser::AST::Node]]
         @escaped = Set.new(reach.names) #: Set[Symbol]
         @forwards = false
+        @def_node = def_node
         [args, body].each { |root| walk(root, [], detached: false) { |node, parents, detached| visit(node, parents, detached) } }
 
         parameters = parameters(args)
@@ -89,7 +92,7 @@ module Steep
           reads = (reads_in_arguments(node, parents) unless detached)
           reads ? (@reads[name] ||= []).concat(reads) : @escaped << name
         when :zsuper
-          @forwards = true
+          hand_on_parameters(node, parents, detached)
         end
       end
 
@@ -130,25 +133,43 @@ module Steep
         end
       end
 
+      # A bare `super` hands on every parameter as the local it is there, once
+      # (`NodeHelper#explicit_super`); one that may run later, or passes a
+      # parameter with no name, hands on the frame.
+      def hand_on_parameters(node, parents, detached)
+        return @forwards = true if detached || explicit_super(node, @def_node).nil?
+
+        call = parents.last(3).reverse.find { |parent| CALLS.include?(parent.type) } or return
+        parameters(@def_node.children[@def_node.type == :defs ? 2 : 1]).each { |name| @escaped << name if LocalReach.mentions(call, name).positive? }
+      end
+
       # A keyword argument's value sits two nodes below its call.
       def handed?(node, parents)
         call = parents.last(3).reverse.find { |parent| CALLS.include?(parent.type) } or return false
-        handed = call.children[0].equal?(node) ||
-                 LocalReach.argument_values(call.children.drop(2)).any? { |value| value.equal?(node) }
+        handed = receiver?(call, node) ||
+                 LocalReach.argument_values(arguments_of(call)).any? { |value| value.equal?(node) }
         handed && LocalReach.mentions(call, node.children[0]) == 1
+      end
+
+      def receiver?(call, node)
+        call.type != :super && call.children[0].equal?(node)
+      end
+
+      def arguments_of(call)
+        call.type == :super ? call.children : call.children.drop(2)
       end
 
       # The calls each other mention of `node`'s local in the arguments of the
       # call it is handed to is the receiver of, or nil where one is not.
       def reads_in_arguments(node, parents)
         call = parents.last(3).reverse.find { |parent| CALLS.include?(parent.type) } or return nil
-        return nil unless call.children[0].equal?(node) || LocalReach.argument_values(call.children.drop(2)).any? { |value| value.equal?(node) }
+        return nil unless receiver?(call, node) || LocalReach.argument_values(arguments_of(call)).any? { |value| value.equal?(node) }
 
         reads = [] #: Array[::Parser::AST::Node]
-        call.children.drop(2).each do |argument|
+        arguments_of(call).each do |argument|
           each_mention(argument, node.children[0], nil) do |mention, parent|
             next if mention.equal?(node)
-            return nil unless mention.type == :lvar && parent && CALLS.include?(parent.type) && parent.children[0].equal?(mention)
+            return nil unless mention.type == :lvar && parent && CALLS.include?(parent.type) && receiver?(parent, mention)
 
             reads << parent
           end
