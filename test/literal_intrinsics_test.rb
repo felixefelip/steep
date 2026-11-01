@@ -4,6 +4,28 @@ class LiteralIntrinsicsTest < Minitest::Test
   MethodDecl = Struct.new(:method_name)
   MethodCall = Struct.new(:method_decls)
 
+  def literal(value) = Steep::AST::Types::Literal.new(value: value)
+
+  def string_fold(key, receiver, *arguments)
+    Steep::LiteralIntrinsics.fold(
+      call: MethodCall.new([MethodDecl.new(key)]),
+      receiver_type: literal(receiver),
+      argument_types: arguments.map { |argument| literal(argument) },
+      override_registry: Steep::Project::LiteralMethodRegistry.new
+    )
+  end
+
+  def test_a_string_wider_than_one_literal_is_an_operand
+    wide = "class << self\n#{"def a; end\n" * 8}end"
+
+    assert_equal literal(wide.tr("\n", ";")), string_fold("::String#tr", wide, "\n", ";")
+  end
+
+  def test_a_wide_string_still_does_not_compute_a_wider_one
+    assert_nil string_fold("::String#*", "a" * 80, 2)
+    assert_nil string_fold("::String#+", "a" * 80, "b")
+  end
+
   def test_unexpected_fold_failure_is_logged_and_declined
     method = Object.new
     method.define_singleton_method(:source_location) { nil }
