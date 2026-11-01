@@ -175,9 +175,11 @@ class ReflectionIntrinsicsTest < Minitest::Test
     refute registry.blocked?("::Kernel#singleton_class")
   end
 
-  def const_set_fold(value, name: :Gen)
+  def const_set_fold(value, name: :Gen, exact: false)
     with_factory({ "probe.rbs" => "class ProbeBase\nend\nmodule ProbeBase::Gen\nend\nclass ProbeBase::Kls\nend\n" }, nostdlib: false) do |factory|
-      argument_types = [Steep::AST::Types::Literal.new(value: name), Steep::AST::Types::Name::Instance.new(name: RBS::TypeName.parse(value), args: [])]
+      instance = Steep::AST::Types::Name::Instance.new(name: RBS::TypeName.parse(value), args: [])
+      instance = Steep::AST::Types::ObjectState.new(back_type: instance, ivars: {}) if exact
+      argument_types = [Steep::AST::Types::Literal.new(value: name), instance]
       return fold("::Module#const_set", singleton("::ProbeBase"), Registry.new, factory, argument_types: argument_types)
     end
   end
@@ -185,6 +187,10 @@ class ReflectionIntrinsicsTest < Minitest::Test
   def test_const_set_answers_the_module_the_signatures_declare_under_that_name
     assert_equal singleton("::ProbeBase::Gen"), const_set_fold("::Module")
     assert_equal singleton("::ProbeBase::Kls"), const_set_fold("::Class", name: :Kls)
+  end
+
+  def test_const_set_reads_an_exact_module_as_the_module_it_is
+    assert_equal singleton("::ProbeBase::Gen"), const_set_fold("::Module", exact: true)
   end
 
   def test_const_set_declines_a_name_declared_as_another_kind_or_not_at_all

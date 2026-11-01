@@ -5709,7 +5709,7 @@ module Steep
         override_registry: literal_method_registry
       ) || StringEvalIntrinsics.fold(self, call: call, receiver_type: receiver_type, argument_types: argument_types) or return call
 
-      return call unless check_relation(sub_type: type, super_type: declared_return_type).success?
+      return call unless check_relation(sub_type: type, super_type: ObjectStates.state_in(declared_return_type)&.back_type || declared_return_type).success?
 
       call.with_return_type(type)
     end
