@@ -421,7 +421,7 @@ class SpecializationsObjectStateTest < Minitest::Test
   # Only a receiver that may be a `P13Reflection`, in any target that checks
   # it, counts against the reflection's `options`, `self` included; a reader
   # on another class that answers it counts by what that reader's own
-  # receivers may be.
+  # receivers may be. A receiver typed `untyped` is none of them.
   def test_a_use_whose_receiver_is_another_class_does_not_count_against_the_reader
     union = "(singleton(::P13Through) | singleton(::P13Plain))"
     leak = "Kernel.puts(status.options)"
@@ -430,8 +430,8 @@ class SpecializationsObjectStateTest < Minitest::Test
       [%w[P13Status P13Status], leak] => "singleton(::P13Through)",
       [["p13_status"], leak] => "singleton(::P13Through)",
       [["P13Status?"], "Kernel.puts(status&.options)"] => "singleton(::P13Through)",
-      [["untyped"], leak] => union,
-      [%w[P13Status untyped], leak] => union,
+      [["untyped"], leak] => "singleton(::P13Through)",
+      [%w[P13Status untyped], leak] => "singleton(::P13Through)",
       [["P13Tagged"], leak] => union,
       [["P13Holder"], "status.held.delete(:through)"] => union,
       [["P13Status"], leak, "def copy = itself.options.delete(:through)"] => union
