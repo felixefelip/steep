@@ -143,6 +143,41 @@ class CallSiteUnionsTest < Minitest::Test
     assert_equal({ "Tags.tag" => '"a!"', "Tags.labelled" => '"a!"' }, declarations(rbs, ruby))
   end
 
+  def test_a_method_whose_body_answers_more_under_the_findings_than_under_the_declarations_is_declared
+    rbs = <<~RBS
+      class Many
+        @name: Symbol
+        def initialize: (Symbol name) -> void
+      end
+      class Through
+      end
+      class Reflection
+        def self.create: (Hash[Symbol, untyped] options, :c name) -> Many
+      end
+      class Builder
+        def self.reflect: (:c name, Hash[Symbol, untyped] options) -> untyped
+      end
+    RBS
+    ruby = <<~'RUBY'
+      class Many
+        def initialize(name)
+          @name = name
+        end
+      end
+      class Through
+      end
+      class Reflection
+        def self.create(options, name) = options[:through] ? Through.new : Many.new(name)
+      end
+      class Builder
+        def self.reflect(name, options) = Reflection.create(options, name)
+        reflect :c, {}
+      end
+    RUBY
+
+    assert_equal "::Many", declarations(rbs, ruby)["Builder.reflect"]
+  end
+
   WRITER_RBS = <<~RBS
     module Writer
       def self.generate: (singleton(Peel) owner, (:human_name | :nick) method) -> untyped
