@@ -296,4 +296,12 @@ class HarvestedMethodsTest < Minitest::Test
       assert_equal ["Base#__store"], defined_keys(base_ruby: base_ruby, store_rbs: "def self.def_store: (Symbol name, untyped value) -> untyped")
     end
   end
+
+  def test_a_define_method_reached_once_per_element_of_an_each_defines_each_method
+    in_tmpdir do
+      base_ruby = "def self.pluralize = 1\n  def self.stores(*names)\n    names.each { |name| Attr.redefine(self, name, 1) }\n  end\n  stores(:__store, :__other)"
+
+      assert_equal ["Base.__other", "Base.__store"], defined_keys(base_ruby: base_ruby, store_rbs: "def self.stores: (*Symbol names) -> untyped").sort
+    end
+  end
 end

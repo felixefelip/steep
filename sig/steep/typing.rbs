@@ -79,7 +79,7 @@ module Steep
 
     attr_reader explicit_supers: Hash[Parser::AST::Node, Parser::AST::Node]
 
-    attr_reader pass_typings: Array[Typing]
+    attr_reader pass_typings: Hash[Parser::AST::Node, Array[Typing]]
 
     attr_reader vouched: Hash[Parser::AST::Node, AST::Types::t]
 
@@ -129,7 +129,9 @@ module Steep
 
     def add_explicit_super: (Parser::AST::Node zsuper, Parser::AST::Node super_node) -> void
 
-    def add_pass_typing: (Typing typing) -> void
+    def add_pass_typing: (Parser::AST::Node node, Typing typing) -> void
+
+    def pass_typings_of: (node: Parser::AST::Node) -> Array[Typing]?
 
     def explicit_super_of: (node: Parser::AST::Node) -> Parser::AST::Node?
 

@@ -575,19 +575,18 @@ module Steep
       typing.add_nominal(node, declared_return_type)
     end
 
-    # Checks the body of an `each` that `Accumulators` counted once per element
-    # of its receiver, with the parameter bound to that element and the env the
-    # pass before it left, and keeps what each pass pushes — and which arm of
-    # every conditional it pushes under the pass took. Every pass runs in a
-    # typing of its own that is never saved: the program's typing of the body
-    # is the ordinary one, and a pass is only asked for what it pushed.
+    # Checks the body of an `each` once per element of its receiver, with the
+    # parameter bound to that element and the env the pass before it left. Keeps
+    # each pass's typing (`Typing#pass_typings`, never saved into the program's)
+    # and, for a loop `Accumulators` counted, what each pass pushes — and which
+    # arm of every conditional it pushes under the pass took.
     #
     # Declined — the loop left unexpanded, so the local has no contents — unless
     # the call is Array's own `each`, unreplaced by the project, over a
     # collection whose length the receiver's type states.
     def record_iterations(node, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
-      entries = source.accumulators.loops[node] or return
-      typing.add_iterations(node, nil)
+      entries = source.accumulators.loops[node]
+      typing.add_iterations(node, nil) if entries
 
       intrinsic = iteration_intrinsic(decls)
       return unless intrinsic&.collect == :each
@@ -595,13 +594,7 @@ module Steep
       param = block_params.params.first
       return unless block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
 
-      # A local `Accumulators` vouches for is read where the loop starts; any
-      # other receiver has to be a collection written out here.
-      collection = accumulated_type(node.children[0]) ||
-                   literal_operand_type(node.children[0].children[0], receiver_type)
-      return unless collection.is_a?(AST::Types::Tuple)
-      # Each pass is a check of the whole body, so the bound is on the work.
-      return if collection.types.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
+      collection = iterated_collection(node.children[0], receiver_type) or return
 
       # Each pass starts where the one before it left off, as it does when the
       # loop runs: a local of the method written in the body, or an ivar, is
@@ -625,12 +618,13 @@ module Steep
         # A pass that cannot finish is the last one that runs, and the count
         # is of every element.
         return if body_type.is_a?(AST::Types::Bot)
+        typing.add_pass_typing(node, pass.typing)
 
         exit_env = pass_context.type_env
         env = exit_env.update(local_variable_types: exit_env.local_variable_types.slice(*carried))
 
         record = {}.compare_by_identity #: Typing::iteration_pass
-        Accumulators.each_entry(entries) do |value|
+        Accumulators.each_entry(entries || []) do |value|
           case value
           when Accumulators::Branch
             record[value.node] = pass.typing.arm_of(node: value.node)
@@ -643,7 +637,7 @@ module Steep
         record
       end
 
-      typing.add_iterations(node, passes)
+      typing.add_iterations(node, passes) if entries
     end
 
     # The entry of `IterationIntrinsics` a block call resolved to, or nil.
@@ -690,7 +684,7 @@ module Steep
           .with_new_typing(typing.new_child)
           .update_type_env { |env| env.refine_types(local_variable_types: bindings) }
         type, _ = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
-        typing.add_pass_typing(pass.typing)
+        typing.add_pass_typing(node, pass.typing)
         type
       end
 

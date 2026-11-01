@@ -240,8 +240,9 @@ module Steep
     attr_reader :dead_clauses
     # The `super(...)` each bare `super` was typed as.
     attr_reader :explicit_supers
-    # The checks of a block run once per known element
-    # (`TypeConstruction#iterated_value`), whose calls are call sites too.
+    # The checks of a block run once per known element, by the block node
+    # (`TypeConstruction#iterated_value`, `#record_iterations`): its calls are
+    # call sites too, and what it writes is written once per element.
     attr_reader :pass_typings
     attr_reader :source_index
     attr_reader :cursor_context
@@ -279,7 +280,7 @@ module Steep
       (@block_exits = {}).compare_by_identity
       (@dead_clauses = {}).compare_by_identity
       (@explicit_supers = {}).compare_by_identity
-      @pass_typings = [] #: Array[Typing]
+      (@pass_typings = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -384,8 +385,12 @@ module Steep
       dead_clauses[node] = true
     end
 
-    def add_pass_typing(typing)
-      pass_typings << typing
+    def add_pass_typing(node, typing)
+      (pass_typings[node] ||= []) << typing
+    end
+
+    def pass_typings_of(node:)
+      pass_typings.fetch(node) { parent&.pass_typings_of(node: node) }
     end
 
     def add_explicit_super(zsuper, super_node)
@@ -584,7 +589,7 @@ module Steep
       parent.jump_envs.merge!(jump_envs)
       parent.dead_clauses.merge!(dead_clauses)
       parent.explicit_supers.merge!(explicit_supers)
-      parent.pass_typings.concat(pass_typings)
+      parent.pass_typings.merge!(pass_typings)
 
       errors.each do |error|
         parent.add_error error

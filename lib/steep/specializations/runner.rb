@@ -295,13 +295,13 @@ module Steep
       # writer that reaches itself is read once.
       def eval_sources(context, store, typing, def_node, definitions, writers, reading, self_target = nil)
         Evals.effects(typing, def_node, writers, overrides: @overrides).flat_map do |effect|
-          next [Evals.chunk_of(typing, effect, context.subtyping.factory.env, self_target)] unless effect.kind == :frame
+          next [Evals.chunk_of(effect.typing, effect, context.subtyping.factory.env, self_target)] unless effect.kind == :frame
           # Code is written there and this call site does not decide what: a
           # hole, the same answer an eval it cannot fold gets.
           next [nil] unless effect.certain
           next [] if reading.include?(effect.callee)
 
-          frame_sources(context, store, typing, effect, definitions, writers, reading, self_target)
+          frame_sources(context, store, effect.typing, effect, definitions, writers, reading, self_target)
         end
       end
 

@@ -29,7 +29,7 @@ Project/ClassLengthCeiling:
   CountAsOne: ["array", "hash", "heredoc", "method_call"]
   Max: 400
   Ceilings:
-    "lib/steep/type_construction.rb": 3805
+    "lib/steep/type_construction.rb": 3803
     "lib/steep/postconditions/inferrer.rb": 1046
     "lib/steep/subtyping/check.rb": 963
     "lib/steep/type_inference/logic_type_interpreter.rb": 759
