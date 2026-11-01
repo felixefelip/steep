@@ -77,10 +77,22 @@ class HeldLocalsTest < Minitest::Test
     RUBY
     locals = held_locals(def_node)
 
-    assert_equal [:a, :d], %i[a b c d].select { |name| locals.held_but_for_reads?(name) }
-    assert_equal [[:a, :[]]], locals.reads(:a).map { |call| [call.children[0].children[0], call.children[1]] }
-    assert_equal [:bar, :baz], locals.reads(:d).map { |call| call.children[1] }
+    assert_equal [:a, :d], %i[a b c d].select { |name| locals.held_but_for_calls_on_it?(name) }
+    assert_equal [[:a, :[]]], locals.calls_on_it(:a).map { |call| [call.children[0].children[0], call.children[1]] }
+    assert_equal [:bar, :baz], locals.calls_on_it(:d).map { |call| call.children[1] }
+    assert locals.calls_on_it(:d).all? { |call| locals.before_a_call_on_it?(call) }
     refute %i[a b c d].any? { |name| locals.held?(name) }
+  end
+
+  def test_a_call_inside_an_argument_of_a_call_it_is_handed_to
+    locals = held_locals(parse(<<~RUBY))
+      def run(a)
+        Writer.pair(a, a.delete(:x))
+      end
+    RUBY
+
+    assert locals.held_but_for_calls_on_it?(:a)
+    refute locals.before_a_call_on_it?(locals.calls_on_it(:a).first)
   end
 
   def test_inside_a_block_a_loop_or_a_rescue

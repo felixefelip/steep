@@ -66,6 +66,7 @@ module Steep
 
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         keys = hash_method_keys(constr, method_name, private: private)
+        receiver_type = left_by_arguments(constr, receiver) || receiver_type
         answer = queried(constr, node, receiver_type, keys, arguments) and return answer
         return read_union(constr, node, receiver_type, keys, arguments, type: type) if record_union?(receiver_type)
         memo = held_ivar(constr, receiver, receiver_type)
@@ -86,6 +87,15 @@ module Steep
         return [type, constr] unless memo && CollectionMutation.only?(constr, keys, STORES)
 
         stored_in_memo(constr, receiver, receiver_type, memo, arguments, type)
+      end
+
+      # The record a local followed through a write made inside an argument of
+      # a call on it holds as the call runs (`HeldLocals#before_a_call_on_it?`).
+      def left_by_arguments(constr, receiver)
+        return unless receiver.type == :lvar && followed_local?(constr, receiver.children[0])
+
+        type = constr.context.type_env[receiver.children[0]]
+        type if type.is_a?(AST::Types::Record)
       end
 
       def record_union?(type)
@@ -449,21 +459,34 @@ module Steep
         held_local?(constr, name) && (!constr.specialization_arguments(def_node).nil? || held.written_hash?(name))
       end
 
-      # A local nothing else names (`HeldLocals#held?`), or one only read
-      # again inside an argument of a call on it, by calls the checker typed
-      # as reads.
+      # A local nothing else names (`HeldLocals#held?`), or one named again
+      # inside an argument of a call it is handed to, by calls the checker
+      # typed as reads, or as writes made before a call on it, which
+      # `fold_in_place` reads the local's record after.
       def held_local?(constr, name)
         held = constr.method_context&.held_locals or return false
         return true if held.held?(name)
 
-        held.held_but_for_reads?(name) && held.reads(name).all? { |node| read_call?(constr, node) }
+        held.held_but_for_calls_on_it?(name) && held.calls_on_it(name).all? do |node|
+          entry?(constr, node, READS) || (held.before_a_call_on_it?(node) && entry?(constr, node, WRITES))
+        end
       end
 
-      def read_call?(constr, node)
+      def entry?(constr, node, entries)
+        entries.include?(called_key(constr, node))
+      end
+
+      # A call on a local holding a record runs the `Hash` method of its name,
+      # known wherever the body asks, before the checker reaches the call or
+      # where it never does: the body has to decide the same everywhere.
+      def called_key(constr, node)
+        receiver = node.children[0]
+        return "::Hash##{node.children[1]}" if receiver&.type == :lvar && constr.context.type_env[receiver.children[0]].is_a?(AST::Types::Record)
+
         call = constr.typing.call_of(node: node)
-        call.is_a?(TypeInference::MethodCall::Typed) && READS.include?(MethodIdentity.key(call))
+        MethodIdentity.key(call) if call.is_a?(TypeInference::MethodCall::Typed)
       rescue Typing::UnknownNodeError
-        false
+        nil
       end
 
       # Each argument node with the slot it fills: its position among the

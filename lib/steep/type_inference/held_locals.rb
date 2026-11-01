@@ -30,6 +30,7 @@ module Steep
         @names = Set[] #: Set[Symbol]
         @reading = Set[] #: Set[Symbol]
         @reads = {} #: Hash[Symbol, Array[::Parser::AST::Node]]
+        @before_calls_on_it = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @values = {}.compare_by_identity #: Hash[::Parser::AST::Node, Symbol]
         @reassigned = reassigned
         analyze(def_node) if def_node
@@ -43,19 +44,27 @@ module Steep
         @names.include?(@values[node])
       end
 
-      # Whether `name` is held but for the calls `reads` lists, made on it
-      # inside an argument of a call on it, before that call runs:
+      # Whether `name` is held but for the calls `calls_on_it` lists, made on
+      # it inside an argument of a call it is handed to, before that call runs:
       #
       #   options[:extend] = [*options[:extend], extension]
+      #   options[:query_constraints] = options.delete(:foreign_key)
       #
-      # Held where each is a call that leaves the object as it found it, which
-      # only the checker can tell.
-      def held_but_for_reads?(name)
+      # Held where each leaves the object as it found it, or changes it before
+      # a call made on it (`before_a_call_on_it?`), which only the checker can
+      # tell.
+      def held_but_for_calls_on_it?(name)
         @reading.include?(name)
       end
 
-      def reads(name)
+      def calls_on_it(name)
         @reads.fetch(name, [])
+      end
+
+      # Whether `call` runs inside an argument of a call made on the same
+      # local, which reaches the object as `call` left it.
+      def before_a_call_on_it?(call)
+        @before_calls_on_it.include?(call)
       end
 
       # Whether the local `name` is assigned a hash written there.
@@ -174,7 +183,10 @@ module Steep
             reads << parent
           end
         end
-        reads unless reads.empty?
+        return nil if reads.empty?
+
+        @before_calls_on_it.merge(reads) if receiver?(call, node)
+        reads
       end
 
       def each_mention(node, name, parent, &block)
