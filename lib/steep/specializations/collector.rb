@@ -78,6 +78,7 @@ module Steep
         each_call(typing, every_call) do |node, call|
           runs = overrides.runs(call, node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node))
           arguments = runs && call_node?(node) && Arguments.recorded(node, typing)
+          node = written_super(typing, node)
           next runs.each_key { |key| yield key, arguments, node } if arguments
           next unless every_call && call.respond_to?(:method_decls)
 
@@ -100,8 +101,16 @@ module Steep
         end
       end
 
+      # A bare `super` is checked as the explicit one it stands for
+      # (`TypeConstruction#explicit_super`), built anew by each check: the
+      # `zsuper` the source writes is what names the call from one check to the
+      # next.
+      def self.written_super(typing, node)
+        node.type == :super && typing.explicit_supers.key(node) || node
+      end
+
       def self.call_node?(node)
-        node.type == :send || Accumulators::LAMBDA_BODIES.include?(node.type)
+        %i[send super].include?(node.type) || Accumulators::LAMBDA_BODIES.include?(node.type)
       end
 
       # A default that reads a parameter written before it: what that parameter

@@ -290,4 +290,46 @@ class CallSiteUnionsTest < Minitest::Test
       end
     end
   end
+
+  def built(assoc_body)
+    declarations(<<~RBS, <<~RUBY)["Label.text"]
+      class Label
+        def self.text: (Symbol name) -> Symbol
+      end
+      class Macro
+        def initialize: (Symbol name) -> void
+      end
+      class Assoc < Macro
+        def initialize: (Symbol name) -> void
+      end
+    RBS
+      class Label
+        def self.text(name) = name
+      end
+
+      class Macro
+        def initialize(name)
+          @text = Label.text(name)
+        end
+      end
+
+      class Assoc < Macro
+        #{assoc_body}
+      end
+
+      Assoc.new(:comments)
+    RUBY
+  end
+
+  def test_a_call_in_an_initialize_is_read_under_each_new_that_runs_it
+    assert_equal ":comments", built("")&.to_s
+  end
+
+  def test_a_call_in_an_initialize_is_read_under_each_super_that_reaches_it
+    assert_equal ":comments", built("def initialize(name)\n    super(name)\n  end")&.to_s
+  end
+
+  def test_a_call_in_an_initialize_is_read_under_each_bare_super_that_reaches_it
+    assert_equal ":comments", built("def initialize(name)\n    super\n  end")&.to_s
+  end
 end

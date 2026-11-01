@@ -460,6 +460,7 @@ module Steep
       # The arguments of the call recorded at `node`, keyed under what the
       # checker knew there.
       def self.recorded(node, typing)
+        node = typing.explicit_super_of(node: node) or return nil if node.type == :zsuper
         call = typing.call_of(node: node)
         from_send(
           node, typing, call: call,
