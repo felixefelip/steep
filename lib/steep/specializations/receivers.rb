@@ -38,8 +38,9 @@ module Steep
         end
 
         # The uses of `name` whose receiver may be a value of `target`.
-        def uses_on(constr, name, target)
-          constr.constructor_bindings.uses_of(name).reject { |use| elsewhere?(constr, use, target) }
+        def uses_on(constr, name, target, every: false)
+          registry = constr.constructor_bindings
+          (every ? registry.every_use_of(name) : registry.uses_of(name)).reject { |use| elsewhere?(constr, use, target) }
         end
 
         # The calls of `name` whose receiver may be a value of `target`

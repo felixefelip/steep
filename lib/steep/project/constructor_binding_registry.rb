@@ -182,6 +182,14 @@ module Steep
         @uses.fetch(name.to_sym, [])
       end
 
+      # `uses_of`, for a reader it does not index too, and what forwards one:
+      # indexed apart, so what `uses_of` answers, and how it records a use of
+      # another name made through this one, stay as they were.
+      def every_use_of(name)
+        index_uses unless @uses
+        @uses[name.to_sym] || @reader_uses.fetch(name.to_sym, [])
+      end
+
       # Every name `uses_of` answers for, and every one `calls_of` does.
       def used_names
         index_uses unless @uses
@@ -354,16 +362,26 @@ module Steep
         @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
         names.merge(keyed_memo_names)
         @uses = uses_by_name(names)
+        @reader_uses = uses_by_name(reader_names - names)
         calls_named(keyed_memo_names)
         @hash_memos = hashes.to_set
         @forwarded_stores = forwarded_stores
         scan_closures(hashes)
         @initializing = initializing_methods
+        index_block_calls
+      end
+
+      def index_block_calls
         yielders = @uses.each_value.flat_map { |uses| uses.select { |use| use.kind == :yielded }.map(&:called) }.to_set
         @block_calls = {}
         @nodes.each do |node|
           TypeInference::ClassMemoAnalyzer.block_calls(node, names: yielders).each { |name, kinds| (@block_calls[name] ||= []).concat(kinds) }
         end
+      end
+
+      # Every method a class body defines as a reader of an ivar (`Body#returns`).
+      def reader_names
+        @methods.each_value.flat_map { |methods| methods.select { |_, bodies| bodies.any? { |body| body&.returns } }.keys }.to_set
       end
 
       def scan_closures(hashes)

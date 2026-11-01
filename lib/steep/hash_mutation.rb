@@ -162,9 +162,12 @@ module Steep
         return constr if handed.empty?
 
         call = ObjectStates.recorded_call(constr, node)
-        exits = ObjectStates.exit_of(constr, node, under: :hands_records?)&.params unless taken?(constr, node) && call && record_in?(call.return_type)
+        kept = constr.method_context&.value_uses&.kept_in(node)
+        exits = ObjectStates.exit_of(constr, node, under: :hands_records?)&.params unless !kept && taken?(constr, node) && call && record_in?(call.return_type)
         handed.reduce(constr) do |current, (slot, argument)|
-          ObjectStates.refine_local(current, argument.children[0], exits&.[](slot) || unknown_contents(current, argument))
+          left = exits&.[](slot)
+          left = kept_in_ivar(current, kept, left) if left && kept
+          ObjectStates.refine_local(current, argument.children[0], left || unknown_contents(current, argument))
         end
       end
 
@@ -192,7 +195,7 @@ module Steep
       def held(constr, instance, ivar, record, followed:)
         return unless record.is_a?(AST::Types::Record) && record.elements.each_value.all? { |value| record_value?(value) }
 
-        writes = writes_to(constr, instance, ivar) or return
+        writes = writes_to(constr, instance, ivar, kept: false) or return
         return record if followed
 
         value = declared_value(constr, instance, ivar)
@@ -205,16 +208,20 @@ module Steep
       # of either only reads the hash. Nil otherwise. A method its class body
       # may not define makes what its body does where it is; an alias of a
       # body the source defines, what that body makes under its own name.
-      def writes_to(constr, instance, ivar)
+      # With `kept`, for a hash a local holds too: the writes the methods that
+      # run while an object is built make as well, which may assign `ivar`,
+      # and those made through every use of a reader.
+      def writes_to(constr, instance, ivar, kept:)
         registry = constr.constructor_bindings
         writes = [] #: Array[TypeInference::ClassMemoAnalyzer::Use]
         ancestors = constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors
         ancestors.each_with_index do |ancestor, index|
           registry.possible_bodies(ancestor.name.to_s).each do |name, bodies|
-            next if Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name) || copies_source_body?(registry, ancestors.drop(index), name)
+            initializing = Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name)
+            next if (initializing && !kept) || copies_source_body?(registry, ancestors.drop(index), name)
 
             bodies.each do |body|
-              made = body_writes(constr, instance, ivar, name, body) or return
+              made = body_writes(constr, instance, ivar, name, body, kept: kept, assigns: initializing) or return
               writes.concat(made)
             end
           end
@@ -229,17 +236,17 @@ module Steep
         !ObjectStates.defining_ancestor(registry, ancestors, copied).nil?
       end
 
-      def body_writes(constr, instance, ivar, name, body)
+      def body_writes(constr, instance, ivar, name, body, kept:, assigns:)
         return unless body
         if body.returns == ivar
-          return reader_writes(constr, Specializations::Receivers.uses_on(constr, name, instance), name)
+          return reader_writes(constr, Specializations::Receivers.uses_on(constr, name, instance, every: kept), name, every: kept)
         end
-        return if body.handed.include?(ivar) || body.writes.include?(ivar)
+        return if body.handed.include?(ivar) || (body.writes.include?(ivar) && !assigns)
 
         literal_methods = constr.literal_method_registry
         own = body.ivar_uses.fetch(ivar, [])
         return unless own.all? { |use| use.kind != :yielded && use_within?(literal_methods, use, [*READS, *WRITES]) }
-        return if body.exposes_self_besides_return && !own.all? { |use| reading_use?(constr, use) }
+        return if body.exposes_self_besides_return && !own.all? { |use| reading_use?(constr, use, every: kept) }
 
         own.select { |use| use_within?(literal_methods, use, WRITES) }
       end
@@ -278,8 +285,12 @@ module Steep
 
       # What a block is handed out of a hash a state follows is a value nothing
       # can change the class of (`record_value?`).
-      def reading_use?(constr, use, forwarders = Set[])
-        return reading_uses?(constr, constr.constructor_bindings.uses_of(use.forwarded_by), use.forwarded_by, forwarders) if use.forwarded_by
+      def reading_use?(constr, use, forwarders = Set[], every: false)
+        if use.forwarded_by
+          registry = constr.constructor_bindings
+          uses = every ? registry.every_use_of(use.forwarded_by) : registry.uses_of(use.forwarded_by)
+          return reading_uses?(constr, uses, use.forwarded_by, forwarders, every: every)
+        end
 
         use.kind != :yielded && use_within?(constr.literal_method_registry, use, READS, elements: true)
       end
@@ -288,9 +299,9 @@ module Steep
       # only reads the hash: on the local that holds the object, or an ivar the
       # body holds, `written_through` moves its state, and on any other object
       # they are among what `held` widens it by.
-      def reader_writes(constr, uses, name)
+      def reader_writes(constr, uses, name, every:)
         writes = uses.select { |use| use.at && use.direct && use_within?(constr.literal_method_registry, use, WRITES) }
-        writes if reading_uses?(constr, uses - writes, name)
+        writes if reading_uses?(constr, uses - writes, name, every: every)
       end
 
       # `record` where the write `use` may or may not have run: the key it
@@ -316,10 +327,10 @@ module Steep
       # A method that answers what a reader does is a reader too, whatever
       # class it is on. One already being checked has its other uses checked
       # there.
-      def reading_uses?(constr, uses, name, forwarders = Set[])
+      def reading_uses?(constr, uses, name, forwarders = Set[], every: false)
         return true if forwarders.include?(name)
 
-        uses.all? { |use| reading_use?(constr, use, forwarders | [name]) }
+        uses.all? { |use| reading_use?(constr, use, forwarders | [name], every: every) }
       end
 
       def use_within?(literal_methods, use, allowed, elements: false)
@@ -459,13 +470,14 @@ module Steep
         held_local?(constr, name) && (!constr.specialization_arguments(def_node).nil? || held.written_hash?(name))
       end
 
-      # A local nothing else names (`HeldLocals#held?`), or one named again
+      # A local nothing else names up to its return
+      # (`HeldLocals#held_up_to_its_return?`), or one named again
       # inside an argument of a call it is handed to, by calls the checker
       # typed as reads, or as writes made before a call on it, which
       # `fold_in_place` reads the local's record after.
       def held_local?(constr, name)
         held = constr.method_context&.held_locals or return false
-        return true if held.held?(name)
+        return true if held.held_up_to_its_return?(name)
 
         held.held_but_for_calls_on_it?(name) && held.calls_on_it(name).all? do |node|
           entry?(constr, node, READS) || (held.before_a_call_on_it?(node) && entry?(constr, node, WRITES))

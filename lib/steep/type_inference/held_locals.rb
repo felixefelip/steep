@@ -32,12 +32,21 @@ module Steep
         @reads = {} #: Hash[Symbol, Array[::Parser::AST::Node]]
         @before_calls_on_it = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @values = {}.compare_by_identity #: Hash[::Parser::AST::Node, Symbol]
+        @returned_parameters = Set[] #: Set[Symbol]
         @reassigned = reassigned
         analyze(def_node) if def_node
       end
 
       def held?(name)
         @names.include?(name)
+      end
+
+      # `held?`, but for a parameter that is also a value the body returns, as
+      # its last mention: the caller gets the object back under a second name,
+      # which `HashMutation.handed_back` accounts for a record and nothing does
+      # for an object's state.
+      def held_up_to_its_return?(name)
+        held?(name) || @returned_parameters.include?(name)
       end
 
       def held_value?(node)
@@ -83,10 +92,16 @@ module Steep
         @escaped = Set.new(reach.names) #: Set[Symbol]
         @forwards = false
         @def_node = def_node
+        @returned = Set[].compare_by_identity #: Set[::Parser::AST::Node]
+        Accumulators::ReturnedValues.each_value(body) { |node| @returned << node if node.type == :lvar }
+        @returned_names = Set[] #: Set[Symbol]
         [args, body].each { |root| walk(root, [], detached: false) { |node, parents, detached| visit(node, parents, detached) } }
 
         parameters = parameters(args)
+        @escaped.merge(@returned_names - parameters)
         register(parameters, @assignments, @forwards ? @escaped | parameters : @escaped)
+        @returned_parameters = @names & @returned_names
+        @names -= @returned_parameters
       end
 
       def visit(node, parents, detached)
@@ -97,6 +112,7 @@ module Steep
         when :lvar
           name = node.children[0]
           return if !detached && handed?(node, parents)
+          return @returned_names << name if !detached && @returned.include?(node)
 
           reads = (reads_in_arguments(node, parents) unless detached)
           reads ? (@reads[name] ||= []).concat(reads) : @escaped << name
