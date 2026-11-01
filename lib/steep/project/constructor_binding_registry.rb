@@ -304,6 +304,7 @@ module Steep
         ingest_constants(node, content)
         @nodes << node
         @uses = nil
+        @defs_by_name = nil
         @defined_names = nil
         @keyed_memo_names = nil
       rescue StandardError, ::Parser::SyntaxError => e
@@ -322,9 +323,48 @@ module Steep
           @nodes.each do |node|
             TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (found[name] ||= []).concat(uses) }
           end
+          found.each_value { |uses| hand_on(uses) }
           names = found.each_value.flat_map { |uses| uses.flat_map { |use| use.enum_for(:each_forwarder).to_a } }.to_set - indexed
         end
         found
+      end
+
+      # Fills each `handed_to` among `uses` with what every body of a method of
+      # that name does with that parameter. One the program defines no body
+      # for, or whose parameters do not say which one it is, stays the escape.
+      def hand_on(uses, handing = Set[])
+        uses.each do |use|
+          hand_on(use.value, handing) if use.value
+          next unless use.handed_to && use.handed.nil? && !use.frozen?
+
+          use.handed = handed_uses(*use.handed_to, handing)
+        end
+      end
+
+      def handed_uses(method_name, index, handing)
+        return [] if handing.include?([method_name, index])
+
+        defs = defs_named(method_name)
+        return if defs.empty?
+
+        defs.flat_map do |def_node|
+          uses = TypeInference::ClassMemoAnalyzer.parameter_uses(def_node, index) or return
+          hand_on(uses, handing | [[method_name, index]])
+          uses
+        end
+      end
+
+      def defs_named(method_name)
+        @defs_by_name ||= @nodes.each_with_object(Hash.new { |by_name, name| by_name[name] = [] }) { |node, by_name| collect_defs(node, by_name) }
+        @defs_by_name.fetch(method_name, [])
+      end
+
+      def collect_defs(node, by_name)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        by_name[node.children[0]] << node if node.type == :def
+        by_name[node.children[1]] << node if node.type == :defs
+        node.children.each { |child| collect_defs(child, by_name) }
       end
 
       # The tables `ingest_methods` merges each scan's methods into.
