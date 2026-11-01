@@ -66,6 +66,23 @@ class HeldLocalsTest < Minitest::Test
     RUBY
   end
 
+  def test_held_but_for_calls_on_it_inside_an_argument_of_a_call_on_it
+    def_node = parse(<<~RUBY)
+      def run(a, b, c, d)
+        a[:extend] = [*a[:extend], 1]
+        b.foo(b)
+        c.foo([c])
+        d.foo(d.bar, d.baz(1))
+      end
+    RUBY
+    locals = held_locals(def_node)
+
+    assert_equal [:a, :d], %i[a b c d].select { |name| locals.held_but_for_reads?(name) }
+    assert_equal [[:a, :[]]], locals.reads(:a).map { |call| [call.children[0].children[0], call.children[1]] }
+    assert_equal [:bar, :baz], locals.reads(:d).map { |call| call.children[1] }
+    refute %i[a b c d].any? { |name| locals.held?(name) }
+  end
+
   def test_inside_a_block_a_loop_or_a_rescue
     assert_equal [:r], held(<<~RUBY)
       def run(a, b, c)

@@ -167,7 +167,7 @@ module Steep
         slots = arguments.positionals.each_with_index.map { |type, index| [index, positional[index], type] } +
                 arguments.keywords.map { |name, type| [name, (name if keyword.include?(name)), type] }
         slots.each_with_object({}) do |(slot, name, arrived), exits|
-          next unless name && arrived.is_a?(AST::Types::Record) && held.held?(name)
+          next unless name && arrived.is_a?(AST::Types::Record) && held_local?(constr, name)
 
           left = env[name]
           exits[slot] = left if left.is_a?(AST::Types::Record)
@@ -368,7 +368,7 @@ module Steep
       end
 
       def followed?(constr, object)
-        return constr.method_context&.held_locals&.held?(object.children[0]) || false if object.type == :lvar
+        return held_local?(constr, object.children[0]) if object.type == :lvar
 
         holder = ObjectStates::HeldIvar.self_ivar(constr, object)
         !holder.nil? && ObjectStates::HeldIvar.held?(constr, holder)
@@ -430,7 +430,7 @@ module Steep
       end
 
       def held_local_record(constr, node)
-        return unless constr.method_context&.held_locals&.held?(node.children[0])
+        return unless held_local?(constr, node.children[0])
 
         type = constr.typing.type_of(node: node)
         type if type.is_a?(AST::Types::Record)
@@ -446,7 +446,24 @@ module Steep
       def followed_local?(constr, name)
         def_node = constr.method_context&.node or return false
         held = constr.method_context.held_locals
-        held.held?(name) && (!constr.specialization_arguments(def_node).nil? || held.written_hash?(name))
+        held_local?(constr, name) && (!constr.specialization_arguments(def_node).nil? || held.written_hash?(name))
+      end
+
+      # A local nothing else names (`HeldLocals#held?`), or one only read
+      # again inside an argument of a call on it, by calls the checker typed
+      # as reads.
+      def held_local?(constr, name)
+        held = constr.method_context&.held_locals or return false
+        return true if held.held?(name)
+
+        held.held_but_for_reads?(name) && held.reads(name).all? { |node| read_call?(constr, node) }
+      end
+
+      def read_call?(constr, node)
+        call = constr.typing.call_of(node: node)
+        call.is_a?(TypeInference::MethodCall::Typed) && READS.include?(MethodIdentity.key(call))
+      rescue Typing::UnknownNodeError
+        false
       end
 
       # Each argument node with the slot it fills: its position among the
