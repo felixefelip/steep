@@ -726,6 +726,34 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  NAMED_ELSEWHERE_RBS = KEYED_RBS.sub("def self.wipe:", "def self.singularize: (String word) -> String\n  def self.wipe:") + <<~RBS
+    class String
+      def singularize: () -> String
+    end
+
+    class Other
+      def self.ids_of: (Array[Symbol] names) -> Array[String]
+      def self.id_name: (Symbol name) -> String
+    end
+  RBS
+
+  def named_elsewhere(call)
+    keyed(body: "def self.singularize(word) = instance(:en).singulars.empty? ? word : word.dup") + <<~RUBY
+      class Other
+        def self.ids_of(names) = names.map { |name| id_name(name) }
+        def self.id_name(name) = "\#{#{call}}_ids"
+      end
+    RUBY
+  end
+
+  def test_a_call_whose_receiver_no_storing_class_can_be_does_not_store
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(named_elsewhere("name.to_s.singularize"), rbs: NAMED_ELSEWHERE_RBS)
+  end
+
+  def test_declines_a_call_whose_receiver_is_the_storing_class
+    assert_equal [[nil], [nil]], chunks(named_elsewhere("Inflector.singularize(name.to_s)"), rbs: NAMED_ELSEWHERE_RBS)
+  end
+
   def held_by_ivar(rbs) = rbs.sub("self.@instances: Hash[Symbol, Inflector::Rules]?\n  def self.instances: () -> Hash[Symbol, Inflector::Rules]\n", "self.@instances: Hash[Symbol, Inflector::Rules]\n")
 
   BY_IVAR_RBS = KEYED_RBS.sub("def self.wipe:", "def self.instance_or_fallback: (Symbol locale) -> Inflector::Rules\n  def self.wipe:")

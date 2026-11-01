@@ -49,7 +49,10 @@ module Steep
           return unless constr.method_context
 
           singleton = Specializations.exact_self(constr) or return
-          storing = constr.constructor_bindings.class_body_storing(call.method_name, ivar) or return
+          storing = constr.specializations.memoize(:"class_body_storing #{call.method_name} #{ivar}") do
+            constr.constructor_bindings.class_body_storing(call.method_name, ivar, reaching: reaching(constr))
+          end
+          return unless storing
           return if overrides_class_method?(constr, storing)
 
           descendants = constr.checker.factory.descendant_index.descendants(singleton.name, limit: ReflectionIntrinsics::MAX_DESCENDANTS) or return
@@ -353,10 +356,18 @@ module Steep
           registry = constr.constructor_bindings
           state = ObjectStates.state_in(constr.context.type_env[ivar])
           nested = state && ForwardedHash.nested(constr, state.back_type)
-          return registry.storing_closure(method_name, ivar) unless state && nested
+          unless state && nested
+            return constr.specializations.memoize(:"storing_closure #{method_name} #{ivar}") do
+              registry.storing_closure(method_name, ivar, reaching: reaching(constr))
+            end
+          end
 
-          registry.forwarded_storing_closure(ivar)
+          constr.specializations.memoize(:"forwarded_storing_closure #{ivar}") do
+            registry.forwarded_storing_closure(ivar, reaching: reaching(constr))
+          end
         end
+
+        def reaching(constr) = ->(call) { Specializations::Receivers.reaches?(constr, call) }
 
         # A method the runtime may call with no send written for it: one of
         # `Class`'s, or of a protocol declared as a top-level interface
