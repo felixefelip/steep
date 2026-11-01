@@ -26,6 +26,8 @@ module Steep
 
       def initialize(def_node, reassigned:)
         @names = Set[] #: Set[Symbol]
+        @reading = Set[] #: Set[Symbol]
+        @reads = {} #: Hash[Symbol, Array[::Parser::AST::Node]]
         @values = {}.compare_by_identity #: Hash[::Parser::AST::Node, Symbol]
         @reassigned = reassigned
         analyze(def_node) if def_node
@@ -36,7 +38,22 @@ module Steep
       end
 
       def held_value?(node)
-        @values.key?(node)
+        @names.include?(@values[node])
+      end
+
+      # Whether `name` is held but for the calls `reads` lists, made on it
+      # inside an argument of a call on it, before that call runs:
+      #
+      #   options[:extend] = [*options[:extend], extension]
+      #
+      # Held where each is a call that leaves the object as it found it, which
+      # only the checker can tell.
+      def held_but_for_reads?(name)
+        @reading.include?(name)
+      end
+
+      def reads(name)
+        @reads.fetch(name, [])
       end
 
       # Whether the local `name` is assigned a hash written there.
@@ -66,13 +83,23 @@ module Steep
           name = node.children[0]
           node.children[1] && !detached ? (@assignments[name] ||= []) << node : @escaped << name
         when :lvar
-          @escaped << node.children[0] if detached || !handed?(node, parents)
+          name = node.children[0]
+          return if !detached && handed?(node, parents)
+
+          reads = (reads_in_arguments(node, parents) unless detached)
+          reads ? (@reads[name] ||= []).concat(reads) : @escaped << name
         when :zsuper
           @forwards = true
         end
       end
 
       def register(parameters, assignments, escaped)
+        register_held(parameters, assignments, escaped)
+        @reading = @names & @reads.keys
+        @names -= @reading
+      end
+
+      def register_held(parameters, assignments, escaped)
         parameters.each { |name| @names << name unless @reassigned.include?(name) || escaped.include?(name) }
         assignments.each do |name, nodes|
           next if nodes.size > 1 || parameters.include?(name) || escaped.include?(name)
@@ -109,6 +136,32 @@ module Steep
         handed = call.children[0].equal?(node) ||
                  LocalReach.argument_values(call.children.drop(2)).any? { |value| value.equal?(node) }
         handed && LocalReach.mentions(call, node.children[0]) == 1
+      end
+
+      # The calls each other mention of `node`'s local in the arguments of the
+      # call it is handed to is the receiver of, or nil where one is not.
+      def reads_in_arguments(node, parents)
+        call = parents.last(3).reverse.find { |parent| CALLS.include?(parent.type) } or return nil
+        return nil unless call.children[0].equal?(node) || LocalReach.argument_values(call.children.drop(2)).any? { |value| value.equal?(node) }
+
+        reads = [] #: Array[::Parser::AST::Node]
+        call.children.drop(2).each do |argument|
+          each_mention(argument, node.children[0], nil) do |mention, parent|
+            next if mention.equal?(node)
+            return nil unless mention.type == :lvar && parent && CALLS.include?(parent.type) && parent.children[0].equal?(mention)
+
+            reads << parent
+          end
+        end
+        reads unless reads.empty?
+      end
+
+      def each_mention(node, name, parent, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+        return if LocalReach::SCOPES.include?(node.type)
+
+        yield node, parent if %i[lvar lvasgn].include?(node.type) && node.children[0] == name
+        node.children.each { |child| each_mention(child, name, node, &block) }
       end
 
       def parameters(args)
