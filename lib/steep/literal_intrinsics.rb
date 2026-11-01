@@ -261,10 +261,11 @@ module Steep
       end
 
       # An operand whose bytes are the file's own, so it may be wider than one
-      # literal: a collection, or a pattern — whose cost is bounded by the
-      # timeout and the subject's width, not by its own length.
+      # literal: a collection, a string — one the checker assembled from the
+      # file's literals is as wide as they are — or a pattern, whose cost is
+      # bounded by the timeout, not by its own length.
       def written_out?(value)
-        collection?(value) || value.is_a?(::Regexp)
+        collection?(value) || value.is_a?(::String) || value.is_a?(::Regexp)
       end
 
       # How wide the result may be. A fold that only reassembles its operands —
