@@ -60,7 +60,7 @@ module Steep
           return @arguments[key] if @arguments.key?(key)
 
           @arguments[key] = nil
-          sites = @sites.call(key)
+          sites = sites_of(key)
           return nil if sites.empty?
 
           @arguments[key] = sites.flat_map do |path, node, arguments|
@@ -70,6 +70,14 @@ module Steep
 
             outer.map { |each| Arguments.recorded(node, @check.call(enclosing, each)) || (return nil) }
           end.uniq
+        end
+
+        # An `initialize` runs where its class is built, as well as where a
+        # `super` reaches it.
+        def sites_of(key)
+          return @sites.call(key) unless key.end_with?("#initialize")
+
+          @sites.call(key) + @sites.call(Collector.constructor_key(key))
         end
 
         def enclosing_key(path, node)
