@@ -599,9 +599,12 @@ module Steep
         [*@positionals, *@keywords.values, *@keyword_rest].any? { |type| type.free_variables.include?(AST::Types::Self.instance) }
       end
 
-      # The one every class shares is the one a declaration can hold.
+      # The one every class shares is the one a declaration can hold. One that
+      # hands a `self` on is not keyed by its receiver: checked for that class,
+      # the callee would read the caller's `self` as its own.
       def tuples
-        [self, (without_self if self_type)].compact.flat_map { |arguments| [arguments, arguments.yielded] }.compact.select(&:literal?)
+        keyed = self_type && !hands_self?
+        [(self if keyed), without_self].compact.flat_map { |arguments| [arguments, arguments.yielded] }.compact.select(&:literal?)
       end
 
       def yielded
