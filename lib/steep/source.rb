@@ -163,40 +163,23 @@ module Steep
     # module it describes is where anything said about it should point.
     def self.attach_scope_annotations(entry:, node:, mapping:, annotation_parser:, buffer:)
       ModuleSelfTypes.scope_annotations(entry).each do |anchor, lines|
-        target = find_scope_node(node, anchor) or next
-        location = RBS::Location.new(
-          buffer: buffer,
-          start_pos: target.loc.expression.begin_pos,
-          end_pos: target.loc.expression.begin_pos
-        )
+        ModuleSelfTypes.scope_nodes(node, anchor).each do |target|
+          location = RBS::Location.new(
+            buffer: buffer,
+            start_pos: target.loc.expression.begin_pos,
+            end_pos: target.loc.expression.begin_pos
+          )
 
-        existing = mapping[target] || []
-        lines.each do |line|
-          annotation = annotation_parser.parse(line.delete_prefix("#").strip, location: location) or next
-          next if existing.any? { |other| other.class == annotation.class }
+          existing = mapping[target] || []
+          lines.each do |line|
+            annotation = annotation_parser.parse(line.delete_prefix("#").strip, location: location) or next
+            next if existing.any? { |other| other.class == annotation.class }
 
-          mapping[target] ||= []
-          mapping.fetch(target) << annotation
+            mapping[target] ||= []
+            mapping.fetch(target) << annotation
+          end
         end
       end
-    end
-
-    # The DEEPEST `class`/`module` whose name is `anchor`, matching how the
-    # sidecar's own reader resolves one: a name written in two scopes is meant as
-    # the inner one, since that is the one a nested declaration adds.
-    def self.find_scope_node(node, anchor, depth = 0, found = nil)
-      return found unless node.is_a?(Parser::AST::Node)
-
-      if node.type == :class || node.type == :module
-        name = node.children[0]
-        if name.is_a?(Parser::AST::Node) && name.type == :const && name.children[1].to_s == anchor
-          found = [depth, node] if found.nil? || depth > found[0]
-        end
-      end
-
-      each_child_node(node) { |child| found = find_scope_node(child, anchor, depth + 1, found) }
-
-      depth.zero? ? found&.last : found
     end
 
     def self.construct_mapping(node:, annotations:, mapping:, line_range: nil)

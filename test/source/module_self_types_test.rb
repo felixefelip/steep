@@ -76,6 +76,33 @@ class Steep::Source::ModuleSelfTypesTest < Minitest::Test
     end
   end
 
+  def test_scope_annotations_reach_every_opening_of_the_module
+    code = <<~RUBY
+      class Example::Post
+        module GeneratedMethods
+        end
+        include ::Example::Post::GeneratedMethods
+      end
+
+      module Example::Post::GeneratedMethods
+        def comments
+        end
+      end
+
+      module Other::GeneratedMethods
+      end
+    RUBY
+    table = { "a.rb" => { "modules" => [{ "anchor" => "GeneratedMethods", "annotations" => ["# @type instance: Example::Post & Example::Post::GeneratedMethods"] }] } }
+
+    with_sidecar(table) do
+      source = with_module_convention { parse_source(code, path: Pathname("a.rb")) }
+      nested, reopen, other = source.node.children[0].children[2].children[0], source.node.children[1], source.node.children[2]
+
+      assert [nested, reopen].all? { |node| (source.mapping[node] || []).any?(Steep::AST::Annotation::InstanceType) }
+      assert_empty(source.mapping[other] || [])
+    end
+  end
+
   def test_an_annotation_written_by_hand_wins_over_the_sidecar
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
