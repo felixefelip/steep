@@ -263,6 +263,7 @@ module Steep
       end
 
       def declared_as?(constant, value, factory)
+        value = ObjectStates.state_in(value)&.back_type || value
         return false unless value.is_a?(AST::Types::Name::Instance)
 
         entry = factory.env.class_decls[constant]
