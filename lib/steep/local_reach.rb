@@ -53,6 +53,28 @@ module Steep
       found
     end
 
+    # Whether every mention of `name` in `body` outside `lines` comes before
+    # them, and no loop around them runs its condition again after them.
+    def named_only_before?(body, lines, name)
+      start = lines.first.location.expression.begin_pos
+      inside = Set.new.compare_by_identity #: Set[untyped]
+      lines.each { |line| each_node(line) { |node| inside << node } }
+
+      each_node(body) do |node|
+        next unless LOCALS.include?(node.type) && node.children[0] == name && !inside.include?(node)
+        return false if node.location.expression.end_pos > start
+      end
+      !repeated_around?(body, lines)
+    end
+
+    def repeated_around?(node, lines, repeated = false)
+      return false unless node.is_a?(Parser::AST::Node)
+      return repeated if node.type == :begin && node.children.equal?(lines)
+
+      inner = repeated || REPEATS.include?(node.type) || node.type == :for
+      node.children.any? { |child| repeated_around?(child, lines, inner) }
+    end
+
     # How many times `node` reads or writes `name`.
     def mentions(node, name)
       count = 0
