@@ -8,18 +8,20 @@ module Steep
       SENDS = %i[send csend].freeze
 
       class << self
-        # Each call in `node` naming one of `names` on an explicit receiver,
-        # with the receiver's type as RBS. A site whose receiver the checker
-        # did not type, or typed relative to where it is, is nil.
-        def collect(typing, node, names, found = {})
+        # Each call in `node` naming one of `names`, with the receiver's type
+        # as RBS: on `self`, the type `self` has where the call is made
+        # (`call`, which a call with a block is recorded on). A site whose
+        # receiver the checker did not type, or typed relative to where it
+        # is, is nil.
+        def collect(typing, node, names, found = {}, call: node)
           return found unless node.is_a?(::Parser::AST::Node)
 
-          receiver = node.children[0]
-          if SENDS.include?(node.type) && names.include?(node.children[1]) && receiver.is_a?(::Parser::AST::Node) && receiver.type != :self
-            site = TypeInference::ClassMemoAnalyzer.site(node)
-            found[site] = typing.has_type?(receiver) ? written(typing.type_of(node: receiver)) : nil if site
+          if SENDS.include?(node.type) && names.include?(node.children[1]) && (site = TypeInference::ClassMemoAnalyzer.site(node))
+            found[site] = receiver_written(typing, node.children[0], call)
           end
-          node.children.each { |child| collect(typing, child, names, found) }
+          node.children.each_with_index do |child, index|
+            collect(typing, child, names, found, call: Accumulators::LAMBDA_BODIES.include?(node.type) && index.zero? ? node : child)
+          end
           found
         end
 
@@ -63,6 +65,15 @@ module Steep
 
         private
 
+        def receiver_written(typing, receiver, call)
+          if receiver.nil? || receiver.type == :self
+            type = typing.self_type_of_call(node: call)
+            type && written(type)
+          elsif typing.has_type?(receiver)
+            written(typing.type_of(node: receiver))
+          end
+        end
+
         def written(type)
           type = Specializations.rbs_writable(readable(type))
           type.to_s if type.free_variables.empty?
@@ -74,7 +85,8 @@ module Steep
 
         def elsewhere?(constr, use, target)
           factory = constr.checker.factory
-          type = use.at && constr.specializations.receiver_type(use.at, factory: factory) or return false
+          site = use.at || use.self_at
+          type = site && constr.specializations.receiver_type(site, factory: factory) or return false
           return true if type.is_a?(AST::Types::Any)
 
           target = factory.instance_type(target.name) if target.is_a?(AST::Types::Name::Instance)
