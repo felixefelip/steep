@@ -68,6 +68,13 @@ module Steep
           end
         end
 
+        # A core method the project gives no body, such as `Array(tags)`, that
+        # answers from its arguments and so reads no entry.
+        def answers_from_arguments?(constr, instance, name)
+          keys = MethodIdentity.keys(constr, instance, name, private: true)
+          keys.size == 1 && LiteralIntrinsics.self_independent?(keys.first, override_registry: constr.literal_method_registry)
+        end
+
         def hash_method?(call, name)
           call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.map { |decl| decl.method_name.to_s }.uniq == ["::Hash##{name}"]
         end
@@ -89,7 +96,7 @@ module Steep
             next true if visiting.include?(name)
 
             _, callee = ObjectStates.resolved_body(constr, instance, name)
-            next readers.include?(name) unless callee
+            next readers.include?(name) || answers_from_arguments?(constr, instance, name) unless callee
 
             entries_left?(constr, instance, callee.self_sends, visiting | [name])
           end
@@ -171,7 +178,8 @@ module Steep
           return true if visiting.include?(method_name)
 
           _, body = ObjectStates.resolved_body(constr, instance, method_name)
-          return false if body.nil? || body.outside_state || body.super_args
+          return answers_from_arguments?(constr, instance, method_name) if body.nil?
+          return false if body.outside_state || body.super_args
 
           ivars.merge(body.ivars || [])
           ivars << body.returns if body.returns
