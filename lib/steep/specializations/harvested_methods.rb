@@ -66,6 +66,7 @@ module Steep
         @enclosing = {} #: Hash[[String, Integer], Parser::AST::Node]
         @definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @nodes = {} #: Hash[String, Parser::AST::Node]
+        @rounds = Kept.new
       end
 
       # The methods each adopted block is the body of, by the block's site.
@@ -131,22 +132,29 @@ module Steep
       # define there, as `key => block`, read by following each call through
       # the frames it runs, the way the eval harvest reads what it writes: only
       # what a call site runs for certain defines a method, and a block's body
-      # is deferred. `check` types the bodies `{ key => arguments }` names.
-      def harvest(locations, definitions, definers, overrides:, rounds:, check:)
+      # is deferred. `check` types, under a store, the bodies
+      # `{ key => arguments }` names. A round is checked again only where
+      # `store` answers what it asked differently from when it was last checked.
+      def harvest(locations, definitions, definers, overrides:, rounds:, check:, store:, class_exits:)
         found = {} #: Hash[String, Parser::AST::Node]
         defining = locations.filter_map do |key, by_arguments|
           handed = by_arguments.reject { |arguments, _| arguments.hands_self? }
           [key, handed] if definitions.key?(key) && definers.include?(key) && !handed.empty?
         end.to_h
         rounds.call(defining.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
-          typings = check.call(active)
-          active.each do |key, arguments|
-            path, def_node = definitions.fetch(key)
-            typing = typings[path] or next
+          defined = @rounds.value([active, definitions.size], store, class_exits) do |logged, left|
+            checked = ->(substituted) { check.call(logged, substituted).tap { |typings| left.concat(typings.values.compact.map(&:class_exits)) } }
+            found_in_round = {} #: Hash[String, Parser::AST::Node]
+            typings = checked.call(active)
+            active.each do |key, arguments|
+              path, def_node = definitions.fetch(key)
+              typing = typings[path] or next
 
-            walk = Walk.new(definitions, definers, overrides, check)
-            walk.defined_in(typing, def_node, arguments, Set[key], found)
+              Walk.new(definitions, definers, overrides, checked).defined_in(typing, def_node, arguments, Set[key], found_in_round)
+            end
+            found_in_round
           end
+          defined.each { |key, block| found[key] ||= block }
         end
         found
       end

@@ -54,6 +54,21 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
     end
   end
 
+  def test_a_body_ingested_after_a_lookup_is_found_by_the_next_one
+    registry = ConstructorBindingRegistry.new
+    assert_empty registry.method_bodies("Late")
+    assert_empty registry.singleton_method_bodies("Late")
+
+    registry.ingest_source("class Late\n  def first = 1\nend\n", path_name: "first.rb")
+    assert_equal [:first], registry.method_bodies("Late").keys
+    assert_equal [:first], registry.method_bodies(RBS::TypeName.parse("::Late")).keys
+
+    registry.ingest_source("class Late\n  def second = 2\n  def self.made = new\nend\n", path_name: "second.rb")
+    assert_equal [:first, :second], registry.method_bodies("Late").keys
+    assert_equal [:first, :second], registry.method_bodies(RBS::TypeName.parse("::Late")).keys
+    assert_equal [:made], registry.singleton_method_bodies("Late").keys
+  end
+
   def class_bodies_of(source, name)
     registry = ConstructorBindingRegistry.new
     registry.ingest_source(source, path_name: "app.rb")

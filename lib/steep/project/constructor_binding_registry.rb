@@ -119,6 +119,7 @@ module Steep
       end
 
       MIXIN_HOOKS = %i[included extended prepended append_features extend_object prepend_features].freeze
+      NONE_UNREACHED = Set[].freeze
 
       # A module the project writes whose bodies run nothing, and which defines
       # no hook: mixing it in runs no code of the project's.
@@ -165,7 +166,7 @@ module Steep
       end
 
       def singleton_method_bodies(class_name)
-        reached(@singleton_methods, class_name, ".")
+        @reached_singleton_methods.of(class_name, unreached_definitions)
       end
 
       # `body_of` for a method of the class object itself.
@@ -382,6 +383,8 @@ module Steep
         @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
         @conditional_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
         @aliases = {} #: Hash[String, Hash[Symbol, Symbol]]
+        @reached_methods = ReachedMethods.new(@methods, "#")
+        @reached_singleton_methods = ReachedMethods.new(@singleton_methods, ".")
       end
 
       def ingest_methods(scan)
@@ -389,6 +392,7 @@ module Steep
         merge_bodies(@singleton_methods, scan.singleton_methods)
         merge_bodies(@conditional_methods, scan.conditional_methods)
         scan.aliases.each { |class_name, aliases| (@aliases[class_name] ||= {}).merge!(aliases) }
+        [@reached_methods, @reached_singleton_methods].each(&:clear)
       end
 
       def merge_bodies(index, scanned)
@@ -554,18 +558,7 @@ module Steep
       end
 
       def methods_of(class_name)
-        reached(@methods, class_name, "#")
-      end
-
-      # The methods `table` holds for `class_name`, but those it defines only
-      # in a branch its class body never takes
-      # (`Postconditions::UnreachedDefinitions`).
-      def reached(table, class_name, separator)
-        name = class_name.to_s.delete_prefix("::")
-        methods = table[name] || {}
-        return methods if unreached_definitions.empty?
-
-        methods.reject { |method_name, _| unreached?("#{name}#{separator}#{method_name}") }
+        @reached_methods.of(class_name, unreached_definitions)
       end
 
       public
@@ -582,7 +575,7 @@ module Steep
 
       private
 
-      def unreached_definitions = @postconditions&.call&.unreached_definitions || Set[]
+      def unreached_definitions = @postconditions&.call&.unreached_definitions || NONE_UNREACHED
 
       def ingest_constants(node, content)
         scalars, written = Constants.scalars(node, frozen_strings: frozen_strings?(content))

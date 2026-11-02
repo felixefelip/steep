@@ -23,6 +23,31 @@ module Steep
       end
     end
 
+    # What a computation over the store came to, kept across generations as
+    # `Checks` keeps a check: handed back while the store answers what it asked
+    # as before, with the class exits its checks left merged again.
+    class Kept
+      Entry = Struct.new(:reads, :value, :class_exits)
+
+      def initialize
+        @entries = {} #: Hash[untyped, Entry]
+      end
+
+      def value(key, store, class_exits)
+        previous = @entries[key]
+        if previous&.reads&.same?(store)
+          previous.class_exits.each { |left| class_exits.merge!(left) }
+          return previous.value
+        end
+
+        reads = Reads.new
+        left = [] #: Array[Hash[untyped, untyped]]
+        value = yield(store.with_reads(reads), left)
+        @entries[key] = Entry.new(reads, value, left)
+        value
+      end
+    end
+
     # What each specialized check of a file came to, kept across generations.
     # A generation whose store answers every question a check asked as it was
     # answered then is handed that check's outcome instead of checking again.

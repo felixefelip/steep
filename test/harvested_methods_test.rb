@@ -319,4 +319,13 @@ class HarvestedMethodsTest < Minitest::Test
       assert_equal ["Base.__other", "Base.__store"], defined_keys(base_ruby: base_ruby, store_rbs: "def self.stores: (*Symbol names) -> untyped").sort
     end
   end
+
+  def test_a_name_that_turns_literal_in_a_later_generation_defines_the_method
+    in_tmpdir do
+      base_ruby = "def self.pluralize = 1\n  def self.store_name(name) = name\n  def self.def_store(name) = define_method(store_name(name)) { 1 }\n  def_store(:__store)"
+      store_rbs = "def self.store_name: (Symbol name) -> Symbol\n  def self.def_store: (Symbol name) -> untyped"
+
+      assert_equal ["Base#__store"], defined_keys(base_ruby: base_ruby, store_rbs: store_rbs)
+    end
+  end
 end
