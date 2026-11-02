@@ -304,15 +304,17 @@ module Steep
           end
         end
 
-        # In a class body, a call may reach a memo still `nil`: it holds what the
-        # call's own check left it, or what its declaration says. So does a memo
-        # whose object a method the call runs (`reached`) yields to a block.
-        def after_class_call(constr, call, exit, reached)
+        # In a class body, a call that may run a memo still `nil`
+        # (`may_set?`) leaves it holding what the call's own check left it, or
+        # what its declaration says. So does a memo whose object a method the
+        # call runs (`reach`, `ClassStates.reach`) yields to a block.
+        def after_class_call(constr, call, exit, reach, hands_self:)
+          reached = reach&.methods
           return constr if constr.method_context
 
           singleton = constr.self_type #: AST::Types::Name::Singleton
           moved = memo_values(constr).select do |ivar, type|
-            type.is_a?(AST::Types::Nil) || (hash_held?(constr, singleton, ivar, type) && (reached || may_store?(constr, singleton, call, ivar)))
+            type.is_a?(AST::Types::Nil) ? may_set?(constr, singleton, call, ivar, reach, hands_self) : hash_held?(constr, singleton, ivar, type) && may_store?(constr, singleton, call, ivar)
           end
           moved = moved.merge(yielded_memos(constr, reached)) if reached
           return constr if moved.empty?
@@ -341,12 +343,30 @@ module Steep
           return true unless call.is_a?(TypeInference::MethodCall::Typed)
 
           value_memos(constr, singleton).any? do |held, _, method_name|
+            held == ivar && closure_runs?(constr, call, storing_closure(constr, ivar, method_name))
+          end
+        end
+
+        # Whether `call` may run the memo that writes `ivar`, the one method
+        # that does (`written_only_through?`): by name, or through a `self` it
+        # or a body it runs hands on, which is followed only by type.
+        def may_set?(constr, singleton, call, ivar, reach, hands_self)
+          return true if !call.is_a?(TypeInference::MethodCall::Typed) || hands_self || reach&.observes_self
+
+          value_memos(constr, singleton).any? do |held, owner, method_name|
             next false unless held == ivar
 
-            closure = storing_closure(constr, ivar, method_name)
-            closure.nil? || closure.methods.include?(call.method_name) || (closure.constructs && call.method_name == :new) ||
-              called_implicitly?(constr, closure.methods)
+            owner.nil? || closure_runs?(constr, call, constr.specializations.memoize(:"running_closure #{method_name}") do
+              constr.constructor_bindings.running_closure(method_name, reaching: reaching(constr))
+            end)
           end
+        end
+
+        # Whether `call` is one of `closure`'s, or the runtime may run one of
+        # them with no send written for it; any call may where there is none.
+        def closure_runs?(constr, call, closure)
+          closure.nil? || closure.methods.include?(call.method_name) || (closure.constructs && call.method_name == :new) ||
+            called_implicitly?(constr, closure.methods)
         end
 
         # The methods that may store into the hash a memo keeps in `ivar`: by

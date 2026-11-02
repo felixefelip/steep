@@ -1378,4 +1378,117 @@ class AccumulatedIvarStateTest < Minitest::Test
       refute_includes written, "def posts_ids; []; end", label
     end
   end
+
+  CALLED_RBS = <<~RBS
+    class Rules
+      attr_reader singulars: Array[untyped]
+      def initialize: () -> Array[untyped]
+      def singular: (untyped rule, untyped replacement) -> Array[untyped]
+    end
+    class Holder
+      attr_reader label: untyped
+      self.@instance: Rules?
+      self.@instances: Hash[Symbol, Rules]?
+      def self.instances: () -> Hash[Symbol, Rules]
+      def self.instance: (?Symbol locale) -> Rules
+      def self.noop: () -> nil
+      def self.mark: (Symbol name) -> Symbol
+      def self.inflections: () { (Rules) -> void } -> void
+      def self.singularize: (String word) -> String
+    end
+    class Post
+      def self.has_many_like: (Symbol name) -> untyped
+    end
+  RBS
+
+  def called_before(call, memo)
+    <<~RUBY
+      class Rules
+        attr_reader :singulars
+
+        def initialize
+          @singulars = []
+        end
+
+        def singular(rule, replacement)
+          @singulars.prepend([rule, replacement])
+        end
+      end
+
+      class Holder
+        #{memo.gsub("\n", "\n  ")}
+        def self.noop = nil
+        def self.mark(name) = name
+        def self.inflections = yield(instance(:en))
+
+        #{call}
+        instance(:en).singular(/ies\\z/, "y")
+
+        def self.singularize(word)
+          result = word.dup
+          instance(:en).singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+          result
+        end
+      end
+
+      class Post
+        def self.has_many_like(name) = class_eval("def \#{Holder.singularize(name.to_s)}_ids; []; end")
+
+        has_many_like :posts
+        has_many_like :categories
+      end
+    RUBY
+  end
+
+  CALLED_MEMOS = {
+    "a memo" => "def self.instance(locale = :en)\n  @instance ||= Rules.new\nend",
+    "a hash memo" => "def self.instances = @instances ||= {}\ndef self.instance(locale = :en) = (instances[locale] ||= Rules.new)"
+  }.freeze
+
+  def test_an_unset_memo_survives_a_class_body_call_that_cannot_run_it
+    CALLED_MEMOS.each do |form, memo|
+      ["attr_reader :label", "noop", "mark(:label)"].each do |call|
+        ruby = called_before("#{call}\ninstance(:en).singular(/s\\z/, \"\")", memo)
+        assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: CALLED_RBS), "#{form}, #{call}"
+      end
+    end
+  end
+
+  BORN_MEMO = "@instances = {}\ndef self.instance(locale = :en)\n  @instances[locale] ||= Rules.new\nend"
+  BORN_RBS = CALLED_RBS.sub("self.@instances: Hash[Symbol, Rules]?", "self.@instances: Hash[Symbol, Rules]").sub("def self.noop:", "def self.reset: () -> Rules\n  def self.noop:")
+
+  def test_a_hash_the_class_body_sets_survives_a_later_call_that_cannot_store_into_it
+    ["attr_reader :label", "noop", "mark(:label)"].each do |call|
+      ruby = called_before("instance(:en).singular(/s\\z/, \"\")\n#{call}", BORN_MEMO)
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: BORN_RBS), call
+    end
+  end
+
+  def test_a_hash_the_class_body_sets_is_not_followed_past_a_call_that_stores_by_no_name
+    memo = "#{BORN_MEMO}\ndef self.reset = (@instances[:en] = Rules.new)"
+    written = chunks(called_before("instance(:en).singular(/s\\z/, \"\")\nsend(:reset)", memo), rbs: BORN_RBS).flatten
+    refute_includes written, "def post_ids; []; end"
+  end
+
+  def test_an_unset_memo_is_not_followed_past_a_call_whose_hook_runs_it
+    CALLED_MEMOS.each do |form, memo|
+      hook = "def self.method_added(name) = inflections { |inflect| inflect.singular(/s\\z/, \"\") }"
+      written = chunks(called_before("#{hook}\nattr_reader :label", memo), rbs: CALLED_RBS.sub("def self.noop:", "def self.method_added: (Symbol name) -> void\n  def self.noop:")).flatten
+      refute_includes written, "def posts_ids; []; end", form
+    end
+  end
+
+  def test_an_unset_memo_is_not_followed_past_a_call_that_hands_self_on
+    toucher = "class Toucher\n  def self.touch(klass) = klass.instance(:en).singular(/s\\z/, \"\")\nend\n\n"
+    rbs = "#{CALLED_RBS}class Toucher\n  def self.touch: (untyped klass) -> void\nend\n"
+    written = chunks(toucher + called_before("Toucher.touch(self)", CALLED_MEMOS.fetch("a memo")), rbs: rbs).flatten
+    refute_includes written, "def posts_ids; []; end"
+  end
+
+  def test_an_unset_memo_holds_what_a_class_body_call_that_runs_it_left
+    CALLED_MEMOS.each do |form, memo|
+      ruby = called_before('inflections { |inflect| inflect.singular(/s\z/, "") }', memo)
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: CALLED_RBS), form
+    end
+  end
 end

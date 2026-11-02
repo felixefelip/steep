@@ -145,7 +145,7 @@ module Steep
         exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
         constr = HeldIvar.moved(self_moved(constr, exit), exit) if reaches_self
         call = recorded_call(constr, node)
-        constr = ClassMemos.after_class_call(constr, call, exit, (ClassStates.reach(constr, call).methods if reaches_self)) unless !reaches_self && ClassMemos.builds_only?(constr, call)
+        constr = ClassMemos.after_class_call(constr, call, exit, (ClassStates.reach(constr, call) if reaches_self), hands_self: reaches_self && !on_self) unless !reaches_self && ClassMemos.builds_only?(constr, call)
         constr = ClassStates.moved(constr, node, receiver_type, handed)
         constr = ClassStates.after_call(constr)
         HashMutation.answer_taken(HashMutation.handed_back(handed_on(constr, arguments), node, arguments), node)
