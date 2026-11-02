@@ -24,6 +24,12 @@ module Steep
         end
       end
 
+      # Whether `lines` assign `name` before any of them names it.
+      def born_first?(lines, name)
+        birth = lines.index { |line| seeds(line).any? { |seeded, _| seeded == name } } or return false
+        lines.take(birth).all? { |line| LocalReach.mentions(line, name).zero? }
+      end
+
       def seed_of(name, value)
         return [name, value.children.dup] if array_literal?(value)
 

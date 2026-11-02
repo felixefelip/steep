@@ -1240,6 +1240,14 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(excluding("[]", "result += [tag] - exclude"), rbs: EXCLUDING_RBS)
   end
 
+  def test_a_loop_body_may_assign_a_parameter_again_before_reading_it
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(excluding("[]", "locale = [tag] - exclude\nresult += locale"), rbs: EXCLUDING_RBS)
+  end
+
+  def test_declines_a_parameter_a_loop_body_reads_before_assigning_it_again
+    assert_equal [[nil], [nil]], chunks(excluding("[]", "result += [locale]\nlocale = [tag] - exclude\nresult += locale"), rbs: EXCLUDING_RBS)
+  end
+
   def test_declines_an_optional_parameter_whose_default_is_not_written_out
     assert_equal [[nil], [nil]], chunks(excluding("excluded", "result += [tag] - exclude"), rbs: EXCLUDING_RBS)
   end
