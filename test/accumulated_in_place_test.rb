@@ -94,6 +94,28 @@ class AccumulatedInPlaceTest < Minitest::Test
     refute_equal '"x"', types.fetch("aliased")
   end
 
+  def test_a_local_spliced_into_another_is_read_where_the_push_reads_it
+    types = types_of({
+      "plus_assign" => "parts = [:en]\nresult = [locale]\nresult += parts\nresult",
+      "splat" => "parts = [:en]\nresult = []\nresult << locale\nresult.push(*parts)\nresult",
+      "concat" => "parts = [:en]\nresult = []\nresult << locale\nresult.concat(parts)\nresult",
+      "changed_after" => "parts = [:en]\nresult = [locale]\nresult += parts\nparts << :x\nresult",
+      "in_a_loop" => "result = []\n[locale, :en].each do |tag|\n  parts = [tag]\n  result += parts\nend\nresult"
+    })
+
+    assert_equal "[:fr, :en]", types.fetch("plus_assign")
+    assert_equal "[:fr, :en]", types.fetch("splat")
+    assert_equal "[:fr, :en]", types.fetch("concat")
+    assert_equal "[:fr, :en]", types.fetch("changed_after")
+    assert_equal "[:fr, :en]", types.fetch("in_a_loop")
+  end
+
+  def test_declines_a_spliced_local_handed_elsewhere_first
+    types = types_of({ "handed" => "parts = [:en]\nparts.each_slice(1) { |slice| slice << :x }\nresult = [locale]\nresult += parts\nresult" })
+
+    refute_match(/\A\[/, types.fetch("handed"))
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 

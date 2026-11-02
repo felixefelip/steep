@@ -106,17 +106,49 @@ module Steep
 
       # The children of `node` that read a local array as a collection, copying
       # its elements out and keeping none of the array: `*parts` written in an
-      # array literal, and a local on the right of a `+`.
+      # array literal or handed to `push`, a local on the right of a `+` or a
+      # `+=`, and one handed to `concat`.
       def operands(node)
         case node.type
-        when :array then node.children.select { |child| child.type == :splat && child.children[0]&.type == :lvar }
-        when :send then binary?(node) ? node.children.drop(2).select { |argument| argument.type == :lvar } : []
+        when :array then local_splats(node.children)
+        when :op_asgn then node.children[1] == :+ && node.children[2].type == :lvar ? [node.children[2]] : []
+        when :send then send_operands(node)
         else []
         end
       end
 
+      # A push copies only onto a local: `concat(words)` on `self` runs
+      # whatever `concat` the class has.
+      def send_operands(node)
+        arguments = node.children.drop(2)
+        onto_local = node.children[0]&.type == :lvar
+        case node.children[1]
+        when :push, :append then onto_local ? local_splats(arguments) : []
+        when :concat then onto_local ? arguments.select { |argument| argument.type == :lvar } : []
+        else binary?(node) ? arguments.select { |argument| argument.type == :lvar } : []
+        end
+      end
+
+      def local_splats(children)
+        children.select { |child| child.type == :splat && child.children[0]&.type == :lvar }
+      end
+
       def operand?(node, child)
         operands(node).any? { |operand| operand.equal?(child) }
+      end
+
+      # `[site, contents]` for each place `statement` reads a local of
+      # `contents` as a collection. A local in `pushed` holds what the push
+      # left, not what it read, so it is left out.
+      def contents_read(statement, contents, pushed)
+        sites = [] #: Array[[untyped, untyped]]
+        LocalReach.each_node(statement) do |child|
+          read_sites(child).each do |site, local|
+            name = local.children[0]
+            sites << [site, contents.fetch(name)] if contents.key?(name) && !pushed.include?(name)
+          end
+        end
+        sites
       end
 
       # `[site, local]` for each place `node` reads a local array: the receiver

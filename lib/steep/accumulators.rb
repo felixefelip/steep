@@ -348,6 +348,7 @@ module Steep
             end
 
             unless pushed.empty?
+              CollectionReaders.contents_read(statement, contents, pushed).each { |site, elements| at_reads[site] = elements }
               pushed.each do |name|
                 elements = contents.fetch(name)
                 last[name] = [statement, elements]
@@ -376,11 +377,7 @@ module Steep
               at_args[argument] = contents.fetch(argument.children[0])
             end
 
-            LocalReach.each_node(statement) do |child|
-              CollectionReaders.read_sites(child).each do |site, local|
-                at_reads[site] = contents.fetch(local.children[0]) if contents.key?(local.children[0])
-              end
-            end
+            CollectionReaders.contents_read(statement, contents, []).each { |site, elements| at_reads[site] = elements }
           end
 
           # A local read only up to a statement does not stay complete past it.
