@@ -198,6 +198,15 @@ module Steep
         watched_keys.select { |key| key.start_with?("::#{class_name}#", "::#{class_name}.") }
       end
 
+      # Whether `key` answers from its arguments alone, whatever `self` is, in
+      # a project that redefines neither it nor what it leans on.
+      def self_independent?(key, override_registry:)
+        entry = ENTRIES[key] or return false
+        return false unless entry.module_function
+
+        [key, *entry.depends_on].none? { |name| override_registry.blocked?(name) }
+      end
+
       private
 
       # A literal, or a tuple of things that are themselves operands. Nested

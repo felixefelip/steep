@@ -1244,6 +1244,19 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [[nil], [nil]], chunks(excluding("excluded", "result += [tag] - exclude"), rbs: EXCLUDING_RBS)
   end
 
+  def test_a_keyed_memo_s_value_may_call_a_core_method_that_answers_from_its_arguments
+    ruby = keyed_memo.sub("def compute(locale) = [locale, @default]", "def compute(locale) = Array(locale) + [@default]")
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: KEYED_MEMO_RBS)
+  end
+
+  def test_declines_a_keyed_memo_s_value_through_a_core_method_the_project_redefines
+    ruby = keyed_memo(outside: "\nmodule Kernel\n  def Array(value) = [value, value]\nend\n")
+             .sub("def compute(locale) = [locale, @default]", "def compute(locale) = Array(locale) + [@default]")
+
+    assert_equal [[nil], [nil]], chunks(ruby, rbs: KEYED_MEMO_RBS)
+  end
+
   def test_declines_a_keyed_memo_whose_entries_something_else_changes
     {
       "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),
