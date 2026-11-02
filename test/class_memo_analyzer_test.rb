@@ -19,6 +19,8 @@ class ClassMemoAnalyzerTest < Minitest::Test
           def self.argued = @argued ||= Settings.new(1)
           def self.tapped = @tapped ||= Settings.new.tap { |settings| settings.name = :posts }
           def self.handed = @handed ||= Settings.new.tap(1) { |settings| settings }
+          def self.own = @own ||= new
+          def self.own_written = @own_written ||= self.new.tap { |own| own.name = :posts }
 
           class << self
             def nested = @nested ||= ::Settings.new
@@ -27,12 +29,14 @@ class ClassMemoAnalyzerTest < Minitest::Test
       end
     RUBY
 
-    assert_equal [:@settings, %w[Wrap::Base::Settings Wrap::Settings Settings], []], methods[:settings].first.memo
+    assert_equal [:@settings, %w[Wrap::Base::Settings Wrap::Settings Settings], [], false], methods[:settings].first.memo
     assert_nil methods[:computed].first.memo
     assert_nil methods[:argued].first.memo
-    assert_equal [:@tapped, %w[Wrap::Base::Settings Wrap::Settings Settings], [:tap]], methods[:tapped].first.memo
+    assert_equal [:@tapped, %w[Wrap::Base::Settings Wrap::Settings Settings], [:tap], false], methods[:tapped].first.memo
     assert_nil methods[:handed].first.memo
-    assert_equal [:@nested, ["Settings"], []], methods[:nested].first.memo
+    assert_equal [:@own, ["Wrap::Base"], [], true], methods[:own].first.memo
+    assert_equal [:@own_written, ["Wrap::Base"], [:tap], true], methods[:own_written].first.memo
+    assert_equal [:@nested, ["Settings"], [], false], methods[:nested].first.memo
   end
 
   def test_each_use_by_what_it_is

@@ -444,8 +444,9 @@ module Steep
 
         def tracked(constr, singleton, method_name, instance)
           owner, body = ObjectStates.resolved_body(constr, singleton, method_name)
-          ivar, classes, wrappers = body&.memo
+          ivar, classes, wrappers, by_self = body&.memo
           return unless ivar && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
+          return if by_self && !built_here?(constr, owner)
           return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, method_name)
           return unless [method_name, ivar].all? { |used| confined?(constr, singleton, instance, used) }
           return unless wrappers.all? { |name| Tap.resolves?(constr, instance, name) }
@@ -462,9 +463,10 @@ module Steep
           return unless singleton.is_a?(AST::Types::Name::Singleton)
 
           owner, body = ObjectStates.resolved_body(constr, singleton, call.method_name)
-          ivar, classes, wrappers = body&.memo
+          ivar, classes, wrappers, by_self = body&.memo
           instance = call.return_type
           return unless ivar && wrappers.empty? && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
+          return if by_self && !built_here?(constr, owner, receiver: call.receiver_type.is_a?(AST::Types::Self) ? nil : singleton)
           return unless written_only_by?(constr, singleton, ivar, owner, call.method_name)
 
           state = ObjectStates.settled(constr, fresh_state(constr, instance) || instance)
@@ -480,6 +482,15 @@ module Steep
 
           names = ObjectStates.resolved_body(constr, singleton, call.method_name)&.last&.hands_back or return false
           names.all? { |name| tracked(constr, singleton, name, state.back_type) }
+        end
+
+        # Whether `new` called on `self` in a method `owner` defines builds an
+        # `owner`: where the check is for that one class, the class body's or
+        # a call's on it (`Specializations.exact_self`), or `receiver`, the
+        # class a call names. Elsewhere `self` may be any subclass.
+        def built_here?(constr, owner, receiver: nil)
+          exact = receiver || Specializations.exact_self(constr)
+          exact.is_a?(AST::Types::Name::Singleton) && exact.name == owner
         end
 
         # `Klass.new` hands back an object nothing else holds.

@@ -79,7 +79,8 @@ module Steep
       #   value it returns is what a memo called on `self` holds under the
       #   positional parameter at `index`, read (`memo[key]`) or stored if
       #   missing (`memo[key] ||= value`); `builds` where each stores
-      #   `Klass.new` handed nothing; `omitted` the key a call that leaves
+      #   `Klass.new` handed nothing, `:self` where one of them is `new` on
+      #   `self` (`ClassMemos.built_here?`); `omitted` the key a call that leaves
       #   the parameter out reads, where its default is a literal.
       # - `stores_element`: `[ivar, key index, value index]` where its body is
       #   exactly `@ivar[key] = value`, both positional parameters.
@@ -94,12 +95,13 @@ module Steep
       # - `outside_state`: whether it reads anything but its parameters, its
       #   locals, `self`'s ivars and what it calls on them: a constant, a
       #   global, a class variable or `self.class`.
-      # - `memo`: `[ivar, class names, wrappers]` when its body is exactly
-      #   `@ivar ||= Klass.new`, with the classes `Klass` may name from where
-      #   it is written; or that `Klass.new` with calls that take a block made
-      #   on it, `wrappers`, innermost first (`Klass.new.tap { … }`). Not a
-      #   `returns`: while the ivar is unset it answers the new object, not
-      #   what the ivar held.
+      # - `memo`: `[ivar, class names, wrappers, by_self]` when its body is
+      #   exactly `@ivar ||= Klass.new`, with the classes `Klass` may name from
+      #   where it is written; or that `Klass.new` with calls that take a block
+      #   made on it, `wrappers`, innermost first (`Klass.new.tap { … }`).
+      #   `by_self` where it is `new` called on `self`, which builds an
+      #   instance of whichever class receives the call. Not a `returns`: while
+      #   the ivar is unset it answers the new object, not what the ivar held.
       # - `ivars`: the ivars it reads;
       # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
       # - `memoized_hash`: the ivar, when that value is `{}`;
@@ -250,7 +252,7 @@ module Steep
       # `register_methods`.
       def register_singleton_methods(body, names:, nesting:)
         each_singleton_definition(body) do |mname, args, mbody|
-          method_body = names.size == 1 ? method_body(args, mbody, nesting: nesting) : nil
+          method_body = names.size == 1 ? method_body(args, mbody, nesting: nesting, defined_as: names.first) : nil
           names.each { |name| ((@singleton_methods[name] ||= {})[mname] ||= []) << method_body }
         end
       end
@@ -347,7 +349,7 @@ module Steep
 
       OUTSIDE = %i[gvar cvar nth_ref back_ref].freeze
 
-      def method_body(args_node, body, nesting: nil)
+      def method_body(args_node, body, nesting: nil, defined_as: nil)
         writes = Set[] #: Set[Symbol]
         ivars = Set[] #: Set[Symbol]
         self_sends = Set[] #: Set[Symbol]
@@ -383,7 +385,7 @@ module Steep
           hands_back_elements: HandedBack.elements(body),
           keyed_memo: HandedBack.keyed_memo(args_node, body),
           outside_state: outside || !consts.empty?,
-          memo: nesting && memo_of(body, nesting),
+          memo: defined_as && memo_of(body, nesting, defined_as),
           memoizes: memoized_ivar(body),
           memoized_hash: memoized_hash(body),
           calls: calls,
@@ -649,7 +651,7 @@ module Steep
         memoized_ivar(body) if value&.type == :hash && value.children.empty?
       end
 
-      def memo_of(body, nesting)
+      def memo_of(body, nesting, defined_as)
         return unless body&.type == :or_asgn
 
         target, value = body.children
@@ -663,14 +665,13 @@ module Steep
           wrappers.unshift(wrapper.children[1])
           value = wrapper.children[0]
         end
-        return unless value.type == :send
+        return unless HandedBack.fresh_object?(value)
+        return [target.children[0], [defined_as], wrappers, true] if HandedBack.built_by_self?(value)
 
-        klass, method_name, *arguments = value.children
-        return unless method_name == :new && arguments.empty? && klass&.type == :const
-
+        klass = value.children[0]
         name = const_to_name(klass) or return
         names = klass.children[0]&.type == :cbase ? [name] : nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
-        [target.children[0], names, wrappers]
+        [target.children[0], names, wrappers, false]
       end
 
       # A reader whose body is exactly `@ivar` (normal or endless def) →
