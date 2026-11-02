@@ -6,7 +6,7 @@ class HarvestedMethodsTest < Minitest::Test
   include ShellHelper
   include SpecializationsProjectHelper
 
-  def store_project(store_rbs:, attr_ruby:, base_ruby:)
+  def store_project(store_rbs:, attr_ruby:, base_ruby:, block_return: "untyped")
     write("sig/base.rbs", <<~RBS)
       class Base
         self.@generated_methods: Module?
@@ -19,7 +19,7 @@ class HarvestedMethodsTest < Minitest::Test
       end
       module Attr
         def self.redefine: (untyped owner, Symbol name, 1 | 2 value) -> void
-        def self.redefine_method: (untyped owner, Symbol | String name) { (?) -> untyped } -> void
+        def self.redefine_method: (untyped owner, Symbol | String name) { (?) -> #{block_return} } -> void
       end
     RBS
     write("app/attr.rb", attr_ruby)
@@ -66,6 +66,21 @@ class HarvestedMethodsTest < Minitest::Test
         store_rbs: "def self.__store: () -> untyped",
         attr_ruby: FORWARDED,
         base_ruby: "def self.pluralize = __store\n  Attr.redefine(self, :__store, 1)"
+      )
+      runner = Steep::Specializations::Runner.new(project)
+      runner.run
+
+      assert_equal ["module GeneratedMethods\nend", nil], runner.evals.fetch("app/base.rb:20:2").map { |chunk| chunk&.source }
+    end
+  end
+
+  def test_a_call_whose_block_does_not_fit_its_declaration_still_runs_the_method_it_names
+    in_tmpdir do
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped",
+        attr_ruby: FORWARDED,
+        base_ruby: "def self.pluralize = __store\n  Attr.redefine(self, :__store, 1)",
+        block_return: "String"
       )
       runner = Steep::Specializations::Runner.new(project)
       runner.run
