@@ -226,6 +226,15 @@ module Steep
         closure_of_stores(ivar, ivar, @forwarded_stores, reaching: reaching) if @born_objects.each_value.any? { |ivars| ivars.key?(ivar) }
       end
 
+      # The calls that may run `method_name` (`StoringClosure`): its own and
+      # those of every method that may call it, by name; nil where a call of
+      # it is made from code no method name stands for. `reaching` says whether
+      # a call of a method of the closure may run that method.
+      def running_closure(method_name, reaching:)
+        index_uses unless @uses
+        closure_of_calls(Set[method_name.to_sym], reaching: reaching)
+      end
+
       # The classes that define `method_name`, on their instances or, with
       # `singleton`, on the class object, as `[class_name, singleton]`.
       def owners_of(method_name)
@@ -426,7 +435,12 @@ module Steep
 
       def scan_closures(hashes)
         hashes.each { |memo, ivar| closure_of_stores(memo, ivar, reaching: EVERY_CALL) }
+        memoizing_methods.each { |name| closure_of_calls(Set[name], reaching: EVERY_CALL) }
         @born_objects.each_value.flat_map(&:keys).uniq.each { |ivar| closure_of_stores(ivar, ivar, @forwarded_stores, reaching: EVERY_CALL) }
+      end
+
+      def memoizing_methods
+        [@methods, @singleton_methods].flat_map { |table| table.each_value.flat_map { |methods| methods.filter_map { |name, bodies| name if bodies.any? { |body| body&.memoizes } } } }.uniq
       end
 
       def forwarded_stores
@@ -490,12 +504,16 @@ module Steep
         stores = stores_into(memo, ivar, names)
         return if stores.any? { |use| use.kind != :statement && !use.within }
 
-        storing = stores.filter_map(&:within).to_set
+        closure_of_calls(stores.filter_map(&:within).to_set, reaching: reaching)
+      end
+
+      def closure_of_calls(storing, reaching:)
         escaped = false
         loop do
           constructs = storing.include?(:initialize)
-          calls = calls_named(constructs ? storing | [:new] : storing).select(&reaching)
-          escaped ||= calls.any? { |call| call.kind == :escape || !(call.in_class_body || call.enclosing) }
+          named = calls_named(constructs ? storing | [:new] : storing)
+          calls = named.reject { |call| call.kind == :escape }.select(&reaching)
+          escaped ||= named.any? { |call| call.kind == :escape } || calls.any? { |call| !(call.in_class_body || call.enclosing) }
 
           grown = calls.filter_map(&:enclosing).to_set - storing
           return (StoringClosure.new(storing - [:initialize], constructs) unless escaped) if grown.empty?
