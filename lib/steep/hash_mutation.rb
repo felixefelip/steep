@@ -223,7 +223,7 @@ module Steep
         ancestors.each_with_index do |ancestor, index|
           registry.possible_bodies(ancestor.name.to_s).each do |name, bodies|
             initializing = Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name)
-            next if (initializing && !kept) || copies_source_body?(registry, ancestors.drop(index), name)
+            next if (initializing && !kept) || copies_source_body?(registry, ancestors.drop(index), name) || unreached?(constr, name, initializing)
 
             bodies.each do |body|
               made = body_writes(constr, instance, ivar, name, body, kept: kept, assigns: initializing) or return
@@ -234,6 +234,12 @@ module Steep
         writes
       rescue RBS::BaseError
         nil
+      end
+
+      # A method the project names nowhere, that the runtime does not call on
+      # its own either, writes nothing on any object.
+      def unreached?(constr, name, initializing)
+        !initializing && !constr.constructor_bindings.may_call?(name) && !ObjectStates::ClassMemos.called_implicitly?(constr, [name])
       end
 
       def copies_source_body?(registry, ancestors, name)
