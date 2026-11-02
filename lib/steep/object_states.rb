@@ -441,8 +441,7 @@ module Steep
       # the instance methods of a module it extends, or of a class or module
       # on an instance's side.
       def ancestor_bodies(registry, ancestor)
-        name = ancestor.name.to_s
-        ancestor.is_a?(RBS::Definition::Ancestor::Singleton) ? registry.singleton_method_bodies(name) : registry.method_bodies(name)
+        ancestor.is_a?(RBS::Definition::Ancestor::Singleton) ? registry.singleton_method_bodies(ancestor.name) : registry.method_bodies(ancestor.name)
       end
 
       def ancestor_defines?(registry, ancestor, method_name)
