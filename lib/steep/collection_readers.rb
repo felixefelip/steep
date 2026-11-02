@@ -117,11 +117,14 @@ module Steep
         end
       end
 
+      # A push copies only onto a local: `concat(words)` on `self` runs
+      # whatever `concat` the class has.
       def send_operands(node)
         arguments = node.children.drop(2)
+        onto_local = node.children[0]&.type == :lvar
         case node.children[1]
-        when :push, :append then local_splats(arguments)
-        when :concat then arguments.select { |argument| argument.type == :lvar }
+        when :push, :append then onto_local ? local_splats(arguments) : []
+        when :concat then onto_local ? arguments.select { |argument| argument.type == :lvar } : []
         else binary?(node) ? arguments.select { |argument| argument.type == :lvar } : []
         end
       end
