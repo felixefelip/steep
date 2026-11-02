@@ -319,9 +319,10 @@ module Steep
             type.is_a?(AST::Types::Nil) ? may_set?(constr, singleton, call, ivar, reach, hands_self) : hash_held?(constr, singleton, ivar, type) && may_store?(constr, singleton, call, ivar)
           end
           moved = moved.merge(yielded_memos(constr, reached)) if reached
+          moved = moved.merge(yielded_elsewhere(constr, singleton, call))
           return constr if moved.empty?
 
-          exit ||= {}
+          exit ||= (call.is_a?(TypeInference::MethodCall::Typed) && ObjectStates.exit_of(constr, call.node, under: :stateful?)&.classes&.[](singleton.name)) || {}
           constr.update_type_env do |env|
             env.refine_types(instance_variable_types: moved.to_h { |ivar, _| [ivar, exit.fetch(ivar) { ObjectStates.declared_ivar(constr, ivar) }] })
           end
@@ -439,6 +440,18 @@ module Steep
 
           chain = ObjectStates.initialize_chain(constr, instance) or return false
           chain.all? { |_, body| body.nil? || !body.calls }
+        end
+
+        # The memos of `self` holding an object that a call not made on `self`
+        # may hand to a block, by a method it reaches that yields it
+        # (`may_yield?`): `Other.boot` running `Inflector.inflections { … }`.
+        def yielded_elsewhere(constr, singleton, call)
+          return {} unless singleton.is_a?(AST::Types::Name::Singleton)
+
+          env = constr.context.type_env
+          value_memos(constr, singleton).filter_map do |ivar, _, _|
+            [ivar, env[ivar]] if ObjectStates.state_in(env[ivar]) && may_yield?(constr, singleton, call, ivar)
+          end.to_h
         end
 
         def yielded_memos(constr, reached)

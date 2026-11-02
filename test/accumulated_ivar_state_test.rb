@@ -621,10 +621,27 @@ class AccumulatedIvarStateTest < Minitest::Test
       "a block reading a local of its own scope" => "replacement = \"article\"\ninflections { |inflect| inflect.singular(/posts\\z/, replacement) }",
       "a block calling on its own self" => "inflections { |inflect| inflect.singular(/posts\\z/, name.to_s) }",
       "a block that breaks" => "inflections { |inflect| break }",
-      "a block handed on" => "handed = proc { |inflect| inflect.singular(/posts\\z/, \"article\") }\ninflections(&handed)",
-      "a call from another class" => "class Other\n  def self.boot = Inflector.inflections { |inflect| inflect.singular(/posts\\z/, \"article\") }\nend"
+      "a block handed on" => "handed = proc { |inflect| inflect.singular(/posts\\z/, \"article\") }\ninflections(&handed)"
     }.each do |label, call|
       assert_equal [[nil], [nil]], yielded(call: call), label
+    end
+  end
+
+  def test_a_block_passed_by_a_call_on_a_constant_writes_through_the_object_it_is_yielded
+    assert_equal [["def article_ids; []; end"], ["def category_ids; []; end"]], yielded(call: YIELD_BLOCK.sub("inflections", "Inflector.inflections")), "the class's own name"
+    assert_equal [["def post_ids; []; end"], ["def categorie_ids; []; end"]],
+                 chunks(yielded_by_another(**ELEMENT_OF_ANOTHER, call: "Inflector.inflections(:en)", caller: "Boot"), rbs: ANOTHER_RBS), "another module, yielded another class's element"
+  end
+
+  OTHER_BOOT = "class Other\n  def self.boot = Inflector.inflections { |inflect| inflect.singular(/posts\\z/, \"article\") }\nend"
+
+  def test_a_block_written_in_another_class_runs_only_where_its_call_does
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], yielded(call: OTHER_BOOT), "a method never called"
+    {
+      "called by its class body" => "#{OTHER_BOOT}\nOther.boot",
+      "called by a name given as a value" => "#{OTHER_BOOT}\nOther.send(:boot)"
+    }.each do |label, call|
+      refute_includes yielded(call: call).flatten, "def post_ids; []; end", label
     end
   end
 
@@ -1515,7 +1532,7 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   RBS
 
-  def yielded_by_another(memo:, reads:, writes:, yields:, call:)
+  def yielded_by_another(memo:, reads:, writes:, yields:, call:, caller: nil)
     <<~RUBY
       class Rules
         attr_reader :singulars
@@ -1547,8 +1564,10 @@ class AccumulatedIvarStateTest < Minitest::Test
           yield #{yields} if block_given?
         end
 
-        #{call} { |inflect| inflect.singular(/s\\z/, "") }
+        #{"#{call} { |inflect| inflect.singular(/s\\z/, \"\") }" unless caller}
       end
+
+      #{"module #{caller}\n  #{call} { |inflect| inflect.singular(/s\\z/, \"\") }\nend" if caller}
 
       class Post
         def self.has_many_like(name) = class_eval("def \#{Holder.singularize(name.to_s)}_ids; []; end")

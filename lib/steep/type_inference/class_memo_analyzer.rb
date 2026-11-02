@@ -85,8 +85,8 @@ module Steep
 
         if Accumulators::LAMBDA_BODIES.include?(node.type) && names.include?(node.children[0].children[1])
           send = node.children[0]
-          on_self = send.children[0].nil? || send.children[0].type == :self
-          found[send.children[1]] << (on_self && ObjectStates::Yields.replayable?(node) ? :replayed : :other)
+          named = send.children[0].nil? || %i[self const].include?(send.children[0].type)
+          found[send.children[1]] << (named && ObjectStates::Yields.replayable?(node) ? :replayed : :other)
           send.children.drop(2).each { |child| block_calls(child, names: names, found: found) }
           node.children.drop(1).each { |child| block_calls(child, names: names, found: found) }
           return found
