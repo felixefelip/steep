@@ -249,12 +249,14 @@ module Steep
         # One whose `Klass.new` they follow holds no object state only while it
         # is `nil`.
         def value_memos(constr, singleton)
-          memos = ObjectStates.class_side_bodies(constr, singleton).filter_map do |owner, method_name, body|
-            [body.memoizes, owner, method_name] if body&.memoizes
+          constr.specializations.memoize(:"value_memos #{singleton.name}") do
+            memos = ObjectStates.class_side_bodies(constr, singleton).filter_map do |owner, method_name, body|
+              [body.memoizes, owner, method_name] if body&.memoizes
+            end
+            registry = constr.constructor_bindings
+            born = registry.born_hashes(singleton.name).keys | registry.born_objects(singleton.name).keys
+            memos + born.map { |ivar| [ivar, nil, ivar] }
           end
-          registry = constr.constructor_bindings
-          born = registry.born_hashes(singleton.name).keys | registry.born_objects(singleton.name).keys
-          memos + born.map { |ivar| [ivar, nil, ivar] }
         end
 
         # `@x ||= value` where the env knows more of `@x` than its declaration:
@@ -327,13 +329,22 @@ module Steep
 
         # What a call that may store into a hash memo of `singleton`, without
         # reaching the class object, leaves the class holding: the record its
-        # check left there (`left`), or none.
-        def stored_through(constr, singleton, ivars, call, left)
+        # check left there (`left`), or none. So does one `carried` to the
+        # class (`ClassStates.of_call`) that may run a memo of it still unset,
+        # or a method yielding a memo's object; one not carried to it is
+        # followed only by name, which is not precise enough to say it does.
+        def stored_through(constr, singleton, ivars, call, left, carried:)
           ivars.filter_map do |ivar, type|
-            next [ivar, type] unless hash_held?(constr, singleton, ivar, type) && may_store?(constr, singleton, call, ivar)
+            unset = type.is_a?(AST::Types::Nil)
+            held = !unset && hash_held?(constr, singleton, ivar, type)
+            changes = if held then may_store?(constr, singleton, call, ivar)
+                      elsif unset then may_set?(constr, singleton, call, ivar, nil, false) && carried.call
+                      else ObjectStates.state_in(type) && may_yield?(constr, singleton, call, ivar) && carried.call
+                      end
+            next [ivar, type] unless changes
 
-            value = left&.[](ivar)
-            [ivar, value] if value && hash_held?(constr, singleton, ivar, value)
+            value = left.call&.[](ivar)
+            [ivar, value] if value && ((unset && value.is_a?(AST::Types::Nil)) || hash_held?(constr, singleton, ivar, value) || (!held && ObjectStates.state_in(value)))
           end.to_h
         end
 
@@ -356,9 +367,26 @@ module Steep
           value_memos(constr, singleton).any? do |held, owner, method_name|
             next false unless held == ivar
 
-            owner.nil? || closure_runs?(constr, call, constr.specializations.memoize(:"running_closure #{method_name}") do
-              constr.constructor_bindings.running_closure(method_name, reaching: reaching(constr))
-            end)
+            owner.nil? || closure_runs?(constr, call, running_closure(constr, method_name))
+          end
+        end
+
+        # Whether `call` may run a method that yields the object a memo of
+        # `singleton` keeps in `ivar` to a block (`Yields`), which may change it
+        # from another class's body.
+        def may_yield?(constr, singleton, call, ivar)
+          return true unless call.is_a?(TypeInference::MethodCall::Typed)
+
+          value_memos(constr, singleton).any? do |held, _, method_name|
+            held == ivar && constr.constructor_bindings.uses_of(method_name).any? do |use|
+              use.kind == :yielded && closure_runs?(constr, call, running_closure(constr, use.called))
+            end
+          end
+        end
+
+        def running_closure(constr, method_name)
+          constr.specializations.memoize(:"running_closure #{method_name}") do
+            constr.constructor_bindings.running_closure(method_name, reaching: reaching(constr))
           end
         end
 
@@ -459,14 +487,16 @@ module Steep
           return unless call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
 
           instance = constr.typing.nominal_of(node: call.node) || call.return_type
-          tracked(constr, singleton, call.method_name, ObjectStates.state_in(instance)&.back_type || instance)
+          tracked(constr, singleton, call.method_name, ObjectStates.state_in(instance)&.back_type || instance, nil)
         end
 
-        def tracked(constr, singleton, method_name, instance)
+        # `receiver`: the class a call names, where it is made on a constant
+        # rather than on `self`.
+        def tracked(constr, singleton, method_name, instance, receiver)
           owner, body = ObjectStates.resolved_body(constr, singleton, method_name)
           ivar, classes, wrappers, by_self = body&.memo
           return unless ivar && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
-          return if by_self && !built_here?(constr, owner)
+          return if by_self && !built_here?(constr, owner, receiver: receiver)
           return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, method_name)
           return unless [method_name, ivar].all? { |used| confined?(constr, singleton, instance, used) }
           return unless wrappers.all? { |name| Tap.resolves?(constr, instance, name) }
@@ -493,6 +523,30 @@ module Steep
           call.with_return_type(state) if state.is_a?(AST::Types::ObjectState)
         end
 
+        # `[class, ivar, object]` for a call on another class object to a memo
+        # of it, `Holder.rules`, as the env knows that class (`ClassStates`),
+        # where the memo is followed.
+        def on_class(constr, node)
+          receiver = node.children[0]
+          return unless node.type == :send && receiver&.type == :const && constr.typing.has_type?(receiver)
+
+          singleton = constr.typing.type_of(node: receiver)
+          return unless singleton.is_a?(AST::Types::Name::Singleton) && singleton != constr.self_type
+
+          ivar, = ObjectStates.resolved_body(constr, singleton, node.children[1])&.last&.memo
+          state = ivar && ObjectStates.state_in(constr.context.type_env.class_states[singleton.name]&.[](ivar)) or return
+          [singleton, ivar, state] if tracked(constr, singleton, node.children[1], state.back_type, singleton)
+        end
+
+        # The env with the memo `on_class` found left holding `left`, or
+        # unknown where that is no one state.
+        def left_on_class(constr, found, left)
+          singleton, ivar, = found
+          states = constr.context.type_env.class_states
+          ivars = left ? states.fetch(singleton.name).merge(ivar => left) : states.fetch(singleton.name).except(ivar)
+          constr.update_type_env { |env| env.update(class_states: states.merge(singleton.name => ivars)) }
+        end
+
         # A method of the class whose every value is one of its tracked memos
         # (`Body#hands_back`) answers the object as its own check left it.
         def handed_back?(constr, call)
@@ -501,7 +555,7 @@ module Steep
           return false unless state && call.is_a?(TypeInference::MethodCall::Typed) && singleton.is_a?(AST::Types::Name::Singleton)
 
           names = ObjectStates.resolved_body(constr, singleton, call.method_name)&.last&.hands_back or return false
-          names.all? { |name| tracked(constr, singleton, name, state.back_type) }
+          names.all? { |name| tracked(constr, singleton, name, state.back_type, nil) }
         end
 
         # Whether `new` called on `self` in a method `owner` defines builds an

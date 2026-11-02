@@ -382,7 +382,8 @@ module Steep
         end
 
         result = assign_local_variables(assignments).merge(pure_method_calls: pure_call_updates)
-        result = result.update(class_states: class_states.select { |name, ivars| envs.all? { |env| env.class_states[name] == ivars } })
+        agreed = envs.empty? ? class_states : envs.first.class_states.select { |name, ivars| envs.all? { |env| env.class_states[name] == ivars } }
+        result = result.update(class_states: agreed)
         result = result.refine_types(instance_variable_types: ivar_updates) unless ivar_updates.empty?
         result
       end

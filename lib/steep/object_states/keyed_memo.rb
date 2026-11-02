@@ -118,7 +118,7 @@ module Steep
             next false if call.kind == :escape || call.called != :new || call.at.nil? || !call.singleton || call.owner.to_s.empty?
 
             owner = AST::Types::Name::Singleton.new(name: RBS::TypeName.parse("::#{call.owner}"))
-            _, _, wrappers = ClassMemos.tracked(constr, owner, call.enclosing, instance)
+            _, _, wrappers = ClassMemos.tracked(constr, owner, call.enclosing, instance, nil)
             !!wrappers&.empty?
           end
         end
