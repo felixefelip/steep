@@ -43,7 +43,7 @@ module Steep
       # first class the receiver may be that runs it; the receiver's own body
       # first. nil where one of them is not a body the source names.
       def runs(call, node:, exact_self:, self_type:)
-        return nil unless call.is_a?(TypeInference::MethodCall::Typed)
+        return nil unless call.is_a?(TypeInference::MethodCall::Typed) || call.is_a?(TypeInference::MethodCall::Error)
 
         key = Specializations.method_key(call.method_decls) or return nil
         return { key => call.receiver_type } if node.type == :super
