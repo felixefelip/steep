@@ -42,8 +42,9 @@ module Steep
       # escape, `[method, index]` where the value is the positional argument
       # `index` of a call of `method`, and `handed` what the bodies of the
       # methods of that name do with that parameter, filled in by the registry
-      # (`ConstructorBindingRegistry#hand_on`).
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed) do
+      # (`ConstructorBindingRegistry#hand_on`). `self_at`: the call naming it
+      # on `self`, by `site`.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed, :self_at) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
           value&.each { |use| use.each_forwarder(&block) }
@@ -212,6 +213,7 @@ module Steep
             use.owner = owner_of(node)
             use.in_class_body = in_class_body
             use.on_self = on_self
+            use.self_at = ClassMemoAnalyzer.site(node) if on_self
           end
         end
         record_named(name, arguments)
@@ -229,8 +231,9 @@ module Steep
         return unless @names.include?(name)
 
         uses = value_uses(node, parent, in_statement) || [ESCAPE]
-        at = %i[send csend].include?(node.type) && node.children[0] && node.children[0].type != :self && ClassMemoAnalyzer.site(node)
-        @uses[name].concat(at ? uses.map { |use| use.dup.tap { |sited| sited.at = at } } : uses)
+        site = %i[send csend].include?(node.type) && ClassMemoAnalyzer.site(node)
+        on_self = site && (node.children[0].nil? || node.children[0].type == :self)
+        @uses[name].concat(site ? uses.map { |use| use.dup.tap { |sited| on_self ? sited.self_at = site : sited.at = site } } : uses)
       end
 
       def value_uses(node, parent, in_statement)

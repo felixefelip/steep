@@ -154,6 +154,20 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def test_a_reader_of_the_same_name_on_self_in_another_module_leaves_the_list_known
+    ruby = source + "\nmodule Words\n  extend self\n\n  def rules(locale = :en) = nil\n  def plural_of(word) = rules(:en).uncountables\nend\n"
+    rbs = RBS + "module Words\n  extend Words\n  def rules: (?Symbol locale) -> untyped\n  def plural_of: (String word) -> untyped\nend\n"
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
+  end
+
+  def test_declines_a_change_on_self_in_a_module_the_class_extends
+    ruby = source(body: "extend Words\nwipe").sub("class Inflector", "module Words\n  def wipe = rules.singulars.clear\nend\n\nclass Inflector")
+    rbs = RBS.sub("class Inflector", "module Words\n  def rules: () -> Inflector::Rules\n  def wipe: () -> untyped\nend\nclass Inflector\n  extend Words\nend\nclass Inflector")
+
+    assert_equal [[nil], [nil]], chunks(ruby, rbs: rbs)
+  end
+
   def test_a_block_may_hand_an_element_to_a_core_method_the_project_does_not_redefine
     reads = 'rules.singulars.each { |(rule, replacement)| "x".start_with?(replacement); break if result.sub!(rule, replacement) }'
 
