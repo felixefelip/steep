@@ -43,6 +43,16 @@ module Steep
       node.children.each { |child| each_node(child, &block) }
     end
 
+    # The locals of `names` that `node` reads or writes, stopping at a body of
+    # its own.
+    def names_in(node, names)
+      found = Set.new #: Set[Symbol]
+      each_node(node) do |child|
+        found << child.children[0] if (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0])
+      end
+      found
+    end
+
     # How many times `node` reads or writes `name`.
     def mentions(node, name)
       count = 0

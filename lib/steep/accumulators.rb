@@ -903,7 +903,7 @@ module Steep
         pushes, mentioned = pushes_in(lines, found, watched)
         return nil if pushes.empty? && !over
 
-        mentioned.merge(names_in(collection, watched)) unless over
+        mentioned.merge(LocalReach.names_in(collection, watched)) unless over
         # Pushing onto the array being run over: one more pass per push, which
         # is no count at all.
         return nil if over && pushes.key?(over)
@@ -934,7 +934,7 @@ module Steep
         return [] unless args.is_a?(Parser::AST::Node)
 
         args.children.filter_map do |arg|
-          arg.children[0] if %i[restarg arg kwarg].include?(arg.type) && arg.children[0]
+          arg.children[0] if %i[restarg arg optarg kwarg kwoptarg].include?(arg.type) && arg.children[0]
         end
       end
 
@@ -956,7 +956,7 @@ module Steep
         # it says.
         return nil if jumps?(statement)
 
-        mentioned = names_in(predicate, watched)
+        mentioned = LocalReach.names_in(predicate, watched)
         arms = [then_clause, else_clause].map do |clause|
           pushes, inner = pushes_in(statements(clause), found, watched)
           mentioned.merge(inner)
@@ -982,11 +982,12 @@ module Steep
       def pushes_in(lines, found, watched)
         pushes = {} #: Hash[Symbol, Array[untyped]]
         mentioned = Set.new #: Set[Symbol]
+        copied = Set.new #: Set[Symbol]
 
         lines.each do |line|
           if (push = Appends.push_onto(line, found))
             name, values = push
-            values.each { |value| mentioned.merge(names_in(value.is_a?(Spliced) ? value.node : value, watched)) }
+            values.each { |value| mentioned.merge(CollectionReaders.names_beyond_copies(value.is_a?(Spliced) ? value.node : value, watched, copied)) }
 
             (pushes[name] ||= []).concat(values)
           elsif (branched = branch_in(line, found, watched))
@@ -994,20 +995,12 @@ module Steep
             mentioned.merge(inner)
             branches.each { |name, branch| (pushes[name] ||= []) << branch }
           else
-            mentioned.merge(names_in(line, watched))
+            mentioned.merge(CollectionReaders.names_beyond_copies(line, watched, copied))
           end
         end
 
-        [pushes, mentioned]
-      end
-
-      # The watched locals `node` reads or writes, stopping at a body of its own.
-      def names_in(node, names)
-        found = Set.new #: Set[Symbol]
-        LocalReach.each_node(node) do |child|
-          found << child.children[0] if (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0])
-        end
-        found
+        # One these lines also push onto holds something else on every pass.
+        [pushes, mentioned.merge(copied & pushes.keys)]
       end
 
       # The one parameter of `{ |x| … }`, or nil for any other list — two
