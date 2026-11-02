@@ -22,6 +22,7 @@ module Steep
           positional = params.map { |param| param.children[0] }
           found = Set[] #: Set[[Symbol, Integer]]
           builds = true
+          by_self = false
           Accumulators::ReturnedValues.each_value(body) do |node|
             read = node.type == :or_asgn ? node.children[0] : node
             memo, method_name, key = read.children
@@ -31,11 +32,12 @@ module Steep
             index = positional.index(key.children[0]) or return
             found << [name, index]
             builds &&= node.type == :or_asgn && fresh_object?(node.children[1])
+            by_self ||= builds && built_by_self?(node.children[1])
           end
           return unless found.size == 1
 
           memo, index = found.first
-          [memo, index, builds, omitted_key(params, index)]
+          [memo, index, builds && (by_self ? :self : true), omitted_key(params, index)]
         end
 
         # The key a call that leaves out the parameter at `index` reads: its
@@ -139,7 +141,11 @@ module Steep
 
         def fresh_object?(node)
           receiver, method_name, *arguments = node.children
-          node.type == :send && method_name == :new && arguments.empty? && receiver&.type == :const
+          node.type == :send && method_name == :new && arguments.empty? && (receiver.nil? || %i[const self].include?(receiver.type))
+        end
+
+        def built_by_self?(node)
+          fresh_object?(node) && (node.children[0].nil? || node.children[0].type == :self)
         end
       end
     end

@@ -1294,4 +1294,88 @@ class AccumulatedIvarStateTest < Minitest::Test
   def test_declines_a_hash_in_a_memo_s_object_that_another_class_stores_into
     assert_equal [[nil], [nil]], chunks(box_source(elsewhere: "Inflector.box.put(:posts, :other)"), rbs: BOX_RBS)
   end
+
+  OWN_RBS = <<~RBS
+    class Rules
+      attr_reader singulars: Array[untyped]
+      def initialize: () -> Array[untyped]
+      def singular: (untyped rule, untyped replacement) -> Array[untyped]
+      self.@instance: Rules?
+      self.@instances: Hash[Symbol, Rules]?
+      def self.instances: () -> Hash[Symbol, Rules]
+      def self.instance: (?Symbol locale) -> Rules
+      def self.singularize: (String word) -> String
+    end
+    class Plain < Rules
+    end
+    class Post
+      def self.has_many_like: (Symbol name) -> untyped
+    end
+  RBS
+
+  BORN_INSTANCES = "@instances = {}\ndef self.instance(locale = :en)\n  @instances[locale] ||= new\nend"
+
+  def own_rbs(memo)
+    memo == BORN_INSTANCES ? OWN_RBS.sub("self.@instances: Hash[Symbol, Rules]?", "self.@instances: Hash[Symbol, Rules]") : OWN_RBS
+  end
+
+  def own_instance(memo, reader: "Rules", subclass: "")
+    <<~RUBY
+      class Rules
+        #{memo.gsub("\n", "\n  ")}
+
+        def singulars = @singulars
+
+        def initialize
+          @singulars = []
+        end
+
+        def singular(rule, replacement)
+          @singulars.prepend([rule, replacement])
+        end
+
+        instance(:en).singular(/s\\z/, "")
+        instance(:en).singular(/ies\\z/, "y")
+
+        def self.singularize(word)
+          result = word.dup
+          instance(:en).singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+          result
+        end
+      end
+
+      #{subclass}
+      class Post
+        def self.has_many_like(name) = class_eval("def \#{#{reader}.singularize(name.to_s)}_ids; []; end")
+
+        has_many_like :posts
+        has_many_like :categories
+      end
+    RUBY
+  end
+
+  def test_a_memo_of_an_instance_of_its_own_class_holds_its_rules
+    {
+      "built by new" => "def self.instance(locale = :en)\n  @instance ||= new\nend",
+      "built by self.new" => "def self.instance(locale = :en)\n  @instance ||= self.new\nend",
+      "built by its own name" => "def self.instance(locale = :en)\n  @instance ||= Rules.new\nend",
+      "kept in a hash memo under a key" => "def self.instances = @instances ||= {}\ndef self.instance(locale = :en) = (instances[locale] ||= new)",
+      "kept in a hash the class body sets" => BORN_INSTANCES
+    }.each do |label, memo|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(own_instance(memo), rbs: own_rbs(memo)), label
+    end
+  end
+
+  def test_a_memo_built_by_new_is_not_answered_for_a_subclass_that_inherits_it
+    subclass = "class Plain < Rules\n  def initialize\n    @singulars = [[/ts\\z/, \"x\"]]\n  end\nend\n"
+    {
+      "a memo" => "def self.instance(locale = :en)\n  @instance ||= new\nend",
+      "a hash memo" => "def self.instances = @instances ||= {}\ndef self.instance(locale = :en) = (instances[locale] ||= new)",
+      "a hash the class body sets" => BORN_INSTANCES
+    }.each do |label, memo|
+      written = chunks(own_instance(memo, reader: "Plain", subclass: subclass), rbs: own_rbs(memo)).flatten
+      refute_includes written, "def post_ids; []; end", label
+      refute_includes written, "def posts_ids; []; end", label
+    end
+  end
 end

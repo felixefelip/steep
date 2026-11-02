@@ -22,7 +22,7 @@ module Steep
           memo, ivar, key, builds = element_of(constr, node)
           return handed_back(constr, call, node) unless memo && ivar && key
 
-          state = held(constr, ivar, key) || (builds && missing?(constr, ivar, key) && built(constr, call)) or return
+          state = held(constr, ivar, key) || (builds && missing?(constr, ivar, key) && built_here?(constr, node, builds) && built(constr, call)) or return
           call.with_return_type(state) if keeps?(constr, memo, ivar, state.back_type)
         end
 
@@ -86,7 +86,7 @@ module Steep
         # (`ClassMemos.fresh_state`).
         def stored(constr, receiver, record, ivar, arguments)
           key_node, value = arguments
-          return unless arguments.size == 2 && fresh_object?(value) && constr.typing.has_type?(key_node) && constr.typing.has_type?(value)
+          return unless arguments.size == 2 && TypeInference::ConstructorBindingAnalyzer::HandedBack.fresh_object?(value) && constr.typing.has_type?(key_node) && constr.typing.has_type?(value)
 
           key = constr.typing.type_of(node: key_node)
           built = constr.typing.type_of(node: value)
@@ -161,6 +161,10 @@ module Steep
           !record.nil? && !record.elements.key?(key)
         end
 
+        def built_here?(constr, node, builds)
+          builds != :self || ClassMemos.built_here?(constr, ObjectStates.resolved_body(constr, constr.self_type, node.children[1])&.first)
+        end
+
         def built(constr, call)
           instance = ObjectStates.state_in(call.return_type)&.back_type || call.return_type
           ClassMemos.fresh_state(constr, instance) if instance.is_a?(AST::Types::Name::Instance)
@@ -173,11 +177,6 @@ module Steep
 
         def literal_key?(type)
           type.is_a?(AST::Types::Literal) && type.value.is_a?(::Symbol)
-        end
-
-        def fresh_object?(node)
-          receiver, method_name, *arguments = node.children
-          node.type == :send && method_name == :new && arguments.empty? && receiver&.type == :const
         end
 
         def keeps?(constr, memo, ivar, instance)
