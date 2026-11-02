@@ -137,10 +137,8 @@ module Steep
     # The calls whose array is new on every call and held by nothing else, so a
     # local born from one is as private as one born from `[]`. Keyed like the
     # intrinsic tables, by the method the call resolved to.
-    FRESH = Set[
-      "::Array#map", "::Array#collect", "::Enumerable#filter_map",
-      "::Method#parameters", "::UnboundMethod#parameters"
-    ].freeze
+    FRESH = (%w[map collect + - & | uniq compact flatten].map { |name| "::Array##{name}" } +
+             %w[::Enumerable#filter_map ::Method#parameters ::UnboundMethod#parameters]).to_set.freeze
 
     # Block calls that hand each element to a body and leave the receiver as it
     # was — unless the body changes an element in place, which nothing here
@@ -243,13 +241,16 @@ module Steep
         end
       end
 
-      # Whether every mention of `name` in the method is in `lines`, and the
-      # method takes no parameter of that name.
+      # Whether what `name` holds in `lines` is theirs alone: every mention of
+      # it in the method is there and the method takes no parameter of that
+      # name, or `lines` assign it before naming it and nothing after them
+      # reads it.
       def local_to?(def_node, lines, name)
         args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
-        return false if args.is_a?(Parser::AST::Node) && args.children.any? { |arg| arg.children[0] == name }
+        parameter = args.is_a?(Parser::AST::Node) && args.children.any? { |arg| arg.children[0] == name }
+        return true if !parameter && LocalReach.mentions(body_of(def_node), name) == lines.sum { |line| LocalReach.mentions(line, name) }
 
-        LocalReach.mentions(body_of(def_node), name) == lines.sum { |line| LocalReach.mentions(line, name) }
+        Births.born_first?(lines, name) && LocalReach.named_only_before?(body_of(def_node), lines, name)
       end
 
       # What one walk of a whole source says, for the checker to ask node by
@@ -347,8 +348,8 @@ module Steep
               at_reads[statement.children[0]] = contents.fetch(over)
             end
 
+            CollectionReaders.contents_read(statement, contents, pushed).each { |site, elements| at_reads[site] = elements }
             unless pushed.empty?
-              CollectionReaders.contents_read(statement, contents, pushed).each { |site, elements| at_reads[site] = elements }
               pushed.each do |name|
                 elements = contents.fetch(name)
                 last[name] = [statement, elements]
@@ -376,8 +377,6 @@ module Steep
             handed_arguments(statement, contents).each do |argument|
               at_args[argument] = contents.fetch(argument.children[0])
             end
-
-            CollectionReaders.contents_read(statement, contents, []).each { |site, elements| at_reads[site] = elements }
           end
 
           # A local read only up to a statement does not stay complete past it.
