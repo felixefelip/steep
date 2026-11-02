@@ -1229,6 +1229,21 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(keyed_memo, rbs: KEYED_MEMO_RBS)
   end
 
+  EXCLUDING_RBS = KEYED_MEMO_RBS.sub("def compute: (Symbol locale) -> Array[Symbol]", "def compute: (Symbol locale, ?Array[Symbol] exclude) -> Array[Symbol]\n  def excluded: () -> Array[Symbol]")
+
+  def excluding(default, line)
+    compute = "def compute(locale, exclude = #{default})\n  result = []\n  [locale].each do |tag|\n    #{line}\n  end\n  result.push(@default)\n  result\nend\ndef excluded = []"
+    keyed_memo.sub("def compute(locale) = [locale, @default]", compute)
+  end
+
+  def test_a_loop_reads_an_optional_parameter_left_at_its_default
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(excluding("[]", "result += [tag] - exclude"), rbs: EXCLUDING_RBS)
+  end
+
+  def test_declines_an_optional_parameter_whose_default_is_not_written_out
+    assert_equal [[nil], [nil]], chunks(excluding("excluded", "result += [tag] - exclude"), rbs: EXCLUDING_RBS)
+  end
+
   def test_declines_a_keyed_memo_whose_entries_something_else_changes
     {
       "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),

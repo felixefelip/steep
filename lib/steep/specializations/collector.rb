@@ -169,7 +169,15 @@ module Steep
         when :nil then AST::Builtin.nil_type
         when :sym, :str, :int then AST::Types::Literal.new(value: node.children[0])
         when :lvar then earlier[node.children[0]]
+        when :array then array_default(node)
         end
+      end
+
+      # An array written out of literals, which a call that leaves the
+      # parameter out builds anew: `exclude = []`.
+      def self.array_default(node)
+        elements = node.children.map { |child| default_type(child, {}) }
+        AST::Types::Tuple.new(types: elements) if elements.all?
       end
 
       # Every project method the call sites in `typing` resolve to, literal

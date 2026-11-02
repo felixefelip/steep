@@ -766,25 +766,15 @@ module Steep
         return nil unless args.is_a?(::Parser::AST::Node)
 
         params = args.children
-        index = params.index { |param| %i[arg restarg kwarg].include?(param.type) && param.children[0] == name } or return nil
-        return rest_tuple(def_node) if params[index].type == :restarg
+        index = params.index { |param| %i[arg optarg restarg kwarg kwoptarg].include?(param.type) && param.children[0] == name } or return nil
 
-        if params[index].type == :kwarg
-          type = keywords[name]
-          return type.is_a?(AST::Types::Tuple) ? type : nil
-        end
-
-        required = %i[arg mlhs]
         type =
-          if params[0...index].all? { |param| required.include?(param.type) }
-            positionals[index]
-          else
-            # After an optional or the rest, a required positional takes its
-            # argument counted from the END.
-            from_end = params[(index + 1)..].count { |param| required.include?(param.type) }
-            positionals[positionals.size - 1 - from_end] if positionals.size > from_end
+          case params[index].type
+          when :restarg then rest_tuple(def_node)
+          when :kwarg, :kwoptarg then keywords.fetch(name) { keyword_default(name) }
+          when :optarg then optional_arrived(params, index)
+          else required_arrived(params, index)
           end
-
         type if type.is_a?(AST::Types::Tuple)
       end
 
@@ -819,6 +809,28 @@ module Steep
 
         filled = [optional, free].min
         AST::Types::Tuple.new(types: positionals[leading + filled, free - filled] || [])
+      end
+
+      def required_arrived(params, index)
+        required = %i[arg mlhs]
+        if params[0...index].all? { |param| required.include?(param.type) }
+          positionals[index]
+        else
+          # After an optional or the rest, a required positional takes its
+          # argument counted from the END.
+          from_end = params[(index + 1)..].count { |param| required.include?(param.type) }
+          positionals[positionals.size - 1 - from_end] if positionals.size > from_end
+        end
+      end
+
+      # An optional positional is filled in order once the required ones are,
+      # which is where `substitute_positionals` puts it, unless a required one
+      # follows and takes an argument first.
+      def optional_arrived(params, index)
+        return nil unless params[0...index].all? { |param| %i[arg optarg mlhs].include?(param.type) }
+        return nil if params[(index + 1)..].any? { |param| param.type == :arg || param.type == :mlhs }
+
+        positionals[index] || positional_default(index)
       end
 
       def ==(other)
