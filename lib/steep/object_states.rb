@@ -133,7 +133,7 @@ module Steep
       # paths.
       def after_call(constr, node:, method_name:, receiver:, receiver_type:, arguments:)
         handed = ClassStates.handed_classes(constr, arguments)
-        on_self = (receiver.nil? || receiver.type == :self) && !Yields.frame_reader(constr, node)
+        on_self = (receiver.nil? || receiver.type == :self || names_self?(constr, receiver)) && !Yields.frame_reader(constr, node)
         reaches_self = on_self || ClassStates.hands_self?(constr, arguments, handed)
         constr = BlockRun.after(constr, node, receiver_type, method_name) unless reaches_self
         if (variable = receiver && HeldIvar.variable(constr, receiver)) && holds_state?(receiver_type)
@@ -234,6 +234,12 @@ module Steep
         return rhs_type if passed && (declared_type.is_a?(AST::Types::Union) || refined || state_in(rhs_type))
 
         declared_type if refined
+      end
+
+      # A constant that is the class object `self` is, `Inflector` in
+      # `Inflector`'s own body.
+      def names_self?(constr, receiver)
+        receiver.type == :const && constr.typing.has_type?(receiver) && constr.typing.type_of(node: receiver) == constr.self_type
       end
 
       def on_self?(node)
