@@ -74,7 +74,10 @@ module Steep
           value = node.children[0]
           ivar, = ClassMemos.tracked_memo(constr, ObjectStates.recorded_call(constr, value)) if ObjectStates.on_self?(value)
           element = HashElements.followed(constr, value) unless ivar
-          state = (ivar && ObjectStates.state_in(constr.typing.type_of(node: value))) || element or return constr
+          on_class = HashElements.on_class(constr, value) unless ivar || element
+          memo_on_class = ClassMemos.on_class(constr, value) unless ivar || element || on_class
+          state = (ivar && ObjectStates.state_in(constr.typing.type_of(node: value))) || element || on_class&.last || memo_on_class&.last
+          return unfollowed(constr, value) unless state
 
           name = Tap.parameter(block)
           inner = constr.with_new_typing(constr.typing.new_child).update_type_env { |env| env.assign_local_variable(name, state, nil) }
@@ -82,8 +85,26 @@ module Steep
           left = ObjectStates.state_in(inner.context.type_env[name])
           constr = constr.update_type_env { |env| env.update(instance_variable_types: inner.context.type_env.instance_variable_types, class_states: inner.context.type_env.class_states) }
           return HashElements.left_by(constr, value, left || state.back_type) if element
+          return HashElements.left_on_class(constr, on_class, left || state.back_type) if on_class
+          return ClassMemos.left_on_class(constr, memo_on_class, left) if memo_on_class
 
           ClassMemos.remembered_as(constr, value, ivar, left || ObjectStates.declared_ivar(constr, ivar))
+        end
+
+        # A block yielded a class's object by its name, which the replay does
+        # not follow, may change it: what the env knew of that class, `self`
+        # included, is known no longer.
+        def unfollowed(constr, value)
+          receiver = value.children[0] if value.type == :send
+          return constr unless receiver&.type == :const && constr.typing.has_type?(receiver)
+
+          singleton = constr.typing.type_of(node: receiver)
+          return constr unless singleton.is_a?(AST::Types::Name::Singleton)
+          return constr.update_type_env { |env| env.update(class_states: env.class_states.except(singleton.name)) } unless singleton == constr.self_type
+
+          env = constr.context.type_env
+          known = env.instance_variable_types.keys.select { |ivar| ObjectStates.state_in(env[ivar]) || env[ivar].is_a?(AST::Types::Record) || env[ivar].is_a?(AST::Types::Nil) }
+          constr.update_type_env { |current| current.refine_types(instance_variable_types: known.to_h { |ivar| [ivar, ObjectStates.declared_ivar(constr, ivar)] }) }
         end
 
         # `block_given?` in a body checked under a call, which says whether it

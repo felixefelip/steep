@@ -435,8 +435,12 @@ module Steep
 
       def scan_closures(hashes)
         hashes.each { |memo, ivar| closure_of_stores(memo, ivar, reaching: EVERY_CALL) }
-        memoizing_methods.each { |name| closure_of_calls(Set[name], reaching: EVERY_CALL) }
+        (memoizing_methods | yielding_methods).each { |name| closure_of_calls(Set[name], reaching: EVERY_CALL) }
         @born_objects.each_value.flat_map(&:keys).uniq.each { |ivar| closure_of_stores(ivar, ivar, @forwarded_stores, reaching: EVERY_CALL) }
+      end
+
+      def yielding_methods
+        @uses.each_value.flat_map { |uses| uses.filter_map { |use| use.called if use.kind == :yielded } }.uniq
       end
 
       def memoizing_methods

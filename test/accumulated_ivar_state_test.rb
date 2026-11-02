@@ -1491,4 +1491,108 @@ class AccumulatedIvarStateTest < Minitest::Test
       assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: CALLED_RBS), form
     end
   end
+
+  ANOTHER_RBS = <<~RBS
+    class Rules
+      attr_reader singulars: Array[untyped]
+      def initialize: () -> Array[untyped]
+      def singular: (untyped rule, untyped replacement) -> Array[untyped]
+    end
+    class Holder
+      self.@rules: Rules?
+      self.@instances: Hash[Symbol, Rules]?
+      def self.rules: () -> Rules
+      def self.instances: () -> Hash[Symbol, Rules]
+      def self.instance: (Symbol locale) -> Rules
+      def self.singularize: (String word) -> String
+    end
+    module Inflector
+      def self.default: () -> Symbol
+      def self.inflections: (?Symbol locale) ?{ (Rules) -> void } -> void
+    end
+    class Post
+      def self.has_many_like: (Symbol name) -> untyped
+    end
+  RBS
+
+  def yielded_by_another(memo:, reads:, writes:, yields:, call:)
+    <<~RUBY
+      class Rules
+        attr_reader :singulars
+
+        def initialize
+          @singulars = []
+        end
+
+        def singular(rule, replacement)
+          @singulars.prepend([rule, replacement])
+        end
+      end
+
+      class Holder
+        #{memo.gsub("\n", "\n  ")}
+        #{"#{writes}.singular(/ies\\z/, \"y\")" if writes}
+
+        def self.singularize(word)
+          result = word.dup
+          #{reads}.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+          result
+        end
+      end
+
+      module Inflector
+        def self.default = :en
+
+        def self.inflections(locale = :en)
+          yield #{yields} if block_given?
+        end
+
+        #{call} { |inflect| inflect.singular(/s\\z/, "") }
+      end
+
+      class Post
+        def self.has_many_like(name) = class_eval("def \#{Holder.singularize(name.to_s)}_ids; []; end")
+
+        has_many_like :posts
+        has_many_like :categories
+      end
+    RUBY
+  end
+
+  ELEMENT_OF_ANOTHER = {
+    memo: "def self.instances = @instances ||= {}\ndef self.instance(locale) = (instances[locale] ||= Rules.new)",
+    reads: "instance(:en)", writes: "instance(:en)", yields: "Holder.instance(locale)"
+  }.freeze
+
+  def test_rules_a_block_writes_through_the_object_another_class_s_memo_keeps
+    {
+      "an element of its hash memo" => ELEMENT_OF_ANOTHER,
+      "its memo's object" => { memo: "def self.rules\n  @rules ||= Rules.new\nend", reads: "rules", writes: "rules", yields: "Holder.rules" }
+    }.each do |label, form|
+      assert_equal [["def post_ids; []; end"], ["def categorie_ids; []; end"]], chunks(yielded_by_another(**form, call: "inflections(:en)"), rbs: ANOTHER_RBS), label
+    end
+  end
+
+  def test_another_class_s_memo_still_unset_survives_a_call_that_only_shares_its_name
+    other = "class Other\n  def self.instance(locale) = nil\n  def self.warm = instance(:en)\nend\n\n"
+    rbs = "#{ANOTHER_RBS}class Other\n  def self.instance: (Symbol locale) -> nil\n  def self.warm: () -> nil\nend\n"
+    ruby = other + yielded_by_another(**ELEMENT_OF_ANOTHER, writes: nil, call: "Other.warm\ninflections(:en)")
+    assert_equal [["def post_ids; []; end"], ["def categorie_ids; []; end"]], chunks(ruby, rbs: rbs)
+  end
+
+  def test_another_class_s_memo_still_unset_holds_what_a_block_wrote_through_it
+    assert_equal [["def post_ids; []; end"], ["def categorie_ids; []; end"]], chunks(yielded_by_another(**ELEMENT_OF_ANOTHER, writes: nil, call: "inflections(:en)"), rbs: ANOTHER_RBS)
+  end
+
+  def test_a_memo_yielded_through_its_own_class_s_name_is_not_answered_without_the_block_s_rules
+    memo = "#{ELEMENT_OF_ANOTHER[:memo]}\ndef self.inflections(locale)\n  yield Holder.instance(locale) if block_given?\nend\ninflections(:en) { |inflect| inflect.singular(/s\\z/, \"\") }"
+    rbs = ANOTHER_RBS.sub("def self.singularize:", "def self.inflections: (Symbol locale) ?{ (Rules) -> void } -> void\n  def self.singularize:")
+    written = chunks(yielded_by_another(**ELEMENT_OF_ANOTHER, memo: memo, call: "[].each"), rbs: rbs).flatten
+    refute_includes written, "def posts_ids; []; end"
+  end
+
+  def test_another_class_s_object_a_block_is_yielded_and_not_followed_is_known_no_longer
+    written = chunks(yielded_by_another(**ELEMENT_OF_ANOTHER, call: "inflections(default)"), rbs: ANOTHER_RBS).flatten
+    refute_includes written, "def posts_ids; []; end"
+  end
 end

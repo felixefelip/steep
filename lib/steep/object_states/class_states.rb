@@ -18,6 +18,19 @@ module Steep
     # the states its call site knew (`of_call`), not the ones around its
     # definition.
     module ClassStates
+      # A value computed the first time it is asked for.
+      class Lazy
+        def initialize(&block)
+          @block = block
+        end
+
+        def value
+          return @value if defined?(@value)
+
+          @value = @block.call
+        end
+      end
+
       class << self
         # A `class`/`module` body entered from `outer`, knowing what `outer`
         # knew of other classes. Its own state is `self`'s ivars there.
@@ -140,20 +153,22 @@ module Steep
         # A call made on a class object whose state the env knows, or handed
         # one, leaves it holding what the call's own check left it, and where
         # nothing says so, only what no call can change. One that may store
-        # into another class's hash memo leaves it as its check left it there
-        # (`ClassMemos.stored_through`).
+        # into another class's hash memo, or, carrying the class to its callee
+        # (`of_call`), change one of its other memos, leaves it as its check
+        # left it there (`ClassMemos.stored_through`).
         def moved(constr, node, receiver_type, handed)
           states = constr.context.type_env.class_states
           receiver = receiver_type.name if receiver_type.is_a?(AST::Types::Name::Singleton)
-          return constr unless states.any? { |name, ivars| name == receiver || handed.include?(name) || ivars.each_value.any?(AST::Types::Record) }
+          return constr unless states.any? { |name, ivars| name == receiver || handed.include?(name) || ivars.each_value.any? { |type| type.is_a?(AST::Types::Record) || type.is_a?(AST::Types::Nil) || ObjectStates.state_in(type) } }
 
-          exit = ObjectStates.exit_of(constr, node, under: :stateful?)
           call = ObjectStates.recorded_call(constr, node)
+          exit = Lazy.new { ObjectStates.exit_of(constr, node, under: :stateful?) }
+          carried = Lazy.new { call.is_a?(TypeInference::MethodCall::Typed) ? of_call(constr, call).keys : [] }
           left = states.to_h do |name, ivars|
             singleton = AST::Types::Name::Singleton.new(name: name)
-            next [name, ClassMemos.stored_through(constr, singleton, ivars, call, exit&.classes&.[](name))] unless name == receiver || handed.include?(name)
+            next [name, ClassMemos.stored_through(constr, singleton, ivars, call, -> { exit.value&.classes&.[](name) }, carried: -> { carried.value.include?(name) })] unless name == receiver || handed.include?(name)
 
-            [name, ObjectStates.moved_ivars(constr, singleton, ivars, name == receiver ? exit&.ivars : exit&.classes&.[](name))]
+            [name, ObjectStates.moved_ivars(constr, singleton, ivars, name == receiver ? exit.value&.ivars : exit.value&.classes&.[](name))]
           end
           return constr if left == states
 

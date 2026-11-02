@@ -15,8 +15,8 @@ module Steep
     class ClassMemoAnalyzer
       # `kind`: `:statement` for the receiver of a call that is itself a
       # statement of a class body, made on `self`; `:receiver` for the receiver
-      # of any other call; `:yielded` for a memo called on `self` and yielded
-      # alone, with `called` the method that yields it; `:escape` for anything else — a value stored,
+      # of any other call; `:yielded` for a memo called on `self`, or on a
+      # constant, and yielded alone, with `called` the method that yields it; `:escape` for anything else — a value stored,
       # handed on or returned, or a name given to a call that reaches a method
       # or an ivar by it. `called` is the method called on it, and
       # `element_calls` the methods an iteration's block hands it elements to.
@@ -234,7 +234,7 @@ module Steep
       end
 
       def value_uses(node, parent, in_statement)
-        if parent&.type == :yield && parent.children.size == 1 && node.type == :send && on_self?(node) && (method = enclosing_method(parent))
+        if parent&.type == :yield && parent.children.size == 1 && node.type == :send && (on_self?(node) || node.children[0]&.type == :const) && (method = enclosing_method(parent))
           [Use.new(:yielded, method, Set[])]
         elsif parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node)
           receiver_uses(node, parent, in_statement, direct: true)
