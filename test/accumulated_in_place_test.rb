@@ -116,6 +116,28 @@ class AccumulatedInPlaceTest < Minitest::Test
     refute_match(/\A\[/, types.fetch("handed"))
   end
 
+  def test_a_loop_inside_a_loop_pushes_once_per_pass_of_each
+    types = types_of({
+      "inner_only" => "result = []\n[locale, :en].each do |tag|\n  [tag, :x].each { |inner| result << inner }\nend\nresult",
+      "both" => "result = []\n[locale].each do |tag|\n  result << tag\n  [:x, :y].each { |inner| result += [inner] }\nend\nresult",
+      "inner_reads_outer_local" => "result = []\n[locale, :en].each do |tag|\n  parts = [tag]\n  parts.each { |inner| result << inner }\nend\nresult"
+    })
+
+    assert_equal "[:fr, :x, :en, :x]", types.fetch("inner_only")
+    assert_equal "[:fr, :x, :y]", types.fetch("both")
+    assert_equal "[:fr, :en]", types.fetch("inner_reads_outer_local")
+  end
+
+  def test_declines_a_loop_inside_a_loop_it_cannot_count_or_that_names_the_local
+    types = types_of({
+      "unknown" => "result = []\n[locale].each do |tag|\n  tag.to_s.chars.each { |char| result << char }\nend\nresult",
+      "named" => "result = []\n[locale].each do |tag|\n  [:x].each { |inner| other = result\n other << inner }\nend\nresult"
+    })
+
+    refute_match(/\A\[/, types.fetch("unknown"))
+    refute_match(/\A\[/, types.fetch("named"))
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 

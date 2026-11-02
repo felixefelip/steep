@@ -21,7 +21,7 @@ module Steep
       def add(constr, element, pass, types)
         case element
         when Loop
-          passes = constr.typing.iterations_of(node: element.block) or return nil
+          passes = (pass ? pass[element] : constr.typing.iterations_of(node: element.block)) or return nil
           passes.all? { |each_pass| types(constr, element.values, each_pass, types) } && types
         when Arrived then concat(types, constr.arrived_types(element))
         when Built then concat(types, constr.built_types(element))
@@ -32,6 +32,18 @@ module Steep
         else
           type = pass ? pass[element] : element_type(constr, element)
           types << type if value?(type)
+        end
+      end
+
+      # What one pass of a loop, checked as `pass`, keeps of `value`, for `add`
+      # to read back: the arm a conditional took, the passes an inner loop
+      # made, or the type of what was pushed.
+      def record(pass, value, record)
+        case value
+        when Branch then record[value.node] = pass.typing.arm_of(node: value.node)
+        when Loop then record[value] = pass.typing.iterations_of(node: value.block)
+        when Spliced then record[value] = spliced_type(pass, value.node)
+        else record[value] = element_type(pass, value)
         end
       end
 

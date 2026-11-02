@@ -624,16 +624,7 @@ module Steep
         env = exit_env.update(local_variable_types: exit_env.local_variable_types.slice(*carried))
 
         record = {}.compare_by_identity #: Typing::iteration_pass
-        Accumulators.each_entry(entries || []) do |value|
-          case value
-          when Accumulators::Branch
-            record[value.node] = pass.typing.arm_of(node: value.node)
-          when Accumulators::Spliced
-            record[value] = Accumulators::Contents.spliced_type(pass, value.node)
-          else
-            record[value] = Accumulators::Contents.element_type(pass, value)
-          end
-        end
+        Accumulators.each_entry(entries || []) { |value| Accumulators::Contents.record(pass, value, record) }
         record
       end
 

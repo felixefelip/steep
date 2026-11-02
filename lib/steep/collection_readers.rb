@@ -134,18 +134,18 @@ module Steep
       end
 
       # The locals of `names` that `node` reads or writes other than by copying
-      # elements out of them (`operands`); the copied ones go to `copied`.
-      def names_beyond_copies(node, names, copied)
-        operands = Set.new.compare_by_identity #: Set[untyped]
+      # elements out of them: one of its `operands`, or the local a `+`, `-`,
+      # `&` or `|` is called on.
+      def names_beyond_copies(node, names)
+        copies = Set.new.compare_by_identity #: Set[untyped]
         LocalReach.each_node(node) do |child|
-          operands(child).each { |operand| operands << (operand.type == :splat ? operand.children[0] : operand) }
+          operands(child).each { |operand| copies << (operand.type == :splat ? operand.children[0] : operand) }
+          copies << child.children[0] if child.type == :send && binary?(child) && child.children[0]&.type == :lvar
         end
 
         found = Set.new #: Set[Symbol]
         LocalReach.each_node(node) do |child|
-          next unless (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0])
-
-          (operands.include?(child) ? copied : found) << child.children[0]
+          found << child.children[0] if (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0]) && !copies.include?(child)
         end
         found
       end

@@ -369,7 +369,10 @@ module Steep
                   next
                 end
 
-                each_entry([entry]) { |nested| branches[nested.node] = true if nested.is_a?(Branch) }
+                each_entry([entry]) do |nested|
+                  branches[nested.node] = true if nested.is_a?(Branch)
+                  loops[nested.block] ||= nested.values if nested.is_a?(Loop)
+                end
               end
               next
             end
@@ -454,9 +457,7 @@ module Steep
         readable
       end
 
-      def body_of(def_node)
-        def_node.type == :defs ? def_node.children[3] : def_node.children[2]
-      end
+      def body_of(def_node) = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
 
       # Every array literal in a position `def_node`'s value leaves from.
       #
@@ -879,12 +880,8 @@ module Steep
       # and the checker answers them where it expands the loop: one it cannot
       # expand leaves the local without contents rather than with wrong ones.
       def loop_onto(statement, found)
-        return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :block
-
-        call, args, body = statement.children
-        return nil unless call.type == :send && call.children[1] == :each && call.children.size == 2
-
-        collection = call.children[0] or return nil
+        collection = each_collection(statement) or return nil
+        _, args, body = statement.children
         param = block_param(args) or return nil
 
         watched = found.select { |_, pushes| pushes }.keys
@@ -913,16 +910,17 @@ module Steep
 
       # The name of the watched local an `each` statement runs over, or nil.
       def looped_local(statement, found)
+        collection = each_collection(statement)
+        name = collection.children[0] if collection&.type == :lvar
+        name if name && found[name]
+      end
+
+      # What a `recv.each { … }` statement runs over, or nil for any other.
+      def each_collection(statement)
         return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :block
 
         call = statement.children[0]
-        return nil unless call.type == :send && call.children[1] == :each && call.children.size == 2
-
-        collection = call.children[0]
-        return nil unless collection&.type == :lvar
-
-        name = collection.children[0]
-        found[name] ? name : nil
+        call.children[0] if call.type == :send && call.children[1] == :each && call.children.size == 2
       end
 
       # The parameters of `def_node` that hold an array a call handed in: the
@@ -975,31 +973,32 @@ module Steep
       # of a body this walk reads but does not own — a loop's, or an arm's.
       # `mentioned` is every watched local one of its statements names in any
       # other way: that local cannot be counted, but the others still can, so
-      # it alone is taken away. A loop inside the line is such a mention: its
-      # passes would have to be expanded per pass of the outer body, which
-      # nothing does.
+      # it alone is taken away. A loop inside the line is a `Loop` of its own,
+      # whose passes each pass of the outer body records.
+      #
+      # A local the lines only copy elements out of is not a mention. One they
+      # also push onto has no contents recorded where it is copied, so the
+      # value that copy goes into is not one the checker knows.
       def pushes_in(lines, found, watched)
         pushes = {} #: Hash[Symbol, Array[untyped]]
         mentioned = Set.new #: Set[Symbol]
-        copied = Set.new #: Set[Symbol]
 
         lines.each do |line|
           if (push = Appends.push_onto(line, found))
             name, values = push
-            values.each { |value| mentioned.merge(CollectionReaders.names_beyond_copies(value.is_a?(Spliced) ? value.node : value, watched, copied)) }
+            values.each { |value| mentioned.merge(CollectionReaders.names_beyond_copies(value.is_a?(Spliced) ? value.node : value, watched)) }
 
             (pushes[name] ||= []).concat(values)
-          elsif (branched = branch_in(line, found, watched))
-            branches, inner = branched
+          elsif (nested = branch_in(line, found, watched) || loop_onto(line, found))
+            entries, inner = nested
             mentioned.merge(inner)
-            branches.each { |name, branch| (pushes[name] ||= []) << branch }
+            entries.each { |name, entry| (pushes[name] ||= []) << entry }
           else
-            mentioned.merge(CollectionReaders.names_beyond_copies(line, watched, copied))
+            mentioned.merge(CollectionReaders.names_beyond_copies(line, watched))
           end
         end
 
-        # One these lines also push onto holds something else on every pass.
-        [pushes, mentioned.merge(copied & pushes.keys)]
+        [pushes, mentioned]
       end
 
       # The one parameter of `{ |x| … }`, or nil for any other list — two
