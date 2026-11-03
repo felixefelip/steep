@@ -128,11 +128,12 @@ module Steep
           MIXIN_HOOKS.none? { |hook| defines?(name, hook, singleton: true) }
       end
 
+      # Whether `call` runs on a plain `Hash` or `Array` (`LiteralWrites`).
+      def literal_receiver?(call) = TypeInference::LiteralWrites.receiver?(call, @methods)
+
       # Every body the project may define for `class_name#method_name`s,
       # nil for one this cannot read.
-      def method_bodies(class_name)
-        methods_of(class_name)
-      end
+      def method_bodies(class_name) = methods_of(class_name)
 
       # Each body `method_bodies` lists, with those defined in a branch of the
       # class body read as written: what a body may do where it runs, whether
@@ -473,7 +474,7 @@ module Steep
         calls = reached.to_h { |name| [name, calls_named([name])] }
         loop do
           kept = reached.select do |name|
-            calls[name].all? { |call| call.on_self && !call.singleton && (INITIALIZERS.include?(call.enclosing) || reached.include?(call.enclosing)) }
+            calls[name].all? { |call| literal_receiver?(call) || (call.on_self && !call.singleton && (INITIALIZERS.include?(call.enclosing) || reached.include?(call.enclosing))) }
           end.to_set
           return kept if kept == reached
 

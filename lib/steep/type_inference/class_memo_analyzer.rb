@@ -43,8 +43,8 @@ module Steep
       # `index` of a call of `method`, and `handed` what the bodies of the
       # methods of that name do with that parameter, filled in by the registry
       # (`ConstructorBindingRegistry#hand_on`). `self_at`: the call naming it
-      # on `self`, by `site`.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed, :self_at) do
+      # on `self`, by `site`. `on_ivar`: of a call, the ivar it is made on.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed, :self_at, :on_ivar) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
           value&.each { |use| use.each_forwarder(&block) }
@@ -214,6 +214,7 @@ module Steep
             use.in_class_body = in_class_body
             use.on_self = on_self
             use.self_at = ClassMemoAnalyzer.site(node) if on_self
+            use.on_ivar = receiver.children[0] if receiver&.type == :ivar
           end
         end
         record_named(name, arguments)

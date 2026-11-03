@@ -187,7 +187,10 @@ module Steep
           loop do
             grown = names.select do |name|
               !building.include?(name) &&
-                Specializations::Receivers.calls_on(constr, name, instance).all? { |call| call.kind != :escape && call.at.nil? && call.singleton == false && building.include?(call.enclosing) }
+                Specializations::Receivers.calls_on(constr, name, instance).all? do |call|
+                  constr.constructor_bindings.literal_receiver?(call) ||
+                    (call.kind != :escape && call.at.nil? && call.singleton == false && building.include?(call.enclosing))
+                end
             end
             return building if grown.empty?
 
