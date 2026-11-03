@@ -15,7 +15,8 @@ module Steep
     # `collect` says what a pass contributes: `:each` nothing (its passes are
     # read for their pushes, not their values), `:map` the value the block
     # hands back, `:filter_map` that value only where it is truthy, `:any`
-    # whether it is truthy, up to the first that is.
+    # whether it is truthy, up to the first that is, `:flat_map` the value, or
+    # the elements of one that is an array.
     #
     # `writes_elements` for one that stores each value back into the receiver:
     # its value is a `map`'s, but it is no read of the collection.
@@ -37,7 +38,12 @@ module Steep
       "::Array#map!" => Entry.new(collect: :map, writes_elements: true),
       "::Array#collect!" => Entry.new(collect: :map, writes_elements: true),
       "::Array#any?" => Entry.new(collect: :any),
-      "::Enumerable#filter_map" => Entry.new(collect: :filter_map, depends_on: ["::Array#each", "::Array#filter_map"])
+      "::Enumerable#filter_map" => Entry.new(collect: :filter_map, depends_on: ["::Array#each", "::Array#filter_map"]),
+      # Each value the block hands back that is an array is spliced in, which
+      # `flat_map` asks of it through `to_ary`.
+      "::Enumerable#flat_map" => Entry.new(
+        collect: :flat_map, depends_on: ["::Array#each", "::Array#flat_map", *LiteralIntrinsics::ARRAY_CONVERSION_METHODS]
+      )
     }.freeze
 
     # What `map(&:first)` leans on to call `first` at all.
@@ -79,22 +85,36 @@ module Steep
             return nil unless results.all? { |type| exact?(type) }
 
             results
-          when :filter_map
-            results.each_with_object([]) do |type, kept|
-              case truthiness(type)
-              when :truthy
-                return nil unless exact?(type)
-
-                kept << type
-              when :falsy
-                next
-              else
-                return nil
-              end
-            end
+          when :flat_map then flattened(results)
+          when :filter_map then truthy_values(results)
           end
 
         types && AST::Types::Tuple.new(types: types)
+      end
+
+      # What each pass hands back where it is truthy.
+      def truthy_values(results)
+        results.each_with_object([]) do |type, kept|
+          case truthiness(type)
+          when :truthy
+            return nil unless exact?(type)
+
+            kept << type
+          when :falsy
+            next
+          else
+            return nil
+          end
+        end
+      end
+
+      # What each pass hands back, one level of an array spliced in.
+      def flattened(results)
+        results.each_with_object([]) do |type, flat|
+          return nil unless exact?(type)
+
+          type.is_a?(AST::Types::Tuple) ? flat.concat(type.types) : flat << type
+        end
       end
 
       def any(results)
