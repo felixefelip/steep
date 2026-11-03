@@ -256,6 +256,12 @@ module Steep
       # `dup` and `clone` run the copy hooks on the copy they made.
       INITIALIZERS = %i[initialize initialize_copy initialize_dup initialize_clone].freeze
 
+      # Whether the project may run `name` on an instance: false only for a
+      # method `index_uses` looked for and found named nowhere, by a call, a
+      # `send` or a symbol (`ClassMemoAnalyzer.calls`). Before it has looked,
+      # any.
+      def may_call?(name) = @calls.fetch(name.to_sym, nil)&.empty? != true
+
       # Whether `name` runs only while an object is initialized: every call
       # the project makes of it is made on `self` by one of `INITIALIZERS`, or
       # by another method that does.
@@ -416,7 +422,7 @@ module Steep
         names.merge(keyed_memo_names)
         @uses = uses_by_name(names)
         @reader_uses = uses_by_name(reader_names - names)
-        calls_named(keyed_memo_names)
+        calls_named(keyed_memo_names | ivar_using_names)
         @hash_memos = hashes.to_set
         @forwarded_stores = forwarded_stores
         scan_closures(hashes)
@@ -473,6 +479,12 @@ module Steep
 
           reached = kept
         end
+      end
+
+      # The instance methods, other than `INITIALIZERS`, whose body names an
+      # ivar: those `may_call?` answers for.
+      def ivar_using_names
+        @methods.each_value.flat_map { |methods| methods.select { |_, bodies| bodies.any? { _1&.names_ivar? } }.keys }.to_set - INITIALIZERS
       end
 
       # `[memo, ivar]` for each hash a class keeps: what a memo of `{}` holds
