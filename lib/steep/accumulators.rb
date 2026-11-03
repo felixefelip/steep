@@ -838,6 +838,10 @@ module Steep
           end
         end
 
+        # `@x = parts` hands the array to the ivar as a call hands it to a parameter.
+        value = statement.children[1] if statement.is_a?(Parser::AST::Node) && statement.type == :ivasgn
+        candidates << value if value&.type == :lvar && found[value.children[0]]
+
         candidates.select { |argument| LocalReach.mentions(statement, argument.children[0]) == 1 }
       end
 
@@ -845,11 +849,7 @@ module Steep
       # loop's condition and body run once per turn, and a closure's body on a
       # schedule of its own — only the call a block is attached to is made where
       # it is written. A `retry` runs the whole statement again.
-      def each_call_once(node, &block)
-        return if jumps_back?(node)
-
-        each_call_in(node, &block)
-      end
+      def each_call_once(node, &block) = (each_call_in(node, &block) unless jumps_back?(node))
 
       def each_call_in(node, &block)
         return unless node.is_a?(Parser::AST::Node)

@@ -19,10 +19,27 @@ module Steep
         def_node = constr.method_context&.node
         return pair unless def_node && constr.specialization_arguments(def_node)&.self_ivars&.key?(ivar)
 
-        operand = Specializations::Arguments.written_record(value, constr.typing, nil) || constr.literal_operand_type(value, pair.type)
+        operand = Specializations::Arguments.written_record(value, constr.typing, nil) || handed_value(constr, def_node, value) ||
+                  constr.literal_operand_type(value, pair.type)
         return pair unless ObjectStates.state_value?(operand)
 
         pair.with(constr: constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => operand }) })
+      end
+
+      # What a local held where a statement of the method's own straight line
+      # assigned it to the ivar, where nothing names it afterwards: the ivar
+      # holds that array, and nothing is left to change it through the local.
+      def self.handed_value(constr, def_node, value)
+        return unless value.type == :lvar
+
+        elements = constr.source.accumulators.at_args[value] or return
+        body = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
+        statements = body&.type == :begin ? body.children : [body]
+        return unless statements.any? { |statement| statement&.type == :ivasgn && statement.children[1].equal?(value) }
+        return if LocalReach.mentions_after?(body, value)
+
+        types = Accumulators::Contents.types(constr, elements) or return
+        AST::Types::Tuple.new(types: types)
       end
     end
   end

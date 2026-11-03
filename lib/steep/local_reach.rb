@@ -75,6 +75,16 @@ module Steep
       node.children.any? { |child| repeated_around?(child, lines, inner) }
     end
 
+    # Whether `body` names `mention`'s local anywhere past `mention`.
+    def mentions_after?(body, mention)
+      name = mention.children[0]
+      finish = mention.location.expression.end_pos
+      each_node(body) do |node|
+        return true if LOCALS.include?(node.type) && node.children[0] == name && node.location.expression.begin_pos >= finish
+      end
+      false
+    end
+
     # How many times `node` reads or writes `name`.
     def mentions(node, name)
       count = 0

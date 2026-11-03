@@ -637,7 +637,7 @@ module Steep
 
         definition = constr.checker.factory.definition_builder.build_instance(instance.name)
         definition.ancestors.ancestors.none? do |ancestor|
-          postconditions.may_write?(ancestor.name.to_s, ivar, except: :initialize)
+          postconditions.may_write_methods(ancestor.name.to_s, ivar).any? { |method| !HashMutation.built_only?(constr, method) }
         end
       rescue RBS::BaseError
         false
