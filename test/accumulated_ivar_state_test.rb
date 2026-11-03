@@ -1386,6 +1386,12 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [[nil], [nil]], chunks(ruby, rbs: HANDED_ARRAY_RBS)
   end
 
+  def test_a_constructor_s_setter_may_run_flat_map_over_the_array_it_is_handed
+    ruby = handed_array("self.defaults = []").sub("@defaults = list", "@defaults = list.flat_map { |locale| compute(locale) }")
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: HANDED_ARRAY_RBS)
+  end
+
   def test_declines_an_array_handed_to_an_ivar_that_may_change_afterwards
     {
       "named after the assignment" => handed_array("@defaults = mappings\nmappings << :pt"),
