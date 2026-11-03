@@ -251,6 +251,9 @@ module Steep
           []
         elsif passed_on?(node, parent)
           value_uses(parent, @parents[parent], @statements.include?(@parents[parent]))
+        elsif parent&.type == :splat
+          # A splat spreads the elements and hands no one the array.
+          [Use.new(:receiver, :*, Set[])]
         elsif (handed = handed_use(node, parent))
           [handed]
         end

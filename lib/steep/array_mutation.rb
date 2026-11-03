@@ -63,6 +63,16 @@ module Steep
         folded ? [folded, constr.add_typing(node, type: folded).constr] : [type, constr]
       end
 
+      # The tuple an object held under any name keeps in `ivar`, where no
+      # method but those that build it assigns the ivar or hands its array on,
+      # and every use of it, or of a reader that answers it, only reads it:
+      # the counterpart of `HashMutation.held`.
+      def held(constr, instance, ivar, tuple)
+        return unless tuple.is_a?(AST::Types::Tuple) && LiteralIntrinsics.fold_value?(tuple)
+
+        tuple if read_everywhere?(constr, instance, ivar)
+      end
+
       def watched_keys
         @watched_keys ||= Set.new(ENTRIES.keys) | ELEMENT_METHODS
       end
@@ -73,6 +83,41 @@ module Steep
       end
 
       private
+
+      def read_everywhere?(constr, instance, ivar)
+        registry = constr.constructor_bindings
+        constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.all? do |ancestor|
+          registry.possible_bodies(ancestor.name.to_s).all? do |name, bodies|
+            Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name) ||
+              bodies.all? { |body| body_reads?(constr, instance, ivar, name, body) }
+          end
+        end
+      rescue RBS::BaseError
+        false
+      end
+
+      def body_reads?(constr, instance, ivar, name, body)
+        return false unless body
+        return indexed_reads?(constr, instance, name) if body.returns == ivar
+        return false if body.handed.include?(ivar) || body.writes.include?(ivar)
+
+        body.ivar_uses.fetch(ivar, []).all? { |use| reading_use?(constr, use) }
+      end
+
+      # Every use of the reader `name` reads only. One whose uses were never
+      # indexed has none to show, which says nothing.
+      def indexed_reads?(constr, instance, name)
+        constr.constructor_bindings.used_names.include?(name) &&
+          Specializations::Receivers.uses_on(constr, name, instance).all? { |use| reading_use?(constr, use) }
+      end
+
+      def reading_use?(constr, use)
+        return false if %i[escape yielded].include?(use.kind) || !use.element_calls.empty?
+        return true if use.called == :*
+
+        keys = ENTRIES.keys.select { |key| key.end_with?("##{use.called}") }
+        !keys.empty? && keys.none? { |key| constr.literal_method_registry.blocked?(key) }
+      end
 
       # An iteration of the core's whose block only reads the elements it is
       # handed, as a use of a class's memo must (`ClassMemoAnalyzer::Use`).
