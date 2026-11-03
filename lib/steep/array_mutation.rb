@@ -85,11 +85,9 @@ module Steep
       private
 
       def read_everywhere?(constr, instance, ivar)
-        registry = constr.constructor_bindings
         constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.all? do |ancestor|
-          registry.possible_bodies(ancestor.name.to_s).all? do |name, bodies|
-            Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name) ||
-              bodies.all? { |body| body_reads?(constr, instance, ivar, name, body) }
+          constr.constructor_bindings.possible_bodies(ancestor.name.to_s).all? do |name, bodies|
+            HashMutation.built_only?(constr, name) || bodies.all? { |body| body_reads?(constr, instance, ivar, name, body) }
           end
         end
       rescue RBS::BaseError

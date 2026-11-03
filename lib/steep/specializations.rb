@@ -309,7 +309,7 @@ module Steep
           return nil if arg.type == :splat
           return nil unless typing.has_type?(arg)
 
-          positionals << argument_type(arg, typing, exact_self)
+          positionals << (written_array(arg, typing) || argument_type(arg, typing, exact_self))
         end
 
         new(
@@ -413,6 +413,17 @@ module Steep
       # The value an argument written as a literal is, whatever the parameter
       # it lands in is declared: an `untyped` one would otherwise widen it at
       # the call, and the call fixes the value all the same.
+      # An array written out of literals as an argument, which is the array the
+      # call builds, whatever the parameter's type made the checker read it as.
+      # Not inside a record, which keeps its values as their classes
+      # (`ObjectStates.state_value?`).
+      def self.written_array(arg, typing)
+        return unless arg.type == :array
+
+        elements = arg.children.map { |element| written_literal(element, typing) }
+        AST::Types::Tuple.new(types: elements) if elements.all?
+      end
+
       def self.written_literal(arg, typing)
         case arg.type
         when :str, :sym, :int

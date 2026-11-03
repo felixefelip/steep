@@ -1352,6 +1352,33 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  HANDED_ARRAY_RBS = LISTED_RBS.sub("def initialize: () -> void\n  def []", "def initialize: (*untyped mappings) -> void\n  def []")
+                         .sub("attr_reader defaults: Array[Symbol]", "attr_reader defaults: Array[Symbol]\n  def defaults=: (Array[Symbol] list) -> Array[Symbol]")
+
+  def handed_array(body, outside: "")
+    keyed_memo(initialize: "@map = {}\n#{body}", outside: outside, extra: "def defaults=(list)\n  @defaults = list\nend")
+      .sub("def initialize\n", "def initialize(*mappings)\n")
+      .sub("def compute(locale) = [locale, @default]", "#{FALLBACKS_COMPUTE}\nattr_reader :defaults")
+  end
+
+  def test_an_ivar_holds_the_array_a_call_hands_its_constructor
+    {
+      "from its rest parameter" => handed_array("@defaults = mappings"),
+      "through a setter it calls" => handed_array("self.defaults = []")
+    }.each do |label, ruby|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: HANDED_ARRAY_RBS), label
+    end
+  end
+
+  def test_declines_an_array_handed_to_an_ivar_that_may_change_afterwards
+    {
+      "named after the assignment" => handed_array("@defaults = mappings\nmappings << :pt"),
+      "a setter called from outside" => handed_array("self.defaults = []", outside: "\nclass Other\n  def self.go = (Locales.fallbacks.defaults = [:pt])\nend\n")
+    }.each do |label, ruby|
+      assert_equal [[nil], [nil]], chunks(ruby, rbs: HANDED_ARRAY_RBS), label
+    end
+  end
+
   def test_declines_a_keyed_memo_whose_entries_something_else_changes
     {
       "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),

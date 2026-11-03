@@ -236,6 +236,13 @@ module Steep
         nil
       end
 
+      # A method that writes nothing on an object once it is built: one only
+      # its construction runs, or one nothing calls.
+      def built_only?(constr, name)
+        initializing = Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || constr.constructor_bindings.initializing?(name)
+        initializing || unreached?(constr, name, initializing)
+      end
+
       # A method the project names nowhere, that the runtime does not call on
       # its own either, writes nothing on any object.
       def unreached?(constr, name, initializing)
