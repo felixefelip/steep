@@ -850,18 +850,23 @@ module Steep
     # push sits under, or that chooses an interpolated local's value. Read off
     # the same answer the checker reports `UnreachableBranch` from, so the arm
     # counted is the arm it type-checked.
-    def record_arm(node, truthy:, falsy:)
+    #
+    # Only a value the checker computed rules out the falsy side: a declaration
+    # never says `nil` where the value may be one (an ivar before it is set,
+    # `Hash#[]` for a key it lacks).
+    def record_arm(node, cond_type, truthy:, falsy:)
       return unless source.accumulators.branches[node] || source.local_assignments.choices[node]
 
       arm =
         if falsy.unreachable && !truthy.unreachable
-          :then
+          :then if LiteralIntrinsics.computed_truthy?(cond_type)
         elsif truthy.unreachable && !falsy.unreachable
           :else
         end
 
       typing.add_arm(node, arm)
     end
+
 
     # The tuple an array built by `<<` holds where this call reads it, or nil for
     # every other call — which is nearly all of them.
@@ -2568,7 +2573,7 @@ module Steep
           yield_self do
             cond, true_clause, false_clause = node.children
 
-            _, constr = synthesize(cond, condition: true).to_ary
+            cond_type, constr = synthesize(cond, condition: true).to_ary
             interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: constr.typing, config: builder_config, postconditions: postconditions, self_type: constr.self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
 
@@ -2576,7 +2581,7 @@ module Steep
             # checker's own answer about this condition instead of re-deriving it
             # from the AST. No-op unless the typing was asked to record.
             constr.typing.record_branch_envs(node, entry: constr.context.type_env, truthy: truthy.env, falsy: falsy.env)
-            constr.record_arm(node, truthy: truthy, falsy: falsy)
+            constr.record_arm(node, cond_type, truthy: truthy, falsy: falsy)
 
             if true_clause
               true_pair =
