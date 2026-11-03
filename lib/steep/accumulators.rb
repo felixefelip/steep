@@ -420,8 +420,10 @@ module Steep
 
         ended = Set[] #: Set[Symbol]
         lines.each_with_index do |statement, index|
-          readable.each { |name, ends| ended << name if ends == index }
-          ended.each { |name| contents.delete(name) }
+          ending = readable.select { |name, ends| ends == index }.keys
+          # The condition runs before the arm that takes the local away.
+          (cond = unstruck_condition(statement, ending)) and yield cond, [], contents
+          ended.merge(ending).each { |name| contents.delete(name) }
 
           seeds = Births.seeds(statement).select { |name, _| readable.key?(name) && !ended.include?(name) }
           unless seeds.empty?
@@ -455,6 +457,16 @@ module Steep
         end
 
         readable
+      end
+
+      # The condition of an `if` statement, where it names none of `names` but
+      # as a read: an arm took them away, and the condition runs first.
+      def unstruck_condition(statement, names)
+        return if names.empty? || !statement.is_a?(Parser::AST::Node) || statement.type != :if
+
+        probe = names.to_h { |name| [name, []] }
+        strike(statement.children[0], probe)
+        statement.children[0] if probe.values.all?
       end
 
       def body_of(def_node) = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
@@ -633,11 +645,7 @@ module Steep
         node&.type == :lvar ? node.children[0] : nil
       end
 
-      def statements(body)
-        return [] unless body.is_a?(Parser::AST::Node)
-
-        body.type == :begin ? body.children : [body]
-      end
+      def statements(body) = body.is_a?(Parser::AST::Node) ? (body.type == :begin ? body.children : [body]) : []
 
       # One statement of the straight line. It either seeds a local, pushes onto
       # one, or is everything else — and everything else only takes locals away.
@@ -647,7 +655,7 @@ module Steep
         # Named again after it was handed on: what it holds now is whatever the
         # callee left in it.
         handed&.each do |name|
-          found[name] = nil if found[name] && mentions?(statement, [name])
+          found[name] = nil if found[name] && !LocalReach.names_in(statement, [name]).empty?
         end
 
         unless (seeds = Births.seeds(statement)).empty?
@@ -940,10 +948,7 @@ module Steep
       # runs is the checker's to say; only the shape is decided here. A watched
       # local the condition or an arm names in any other way is `mentioned`,
       # and only that one is taken away.
-      def branch_onto(statement, found)
-        watched = found.select { |_, pushes| pushes }.keys
-        branch_in(statement, found, watched)
-      end
+      def branch_onto(statement, found) = branch_in(statement, found, found.select { |_, pushes| pushes }.keys)
 
       def branch_in(statement, found, watched)
         return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :if
@@ -1017,15 +1022,6 @@ module Steep
         end
       end
 
-      # Whether `node` reads or writes one of `names`, stopping at a body of its
-      # own.
-      def mentions?(node, names)
-        LocalReach.each_node(node) do |child|
-          return true if (child.type == :lvar || child.type == :lvasgn) && names.include?(child.children[0])
-        end
-
-        false
-      end
 
       def jumps?(node)
         LocalReach.each_node(node) do |child|
@@ -1120,7 +1116,7 @@ module Steep
         # The read itself is still a read; what takes the local away is that
         # something else is holding one of its elements.
         if node.type == :send && element_read?(node.children[0])
-          strike(node.children[0].children[0], found, closure: closure)
+          strike(node.children[0].children[0], found, closure: closure) unless CollectionReaders::ELEMENT_QUERIES.include?(node.children[1])
           node.children.drop(1).each { |child| strike(child, found, closure: closure) }
           return
         end

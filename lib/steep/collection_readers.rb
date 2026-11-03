@@ -30,6 +30,9 @@ module Steep
 
     METHODS = (WHOLE + ELEMENT).freeze
 
+    # What an element is asked without being changed: `mappings.last.is_a?(Hash)`.
+    ELEMENT_QUERIES = CollectionMutation::OBJECT_READS.map { |key| key.split("#").last.to_sym }.to_set.freeze
+
     # Calls whose ARGUMENT is another collection, read exactly the way the
     # receiver is: `KEYWORDS + EXTRA` reads both and changes neither, where
     # `parts.include?(x)` takes a value that has nothing to do with the

@@ -138,6 +138,16 @@ class AccumulatedInPlaceTest < Minitest::Test
     refute_match(/\A\[/, types.fetch("named"))
   end
 
+  def test_asking_an_element_what_it_is_leaves_the_local_readable
+    types = types_of({
+      "query" => "parts = [locale]\nparts.last.is_a?(Symbol)\nparts.join(\",\")",
+      "changed" => "parts = [\"a\"]\nparts.last << \"b\"\nparts.join(\",\")"
+    })
+
+    assert_equal '"fr"', types.fetch("query")
+    assert_equal "::String", types.fetch("changed")
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 

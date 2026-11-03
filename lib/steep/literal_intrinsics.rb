@@ -499,6 +499,9 @@ module Steep
         method: Array.instance_method(:intersect?), arity: 1, preflight: ARRAY_INTERSECT,
         depends_on: EQUALITY_METHODS + HASH_METHODS
       ),
+      # `last` and not `first`, which the note above keeps out: what an empty
+      # rest parameter holds is read through it (`mappings.last.is_a?(Hash)`).
+      "::Array#last" => Entry.new(method: Array.instance_method(:last), arity: 0, preflight: ALWAYS),
       "::Array#+" => Entry.new(method: Array.instance_method(:+), arity: 1, preflight: ARRAY_CONCAT),
       "::Array#uniq" => Entry.new(method: Array.instance_method(:uniq), arity: 0, preflight: ARRAY_UNIQ, depends_on: HASH_METHODS),
       "::Array#-" => Entry.new(method: Array.instance_method(:-), arity: 1, preflight: ARRAY_DIFFERENCE, depends_on: HASH_METHODS),
