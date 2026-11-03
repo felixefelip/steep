@@ -155,10 +155,15 @@ module Steep
           ivars.all? { |ivar| written_while_built?(constr, instance, ivar, building) }
         end
 
+        public :settled?
+
         def reads_settled?(constr, instance, node, ivars, visiting)
           return true unless node.is_a?(::Parser::AST::Node)
           return false if TypeInference::OutsideReads::OUTSIDE.include?(node.type) || %i[const cvar].include?(node.type)
-          return false if node.type == :send && node.children[1] == :class && node.children[0]&.type == :self
+          if node.type == :send && node.children[0].is_a?(::Parser::AST::Node) && TypeInference::OutsideReads.own_class?(node.children[0])
+            return own_class_settled?(constr, instance, node.children[1], visiting) && node.children.drop(2).all? { |argument| reads_settled?(constr, instance, argument, ivars, visiting) }
+          end
+          return false if TypeInference::OutsideReads.own_class?(node)
 
           ivars << node.children[0] if node.type == :ivar
           if node.type == :send && (node.children[0].nil? || node.children[0].type == :self)
@@ -170,6 +175,8 @@ module Steep
         def method_settled?(constr, instance, method_name, ivars, visiting)
           return true if visiting.include?([instance, method_name])
 
+          return built_settled?(constr, instance, visiting) if method_name == :new && instance.is_a?(AST::Types::Name::Singleton)
+
           _, body = ObjectStates.resolved_body(constr, instance, method_name)
           return LiteralIntrinsics.answers_from_arguments?(constr, instance, method_name) if body.nil?
           return false if body.outside_state || body.super_args || !outside_settled?(constr, body)
@@ -178,7 +185,8 @@ module Steep
           ivars.merge(body.ivars || [])
           ivars << body.returns if body.returns
           body.const_sends.all? { |names, name| class_method_settled?(constr, names, name, visiting) } &&
-            body.self_sends.all? { |name| method_settled?(constr, instance, name, ivars, visiting) }
+            body.own_class_sends.all? { |name| own_class_settled?(constr, instance, name, visiting) } &&
+            (body.self_sends - [:class]).all? { |name| method_settled?(constr, instance, name, ivars, visiting) }
         end
 
         # A constant naming a class or module names it for good, and a class
@@ -190,8 +198,35 @@ module Steep
 
         def class_method_settled?(constr, names, method_name, visiting)
           singleton = module_named(constr, names) or return false
+          singleton_settled?(constr, singleton, method_name, visiting)
+        end
+
+        # A `new` answers an object of its own, holding what its `initialize`
+        # chain sets from the arguments.
+        def built_settled?(constr, singleton, visiting)
+          instance = AST::Types::Name::Instance.new(name: singleton.name, args: [])
+          chain = ObjectStates.initialize_chain(constr, instance) or return false
+          chain.all? do |_, body|
+            body && !body.outside_state && outside_settled?(constr, body) &&
+              body.self_sends.all? { |name| method_settled?(constr, instance, name, Set[], visiting) }
+          end
+        end
+
+        def singleton_settled?(constr, singleton, method_name, visiting)
           class_ivars = Set[] #: Set[Symbol]
           method_settled?(constr, singleton, method_name, class_ivars, visiting) && class_ivars.empty?
+        end
+
+        # `self.class.m(…)` runs the `m` of whichever class the object is, so
+        # no class below `instance` may define its own.
+        def own_class_settled?(constr, instance, method_name, visiting)
+          return false unless instance.is_a?(AST::Types::Name::Instance)
+
+          below = constr.constructor_bindings.owners_of(method_name).any? do |owner, singleton|
+            name = RBS::TypeName.parse("::#{owner}")
+            singleton && name != instance.name && descends?(constr, name, instance.name)
+          end
+          !below && singleton_settled?(constr, AST::Types::Name::Singleton.new(name: instance.name), method_name, visiting)
         end
 
         # The class object the first of `names` that names a constant resolves

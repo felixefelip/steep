@@ -268,9 +268,12 @@ module Steep
           current = env[asgn.children[0]]
           declared = env.declared_instance_variable_types[asgn.children[0]]
           arm = or_arm(current, declared) if node.type == :or_asgn
+          settled = arm.nil? && SettledMemo.answers?(constr, node)
+          arm = :then if settled
           constr.typing.add_arm(node, arm)
 
           type, after = constr.synthesize(rhs, hint: declared || hint)
+          type = SettledMemo.value(after, rhs, type) if settled
           return [current, constr] if arm == :else
 
           pair = after.ivasgn(asgn, type)

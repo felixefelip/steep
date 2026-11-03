@@ -1,7 +1,9 @@
 module Steep
   module TypeInference
-    # The class variables and constants a method body reads, for
-    # `ObjectStates::KeyedMemo` to tell which of them stay as they are.
+    # What a method body reads besides its parameters, its locals and
+    # `self`'s ivars: class variables, constants and the methods it calls on
+    # `self.class`, for `ObjectStates::KeyedMemo` to tell which of them stay as
+    # they are; `outside_state` for the rest.
     #
     #     def implementation = @@implementation ||= Simple
     #     # cvars: [:@@implementation], const_reads: [["Tag::Simple", "Simple"]]
@@ -9,7 +11,7 @@ module Steep
       # What a body reads that no fact here follows: a global or a match.
       OUTSIDE = %i[gvar nth_ref back_ref].freeze
 
-      NONE = { cvars: Set[].freeze, cvar_writes: Set[].freeze, const_reads: [].freeze, const_sends: [].freeze }.freeze
+      NONE = { outside_state: false, own_class_sends: Set[].freeze, cvars: Set[].freeze, cvar_writes: Set[].freeze, const_reads: [].freeze, const_sends: [].freeze }.freeze
 
       # `names` answers the names a constant node may resolve to.
       def self.of(body, &names)
@@ -26,6 +28,9 @@ module Steep
 
       def initialize(names)
         @names = names
+        @outside = false
+        @own_class_sends = Set[]
+        @called_classes = Set[].compare_by_identity
         @cvars = Set[]
         @cvar_writes = Set[]
         @memoized = Set[].compare_by_identity
@@ -41,12 +46,15 @@ module Steep
       end
 
       def facts
-        { cvars: @cvars, cvar_writes: @cvar_writes, const_reads: @const_reads, const_sends: @const_sends }
+        { outside_state: @outside, own_class_sends: @own_class_sends, cvars: @cvars, cvar_writes: @cvar_writes, const_reads: @const_reads, const_sends: @const_sends }
       end
+
+      def self.own_class?(node) = node.type == :send && node.children[1] == :class && node.children[0]&.type == :self
 
       private
 
       def record(node)
+        @outside ||= OUTSIDE.include?(node.type) || (OutsideReads.own_class?(node) && !@called_classes.include?(node))
         case node.type
         when :or_asgn
           target = node.children[0]
@@ -61,9 +69,16 @@ module Steep
         when :const
           @const_reads << @names.call(node)
         when :send, :csend
-          receiver = node.children[0]
-          @const_sends << [@names.call(receiver), node.children[1]] if receiver&.type == :const
+          record_send(node.children[0], node.children[1])
         end
+      end
+
+      def record_send(receiver, method_name)
+        @const_sends << [@names.call(receiver), method_name] if receiver&.type == :const
+        return unless receiver.is_a?(::Parser::AST::Node) && OutsideReads.own_class?(receiver)
+
+        @called_classes << receiver
+        @own_class_sends << method_name
       end
     end
   end
