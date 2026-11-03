@@ -1265,6 +1265,15 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [[nil], [nil]], chunks(ruby, rbs: KEYED_MEMO_RBS)
   end
 
+  def test_a_rest_parameter_a_call_passes_nothing_to_is_empty
+    ruby = keyed_memo(initialize: "@default = :en\n@default = mappings.pop[:default] if mappings.last.is_a?(Hash)").sub("def initialize\n", "def initialize(*mappings)\n")
+
+    %w[untyped Symbol].each do |element|
+      rbs = KEYED_MEMO_RBS.sub("@default: Symbol\n  def initialize: () -> void", "@default: Symbol\n  def initialize: (*#{element} mappings) -> void")
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs), element
+    end
+  end
+
   MAPPED_RBS = KEYED_MEMO_RBS.sub("@default: Symbol", "@default: Symbol\n  @map: Hash[Symbol, Array[Symbol]]")
                               .sub("def compute: (Symbol locale) -> Array[Symbol]", <<~RBS.chomp)
                                 def compute: (Symbol | Array[Symbol] tags, ?bool include_defaults, ?Array[Symbol] exclude) -> Array[Symbol]
