@@ -50,6 +50,10 @@ module Steep
     SYMBOL_TO_PROC = "::Symbol#to_proc"
 
     class << self
+      def rewritten?(entry, node, errors)
+        entry&.writes_elements && errors.all? { |error| error.is_a?(Diagnostic::Ruby::BlockBodyTypeMismatch) && error.node.equal?(node) } || false
+      end
+
       def entry(key, override_registry:)
         entry = ENTRIES[key] or return nil
         return nil if override_registry.blocked?(key)

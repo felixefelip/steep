@@ -1438,6 +1438,13 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def test_a_memo_s_constructor_may_call_a_method_whose_core_iteration_changes_the_element_type
+    rbs = KEYED_MEMO_RBS.sub("@default: Symbol", "@default: Symbol\n  @extra: Array[Symbol]")
+    compute = "def compute(locale) = [locale.to_s].map! { |tag| tag.to_sym } + [@default]"
+    ruby = keyed_memo(initialize: "@default = :en\n@extra = [:en].flat_map { |locale| compute(locale) }").sub("def compute(locale) = [locale, @default]", compute)
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs)
+  end
+
   def test_a_memo_s_constructor_may_call_a_method_whose_loop_assigns_its_parameter
     rbs = KEYED_MEMO_RBS.sub("@default: Symbol", "@default: Symbol\n  @extra: Array[Symbol]")
     compute = <<~RUBY
