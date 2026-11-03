@@ -40,6 +40,14 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
       def publish: (PEBox box) -> void
       def self.publish: (PEBox box) -> void
     end
+
+    interface _PEPaths
+      def things_path: () -> String
+    end
+
+    class PEView
+      include _PEPaths
+    end
   RBS
 
   def infer_for(ruby)
@@ -464,5 +472,17 @@ class PostconditionsParamEstablishmentTest < Minitest::Test
     RUBY
 
     assert_equal ":draft", type.to_s
+  end
+
+  def test_a_method_declared_on_an_interface_types_as_declared
+    type = value_type_after(<<~RUBY, postconditions: publish_postcondition)
+      # @type self: ::PEView
+      def run
+        path = things_path
+        path
+      end
+    RUBY
+
+    assert_equal "::String", type.to_s
   end
 end

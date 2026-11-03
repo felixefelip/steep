@@ -8244,7 +8244,7 @@ module Steep
       call.method_decls.each do |decl|
         name = decl.method_name
         next unless name.is_a?(InstanceMethodName) || name.is_a?(SingletonMethodName)
-        next if defined_on_both_sides?(name.type_name, name.method_name)
+        next if !name.type_name.class? || defined_on_both_sides?(name.type_name, name.method_name)
 
         entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
         return entry if entry&.unconditional && !entry.unconditional.param_establishes_type_strings.empty?
