@@ -156,18 +156,36 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
     assert_nil found[:required_after].hands_back_element
   end
 
-  def test_a_body_reading_a_constant_a_global_a_class_variable_or_its_class_reads_outside_state
+  def test_a_body_reading_a_global_or_its_class_reads_outside_state
     found = bodies(<<~RUBY)
       class Fallbacks < Hash
         def own(locale) = [locale, @default, helper(locale)]
-        def constant = DEFAULT
         def global = $default
-        def class_variable = @@default
         def its_class = self.class.default
       end
     RUBY
 
     refute found[:own].outside_state
-    assert(%i[constant global class_variable its_class].all? { |name| found[name].outside_state })
+    assert(%i[global its_class].all? { |name| found[name].outside_state })
+  end
+
+  def test_the_constants_and_class_variables_a_body_reads
+    found = bodies(<<~RUBY)
+      class Fallbacks < Hash
+        def constant = Tag::DEFAULT
+        def called = Tag.tag(:en)
+        def memoized = @@default ||= Plain
+        def read = @@default
+        def written(value)
+          @@default = value
+        end
+      end
+    RUBY
+
+    assert_equal [["Fallbacks::Tag::DEFAULT", "Tag::DEFAULT"], ["Fallbacks::Tag", "Tag"]], found[:constant].const_reads
+    assert_equal [[["Fallbacks::Tag", "Tag"], :tag]], found[:called].const_sends
+    assert_equal [Set[:@@default], Set[]], [found[:memoized].cvars, found[:memoized].cvar_writes]
+    assert_equal [Set[:@@default], Set[]], [found[:read].cvars, found[:read].cvar_writes]
+    assert_equal [Set[], Set[:@@default]], [found[:written].cvars, found[:written].cvar_writes]
   end
 end

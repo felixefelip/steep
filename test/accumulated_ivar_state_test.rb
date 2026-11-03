@@ -1463,6 +1463,62 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  TAGS_RBS = KEYED_MEMO_RBS.sub("class Inflector\n", <<~RBS)
+    module Tags
+      @@implementation: singleton(Tags::Plain)
+      def self.implementation: () -> singleton(Tags::Plain)
+      def self.implementation=: (singleton(Tags::Plain) implementation) -> singleton(Tags::Plain)
+      def self.reset: () -> void
+      def self.tag: (Symbol tag) -> Symbol
+      class Plain
+        def self.tag: (Symbol tag) -> Symbol
+      end
+    end
+    class Inflector
+  RBS
+
+  TAGS = <<~RUBY
+
+    module Tags
+      class << self
+        def implementation
+          @@implementation ||= Plain
+        end
+
+        def implementation=(implementation)
+          @@implementation = implementation
+        end
+
+        def reset
+          @@implementation = Plain
+        end
+
+        def tag(tag)
+          implementation.tag(tag)
+        end
+      end
+
+      class Plain
+        def self.tag(tag) = tag
+      end
+    end
+  RUBY
+
+  def test_a_keyed_memo_s_value_may_call_a_module_whose_class_variable_nothing_reassigns
+    ruby = keyed_memo(outside: TAGS).sub("def compute(locale) = [locale, @default]", "def compute(locale) = Tags.tag(locale) ? [locale, @default] : []")
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: TAGS_RBS)
+  end
+
+  def test_declines_a_keyed_memo_s_value_whose_module_s_class_variable_something_reassigns
+    {
+      "through its writer" => "\nclass Other\n  def self.go = Tags.implementation = Tags::Plain\nend\n",
+      "through another method" => "\nclass Other\n  def self.go = Tags.reset\nend\n"
+    }.each do |label, outside|
+      ruby = keyed_memo(outside: TAGS + outside).sub("def compute(locale) = [locale, @default]", "def compute(locale) = Tags.tag(locale) ? [locale, @default] : []")
+      assert_equal [[nil], [nil]], chunks(ruby, rbs: TAGS_RBS), label
+    end
+  end
+
   def test_declines_a_keyed_memo_whose_entries_something_else_changes
     {
       "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),
