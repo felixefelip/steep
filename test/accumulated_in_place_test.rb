@@ -138,6 +138,48 @@ class AccumulatedInPlaceTest < Minitest::Test
     refute_match(/\A\[/, types.fetch("named"))
   end
 
+  def test_an_arm_a_computed_value_decides_is_counted
+    types = types_of({
+      "literal" => "result = [locale]\nresult << :x if [locale].include?(:fr)\nresult",
+      "compared" => "seen = false\nresult = [locale]\nresult << :x if seen == false\nresult",
+      "else" => "result = [locale]\nresult << :x if nil\nresult"
+    })
+
+    assert_equal "[:fr, :x]", types.fetch("literal")
+    assert_equal "[:fr, :x]", types.fetch("compared")
+    assert_equal "[:fr]", types.fetch("else")
+  end
+
+  def test_declines_an_arm_only_a_declaration_takes
+    in_tmpdir do
+      write("sig/p.rbs", "class P\n  @h: Hash[Symbol, Array[Symbol]]\n  def go: (:fr locale) -> untyped\n  def read: (:fr locale) -> untyped\n  def unset: (:fr locale) -> untyped\nend\n")
+      write("app/p.rb", <<~RUBY)
+        class P
+          def go(locale)
+            result = []
+            [locale].each { |tag| result += [:x] if @h[tag] }
+            result
+          end
+
+          def read(locale)
+            result = [locale]
+            result += [:x] if @h[locale]
+            result
+          end
+
+          def unset(locale)
+            result = []
+            result << :x if @h
+            result
+          end
+        end
+      RUBY
+      types = body_types(setup_project, current_dir + "app/p.rb")
+
+      %w[go read unset].each { |name| refute_match(/\A\[/, types.fetch(name), name) }
+    end
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 
