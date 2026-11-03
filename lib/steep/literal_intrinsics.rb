@@ -349,6 +349,8 @@ module Steep
     STRING_SUB_BANG = ->(receiver, arguments) { receiver.dup.sub!(*arguments) }
     STRING_AFFIX = ->(_receiver, arguments) { arguments.first.is_a?(String) }
     STRING_TR = ->(_receiver, arguments) { arguments.all?(String) }
+    # Without a separator `split` reads `$;`, a global this cannot see.
+    STRING_SPLIT = ->(_receiver, arguments) { arguments.first.is_a?(String) }
     ARRAY_FLATTEN = lambda do |receiver, arguments|
       leaves = ->(value) { value.is_a?(::Array) ? value.all?(&leaves) : FLATTEN_LEAVES.any? { |klass| value.is_a?(klass) } }
       (arguments.empty? || (arguments.size == 1 && arguments.first.is_a?(Integer))) && receiver.all?(&leaves)
@@ -392,6 +394,7 @@ module Steep
     # `+` walks its two operands and copies them; nothing is compared, nothing
     # is dispatched.
     ARRAY_CONCAT = ->(_receiver, arguments) { arguments.size == 1 && arguments.first.is_a?(::Array) }
+    ARRAYS = ->(_receiver, arguments) { arguments.all?(::Array) }
     # `uniq` and `-` tell elements apart by `hash`/`eql?`; `compact` only
     # asks which ones are `nil`, in C.
     ARRAY_UNIQ = ->(receiver, arguments) { arguments.empty? && receiver.all?(&COMPARABLE) }
@@ -480,6 +483,10 @@ module Steep
       "::Array#unshift" => Entry.new(method: Array.instance_method(:unshift), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:unshift)),
       "::Array#push" => Entry.new(method: Array.instance_method(:push), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:push)),
       "::Array#<<" => Entry.new(method: Array.instance_method(:<<), arity: 1, preflight: ALWAYS, native: ARRAY_IN_PLACE.(:<<)),
+      "::Array#concat" => Entry.new(method: Array.instance_method(:concat), arity: 0.., preflight: ARRAYS, native: ARRAY_IN_PLACE.(:concat)),
+      "::Array#length" => Entry.new(method: Array.instance_method(:length), arity: 0, preflight: ALWAYS),
+      "::Array#size" => Entry.new(method: Array.instance_method(:size), arity: 0, preflight: ALWAYS),
+      "::String#split" => Entry.new(method: String.instance_method(:split), arity: 1, preflight: STRING_SPLIT),
       # A String literal is a `String` itself, never a subclass, so `to_s` is
       # the receiver unchanged. `Delegation.generate` writes it once the name
       # is already a string — `method_name.to_s` under `prefix:`.
@@ -490,6 +497,10 @@ module Steep
       "::Integer#/" => Entry.new(method: Integer.instance_method(:/), arity: 1, preflight: INTEGER_DIVISION),
       "::Integer#%" => Entry.new(method: Integer.instance_method(:%), arity: 1, preflight: INTEGER_DIVISION),
       "::Integer#**" => Entry.new(method: Integer.instance_method(:**), arity: 1, preflight: INTEGER_POWER),
+      "::Integer#>" => Entry.new(method: Integer.instance_method(:>), arity: 1, preflight: INTEGER_BINARY),
+      "::Integer#<" => Entry.new(method: Integer.instance_method(:<), arity: 1, preflight: INTEGER_BINARY),
+      "::Integer#>=" => Entry.new(method: Integer.instance_method(:>=), arity: 1, preflight: INTEGER_BINARY),
+      "::Integer#<=" => Entry.new(method: Integer.instance_method(:<=), arity: 1, preflight: INTEGER_BINARY),
       "::Integer#abs" => Entry.new(method: Integer.instance_method(:abs), arity: 0, preflight: ALWAYS),
       "::Integer#succ" => Entry.new(method: Integer.instance_method(:succ), arity: 0, preflight: ALWAYS),
       "::Integer#to_s" => Entry.new(method: Integer.instance_method(:to_s), arity: 0, preflight: ALWAYS),

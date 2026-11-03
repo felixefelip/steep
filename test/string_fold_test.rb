@@ -181,6 +181,28 @@ class StringFoldTest < Minitest::Test
     end
   end
 
+  def test_split_by_a_string_folds
+    check(<<~'RUBY') do |pair|
+      # @type var tag: "en-US"
+      tag = _ = "en-US"
+      x = tag.split("-")
+      y = tag.split("_")
+    RUBY
+      assert_equal parse_type('["en", "US"]'), pair.context.type_env[:x]
+      assert_equal parse_type('["en-US"]'), pair.context.type_env[:y]
+    end
+  end
+
+  def test_split_without_a_separator_does_not_fold
+    check(<<~'RUBY') do |pair|
+      # @type var tag: "en US"
+      tag = _ = "en US"
+      x = tag.split
+    RUBY
+      assert_equal parse_type("::Array[::String]"), pair.context.type_env[:x]
+    end
+  end
+
   def test_tr_with_an_argument_that_is_not_a_literal_does_not_fold
     check(<<~'RUBY') do |pair|
       # @type var code: "def a\nend"
