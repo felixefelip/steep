@@ -1388,6 +1388,17 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def test_a_memo_s_constructor_may_call_on_self_inside_a_core_iteration
+    rbs = KEYED_MEMO_RBS.sub("@default: Symbol", "@default: Symbol\n  @extra: Array[Symbol]")
+    {
+      "a method that answers a literal" => "def compute(locale) = [locale, @default]",
+      "one that calls a core method answering from its arguments" => "def compute(locale) = Array(locale) + [@default]"
+    }.each do |label, compute|
+      ruby = keyed_memo(initialize: "@default = :en\n@extra = [].flat_map { |locale| compute(locale) }").sub("def compute(locale) = [locale, @default]", compute)
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs), label
+    end
+  end
+
   def test_declines_a_keyed_memo_whose_entries_something_else_changes
     {
       "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),

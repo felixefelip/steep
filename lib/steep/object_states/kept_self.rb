@@ -22,10 +22,9 @@ module Steep
       def kept?(constr, def_node)
         body = ObjectStates.pair_body(def_node) or return
         flow = Specializations::Evals::Flow.new(constr.typing)
-        exposures = TypeInference::ConstructorBindingAnalyzer.self_exposures(body)
-        return if exposures.any? { |node| !flow.dead?(node) }
+        return if exposures(constr, body).any? { |node| !flow.dead?(node) }
 
-        narrowed = !exposures.empty?
+        narrowed = !TypeInference::ConstructorBindingAnalyzer.self_exposures(body).empty?
         LocalReach.each_node(body) do |node|
           next unless self_call?(node)
           next narrowed ||= exposed?(constr, node) if flow.dead?(node)
@@ -33,6 +32,27 @@ module Steep
           return if exposed?(constr, node)
         end
         narrowed || nil
+      end
+
+      # The nodes through which `self` may reach anything but a call on it
+      # (`ConstructorBindingAnalyzer.self_exposures`), past a block the check
+      # resolved to a core iteration: that runs before its call returns and
+      # keeps nothing, so only what its own body hands on counts.
+      def exposures(constr, node)
+        TypeInference::ConstructorBindingAnalyzer.self_exposures(node).flat_map do |exposure|
+          in_place?(constr, exposure) ? exposures(constr, exposure.children[2]) : [exposure]
+        end
+      end
+
+      def in_place?(constr, node)
+        return false unless %i[block numblock].include?(node.type)
+
+        call = constr.typing.call_of(node: node)
+        call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.all? do |decl|
+          IterationIntrinsics.entry(MethodIdentity.normalize(decl.method_name.to_s), override_registry: constr.literal_method_registry)
+        end
+      rescue Typing::UnknownNodeError
+        false
       end
 
       # Whether nothing but its holder has the object `Klass.new` called as
