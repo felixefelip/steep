@@ -159,15 +159,15 @@ module Steep
       end
 
       # `self_exit`, or every ivar as it stands where the call evaluates a
-      # string that only defines methods, is a core array method acting on
-      # `self`'s own elements, or a `super` reaching a core class's
+      # string that only defines methods, is a core method that reaches no ivar
+      # (`CollectionMutation.reaches_no_ivar?`), or a `super` reaching a core class's
       # `initialize` (`initialize_chain`).
       def self_exit_or_unchanged(constr, node, on_self)
         exit = self_exit(constr, node, on_self)
         return exit if exit
 
         call = recorded_call(constr, node)
-        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node) || Supers.core_initializer?(call, node) || (on_self && ArrayMutation.elements_only?(call, constr))
+        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node) || Supers.core_initializer?(call, node) || (on_self && CollectionMutation.reaches_no_ivar?(call, constr))
       end
 
       # A call on `self`, or one handed `self`, from a body checked under its
