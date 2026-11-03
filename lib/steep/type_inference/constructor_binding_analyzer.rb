@@ -107,6 +107,8 @@ module Steep
       # - `memoized_hash`: the ivar, when that value is `{}`;
       # - `calls`: whether it makes a call or a `yield`, a `super` aside;
       # - `empties`: the ivars a statement of the body sets to `[]`;
+      # - `literal_writes`: the ivars every assignment of the body sets to a
+      #   hash or array literal;
       # - `rebuilds`: the ivars it only writes as `@ivar += …`, a new array
       #   built out of the one it held;
       # - `handed`: the ivars whose object it lets out, naming one other than as
@@ -115,7 +117,7 @@ module Steep
       # - `consts`: every name a constant it mentions may resolve to.
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
-        :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
+        :empties, :literal_writes, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
         keyword_init: true
       ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
 
@@ -366,6 +368,7 @@ module Steep
         end
         Body.new(
           empties: empties_of(body),
+          literal_writes: LiteralWrites.of(body, writes),
           rebuilds: rebuilds_of(body),
           handed: handed_ivars(body),
           bindings: ivar_param_bindings(args_node, body),

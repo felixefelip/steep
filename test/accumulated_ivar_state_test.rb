@@ -1319,6 +1319,32 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(mapped(FALLBACKS_COMPUTE, extra: MAPPING), rbs: MAPPED_RBS)
   end
 
+  DELEGATING_MAP = <<~RUBY
+    def map(*args, &block)
+      if args.count == 1 && !block_given?
+        args.first.each { |from, to| @map[from] = to }
+      else
+        @map.map(*args, &block)
+      end
+    end
+  RUBY
+
+  def delegating_map(outside: "")
+    mapped(FALLBACKS_COMPUTE, extra: DELEGATING_MAP, outside: outside).sub("@map = {}\n", "@map = {}\n    map({ en: [:pt] }) if @default == :pt\n")
+  end
+
+  DELEGATING_MAP_RBS = MAPPED_RBS.sub("def map: (Hash[Symbol, Array[Symbol]] mappings) -> void", "def map: (*untyped args) ?{ (*untyped) -> untyped } -> untyped")
+
+  def test_a_constructor_may_call_a_method_that_hands_the_rest_to_its_hash
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(delegating_map, rbs: DELEGATING_MAP_RBS)
+  end
+
+  def test_declines_a_method_handing_on_to_an_ivar_something_may_assign_otherwise
+    ruby = delegating_map(outside: "\nclass Other\n  def initialize\n    @map = Object.new\n  end\nend\n")
+
+    assert_equal [[nil], [nil]], chunks(ruby, rbs: DELEGATING_MAP_RBS.sub("class Other\n", "class Other\n  @map: untyped\n"))
+  end
+
   def test_declines_a_method_something_may_call_that_writes_the_hash
     {
       "a call from another class" => mapped(FALLBACKS_COMPUTE, extra: MAPPING, outside: "\nclass Other\n  def self.go = Locales.fallbacks.map({ en: [:pt] })\nend\n"),
