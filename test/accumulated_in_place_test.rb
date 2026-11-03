@@ -228,6 +228,12 @@ class AccumulatedInPlaceTest < Minitest::Test
     refute_match(/\A\[/, types.fetch("open"))
   end
 
+  def test_flat_map_reads_what_a_local_holds
+    types = types_of({ "flat_map" => "parts = [locale]\nparts.flat_map { |tag| [tag, :en] }" })
+
+    assert_equal "[:fr, :en]", types.fetch("flat_map")
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 

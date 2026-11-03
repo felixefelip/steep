@@ -147,7 +147,7 @@ module Steep
     # was — unless the body changes an element in place, which nothing here
     # follows. So one of these is the LAST thing that may read the local: a
     # mention after it takes the local away.
-    BLOCK_READS = %i[map collect filter_map].freeze
+    BLOCK_READS = %i[map collect filter_map flat_map].freeze
 
     # Calls that answer with a value holding none of the receiver's elements.
     # `parameters.map(&:first)` shares the elements it picks; read by one of
