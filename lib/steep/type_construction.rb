@@ -6770,8 +6770,8 @@ module Steep
         # A collection the passes above answered exactly, held to the
         # declaration like every other value the checker computes, and vouched
         # for as built here — it is a new array, and nothing else holds it.
-        if iterated && errors.empty? &&
-           check_relation(sub_type: iterated, super_type: return_type || method_type.type.return_type).success?
+        if iterated && (IterationIntrinsics.rewritten?(iteration_intrinsic(decls), node, errors) || (errors.empty? &&
+           check_relation(sub_type: iterated, super_type: return_type || method_type.type.return_type).success?))
           constr.typing.add_nominal(node, return_type || method_type.type.return_type)
           return_type = iterated
           constr.typing.add_vouched(node, iterated)

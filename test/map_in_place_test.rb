@@ -26,6 +26,16 @@ class MapInPlaceTest < Minitest::Test
     assert_equal '["FR", "DE"]', types.fetch("collect")
   end
 
+  def test_the_value_of_map_bang_is_folded_where_the_block_changes_the_element_type
+    types = types_of({
+      "literal" => "[locale.to_s, \"en\"].map! { |tag| tag.to_sym }",
+      "chained" => "([locale.to_s, \"en\"].map! { |tag| tag.to_sym } - [:en]).join(\",\")"
+    })
+
+    assert_equal "[:fr, :en]", types.fetch("literal")
+    assert_equal '"fr"', types.fetch("chained")
+  end
+
   def test_map_bang_on_an_accumulated_local_changes_what_it_holds
     types = types_of({
       "returned" => "result = []\nresult << locale\nresult << :en\nresult.map! { |tag| tag.to_s.upcase.to_sym }\nresult",

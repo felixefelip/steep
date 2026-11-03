@@ -49,12 +49,16 @@ module Steep
 
         typings_reaching(constr.typing, node).all? do |typing|
           call = typing.call_of(node: node)
-          call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.all? do |decl|
+          resolved?(call) && call.method_decls.all? do |decl|
             IterationIntrinsics.entry(MethodIdentity.normalize(decl.method_name.to_s), override_registry: constr.literal_method_registry)
           end
         end
       rescue Typing::UnknownNodeError
         false
+      end
+
+      def resolved?(call)
+        call.is_a?(TypeInference::MethodCall::Typed) || (call.is_a?(TypeInference::MethodCall::Error) && call.method_decls.any?)
       end
 
       # The typings `node` was checked under: one per pass of every loop around
