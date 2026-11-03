@@ -1373,10 +1373,17 @@ class AccumulatedIvarStateTest < Minitest::Test
   def test_an_ivar_holds_the_arm_an_emptiness_check_decides
     {
       "assigned" => handed_array("@defaults = mappings.empty? ? [] : mappings"),
-      "through a setter" => handed_array("self.defaults = mappings.empty? ? [] : mappings")
+      "through a setter" => handed_array("self.defaults = mappings.empty? ? [] : mappings"),
+      "after an arm that would change it" => handed_array("mappings.pop if mappings.last.is_a?(Hash)\nself.defaults = mappings.empty? ? [] : mappings")
     }.each do |label, ruby|
       assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: HANDED_ARRAY_RBS), label
     end
+  end
+
+  def test_declines_an_array_an_arm_that_may_run_changes
+    ruby = handed_array("mappings.pop unless mappings.last.is_a?(Hash)\nself.defaults = mappings.empty? ? [] : mappings")
+
+    assert_equal [[nil], [nil]], chunks(ruby, rbs: HANDED_ARRAY_RBS)
   end
 
   def test_declines_an_array_handed_to_an_ivar_that_may_change_afterwards

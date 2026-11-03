@@ -16,6 +16,7 @@ Metrics/MethodLength:
     - "bin/subtyping_cache_bench.rb"
     - "lib/steep.rb"
     - "lib/steep/accumulators.rb"
+    - "lib/steep/accumulators/strikes.rb"
     - "lib/steep/annotation_parser.rb"
     - "lib/steep/annotations_helper.rb"
     - "lib/steep/ast/annotation/collection.rb"

@@ -216,6 +216,18 @@ class AccumulatedInPlaceTest < Minitest::Test
     refute_match(/\A\[/, types.fetch("unknown"))
   end
 
+  def test_a_change_under_an_if_takes_the_local_away_only_where_its_arm_may_run
+    types = types_of({
+      "dead" => "parts = [:a]\nparts.pop if parts.empty?\nparts",
+      "live" => "parts = [:a]\nparts.pop unless parts.empty?\nparts",
+      "open" => "parts = [:a]\nparts.pop if rand > 0.5\nparts"
+    })
+
+    assert_equal "[:a]", types.fetch("dead")
+    refute_match(/\A\[/, types.fetch("live"))
+    refute_match(/\A\[/, types.fetch("open"))
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 

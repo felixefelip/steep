@@ -29,6 +29,7 @@ module Steep
         when Reshaped then concat(types, types(constr, element.elements, pass)&.then { |before| reshaped(constr, element, before) })
         when Mapped then concat(types, mapped(constr, element))
         when Branch then branch(constr, element, pass, types)
+        when Taken then nil
         else
           type = pass ? pass[element] : element_type(constr, element)
           types << type if value?(type)

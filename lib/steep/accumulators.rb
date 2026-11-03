@@ -134,6 +134,9 @@ module Steep
     # `more` stays its own array; which elements it holds the checker says.
     Spliced = Struct.new(:node, :key)
 
+    # Where an arm takes the local away, inside a `Branch`.
+    Taken = Struct.new(:node)
+
     # The calls whose array is new on every call and held by nothing else, so a
     # local born from one is as private as one born from `[]`. Keyed like the
     # intrinsic tables, by the method the call resolved to.
@@ -451,6 +454,10 @@ module Steep
           elsif (changed = Appends.changed(statement, contents))
             contents.merge!(changed)
             pushed.concat(changed.keys)
+          elsif (taken = taken_in_arm(statement, contents))
+            yield statement.children[0], [], contents
+            taken.each { |name, branch| contents[name] = contents.fetch(name) + [branch] }
+            pushed.concat(taken.keys)
           end
 
           yield statement, pushed, contents
@@ -683,6 +690,13 @@ module Steep
           entries, mentioned = counted
           mentioned.each { |name| found[name] = nil if found.key?(name) }
           entries.each { |name, entry| found[name] = found[name] + [entry] if found[name] }
+          return
+        end
+
+        if (taken = taken_in_arm(statement, found))
+          held = taken.to_h { |name, branch| [name, found[name] + [branch]] }
+          consume(statement, found, handed)
+          found.merge!(held)
           return
         end
 
@@ -973,6 +987,34 @@ module Steep
         [branches, mentioned]
       end
 
+      # `{ name => Branch }` where this statement is an `if` whose condition
+      # leaves watched locals readable and whose arms take them away: kept
+      # where the checker leaves the arm that takes them unreachable.
+      def taken_in_arm(statement, found)
+        return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :if
+        return nil if jumps?(statement)
+
+        predicate, *clauses = statement.children
+        watched = found.select { |_, pushes| pushes }.keys
+        return nil if watched.empty?
+
+        kept = watched.to_h { |name| [name, []] }
+        strike(predicate, kept)
+        arms = clauses.map do |clause|
+          probe = kept.dup
+          strike(clause, probe)
+          probe.merge(kept.slice(*last_reads(clause, kept)))
+        end
+
+        taken = kept.filter_map do |name, elements|
+          next unless elements && arms.any? { |arm| arm[name].nil? }
+
+          values = arms.map { |arm| arm[name] ? [] : [Taken.new(statement)] }
+          [name, Branch.new(statement, *values)]
+        end
+        taken.empty? ? nil : taken.to_h
+      end
+
       # `[{ name => [value node or Branch, …] }, mentioned]` for a straight line
       # of a body this walk reads but does not own — a loop's, or an arm's.
       # `mentioned` is every watched local one of its statements names in any
@@ -1030,104 +1072,8 @@ module Steep
         false
       end
 
-      # An element read whose answer is KEPT under another name: that name can
-      # change the element in place, as a call on the answer can.
-      #
-      #     y = parts.first
-      #     y << "b"              # parts is ["ab"] from here on
-      def strike_held_element(value, found)
-        return unless CollectionReaders.element_read?(value)
-
-        name = value.children[0].children[0]
-        found[name] = nil if found.key?(name)
-      end
-
-      # Every local this statement so much as names stops being readable, except
-      # where it is the receiver of a call that only READS the array — and not
-      # even then inside a closure, whose body runs at a time this walk does not
-      # know.
-      def strike(node, found, closure: false)
-        return unless node.is_a?(Parser::AST::Node)
-        # Another body's locals, not these.
-        return if SCOPES.include?(node.type)
-
-        if CLOSURES.include?(node.type)
-          node.children.each { |child| strike(child, found, closure: true) }
-          return
-        end
-
-        # WRITTEN, so the pushes recorded so far were into an array the name no
-        # longer holds:
-        #
-        #     parts = []
-        #     parts << "a"
-        #     parts = Array.new   # ← a different array from here on
-        #     parts << "b"        #   `["b"]`, and `["a", "b"]` to anything
-        #     parts               #   still counting from the first one
-        #
-        # Reached for every shape of write, because `op_asgn`, `or_asgn`,
-        # `and_asgn` and each target of an `masgn` all hold an `lvasgn` of their
-        # own. The one write that does NOT come through here is the birth
-        # `parts = []`, which `read` takes before striking — and a SECOND one of
-        # those it strikes itself, for this same reason.
-        if node.type == :lvasgn
-          name = node.children[0]
-          found[name] = nil if found.key?(name)
-          strike_held_element(node.children[1], found)
-          strike(node.children[1], found, closure: closure)
-          return
-        end
-
-        if ASSIGNMENTS.include?(node.type)
-          strike_held_element(node.children.last, found)
-        end
-
-        if !closure && CollectionReaders.scalar_mapped_read?(node)
-          node.children.drop(2).each do |argument|
-            next if CollectionReaders.binary?(node) && argument.type == :lvar
-
-            strike(argument, found, closure: closure)
-          end
-          return
-        end
-
-        if !closure && CollectionReaders.reads_arguments?(node)
-          strike(node.children[0], found, closure: closure)
-          node.children.drop(2).each { |argument| strike(argument, found, closure: closure) unless argument.type == :lvar }
-          return
-        end
-
-        if !closure && node.type == :send && CollectionReaders.read?(node) && node.children[0]&.type == :lvar
-          node.children.drop(2).each do |argument|
-            # The other side of a `+` is read, not handed anywhere.
-            next if CollectionReaders.binary?(node) && argument.type == :lvar
-
-            strike(argument, found, closure: closure)
-          end
-          return
-        end
-
-        # A call ON the answer of one of those. `parts.first` hands back an
-        # ELEMENT, and the next call is free to change it in place:
-        #
-        #     parts.first << "b"    # parts is ["ab"] from here on
-        #
-        # The read itself is still a read; what takes the local away is that
-        # something else is holding one of its elements.
-        if node.type == :send && CollectionReaders.element_read?(node.children[0])
-          strike(node.children[0].children[0], found, closure: closure) unless CollectionReaders::ELEMENT_QUERIES.include?(node.children[1])
-          node.children.drop(1).each { |child| strike(child, found, closure: closure) }
-          return
-        end
-
-        if node.type == :lvar
-          name = node.children[0]
-          found[name] = nil if found.key?(name)
-          return
-        end
-
-        node.children.each { |child| strike(child, found, closure: closure) unless !closure && CollectionReaders.operand?(node, child) }
-      end
+      def strike(...) = Strikes.strike(...)
+      def strike_held_element(...) = Strikes.strike_held_element(...)
     end
 
   end
