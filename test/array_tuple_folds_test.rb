@@ -30,6 +30,30 @@ class ArrayTupleFoldsTest < Minitest::Test
     assert_equal "[:fr, :en]", types.fetch("accumulated")
   end
 
+  def test_length_and_concat_fold_over_a_tuple_and_integers_compare
+    types = types_of({
+      "length" => "[locale, :en].length",
+      "size" => "[locale].size",
+      "concat" => "[locale].concat([], [locale])",
+      "compared" => "[[locale].length > 1, 1 < 2, 2 >= 2, 3 <= 2]",
+      "branch" => "segs = [locale]\nsegs.length > 1 ? :many : nil"
+    })
+
+    assert_equal "2", types.fetch("length")
+    assert_equal "1", types.fetch("size")
+    assert_equal "[:fr, :fr]", types.fetch("concat")
+    assert_equal "[false, true, true, false]", types.fetch("compared")
+    assert_equal "nil", types.fetch("branch")
+  end
+
+  def test_declines_a_length_or_comparison_the_project_redefines
+    reopen = "class Array\n  def length = 0\nend\nclass Integer\n  def >(other) = true\nend\n"
+    types = types_of({ "length" => "[locale].length", "compared" => "1 > 2" }, reopen: reopen)
+
+    assert_equal "::Integer", types.fetch("length")
+    assert_equal "bool", types.fetch("compared")
+  end
+
   def test_declines_elements_told_apart_by_a_call_the_fold_does_not_watch
     types = types_of({ "patterns" => "[/a/, /a/].uniq", "unknown" => "[locale, :en] - [Object.new]" })
 
