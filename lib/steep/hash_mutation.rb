@@ -42,6 +42,11 @@ module Steep
 
     ENTRIES = (READS | WRITES).to_h { |key| [key, true] }.freeze
 
+    # The ones that read or change a hash's entries, written in C, and reach
+    # no ivar of the object they run on: what a `Hash` subclass calls on
+    # itself (`Fallbacks#[]` runs `super || store(locale, compute(locale))`).
+    ELEMENT_METHODS = (KEY_READ | KEY_QUERY | STORES | ["::Hash#fetch", "::Hash#size", "::Hash#length", "::Hash#empty?"]).freeze
+
     class << self
       def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
         keys = hash_method_keys(constr, method_name, private: private)
@@ -218,7 +223,7 @@ module Steep
         ancestors.each_with_index do |ancestor, index|
           registry.possible_bodies(ancestor.name.to_s).each do |name, bodies|
             initializing = Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name)
-            next if (initializing && !kept) || copies_source_body?(registry, ancestors.drop(index), name)
+            next if (initializing && !kept) || copies_source_body?(registry, ancestors.drop(index), name) || unreached?(constr, name, initializing)
 
             bodies.each do |body|
               made = body_writes(constr, instance, ivar, name, body, kept: kept, assigns: initializing) or return
@@ -229,6 +234,12 @@ module Steep
         writes
       rescue RBS::BaseError
         nil
+      end
+
+      # A method the project names nowhere, that the runtime does not call on
+      # its own either, writes nothing on any object.
+      def unreached?(constr, name, initializing)
+        !initializing && !constr.constructor_bindings.may_call?(name) && !ObjectStates::ClassMemos.called_implicitly?(constr, [name])
       end
 
       def copies_source_body?(registry, ancestors, name)
@@ -249,6 +260,15 @@ module Steep
         return if body.exposes_self_besides_return && !own.all? { |use| reading_use?(constr, use, every: kept) }
 
         own.select { |use| use_within?(literal_methods, use, WRITES) }
+      end
+
+      # Whether `call` runs only `ELEMENT_METHODS`. `[]` asks `default` for a
+      # key it misses, so a class that defines its own is left out.
+      def elements_only?(call, constr)
+        return false unless call.is_a?(TypeInference::MethodCall::Typed)
+
+        keys = call.method_decls.map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }.uniq
+        CollectionMutation.only?(constr, keys, ELEMENT_METHODS) && ObjectStates.resolved_body(constr, constr.self_type, :default).nil?
       end
 
       def watched_keys

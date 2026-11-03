@@ -117,7 +117,7 @@ module Steep
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
         :empties, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
         keyword_init: true
-      )
+      ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
 
       def self.analyze(node)
         scan(node).readers

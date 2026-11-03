@@ -123,6 +123,22 @@ module Steep
         end
       end
 
+      # Whether `type`, a condition's, is a value the checker computed that is
+      # truthy, rather than a declaration, which never says `nil` where the
+      # value may be one. A predicate (`Logic`) is decided by what it
+      # compares, which the interpreter narrowed from the operands' own types.
+      def computed_truthy?(type)
+        case type
+        when AST::Types::Literal then type.value != false
+        when AST::Types::Union then type.types.all? { |member| computed_truthy?(member) }
+        when AST::Types::Tuple, AST::Types::Record, AST::Types::ObjectState, AST::Types::RegexpLiteral, AST::Types::FiniteSet,
+             AST::Types::RangeLiteral, AST::Types::Name::Singleton, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::Logic::Base
+          true
+        when AST::Types::NotInRBS then computed_truthy?(type.back_type)
+        else false
+        end
+      end
+
       def literal_union?(type)
         type.is_a?(AST::Types::Union) && type.types.all?(AST::Types::Literal)
       end

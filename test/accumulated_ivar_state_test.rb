@@ -1274,6 +1274,61 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  MAPPED_RBS = KEYED_MEMO_RBS.sub("@default: Symbol", "@default: Symbol\n  @map: Hash[Symbol, Array[Symbol]]")
+                              .sub("def compute: (Symbol locale) -> Array[Symbol]", <<~RBS.chomp)
+                                def compute: (Symbol | Array[Symbol] tags, ?bool include_defaults, ?Array[Symbol] exclude) -> Array[Symbol]
+                                  def defaults: () -> Array[Symbol]
+                                  def map: (Hash[Symbol, Array[Symbol]] mappings) -> void
+                                  def to_a: () -> untyped
+                              RBS
+
+  def mapped(compute, outside: "", extra: "")
+    keyed_memo(initialize: "@default = :en\n@map = {}", outside: outside, extra: extra)
+      .sub("def compute(locale) = [locale, @default]", "#{compute}\ndef defaults = [@default]")
+  end
+
+  MAPPING = "def map(mappings) = mappings.each { |from, to| @map[from] = to }"
+
+  # `I18n::Locale::Fallbacks#compute`, with `Tag.tag(tag).self_and_parents` read as `[tag]`.
+  FALLBACKS_COMPUTE = <<~RUBY
+    def compute(tags, include_defaults = true, exclude = [])
+      result = []
+      Array(tags).each do |tag|
+        tags = [tag].map! { |t| t.to_sym } - exclude
+        result += tags
+        tags.each { |_tag| result += compute(@map[_tag], false, exclude + result) if @map[_tag] }
+      end
+      result.push(*defaults) if include_defaults
+      result.uniq!
+      result.compact!
+      result
+    end
+  RUBY
+
+  def test_an_empty_hash_an_ivar_keeps_through_the_hash_s_own_super_answers_nil
+    compute = "def compute(tags, include_defaults = true, exclude = [])\n  @map[tags] ? [:pt] : [tags, @default]\nend"
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(mapped(compute), rbs: MAPPED_RBS)
+  end
+
+  def test_i18n_fallbacks_compute_folds_for_a_locale_with_no_mapping
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(mapped(FALLBACKS_COMPUTE), rbs: MAPPED_RBS)
+  end
+
+  def test_a_method_nothing_calls_writes_nothing_on_the_object
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(mapped(FALLBACKS_COMPUTE, extra: MAPPING), rbs: MAPPED_RBS)
+  end
+
+  def test_declines_a_method_something_may_call_that_writes_the_hash
+    {
+      "a call from another class" => mapped(FALLBACKS_COMPUTE, extra: MAPPING, outside: "\nclass Other\n  def self.go = Locales.fallbacks.map({ en: [:pt] })\nend\n"),
+      "a send naming it" => mapped(FALLBACKS_COMPUTE, extra: MAPPING, outside: "\nclass Other\n  def self.go = Locales.fallbacks.send(:map, { en: [:pt] })\nend\n"),
+      "a method the runtime calls on its own" => mapped(FALLBACKS_COMPUTE, extra: "def to_a = (@map[:en] = [:pt])")
+    }.each do |label, ruby|
+      assert_equal [[nil], [nil]], chunks(ruby, rbs: MAPPED_RBS), label
+    end
+  end
+
   def test_declines_a_keyed_memo_whose_entries_something_else_changes
     {
       "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),
