@@ -27,8 +27,8 @@ module Steep
         narrowed = !TypeInference::ConstructorBindingAnalyzer.self_exposures(body).empty?
         LocalReach.each_node(body) do |node|
           next unless self_call?(node)
-          next narrowed ||= exposed?(constr, node) if flow.dead?(node)
-          next narrowed = true if ObjectStates.exit_of(constr, node, under: :stateful?)&.keeps_self
+          next narrowed ||= exposed?(constr, node) if flow.dead?(node) || typings_reaching(constr.typing, node).empty?
+          next narrowed = true if kept_where_run?(constr, node)
           return if exposed?(constr, node)
         end
         narrowed || nil
@@ -47,11 +47,36 @@ module Steep
       def in_place?(constr, node)
         return false unless %i[block numblock].include?(node.type)
 
-        call = constr.typing.call_of(node: node)
-        call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.all? do |decl|
-          IterationIntrinsics.entry(MethodIdentity.normalize(decl.method_name.to_s), override_registry: constr.literal_method_registry)
+        typings_reaching(constr.typing, node).all? do |typing|
+          call = typing.call_of(node: node)
+          call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.all? do |decl|
+            IterationIntrinsics.entry(MethodIdentity.normalize(decl.method_name.to_s), override_registry: constr.literal_method_registry)
+          end
         end
       rescue Typing::UnknownNodeError
+        false
+      end
+
+      # The typings `node` was checked under: one per pass of every loop around
+      # it that `record_iterations` expanded, or `typing` where none did. A
+      # local the loop body assigns again has, in the method's own typing, the
+      # type it had outside the loop.
+      def typings_reaching(typing, node)
+        around = typing.pass_typings.select { |loop, _| !loop.equal?(node) && inside?(loop.children[2], node) }
+        loop, passes = around.max_by { |outer, _| outer.loc.expression.size }
+        return [typing] unless loop
+
+        passes.flat_map { |pass| typings_reaching(pass, node) }
+      end
+
+      def kept_where_run?(constr, node)
+        typings_reaching(constr.typing, node).all? do |typing|
+          ObjectStates.exit_of(typing.equal?(constr.typing) ? constr : constr.with_new_typing(typing), node, under: :stateful?)&.keeps_self
+        end
+      end
+
+      def inside?(body, node)
+        LocalReach.each_node(body) { |child| return true if child.equal?(node) }
         false
       end
 
@@ -93,7 +118,7 @@ module Steep
 
       def reached_exposes?(constr, instance, owner, method_name)
         _, callee = ObjectStates.resolved_body(constr, owner, method_name)
-        callee.nil? || ObjectStates.exposes_self?(constr, instance, callee, [method_name])
+        callee ? ObjectStates.exposes_self?(constr, instance, callee, [method_name]) : !LiteralIntrinsics.answers_from_arguments?(constr, owner, method_name)
       end
     end
   end

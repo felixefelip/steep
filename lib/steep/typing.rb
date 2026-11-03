@@ -386,7 +386,11 @@ module Steep
     end
 
     def add_pass_typing(node, typing)
-      (pass_typings[node] ||= []) << typing
+      expand(node) << typing
+    end
+
+    def expand(node)
+      pass_typings[node] ||= []
     end
 
     def pass_typings_of(node:)
