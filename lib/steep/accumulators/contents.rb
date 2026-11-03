@@ -76,9 +76,24 @@ module Steep
         type.is_a?(AST::Types::Literal) || type.is_a?(AST::Types::Nil)
       end
 
-      # The array a `Spliced` node evaluates to, read as a pushed value is.
+      # The array a `Spliced` node evaluates to, read as a pushed value is, or
+      # as what a reader answers: a splat binds no block parameter, so an empty
+      # one is an answer here (`ObjectStates.read`).
       def spliced_type(constr, node)
-        operand_type(constr, node)
+        type = operand_type(constr, node)
+        type.is_a?(AST::Types::Tuple) ? type : (splatted_reader(constr, node) || type)
+      end
+
+      def splatted_reader(constr, node)
+        return unless node.type == :send
+
+        call = constr.typing.call_of(node: node)
+        return unless call.is_a?(TypeInference::MethodCall::Typed)
+
+        value = ObjectStates.held_value(constr, call, call.receiver_type, node.children.drop(2))
+        value if value.is_a?(AST::Types::Tuple)
+      rescue Typing::UnknownNodeError
+        nil
       end
 
       def operand_type(constr, node)

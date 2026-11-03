@@ -266,7 +266,7 @@ module Steep
         when AST::Types::ObjectState
           ivars = type.ivars.filter_map do |ivar, value|
             value = HashMutation.flatten(value)
-            value = fixed?(value) ? value : HashMutation.held(constr, type.back_type, ivar, value, followed: false)
+            value = fixed?(value) ? value : HashMutation.held(constr, type.back_type, ivar, value, followed: false) || ArrayMutation.held(constr, type.back_type, ivar, value)
             [ivar, value] if value && never_rewritten?(constr, type.back_type, ivar)
           end.to_h
           ivars.empty? ? type.back_type : AST::Types::ObjectState.new(back_type: type.back_type, ivars: ivars)
@@ -283,17 +283,19 @@ module Steep
       # comes out with what holds under any name: only `self`'s are followed
       # (`HeldIvars`), and a second name for one would not be.
       def read(constr, call, receiver_type:, arguments:)
-        state = (held = state_in(receiver_type)) || EnteredSelf.state(constr, receiver_type, call)
-        return call unless state && arguments.empty?
-
-        ivar = reader_ivar(constr, state, call)
-        value = ivar && state.ivar_type(ivar) or return call
-        value = settled(constr, value) if held
+        value = held_value(constr, call, receiver_type, arguments) or return call
         # The checker cannot bind a block's parameters to the elements of `[]`.
-        return call if value.is_a?(AST::Types::Tuple) && value.types.empty?
-        return call unless constr.check_relation(sub_type: value, super_type: call.return_type).success?
+        return call if (value.is_a?(AST::Types::Tuple) && value.types.empty?) || !constr.check_relation(sub_type: value, super_type: call.return_type).success?
 
         call.with_return_type(value)
+      end
+
+      # What `call`, a reader on an object whose ivar is known, answers, or nil.
+      def held_value(constr, call, receiver_type, arguments)
+        state = (held = state_in(receiver_type)) || EnteredSelf.state(constr, receiver_type, call)
+        ivar = state && arguments.empty? && reader_ivar(constr, state, call)
+        value = ivar && state.ivar_type(ivar) or return
+        held ? settled(constr, value) : value
       end
 
       # The ivar `call`, a reader on an object in `state`, answers.

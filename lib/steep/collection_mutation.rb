@@ -15,15 +15,17 @@ module Steep
         !keys.empty? && keys.all? { |key| allowed.include?(key) && !constr.literal_method_registry.blocked?(key) }
       end
 
-      # Whether a core method `self` runs reaches no ivar of it: one that
+      # Whether a method `self` runs reaches no ivar of it: a core one that
       # touches only its own elements, or that answers from its arguments
-      # whatever `self` is (`Array(tags)`).
+      # whatever `self` is (`Array(tags)`), or one of the project's that only
+      # reads (`attr_reader`).
       def reaches_no_ivar?(call, constr)
         return false unless call.is_a?(TypeInference::MethodCall::Typed)
 
         key = MethodIdentity.key(call)
         ArrayMutation.elements_only?(call, constr) || HashMutation.elements_only?(call, constr) ||
-          (!key.nil? && LiteralIntrinsics.self_independent?(key, override_registry: constr.literal_method_registry))
+          (!key.nil? && LiteralIntrinsics.self_independent?(key, override_registry: constr.literal_method_registry)) ||
+          (constr.self_type.is_a?(AST::Types::Name::Base) && !!ObjectStates.method_effect(constr, constr.self_type, call.method_name)&.reads_only)
       end
 
       # Whether `receiver` reads an ivar whose contents the body was entered
