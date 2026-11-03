@@ -92,7 +92,8 @@ module Steep
       # - `keyed_memo`: on a hash's own method, `[read, value]` where it stores
       #   `value` under its first parameter when `read` of it finds nothing
       #   there (`super || store(key, value)`).
-      # - `outside_state`: whether it reads a global, a match or `self.class`;
+      # - `outside_state`: whether it reads a global, a match or `self.class`
+      #   other than to call a method on it, which `own_class_sends` lists;
       # - `cvars`: the class variables it reads, `@@x ||= …` included, and
       #   `cvar_writes` those it assigns otherwise;
       # - `const_reads`: for each constant it mentions, the names it may
@@ -121,7 +122,7 @@ module Steep
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
         :empties, :literal_writes, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
-        :cvars, :cvar_writes, :const_reads, :const_sends, keyword_init: true
+        :own_class_sends, :cvars, :cvar_writes, :const_reads, :const_sends, keyword_init: true
       ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
 
       def self.analyze(node)
@@ -358,10 +359,8 @@ module Steep
         self_sends = Set[] #: Set[Symbol]
         consts = Set[] #: Set[String]
         calls = false
-        outside = false
         each_node(body) do |node|
           calls ||= CALLS.include?(node.type)
-          outside ||= OutsideReads::OUTSIDE.include?(node.type) || (node.type == :send && node.children[1] == :class && node.children[0]&.type == :self)
           writes << node.children[0] if node.type == :ivasgn
           ivars << node.children[0] if node.type == :ivar
           consts.merge(referenced_names(node, nesting || [])) if node.type == :const
@@ -388,7 +387,7 @@ module Steep
           block_super: HandedBack.block_super(body),
           hands_back_elements: HandedBack.elements(body),
           keyed_memo: HandedBack.keyed_memo(args_node, body),
-          outside_state: outside, **OutsideReads.of(body) { |const| referenced_names(const, nesting || @lexical_nesting || []) },
+          **OutsideReads.of(body) { |const| referenced_names(const, nesting || @lexical_nesting || []) },
           memo: defined_as && memo_of(body, nesting, defined_as),
           memoizes: memoized_ivar(body),
           memoized_hash: memoized_hash(body),

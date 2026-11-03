@@ -161,12 +161,15 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
       class Fallbacks < Hash
         def own(locale) = [locale, @default, helper(locale)]
         def global = $default
-        def its_class = self.class.default
+        def its_class = self.class
+        def its_class_method = self.class.default
       end
     RUBY
 
     refute found[:own].outside_state
     assert(%i[global its_class].all? { |name| found[name].outside_state })
+    refute found[:its_class_method].outside_state
+    assert_equal Set[:default], found[:its_class_method].own_class_sends
   end
 
   def test_the_constants_and_class_variables_a_body_reads
