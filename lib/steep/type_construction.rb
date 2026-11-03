@@ -594,7 +594,7 @@ module Steep
       param = block_params.params.first
       return unless block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
 
-      collection = iterated_collection(node.children[0], receiver_type) or return
+      collection = iterated_collection(node.children[0], receiver_type)&.tap { |known| typing.expand(node) if known.types.empty? } or return
 
       # Each pass starts where the one before it left off, as it does when the
       # loop runs: a local of the method written in the body, or an ivar, is
@@ -667,7 +667,7 @@ module Steep
       return if intrinsic.collect == :each
       return if jumps_out?(block_body)
 
-      collection = iterated_collection(node.children[0], receiver_type) or return
+      collection = iterated_collection(node.children[0], receiver_type)&.tap { |known| typing.expand(node) if known.types.empty? } or return
 
       results = collection.types.map do |element|
         bindings = IterationIntrinsics.element_bindings(block_params, element) or return
