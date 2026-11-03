@@ -190,6 +190,18 @@ class AccumulatedInPlaceTest < Minitest::Test
     end
   end
 
+  def test_asking_whether_a_local_is_empty_reads_what_it_holds
+    types = types_of({
+      "empty" => "parts = []\nparts.empty?",
+      "held" => "parts = []\nparts << locale\nparts.empty?",
+      "decided" => "result = []\nparts = []\nresult << :none if parts.empty?\nresult << :some unless parts.empty?\nresult"
+    })
+
+    assert_equal "true", types.fetch("empty")
+    assert_equal "false", types.fetch("held")
+    assert_equal "[:none]", types.fetch("decided")
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 

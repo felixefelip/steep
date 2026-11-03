@@ -459,14 +459,17 @@ module Steep
         readable
       end
 
-      # The condition of an `if` statement, where it names none of `names` but
-      # as a read: an arm took them away, and the condition runs first.
+      # The condition of an `if` statement, or of one a statement assigns
+      # (`LocalReach.assigned_value`),
+      # where it names none of `names` but as a read: an arm took them away,
+      # and the condition runs first.
       def unstruck_condition(statement, names)
-        return if names.empty? || !statement.is_a?(Parser::AST::Node) || statement.type != :if
+        value = LocalReach.assigned_value(statement) unless names.empty?
+        condition = value.children[0] if value.is_a?(Parser::AST::Node) && value.type == :if or return
 
         probe = names.to_h { |name| [name, []] }
-        strike(statement.children[0], probe)
-        statement.children[0] if probe.values.all?
+        strike(condition, probe)
+        condition if probe.values.all?
       end
 
       def body_of(def_node) = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
@@ -873,10 +876,6 @@ module Steep
       end
 
       # A read that hands back an ELEMENT of a local this walk is watching.
-      def element_read?(node)
-        node.is_a?(Parser::AST::Node) && node.type == :send &&
-          CollectionReaders.element?(node) && node.children[0]&.type == :lvar
-      end
 
       # `{ name => Loop }` where this statement is an `each` over a collection,
       # whose body pushes onto watched locals in a straight line of its own —
@@ -1037,7 +1036,7 @@ module Steep
       #     y = parts.first
       #     y << "b"              # parts is ["ab"] from here on
       def strike_held_element(value, found)
-        return unless element_read?(value)
+        return unless CollectionReaders.element_read?(value)
 
         name = value.children[0].children[0]
         found[name] = nil if found.key?(name)
@@ -1115,7 +1114,7 @@ module Steep
         #
         # The read itself is still a read; what takes the local away is that
         # something else is holding one of its elements.
-        if node.type == :send && element_read?(node.children[0])
+        if node.type == :send && CollectionReaders.element_read?(node.children[0])
           strike(node.children[0].children[0], found, closure: closure) unless CollectionReaders::ELEMENT_QUERIES.include?(node.children[1])
           node.children.drop(1).each { |child| strike(child, found, closure: closure) }
           return
