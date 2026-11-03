@@ -63,6 +63,10 @@ module Steep
         METHODS.include?(send_node.children[1])
       end
 
+      def element_read?(node)
+        node.is_a?(Parser::AST::Node) && node.type == :send && element?(node) && node.children[0]&.type == :lvar
+      end
+
       def element?(send_node)
         ELEMENT.include?(send_node.children[1])
       end

@@ -20,7 +20,7 @@ module Steep
         return pair unless def_node && constr.specialization_arguments(def_node)&.self_ivars&.key?(ivar)
 
         operand = Specializations::Arguments.written_record(value, constr.typing, nil) || handed_value(constr, def_node, value) ||
-                  constr.literal_operand_type(value, pair.type)
+                  Specializations::Arguments.written_array(value, constr.typing) || constr.literal_operand_type(value, pair.type)
         return pair unless ObjectStates.state_value?(operand)
 
         pair.with(constr: constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => operand }) })

@@ -85,6 +85,18 @@ module Steep
       false
     end
 
+    # What a statement assigns, to a variable or through a setter, or the
+    # statement itself.
+    def assigned_value(statement)
+      return statement unless statement.is_a?(::Parser::AST::Node)
+
+      case statement.type
+      when :ivasgn, :lvasgn then statement.children.last
+      when :send then statement.children[1].end_with?("=") && statement.children.size == 3 ? statement.children[2] : statement
+      else statement
+      end
+    end
+
     # How many times `node` reads or writes `name`.
     def mentions(node, name)
       count = 0

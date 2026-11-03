@@ -676,7 +676,8 @@ module Steep
           .update_type_env { |env| env.refine_types(local_variable_types: bindings) }
         type, _ = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
         typing.add_pass_typing(node, pass.typing)
-        type
+        # An array written out is read off its elements, as a hint may widen it.
+        block_body.type == :array ? pass.literal_operand_type(block_body, type) : type
       end
 
       IterationIntrinsics.collect(intrinsic, results)

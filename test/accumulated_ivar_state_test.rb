@@ -1370,6 +1370,15 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def test_an_ivar_holds_the_arm_an_emptiness_check_decides
+    {
+      "assigned" => handed_array("@defaults = mappings.empty? ? [] : mappings"),
+      "through a setter" => handed_array("self.defaults = mappings.empty? ? [] : mappings")
+    }.each do |label, ruby|
+      assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: HANDED_ARRAY_RBS), label
+    end
+  end
+
   def test_declines_an_array_handed_to_an_ivar_that_may_change_afterwards
     {
       "named after the assignment" => handed_array("@defaults = mappings\nmappings << :pt"),

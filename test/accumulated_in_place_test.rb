@@ -190,6 +190,32 @@ class AccumulatedInPlaceTest < Minitest::Test
     end
   end
 
+  def test_asking_whether_a_local_is_empty_reads_what_it_holds
+    types = types_of({
+      "empty" => "parts = []\nparts.empty?",
+      "held" => "parts = []\nparts << locale\nparts.empty?",
+      "decided" => "result = []\nparts = []\nresult << :none if parts.empty?\nresult << :some unless parts.empty?\nresult"
+    })
+
+    assert_equal "true", types.fetch("empty")
+    assert_equal "false", types.fetch("held")
+    assert_equal "[:none]", types.fetch("decided")
+  end
+
+  def test_flat_map_over_a_known_collection_splices_what_each_pass_hands_back
+    types = types_of({
+      "arrays" => "[locale, :en].flat_map { |tag| [tag, :x] }",
+      "values" => "[locale, :en].flat_map { |tag| tag }",
+      "empty" => "[].flat_map { |tag| [tag] }",
+      "unknown" => "[locale].flat_map { |tag| tag.to_s.chars }"
+    })
+
+    assert_equal "[:fr, :x, :en, :x]", types.fetch("arrays")
+    assert_equal "[:fr, :en]", types.fetch("values")
+    assert_equal "[]", types.fetch("empty")
+    refute_match(/\A\[/, types.fetch("unknown"))
+  end
+
   def test_declines_a_spliced_array_whose_elements_are_not_known
     types = types_of({ "unknown" => "result = [locale]\nresult.concat([Object.new])\nresult" })
 

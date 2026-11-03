@@ -418,10 +418,23 @@ module Steep
       # Not inside a record, which keeps its values as their classes
       # (`ObjectStates.state_value?`).
       def self.written_array(arg, typing)
+        arg = decided_arm(arg, typing)
         return unless arg.type == :array
 
         elements = arg.children.map { |element| written_literal(element, typing) }
         AST::Types::Tuple.new(types: elements) if elements.all?
+      end
+
+      # The arm a conditional evaluates to where the checker computed its
+      # condition (`mappings.empty? ? [] : mappings`), or `node` itself.
+      def self.decided_arm(node, typing)
+        return node unless node.type == :if && typing.has_type?(node.children[0])
+
+        condition = typing.type_of(node: node.children[0])
+        return node unless condition.is_a?(AST::Types::Literal) || condition.is_a?(AST::Types::Nil)
+
+        arm = node.children[condition.is_a?(AST::Types::Literal) && condition.value != false ? 1 : 2]
+        arm ? decided_arm(arm, typing) : node
       end
 
       def self.written_literal(arg, typing)
