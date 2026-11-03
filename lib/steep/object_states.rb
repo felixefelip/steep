@@ -381,7 +381,7 @@ module Steep
           next false if visiting.include?(name)
 
           _, callee = resolved_body(constr, instance, name)
-          callee.nil? || exposes_self?(constr, instance, callee, [*visiting, name])
+          callee ? exposes_self?(constr, instance, callee, [*visiting, name]) : !LiteralIntrinsics.answers_from_arguments?(constr, instance, name)
         end
       end
 

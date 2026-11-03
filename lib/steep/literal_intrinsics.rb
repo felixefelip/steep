@@ -214,6 +214,14 @@ module Steep
         watched_keys.select { |key| key.start_with?("::#{class_name}#", "::#{class_name}.") }
       end
 
+      # Whether `name`, called on `type` with no body in the project, is a
+      # core method that answers from its arguments alone, such as
+      # `Array(tags)`: it reads nothing of `self` and hands it nowhere.
+      def answers_from_arguments?(constr, type, name)
+        keys = MethodIdentity.keys(constr, type, name, private: true)
+        keys.size == 1 && self_independent?(keys.first, override_registry: constr.literal_method_registry)
+      end
+
       # Whether `key` answers from its arguments alone, whatever `self` is, in
       # a project that redefines neither it nor what it leans on.
       def self_independent?(key, override_registry:)
