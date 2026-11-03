@@ -246,6 +246,11 @@ module Steep
         end
       end
 
+      # The methods of the project that assign one of `cvars` other than by
+      # `||=`, by name; every one that assigns a class variable that way
+      # without `cvars`. `uses_of` indexes their calls.
+      def cvar_writers(cvars = nil) = TypeInference::OutsideReads.writers([@methods, @singleton_methods], cvars)
+
       # Every call the project makes of `name`, one of `keyed_memo_names`
       # (`TypeInference::ClassMemoAnalyzer.calls`).
       def calls_of(name)
@@ -420,7 +425,7 @@ module Steep
         hashes.each { |name, ivar| names << name << ivar }
         @born_objects.each_value { |ivars| names.merge(ivars.keys) }
         @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
-        names.merge(keyed_memo_names)
+        names.merge(keyed_memo_names).merge(cvar_writers)
         @uses = uses_by_name(names)
         @reader_uses = uses_by_name(reader_names - names)
         calls_named(keyed_memo_names | ivar_using_names)

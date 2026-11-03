@@ -157,7 +157,7 @@ module Steep
 
         def reads_settled?(constr, instance, node, ivars, visiting)
           return true unless node.is_a?(::Parser::AST::Node)
-          return false if TypeInference::ConstructorBindingAnalyzer::OUTSIDE.include?(node.type) || node.type == :const
+          return false if TypeInference::OutsideReads::OUTSIDE.include?(node.type) || %i[const cvar].include?(node.type)
           return false if node.type == :send && node.children[1] == :class && node.children[0]&.type == :self
 
           ivars << node.children[0] if node.type == :ivar
@@ -168,15 +168,44 @@ module Steep
         end
 
         def method_settled?(constr, instance, method_name, ivars, visiting)
-          return true if visiting.include?(method_name)
+          return true if visiting.include?([instance, method_name])
 
           _, body = ObjectStates.resolved_body(constr, instance, method_name)
           return LiteralIntrinsics.answers_from_arguments?(constr, instance, method_name) if body.nil?
-          return false if body.outside_state || body.super_args
+          return false if body.outside_state || body.super_args || !outside_settled?(constr, body)
 
+          visiting |= [[instance, method_name]]
           ivars.merge(body.ivars || [])
           ivars << body.returns if body.returns
-          body.self_sends.all? { |name| method_settled?(constr, instance, name, ivars, visiting | [method_name]) }
+          body.const_sends.all? { |names, name| class_method_settled?(constr, names, name, visiting) } &&
+            body.self_sends.all? { |name| method_settled?(constr, instance, name, ivars, visiting) }
+        end
+
+        # A constant naming a class or module names it for good, and a class
+        # variable stays as it is where no method that may assign it is called.
+        def outside_settled?(constr, body)
+          body.const_reads.all? { |names| module_named(constr, names) } &&
+            constr.constructor_bindings.cvar_writers(body.cvars).all? { |writer| constr.constructor_bindings.uses_of(writer).empty? }
+        end
+
+        def class_method_settled?(constr, names, method_name, visiting)
+          singleton = module_named(constr, names) or return false
+          class_ivars = Set[] #: Set[Symbol]
+          method_settled?(constr, singleton, method_name, class_ivars, visiting) && class_ivars.empty?
+        end
+
+        # The class object the first of `names` that names a constant resolves
+        # to, nil where that one is a value or none does.
+        def module_named(constr, names)
+          env = constr.checker.factory.env
+          names.each do |name|
+            type_name = RBS::TypeName.parse("::#{name}")
+            next unless env.constant_name?(type_name)
+
+            module_name = env.normalize_module_name?(type_name) if env.module_name?(type_name)
+            return module_name && AST::Types::Name::Singleton.new(name: module_name)
+          end
+          nil
         end
 
         # `initialize`, and each method only ever called on `self` while one
