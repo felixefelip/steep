@@ -329,7 +329,7 @@ module Steep
 
         positionals = [] #: Array[AST::Types::t]
         args.each do |arg|
-          return nil if arg.type == :splat
+          next positionals.concat(splatted(arg.children[0], typing, exact_self) || (return nil)) if arg.type == :splat
           return nil unless typing.has_type?(arg)
 
           positionals << (written_array(arg, typing) || argument_type(arg, typing, exact_self))
@@ -340,6 +340,18 @@ module Steep
           block: block, block_return: block && Specializations.block_return(typing, block),
           narrows_classes: narrows_classes?(call, positionals, keywords)
         )
+      end
+
+      # `*value` as the arguments it spreads into, where its type says how
+      # many: a tuple its elements, `nil` none, and a value with no `to_a` itself.
+      def self.splatted(node, typing, exact_self)
+        return nil unless typing.has_type?(node)
+
+        case (type = written_array(node, typing) || argument_type(node, typing, exact_self))
+        when AST::Types::Tuple then type.types
+        when AST::Types::Nil then []
+        when AST::Types::Literal then [type] if [String, Symbol, Integer].any? { |klass| type.value.is_a?(klass) }
+        end
       end
 
       # Whether an argument is an instance of a class narrower than the

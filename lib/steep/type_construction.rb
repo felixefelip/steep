@@ -6149,7 +6149,7 @@ module Steep
             constr
               .with_child_typing()
               .try_tuple_type!(arg.node.children[0])
-          arg.type = arg_type
+          arg.type, arg.itself = Splatted.spread(constr, arg_type)
 
         when TypeInference::SendArgs::PositionalArgs::MissingArg
           # ignore

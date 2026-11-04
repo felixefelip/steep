@@ -21,27 +21,27 @@ module Steep
         class NodeTypePair
           attr_reader :node
           attr_reader :type
+          # A splat's `type` is what its value spreads into as a whole, rather
+          # than each of its elements.
+          attr_reader :whole
 
-          def initialize(node:, type:)
+          def initialize(node:, type:, whole: false)
             @node = node
             @type = type
+            @whole = whole
           end
 
           include Equatable
 
           def node_type
-            case node.type
-            when :splat
-              AST::Builtin::Array.instance_type(type)
-            else
-              type
-            end
+            node.type == :splat && !whole ? AST::Builtin::Array.instance_type(type) : type
           end
         end
 
         class SplatArg
           attr_reader :node
           attr_accessor :type
+          attr_accessor :itself
 
           def initialize(node:)
             @node = node
@@ -596,8 +596,8 @@ module Steep
 
                   case ts
                   when Array
-                    ty = AST::Types::Tuple.new(types: ts.map(&:type))
-                    yield PositionalArgs::NodeTypePair.new(node: value.node, type: ty)
+                    ty = value.itself ? ts.first&.type || AST::Types::Nil.instance : AST::Types::Tuple.new(types: ts.map(&:type))
+                    yield PositionalArgs::NodeTypePair.new(node: value.node, type: ty, whole: true)
                   when PositionalArgs::UnexpectedArg
                     errors << ts
                     yield ts
