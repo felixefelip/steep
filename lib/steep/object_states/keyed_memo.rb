@@ -193,7 +193,7 @@ module Steep
         # variable stays as it is where no method that may assign it is called.
         def outside_settled?(constr, body)
           body.const_reads.all? { |names| module_named(constr, names) } &&
-            constr.constructor_bindings.cvar_writers(body.cvars).all? { |writer| constr.constructor_bindings.uses_of(writer).empty? }
+            constr.constructor_bindings.cvar_writes_of(body.cvars).all? { |_, writer, memo| memo || writer.nil? || constr.constructor_bindings.uses_of(writer).empty? }
         end
 
         def class_method_settled?(constr, names, method_name, visiting)

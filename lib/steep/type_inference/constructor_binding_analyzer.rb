@@ -48,9 +48,11 @@ module Steep
       # `born_hashes` and `born_objects`: the ivars a statement of a body sets
       # to `{}`, or to `Klass.new` handed nothing, each with how. Where both
       # `@x = …` and `@x ||= …` set one, the assignment.
+      # `class_body_cvars`: for each class or module, the class variables its
+      # body, outside its methods, assigns anything but `nil`.
       JOIN_BIRTHS = proc { |_, *hows| hows.include?(:ivasgn) ? :ivasgn : :or_asgn }
 
-      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :conditional_methods, :aliases, :class_bodies, :mixin_bodies, :declared, :born_hashes, :born_objects, keyword_init: true)
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :conditional_methods, :aliases, :class_bodies, :mixin_bodies, :declared, :born_hashes, :born_objects, :class_body_cvars, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
       #
@@ -95,7 +97,8 @@ module Steep
       # - `outside_state`: whether it reads a global, a match or `self.class`
       #   other than to call a method on it, which `own_class_sends` lists;
       # - `cvars`: the class variables it reads, `@@x ||= …` included, and
-      #   `cvar_writes` those it assigns otherwise;
+      #   `cvar_writes` those it assigns otherwise, `cvar_memos` those it
+      #   assigns by `||=`;
       # - `const_reads`: for each constant it mentions, the names it may
       #   resolve to, innermost first; `const_sends`, those with the method
       #   called on that constant.
@@ -122,7 +125,7 @@ module Steep
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
         :empties, :literal_writes, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
-        :own_class_sends, :cvars, :cvar_writes, :const_reads, :const_sends, keyword_init: true
+        :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, keyword_init: true
       ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
 
       def self.analyze(node)
@@ -145,6 +148,7 @@ module Steep
         @declared = Set[] #: Set[String]
         @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
         @born_objects = {} #: Hash[String, Hash[Symbol, Symbol]]
+        @class_body_cvars = {} #: Hash[String, Set[Symbol]]
       end
 
       def scan(node)
@@ -152,7 +156,7 @@ module Steep
         Scan.new(
           readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods, conditional_methods: @conditional_methods, aliases: @aliases,
           class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared, born_hashes: @born_hashes,
-          born_objects: @born_objects
+          born_objects: @born_objects, class_body_cvars: @class_body_cvars
         )
       end
 
@@ -586,6 +590,7 @@ module Steep
         @declared.merge(names)
         record_births(@born_hashes, names, births(body) { |value| value.type == :hash && value.children.empty? })
         record_births(@born_objects, names, births(body) { |value| HandedBack.fresh_object?(value) })
+        ClassVariableWrites.record_class_body(@class_body_cvars, names, body)
         code = body_code(body, nesting) or return
 
         names.each { |name| code == true ? @class_bodies[name] += 1 : (@mixin_bodies[name] ||= []) << code }
@@ -659,7 +664,7 @@ module Steep
         return unless body&.type == :or_asgn
 
         target, value = body.children
-        return unless target.type == :ivasgn
+        return unless %i[ivasgn cvasgn].include?(target.type)
 
         wrappers = [] #: Array[Symbol]
         while value.type == :block
