@@ -19,7 +19,9 @@ module Steep
 
           attr_reader type: AST::Types::t
 
-          def initialize: (node: Parser::AST::Node, type: AST::Types::t) -> void
+          attr_reader whole: bool
+
+          def initialize: (node: Parser::AST::Node, type: AST::Types::t, ?whole: bool) -> void
 
           include Equatable
 
@@ -30,6 +32,8 @@ module Steep
           attr_reader node: Parser::AST::Node
 
           attr_accessor type: AST::Types::t?
+
+          attr_accessor itself: bool?
 
           def initialize: (node: Parser::AST::Node) -> void
 

@@ -111,4 +111,8 @@ class TwoSegmentParentTest < Minitest::Test
   def test_a_slice_of_a_local_tuple_by_a_range_it_computes_folds
     assert_equal "\"fr\"", types.fetch("sliced")
   end
+
+  def test_a_call_through_a_splat_of_a_value_with_no_to_a_specializes
+    assert_equal "::Simple{@tag: :fr}", types.fetch("splatted")
+  end
 end
