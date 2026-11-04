@@ -16,9 +16,14 @@ class AnsweredTupleLocalTest < Minitest::Test
       def to_a: () -> Array[String]
       def grow!: () -> Array[String]
       def wide: () -> untyped
+      def wrapped: () -> untyped
+      def memo: () -> untyped
+      @memo: untyped
     end
     class P
       def wide: (:fr locale) -> untyped
+      def wrapped: (:fr locale) -> untyped
+      def memo: (:fr locale) -> untyped
     end
   RBS
 
@@ -39,10 +44,29 @@ class AnsweredTupleLocalTest < Minitest::Test
         segs.compact!
         segs.length > 1
       end
+
+      def wrapped
+        begin
+          segs = to_a
+          segs.compact!
+          segs.length > 1 ? segs : nil
+        end
+      end
+
+      def memo
+        @memo ||=
+          begin
+            segs = to_a
+            segs.compact!
+            segs.length > 1 ? segs : nil
+          end
+      end
     end
 
     class P
       def wide(locale) = Tag.new(locale).wide
+      def wrapped(locale) = Tag.new(locale).wrapped
+      def memo(locale) = Tag.new(locale).memo
     end
   RUBY
 
@@ -75,5 +99,20 @@ class AnsweredTupleLocalTest < Minitest::Test
       found = types(TAG.sub("segs.compact!\n    segs.length > 1", body))
       refute_match(/\A(true|false)\z/, found.fetch("wide"), label)
     end
+  end
+
+  def test_follows_the_local_inside_a_begin_block
+    found = types(TAG)
+
+    assert_equal "nil", found.fetch("wrapped")
+    assert_equal "nil", found.fetch("memo")
+  end
+
+  def test_declines_inside_a_begin_block_where_a_statement_between_may_reach_the_array
+    ruby = TAG.sub("segs.compact!\n      segs.length > 1 ? segs", "segs.compact!\n      grow!\n      segs.length > 1 ? segs")
+    refute_equal TAG, ruby
+    found = types(ruby)
+
+    refute_equal "nil", found.fetch("wrapped")
   end
 end
