@@ -775,6 +775,23 @@ type json = String | Integer | Array[json] | Hash[String, json]
     end
   end
 
+  def test_alias_argument_rbs_cannot_spell
+    with_checker <<-EOS do |checker|
+class Tag
+end
+type list[T] = Array[T]
+    EOS
+      tag = parse_type("::Tag", checker: checker)
+      fr = AST::Types::ObjectState.new(back_type: tag, ivars: { :@tag => AST::Types::Literal.new(value: :fr) })
+      x = AST::Types::ObjectState.new(back_type: tag, ivars: { :@tag => AST::Types::Literal.new(value: :x) })
+      list = ->(element) { AST::Types::Name::Alias.new(name: RBS::TypeName.parse("::list"), args: [element]) }
+
+      assert_success_check checker, AST::Builtin::Array.instance_type(fr), list[fr]
+      assert_fail_check checker, AST::Builtin::Array.instance_type(x), list[fr]
+      assert_fail_check checker, AST::Builtin::Array.instance_type(tag), list[fr]
+    end
+  end
+
   def test_hash
     with_checker do |checker|
       assert_fail_check checker, "{ foo: ::String }", "{ foo: ::Integer }"

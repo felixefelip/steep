@@ -363,12 +363,13 @@ module Steep
         end
 
         def unfold(type_name, args)
-          type(
-            definition_builder.expand_alias2(
-              type_name,
-              args.empty? ? [] : args.map {|t| type_1(t) }
-            )
-          )
+          return type(definition_builder.expand_alias2(type_name, [])) if args.empty?
+
+          # Substituted after the expansion: written into RBS first, an argument
+          # RBS cannot spell (`NotInRBS`) would leave as its `back_type`.
+          params = definition_builder.env.type_alias_decls.fetch(type_name).decl.type_params.map(&:name)
+          body = type(definition_builder.expand_alias2(type_name, params.map { |name| RBS::Types::Variable.new(name: name, location: nil) }))
+          body.subst(Interface::Substitution.build(params, args))
         end
 
         def expand_alias(type)
