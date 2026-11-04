@@ -239,6 +239,8 @@ module Steep
         [key, *entry.depends_on].none? { |name| override_registry.blocked?(name) }
       end
 
+      def held?(type) = type.is_a?(AST::Types::Self) || type.is_a?(AST::Types::ObjectState)
+
       private
 
       # A literal, or a tuple of things that are themselves operands. Nested
@@ -253,8 +255,6 @@ module Steep
         else false
         end
       end
-
-      def held?(type) = type.is_a?(AST::Types::Self) || type.is_a?(AST::Types::ObjectState)
 
       def operand_value(type)
         return Held.new(type) if held?(type)

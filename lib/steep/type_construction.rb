@@ -5728,7 +5728,7 @@ module Steep
           # as it would have before.
           inferred = typing.recorded_type_of(node: child) || AST::Builtin.any_type
           element = child.type == :self ? AST::Types::Self.instance : literal_operand_type(child, inferred)
-          element if element.is_a?(AST::Types::Self) || element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple) || element.is_a?(AST::Types::RegexpLiteral) || element.is_a?(AST::Types::Nil) || LiteralIntrinsics.literal_union?(element)
+          element if LiteralIntrinsics.held?(element) || element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple) || element.is_a?(AST::Types::RegexpLiteral) || element.is_a?(AST::Types::Nil) || LiteralIntrinsics.literal_union?(element)
         end
 
         return elements.all? ? AST::Types::Tuple.new(types: elements) : built_here_only(inferred_type)
