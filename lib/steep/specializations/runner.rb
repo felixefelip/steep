@@ -216,7 +216,7 @@ module Steep
               type = Specializations.widen_literals(type)
             end
 
-            [tuple, type] unless type.to_s == baselines[key]
+            [tuple, type] unless type.to_s == baselines[key] && !Specializations.answers_self?(type)
           end.to_h
 
           result[key] = settled unless settled.empty?
@@ -245,7 +245,7 @@ module Steep
             outcome = outcomes.fetch(definitions.fetch(key).first)
             store_exit(key, arguments, outcome.exits[key]) if outcome.exits.key?(key)
             type = outcome.returns[key] or next
-            next if type.to_s == baselines[key]
+            next if type.to_s == baselines[key] && !(arguments.stateful? && Specializations.answers_self?(type))
 
             (found[key] ||= {})[arguments.key] = type
           end
