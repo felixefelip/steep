@@ -80,8 +80,8 @@ class AnsweredSelfStateTest < Minitest::Test
     found = types
 
     assert_equal ":fr", found.fetch("itself_")
-    assert_equal "::Array[::D{@tag: :fr}]", found.fetch("selfs")
-    assert_equal "::Array[:fr]", found.fetch("mapped")
+    assert_equal "[::D{@tag: :fr}]", found.fetch("selfs")
+    assert_equal "[:fr]", found.fetch("mapped")
   end
 
   def test_declines_the_state_the_receiver_held_before_a_body_that_changes_it
