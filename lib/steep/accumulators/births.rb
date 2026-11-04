@@ -33,7 +33,7 @@ module Steep
       def seed_of(name, value)
         return [name, value.children.dup] if array_literal?(value)
 
-        [name, [Built.new(value)]] if built_call?(value)
+        [name, [Built.new(value, [])]] if built_call?(value)
       end
 
       def array_literal?(node)

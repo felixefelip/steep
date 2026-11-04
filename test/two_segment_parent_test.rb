@@ -115,4 +115,8 @@ class TwoSegmentParentTest < Minitest::Test
   def test_a_call_through_a_splat_of_a_value_with_no_to_a_specializes
     assert_equal "::Simple{@tag: :fr}", types.fetch("splatted")
   end
+
+  def test_a_local_read_past_self_class_keeps_what_a_method_answered
+    assert_equal "::Simple{@tag: :\"fr-CA\"}", types.fetch("passed")
+  end
 end
