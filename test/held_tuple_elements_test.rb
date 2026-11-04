@@ -16,6 +16,7 @@ class HeldTupleElementsTest < Minitest::Test
       def count: () -> Integer
       def listed: () -> bool
       def unique: () -> Array[D]
+      def wrapped: () -> Array[D]
     end
     class P
       def selves: (:fr locale) -> untyped
@@ -24,6 +25,7 @@ class HeldTupleElementsTest < Minitest::Test
       def count: (:fr locale) -> untyped
       def listed: (:fr locale) -> untyped
       def unique: (:fr locale) -> untyped
+      def wrapped: (:fr locale) -> untyped
     end
   RBS
 
@@ -40,6 +42,7 @@ class HeldTupleElementsTest < Minitest::Test
       def count = [self, tag].concat([]).length
       def listed = [self].include?(D.new(:fr))
       def unique = [self].uniq
+      def wrapped = [D.new(tag)]
     end
 
     class P
@@ -49,6 +52,7 @@ class HeldTupleElementsTest < Minitest::Test
       def count(locale) = D.new(locale).count
       def listed(locale) = D.new(locale).listed
       def unique(locale) = D.new(locale).unique
+      def wrapped(locale) = D.new(locale).wrapped
     end
   RUBY
 
@@ -74,6 +78,10 @@ class HeldTupleElementsTest < Minitest::Test
     assert_equal "[::D{@tag: :fr}]", found.fetch("joined")
     assert_equal "[:fr]", found.fetch("tags")
     assert_equal "2", found.fetch("count")
+  end
+
+  def test_an_array_written_around_an_object_with_state_is_a_tuple_of_it
+    assert_equal "[::D{@tag: :fr}]", types.fetch("wrapped")
   end
 
   def test_declines_operations_that_compare_or_hash_elements

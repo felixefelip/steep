@@ -208,18 +208,27 @@ module Steep
         type.map_type { |child| rbs_writable(child) }
       end
 
-      # `rbs_writable`, but an object whose ivars are known kept as one: the
-      # sidecar spells it (`sidecar_value`).
+      # `rbs_writable`, but an object whose ivars are known kept as one, alone
+      # or in a tuple: the sidecar spells both (`sidecar_value`).
       def sidecar_writable(type)
-        type.is_a?(AST::Types::ObjectState) ? type.map_type { |child| sidecar_writable(child) } : rbs_writable(type)
+        case type
+        when AST::Types::ObjectState, AST::Types::Tuple then type.map_type { |child| sidecar_writable(child) }
+        else rbs_writable(type)
+        end
       end
 
       # How the sidecar writes a return: as RBS, or, for an object whose ivars
-      # are known, which RBS cannot spell, as its class and the value of each.
+      # are known, which RBS cannot spell, as its class and the value of each,
+      # and for a tuple holding one, as the list of its elements.
       def sidecar_value(type)
-        return type.to_s unless type.is_a?(AST::Types::ObjectState)
-
-        { "class" => type.back_type.to_s, "ivars" => type.ivars.to_h { |name, value| [name.to_s, sidecar_value(value)] } }
+        case type
+        when AST::Types::ObjectState
+          { "class" => type.back_type.to_s, "ivars" => type.ivars.to_h { |name, value| [name.to_s, sidecar_value(value)] } }
+        when AST::Types::Tuple
+          values = type.types.map { |element| sidecar_value(element) }
+          values.all?(String) ? type.to_s : values
+        else type.to_s
+        end
       end
 
       # How the sidecar writes what a body left its receiver holding
@@ -998,7 +1007,7 @@ module Steep
         ((raw && raw["methods"]) || {}).each do |method_key, entries|
           next unless entries.is_a?(Hash)
 
-          methods[method_key] = entries.select { |key, type| key.is_a?(String) && (type.is_a?(String) || type.is_a?(Hash)) }
+          methods[method_key] = entries.select { |key, type| key.is_a?(String) && (type.is_a?(String) || type.is_a?(Hash) || type.is_a?(Array)) }
         end
 
         declarations = ((raw && raw["declarations"]) || {}).select { |key, type| key.is_a?(String) && type.is_a?(String) }
@@ -1113,6 +1122,7 @@ module Steep
       def parse(method_key, raw, factory:)
         return nil unless raw
         return parse_state(method_key, raw, factory: factory) if raw.is_a?(Hash)
+        return AST::Types::Tuple.new(types: raw.map { |element| parse(method_key, element, factory: factory) || (return nil) }) if raw.is_a?(Array)
 
         factory.type(RBS::Parser.parse_type(raw).map_type_name { |name, _, _| name.absolute! })
       rescue RBS::ParsingError, RBS::BaseError => exn
