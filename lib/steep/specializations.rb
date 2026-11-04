@@ -86,7 +86,29 @@ module Steep
         arguments = returned_arguments(constr, node, call, block) or return call
         type = store.call_return_type(key, arguments, factory: constr.checker.factory) or return call
 
-        call.with_return_type(ObjectStates.initialize_call?(call) ? constructed(type, call.return_type) : type)
+        return call.with_return_type(constructed(type, call.return_type)) if ObjectStates.initialize_call?(call)
+
+        if answers_self?(type) && (receiver = receiver_left(constr, call, key, arguments))
+          type = type.subst(Interface::Substitution.build([], [], self_type: receiver))
+        end
+
+        call.with_return_type(type)
+      end
+
+      # A body whose answer holds its receiver, which the store records under
+      # the receiver's state and its caller reads as the receiver it called.
+      def answers_self?(type)
+        type.free_variables.include?(AST::Types::Self.instance)
+      end
+
+      # The receiver as the body left it: its class with the ivars the body's
+      # exit records. Nil where the call's receiver has no state: a `self` the
+      # record holds then came from the arguments, as the caller's self.
+      def receiver_left(constr, call, key, arguments)
+        state = ObjectStates.state_in(call.receiver_type) or return nil
+        exit = ObjectStates.recorded_exit(constr, key, arguments)&.ivars or return nil
+        kept = exit.select { |ivar, value| !value.is_a?(AST::Types::Tuple) || ObjectStates::ClassMemos.collection_confined?(constr, state.back_type, ivar) }
+        kept.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: kept)
       end
 
       # What a `Klass.new` recorded under the class whose `initialize` it runs
@@ -112,6 +134,7 @@ module Steep
         arguments = returned_arguments(constr, node, call, block) unless store.empty?
         own, *others = runs.map.with_index do |(key, receiver), index|
           recorded = arguments && store.call_return_type(key, arguments, factory: constr.checker.factory)
+          recorded = nil if recorded && answers_self?(recorded)
           recorded || (index.zero? ? call.return_type : declared_return(constr, receiver, call.method_name)) or return call
         end
         others.reject! { |type| constr.check_relation(sub_type: type, super_type: own).success? }

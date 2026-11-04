@@ -47,7 +47,10 @@ module Steep
         # not known.
         def union(key)
           arguments = arguments_of(key) or return nil
-          types = arguments.map { |each| @store.call_return_type(key, each, factory: @factory) or return nil }
+          types = arguments.map do |each|
+            type = @store.call_return_type(key, each, factory: @factory)
+            type && !Specializations.answers_self?(type) ? type : (return nil)
+          end
           AST::Types::Union.build(types: types)
         end
 
