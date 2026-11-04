@@ -203,7 +203,9 @@ module Steep
       # found: a body just reached is converging, not oscillating.
       #
       # `widened` remembers which entries have widened, and that memory is what
-      # makes the loop terminate rather than cycle. Widening only by comparison
+      # makes the loop terminate rather than cycle. An entry holding no literal
+      # had nothing to widen: one that keeps changing class is the cycle `seen`
+      # stops. Widening only by comparison
       # with the generation before forgets: a widened entry that the next
       # generation drops comes back literal, and the result then depends on which
       # generation the loop happens to stop at.
@@ -212,8 +214,9 @@ module Steep
           settled = entries.filter_map do |tuple, type|
             previous = found.dig(key, tuple)
             if widened.include?([key, tuple]) || (previous && previous != type && !refinement?(key, tuple, type, previous))
-              widened << [key, tuple]
-              type = Specializations.widen_literals(type)
+              wide = Specializations.widen_literals(type)
+              widened << [key, tuple] unless wide == type
+              type = wide
             end
 
             [tuple, type] unless type.to_s == baselines[key] && !Specializations.answers_self?(type)

@@ -1258,11 +1258,11 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: KEYED_MEMO_RBS)
   end
 
-  def test_declines_a_keyed_memo_s_value_through_a_core_method_the_project_redefines
+  def test_a_keyed_memo_s_value_runs_the_body_the_project_redefines_a_core_method_with
     ruby = keyed_memo(outside: "\nmodule Kernel\n  def Array(value) = [value, value]\nend\n")
              .sub("def compute(locale) = [locale, @default]", "def compute(locale) = Array(locale) + [@default]")
 
-    assert_equal [[nil], [nil]], chunks(ruby, rbs: KEYED_MEMO_RBS)
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: KEYED_MEMO_RBS)
   end
 
   def test_a_rest_parameter_a_call_passes_nothing_to_is_empty
