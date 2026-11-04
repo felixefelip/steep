@@ -234,15 +234,16 @@ module Steep
       end
 
       # The method's own straight line, then every nested one in it. A `begin`
-      # is the only node holding more than one statement, and a local has to be
-      # born and read for a list to have anything to say.
+      # (`kwbegin` where written as `begin … end`) is the only node holding more
+      # than one statement, and a local has to be born and read for a list to
+      # have anything to say.
       def each_line_list(def_node)
         body = body_of(def_node) or return
 
         yield statements(body), true
 
         LocalReach.each_node(body) do |node|
-          yield node.children, false if node.type == :begin && !node.equal?(body)
+          yield node.children, false if %i[begin kwbegin].include?(node.type) && !node.equal?(body)
         end
       end
 
@@ -657,7 +658,7 @@ module Steep
         node&.type == :lvar ? node.children[0] : nil
       end
 
-      def statements(body) = body.is_a?(Parser::AST::Node) ? (body.type == :begin ? body.children : [body]) : []
+      def statements(body) = body.is_a?(Parser::AST::Node) ? (%i[begin kwbegin].include?(body.type) ? body.children : [body]) : []
 
       # One statement of the straight line. It either seeds a local, pushes onto
       # one, or is everything else — and everything else only takes locals away.
