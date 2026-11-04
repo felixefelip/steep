@@ -378,6 +378,10 @@ module Steep
     STRING_SLICE = lambda do |_receiver, arguments|
       arguments.all?(Integer) || (arguments.size == 1 && arguments.first.is_a?(::Range))
     end
+    # The same, minus the index alone: a tuple answers that one by position.
+    ARRAY_SLICE = lambda do |_receiver, arguments|
+      (arguments.size == 2 && arguments.all?(Integer)) || (arguments.size == 1 && arguments.first.is_a?(::Range))
+    end
     # On a copy, as `sub!`: what an in-place method answers, and leaves in the
     # array it runs on (`ArrayMutation::IN_PLACE`, `Accumulators::RESHAPES`).
     ARRAY_IN_PLACE = ->(method_name) { ->(receiver, arguments) { receiver.dup.public_send(method_name, *arguments) } }
@@ -499,6 +503,7 @@ module Steep
       "::Array#push" => Entry.new(method: Array.instance_method(:push), arity: 0.., preflight: ALWAYS, native: ARRAY_IN_PLACE.(:push)),
       "::Array#<<" => Entry.new(method: Array.instance_method(:<<), arity: 1, preflight: ALWAYS, native: ARRAY_IN_PLACE.(:<<)),
       "::Array#concat" => Entry.new(method: Array.instance_method(:concat), arity: 0.., preflight: ARRAYS, native: ARRAY_IN_PLACE.(:concat)),
+      "::Array#[]" => Entry.new(method: Array.instance_method(:[]), arity: 1..2, preflight: ARRAY_SLICE),
       "::Array#length" => Entry.new(method: Array.instance_method(:length), arity: 0, preflight: ALWAYS),
       "::Array#size" => Entry.new(method: Array.instance_method(:size), arity: 0, preflight: ALWAYS),
       "::String#split" => Entry.new(method: String.instance_method(:split), arity: 1, preflight: STRING_SPLIT),

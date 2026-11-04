@@ -71,6 +71,14 @@ module Steep
         ELEMENT.include?(send_node.children[1])
       end
 
+      # `parts[0..1].join("-")`: a slice is a new array, and a scalar read of it
+      # hands none of the elements it shares with `parts` on.
+      def scalar_read_of_slice?(node)
+        slice = node.children[0]
+        Accumulators::SCALAR_READS.include?(node.children[1]) && slice.children[1] == :[] &&
+          (slice.children.size == 4 || %i[irange erange].include?(slice.children[2]&.type))
+      end
+
       # Whether this send reads its argument as a collection rather than using
       # it as a value.
       def binary?(send_node)

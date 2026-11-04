@@ -88,7 +88,7 @@ module Steep
         # The read itself is still a read; what takes the local away is that
         # something else is holding one of its elements.
         if node.type == :send && CollectionReaders.element_read?(node.children[0])
-          strike(node.children[0].children[0], found, closure: closure) unless CollectionReaders::ELEMENT_QUERIES.include?(node.children[1])
+          strike(node.children[0].children[0], found, closure: closure) unless CollectionReaders::ELEMENT_QUERIES.include?(node.children[1]) || CollectionReaders.scalar_read_of_slice?(node)
           node.children.drop(1).each { |child| strike(child, found, closure: closure) }
           return
         end

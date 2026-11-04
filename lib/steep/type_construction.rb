@@ -5757,7 +5757,7 @@ module Steep
       end
 
       if node.type == :irange || node.type == :erange
-        return LiteralSyntax.range(node) || built_here_only(inferred_type)
+        return LiteralSyntax.range(node, typing) || built_here_only(inferred_type)
       end
 
       # A constant whose value is written out ONCE in this file and only read
