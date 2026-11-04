@@ -491,6 +491,7 @@ end
 #   # steep:ignore:end
 # end
 require "steep/collection_readers"
+require "steep/array_writes"
 require "steep/splatted"
 require "steep/accumulators"
 require "steep/accumulators/returned_values"
