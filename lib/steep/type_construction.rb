@@ -4109,7 +4109,7 @@ module Steep
     end
 
     def type_send_interface(node, interface:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:, send_dispatch:)
-      method = interface.methods[method_name]
+      method = ArrayWrites.entry(self, interface.methods[method_name], receiver_type)
 
       if method
         call, constr = type_method_call(

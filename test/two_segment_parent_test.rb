@@ -12,6 +12,8 @@ class TwoSegmentParentTest < Minitest::Test
     module Parents
       @parent: Simple?
       @parents: Array[Simple]
+      @self_and_parents: Array[Simple]
+      def self_and_parents: () -> Array[Simple]
       def parent: () -> Simple?
       def parents: () -> Array[Simple]
     end
@@ -34,6 +36,8 @@ class TwoSegmentParentTest < Minitest::Test
       def splatted: (:"fr-CA" locale) -> untyped
       def parent: (:"fr-CA" locale) -> untyped
       def parents: (:"fr-CA" locale) -> untyped
+      def tags: (:"fr-CA" locale) -> untyped
+      def one_tag: (:fr locale) -> untyped
     end
   RBS
 
@@ -51,6 +55,10 @@ class TwoSegmentParentTest < Minitest::Test
 
       def parents
         @parents ||= parent ? [parent].concat(parent.parents) : []
+      end
+
+      def self_and_parents
+        @self_and_parents ||= [self].concat parents
       end
     end
 
@@ -90,6 +98,8 @@ class TwoSegmentParentTest < Minitest::Test
       def splatted(locale) = Simple.new(locale).splatted
       def parent(locale) = Simple.new(locale).parent
       def parents(locale) = Simple.new(locale).parents
+      def tags(locale) = Simple.new(locale).self_and_parents.map { |t| t.tag }
+      def one_tag(locale) = Simple.new(locale).self_and_parents.map { |t| t.tag }
     end
   RUBY
 
@@ -125,5 +135,12 @@ class TwoSegmentParentTest < Minitest::Test
 
     assert_equal "::Simple{@tag: :fr}", found.fetch("parent")
     assert_equal "[::Simple{@tag: :fr}]", found.fetch("parents")
+  end
+
+  def test_a_locale_and_its_parents_answer_their_tags
+    found = types
+
+    assert_equal "[:\"fr-CA\", :fr]", found.fetch("tags")
+    assert_equal "[:fr]", found.fetch("one_tag")
   end
 end
