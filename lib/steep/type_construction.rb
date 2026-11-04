@@ -521,7 +521,7 @@ module Steep
       return nil unless tuple.is_a?(AST::Types::Tuple)
       return nil unless built_value?(node, tuple)
 
-      return nil unless fresh_call?(node)
+      return nil unless fresh_call?(node) || !element.exposed
       return nil unless tuple.types.all? { |type| LiteralIntrinsics.fold_value?(type) }
 
       tuple.types

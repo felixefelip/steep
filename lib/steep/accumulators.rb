@@ -126,8 +126,10 @@ module Steep
     Arrived = Struct.new(:def_node, :name)
 
     # What a local born from a call holds: the array `node` evaluates to. Which
-    # one it is the checker says, and only for a call in `FRESH`.
-    Built = Struct.new(:node)
+    # one it is the checker says. A call outside `FRESH` may answer an array
+    # other names hold, so its contents stand only while nothing `exposed` the
+    # local: no statement since the birth ran code that could reach those names.
+    Built = Struct.new(:node, :exposed)
 
     # The elements of the array `node` evaluates to, copied in by `key`:
     # `parts.push(*more)`, `parts.concat(more)`, `parts += more`. Copied, so
@@ -348,10 +350,10 @@ module Steep
             # for the count of passes at the `each`. The loop cannot push onto
             # the local it runs over, so the contents are the same either side.
             if (over = looped_local(statement, contents))
-              at_reads[statement.children[0]] = contents.fetch(over)
+              at_reads[statement.children[0]] = Noise.heard(statement, statement.children[0], contents, contents.fetch(over))
             end
 
-            CollectionReaders.contents_read(statement, contents, pushed).each { |site, elements| at_reads[site] = elements }
+            CollectionReaders.contents_read(statement, contents, pushed).each { |site, elements| at_reads[site] = Noise.heard(statement, site, contents, elements) }
             unless pushed.empty?
               pushed.each do |name|
                 elements = contents.fetch(name)
@@ -381,7 +383,7 @@ module Steep
             end
 
             handed_arguments(statement, contents).each do |argument|
-              at_args[argument] = contents.fetch(argument.children[0])
+              at_args[argument] = Noise.heard(statement, argument, contents, contents.fetch(argument.children[0]))
             end
           end
 
@@ -431,7 +433,7 @@ module Steep
           seeds = Births.seeds(statement).select { |name, _| readable.key?(name) && !ended.include?(name) }
           unless seeds.empty?
             # The value is read before the name holds it.
-            yield statement, [], contents
+            Noise.around(statement, contents, []) { yield statement, [], contents }
             seeds.each { |name, elements| contents[name] = elements }
             next
           end
@@ -460,7 +462,7 @@ module Steep
             pushed.concat(taken.keys)
           end
 
-          yield statement, pushed, contents
+          Noise.around(statement, contents, pushed) { yield statement, pushed, contents }
         end
 
         readable
