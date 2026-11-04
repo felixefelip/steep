@@ -1,8 +1,6 @@
 require_relative "test_helper"
 require_relative "specializations_project_helper"
 
-# `concat`, `push`, `<<`, … on an array whose element type the checker
-# inferred: what they are handed fits up to the class that element stands for.
 class ArrayWritersTest < Minitest::Test
   include TestHelper
   include ShellHelper
@@ -18,6 +16,7 @@ class ArrayWritersTest < Minitest::Test
       def appended: (Integer number) -> untyped
       def narrower_class: () -> untyped
       def other_class: () -> untyped
+      def same_literal: () -> untyped
     end
   RBS
 
@@ -29,6 +28,7 @@ class ArrayWritersTest < Minitest::Test
       def appended(number) = pair << number
       def narrower_class = [Sub.new].concat([Base.new])
       def other_class = [1].concat(["x"])
+      def same_literal = pair << 1
     end
   RUBY
 
@@ -49,5 +49,11 @@ class ArrayWritersTest < Minitest::Test
     assert_equal "::Array[(1 | 2 | ::Integer)]", found.fetch("pushed")
     assert_equal "::Array[(1 | 2 | ::Integer)]", found.fetch("appended")
     assert_equal [6, 7], errors
+  end
+
+  def test_a_writer_handed_what_already_fits_answers_the_declared_type
+    _, found = check
+
+    assert_equal "[1, 2]", found.fetch("same_literal")
   end
 end

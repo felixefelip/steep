@@ -1,15 +1,9 @@
 module Steep
-  # The writers of an array that answer it: `concat`, `push`, `<<`, … RBS
-  # declares each `-> self` with what it is handed confined to `Elem`, which is
-  # the array's type where a signature declared it. Where `Elem` is a value the
-  # checker inferred for an array written out — a literal, an object with
-  # state, `self` — the call adds elements that do not fit it:
-  #
-  #   [self].concat(parents)     # `Array[self]`, holding parents too
-  #   [1, 2].concat(numbers)
-  #
-  # There each writer is generic over what it is handed, up to the class the
-  # inferred element stands for, and answers an array of both.
+  # RBS confines what `concat`, `push`, `<<`, … are handed to `Elem`. Where the
+  # checker inferred `Elem` (a literal, an object with state, `self`), that bound
+  # is the class it stands for, and the writer answers both element types. The
+  # declared overload stays first: a generic parameter types a literal argument
+  # as its class, so `["a"] << "a"` would answer `Array["a" | String]`.
   module ArrayWrites
     KEYS = %w[concat push append << unshift prepend insert].map { |name| "::Array##{name}" }.to_set.freeze
 
@@ -21,7 +15,7 @@ module Steep
 
         Interface::Shape::Entry.new(
           method_name: entry.method_name, private_method: entry.private_method?,
-          overloads: entry.overloads.map { |overload| writer?(constr, overload, entry.method_name) ? generic(overload, element, erased) : overload }
+          overloads: entry.overloads.flat_map { |overload| writer?(constr, overload, entry.method_name) ? [overload, generic(overload, element, erased)] : [overload] }
         )
       end
 
