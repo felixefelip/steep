@@ -23,7 +23,16 @@ class WriterReachedByReceiverTest < Minitest::Test
       def []: (Symbol key) -> K?
       def []=: (Symbol key, K value) -> K
     end
+    class OrWritten
+      @name: Symbol
+      @locals: Hash[Symbol, K]
+      def initialize: () -> void
+      def []: (Symbol key) -> K?
+      def []=: (Symbol key, K value) -> K
+    end
     class P
+      def or_written: () -> untyped
+      def write_by_or: () -> untyped
       def unwritten: () -> untyped
       def written: () -> untyped
       def write: () -> untyped
@@ -60,7 +69,27 @@ class WriterReachedByReceiverTest < Minitest::Test
       end
     end
 
+    class OrWritten
+      def initialize
+        @name = :main
+        @locals = {}
+      end
+
+      def [](key) = @locals[key]
+
+      def []=(key, value)
+        @locals[key] = value
+      end
+    end
+
     class P
+      def or_written = OrWritten.new[:k]
+
+      def write_by_or
+        written = OrWritten.new
+        written[:k] ||= K.new
+      end
+
       def unwritten = Locals.new[:k]
       def written = Written.new[:k]
 
@@ -91,6 +120,9 @@ class WriterReachedByReceiverTest < Minitest::Test
   end
 
   def test_a_writer_a_call_may_run_on_the_object_still_writes_it
-    assert_equal "(::K | nil)", types.fetch("written")
+    found = types
+
+    assert_equal "(::K | nil)", found.fetch("written")
+    assert_equal "(::K | nil)", found.fetch("or_written")
   end
 end
