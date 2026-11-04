@@ -119,4 +119,11 @@ class TwoSegmentParentTest < Minitest::Test
   def test_a_local_read_past_self_class_keeps_what_a_method_answered
     assert_equal "::Simple{@tag: :\"fr-CA\"}", types.fetch("passed")
   end
+
+  def test_a_two_segment_locale_answers_its_parent_and_the_chain_of_them
+    found = types
+
+    assert_equal "::Simple{@tag: :fr}", found.fetch("parent")
+    assert_equal "[::Simple{@tag: :fr}]", found.fetch("parents")
+  end
 end

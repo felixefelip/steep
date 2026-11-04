@@ -253,11 +253,21 @@ module Steep
 
       # Whether `type` only adds to what `previous` knew: a state that learned
       # an ivar, a state over the plain instance it was, a union that lost
-      # members or whose members did.
+      # members or whose members did, a tuple or a generic instance whose
+      # elements did.
       def refines?(type, previous)
         return true if type == previous
         if type.is_a?(AST::Types::Union) || previous.is_a?(AST::Types::Union)
           return union_members(type).all? { |member| union_members(previous).any? { |other| refines?(member, other) } }
+        end
+        if type.is_a?(AST::Types::Tuple)
+          return type.types.size == previous.types.size && type.types.zip(previous.types).all? { |member, other| refines?(member, other) } if previous.is_a?(AST::Types::Tuple)
+
+          array = AST::Builtin::Array.instance_type?(previous)
+          return array && type.types.all? { |member| refines?(member, array.args.fetch(0)) }
+        end
+        if type.is_a?(AST::Types::Name::Instance) && previous.is_a?(AST::Types::Name::Instance) && type.name == previous.name && type.args.size == previous.args.size && !type.args.empty?
+          return type.args.zip(previous.args).all? { |member, other| refines?(member, other) }
         end
         return false unless type.is_a?(AST::Types::ObjectState)
         return type.back_type == previous unless previous.is_a?(AST::Types::ObjectState)
