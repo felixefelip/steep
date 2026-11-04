@@ -34,13 +34,16 @@ module Steep
       AST::Types::Union.build(types: names.map { |name| AST::Types::Literal.new(value: name.to_sym) })
     end
 
-    # `1..-1` with each end an integer written out, or left open.
-    def self.range(node)
+    # `1..-1` with each end an integer the checker knows, or left open.
+    def self.range(node, typing)
       first, last = node.children.map do |bound|
         next nil unless bound
-        return nil unless bound.type == :int
+        next bound.children[0] if bound.type == :int
 
-        bound.children[0]
+        type = typing.type_of(node: bound)
+        return nil unless type.is_a?(AST::Types::Literal) && type.value.is_a?(Integer)
+
+        type.value
       end
 
       AST::Types::RangeLiteral.new(value: ::Range.new(first, last, node.type == :erange))
