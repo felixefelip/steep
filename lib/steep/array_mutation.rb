@@ -87,7 +87,7 @@ module Steep
       def read_everywhere?(constr, instance, ivar)
         constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.all? do |ancestor|
           constr.constructor_bindings.possible_bodies(ancestor.name.to_s).all? do |name, bodies|
-            HashMutation.built_only?(constr, name) || bodies.all? { |body| body_reads?(constr, instance, ivar, name, body) }
+            HashMutation.built_only?(constr, instance, name) || bodies.all? { |body| body_reads?(constr, instance, ivar, name, body) }
           end
         end
       rescue RBS::BaseError
