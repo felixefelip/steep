@@ -127,8 +127,8 @@ module Steep
 
     # What a local born from a call holds: the array `node` evaluates to. Which
     # one it is the checker says. A call outside `FRESH` may answer an array
-    # other names hold, so its contents stand only while nothing `exposed` the
-    # local: no statement since the birth ran code that could reach those names.
+    # other names hold, so its contents stand only while none of the code run
+    # since the birth (`exposed`, the noise points) could reach those names.
     Built = Struct.new(:node, :exposed)
 
     # The elements of the array `node` evaluates to, copied in by `key`:

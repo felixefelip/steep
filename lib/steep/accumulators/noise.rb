@@ -10,22 +10,29 @@ module Steep
       LITERALS = %i[int float str sym nil true false rational complex].freeze
 
       # The nodes that run nothing of their own beyond their children.
-      QUIET = (LITERALS + %i[lvar lvasgn array begin and or if irange erange splat const]).freeze
+      QUIET = (LITERALS + %i[self lvar lvasgn array begin and or if irange erange splat const]).freeze
 
       # The noisy nodes that run their children before they run themselves.
       AFTER_CHILDREN = %i[send csend yield super zsuper ivasgn gvasgn cvasgn casgn dstr dsym xstr].freeze
 
-      def any?(statement, locals)
-        !points(statement, locals).empty?
+      # The noise in `statement` that may run before `site` is evaluated.
+      def before(statement, site, locals)
+        start = site.loc.expression&.begin_pos
+        points(statement, locals).select do |point|
+          range = point.loc.expression
+          !start || !range || range.end_pos <= start || (contains?(point, site) && !AFTER_CHILDREN.include?(point.type))
+        end
       end
 
-      # Whether noise in `statement` may run before `site` is evaluated.
-      def before?(statement, site, locals)
-        start = site.loc.expression&.begin_pos or return true
-
-        points(statement, locals).any? do |point|
-          range = point.loc.expression or next true
-          range.end_pos <= start || (contains?(point, site) && !AFTER_CHILDREN.include?(point.type))
+      # Whether every point that exposed a local is a call the checker resolved
+      # to a core read that runs no code of the project's (`self.class`).
+      def harmless?(constr, points)
+        points.all? do |point|
+          call = constr.typing.call_of(node: point)
+          call.is_a?(TypeInference::MethodCall::Typed) &&
+            CollectionMutation.only?(constr, call.method_decls.map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }.uniq, CollectionMutation::OBJECT_READS)
+        rescue Typing::UnknownNodeError
+          false
         end
       end
 
@@ -66,26 +73,28 @@ module Steep
       end
 
       def heard(statement, site, contents, elements)
-        before?(statement, site, contents.keys) ? expose(elements) : elements
+        expose(elements, before(statement, site, contents.keys))
       end
 
       def around(statement, contents, pushed)
-        noisy = any?(statement, contents.keys)
-        expose_names(contents, pushed) if noisy
+        noise = points(statement, contents.keys)
+        expose_names(contents, pushed, noise)
         yield
-        expose_names(contents, contents.keys) if noisy
+        expose_names(contents, contents.keys, noise)
       end
 
-      def expose_names(contents, names)
-        names.each { |name| contents[name] = expose(contents.fetch(name)) }
+      def expose_names(contents, names, noise)
+        names.each { |name| contents[name] = expose(contents.fetch(name), noise) }
       end
 
-      def expose(elements)
+      def expose(elements, noise)
+        return elements if noise.empty?
+
         elements.map do |element|
           case element
-          when Built then element.exposed ? element : Built.new(element.node, true)
-          when Reshaped then Reshaped.new(element.key, element.fold_key, expose(element.elements))
-          when Mapped then Mapped.new(element.block, expose(element.elements))
+          when Built then Built.new(element.node, element.exposed + noise)
+          when Reshaped then Reshaped.new(element.key, element.fold_key, expose(element.elements, noise))
+          when Mapped then Mapped.new(element.block, expose(element.elements, noise))
           else element
           end
         end
