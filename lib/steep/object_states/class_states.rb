@@ -212,13 +212,18 @@ module Steep
         end
 
         # Whether `sent`, called on `self` in a method `owner` defines, runs
-        # another body on `receiver`, a subclass of `owner`, than on `owner`
-        # itself: the body then depends on which class it runs on.
+        # another body on `receiver`, a subclass of `owner` or a class that
+        # mixes it in, than on `owner` itself: the body then depends on which
+        # class it runs on.
         def overridden?(constr, receiver, owner, sent, sent_owner)
           return false unless owner && owner != receiver.name
-          return false unless constr.checker.factory.env.class_decls[owner].is_a?(RBS::Environment::ClassEntry)
 
-          on_owner = receiver.is_a?(AST::Types::Name::Singleton) ? AST::Types::Name::Singleton.new(name: owner) : AST::Types::Name::Instance.new(name: owner, args: [])
+          on_owner =
+            case constr.checker.factory.env.class_decls[owner]
+            when RBS::Environment::ModuleEntry then AST::Types::Name::Instance.new(name: owner, args: [])
+            when RBS::Environment::ClassEntry then receiver.is_a?(AST::Types::Name::Singleton) ? AST::Types::Name::Singleton.new(name: owner) : AST::Types::Name::Instance.new(name: owner, args: [])
+            else return false
+            end
           ObjectStates.resolved_body(constr, on_owner, sent)&.first != sent_owner
         end
 
