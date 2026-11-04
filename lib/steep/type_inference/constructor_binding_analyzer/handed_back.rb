@@ -10,7 +10,7 @@ module Steep
 
         # The `@x ||= value` (or `@@x ||= value`) a body is, or that a statement
         # of it is where every value the body hands back is that variable, read
-        # after it and assigned nowhere else.
+        # after it and assigned nowhere else, or `a || x` with `a` a fallback.
         def memo_assignment(body)
           return body if body&.type == :or_asgn && MEMO_TARGETS.key?(body.children[0].type)
           return unless body&.type == :begin
@@ -18,9 +18,36 @@ module Steep
           set = body.children[0...-1].find { |stmt| stmt.type == :or_asgn && MEMO_TARGETS.key?(stmt.children[0].type) } or return
           target = set.children[0]
           Accumulators::ReturnedValues.each_return(body) { return }
-          Accumulators::ReturnedValues.each_value(body) { |node| return unless node.type == MEMO_TARGETS[target.type] && node.children[0] == target.children[0] }
+          Accumulators::ReturnedValues.each_value(body) { |node| return unless memo_read?(node, target) || fallback(node, target) }
           set if assignments(body, target.type, target.children[0]) == 1
         end
+
+        # The `a` of each value `a || x` a memo's body hands back.
+        def fallbacks(body)
+          set = memo_assignment(body)
+          return [] unless set && body.type == :begin
+
+          found = [] #: Array[::Parser::AST::Node]
+          Accumulators::ReturnedValues.each_value(body) { |node| (fallback = fallback(node, set.children[0])) && found << fallback }
+          found
+        end
+
+        def memo_read?(node, target) = node.type == MEMO_TARGETS[target.type] && node.children[0] == target.children[0]
+
+        def fallback(node, target)
+          node.children[0] if node.type == :or && memo_read?(node.children[1], target) && outside_the_body?(node.children[0])
+        end
+
+        # Whether `node` reads nothing of the body it is in: no `self`, no
+        # variable, and every call made on an explicit receiver.
+        def outside_the_body?(node)
+          return true unless node.is_a?(::Parser::AST::Node)
+          return false if BODY_READS.include?(node.type) || (%i[send csend].include?(node.type) && node.children[0].nil?)
+
+          node.children.all? { |child| outside_the_body?(child) }
+        end
+
+        BODY_READS = %i[self ivar cvar gvar lvar yield super zsuper block numblock block_pass nth_ref back_ref].freeze
 
         def assignments(node, type, name)
           return 0 unless node.is_a?(::Parser::AST::Node)

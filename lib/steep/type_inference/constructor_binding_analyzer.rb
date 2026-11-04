@@ -110,7 +110,8 @@ module Steep
       #   instance of whichever class receives the call. Not a `returns`: while
       #   the ivar is unset it answers the new object, not what the ivar held.
       #   A fifth, `allocated`, where it is `allocate` instead of `new`, which
-      #   runs no `initialize`.
+      #   runs no `initialize`; a sixth, the `a` of each `a || @ivar` the body
+      #   hands back after the memo (`HandedBack.fallbacks`).
       # - `ivars`: the ivars it reads;
       # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
       # - `memoized_hash`: the ivar, when that value is `{}`;
@@ -676,12 +677,12 @@ module Steep
         end
         allocated = HandedBack.allocated?(value)
         return unless allocated || HandedBack.fresh_object?(value)
-        return [target.children[0], [defined_as], wrappers, true, allocated] if HandedBack.built_by_self?(value)
+        return [target.children[0], [defined_as], wrappers, true, allocated, HandedBack.fallbacks(body)] if HandedBack.built_by_self?(value)
 
         klass = value.children[0]
         name = const_to_name(klass) or return
         names = klass.children[0]&.type == :cbase ? [name] : nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
-        [target.children[0], names, wrappers, false, allocated]
+        [target.children[0], names, wrappers, false, allocated, HandedBack.fallbacks(body)]
       end
 
       # A reader whose body is exactly `@ivar` (normal or endless def) →
