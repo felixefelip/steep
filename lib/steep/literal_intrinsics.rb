@@ -48,6 +48,14 @@ module Steep
     # preflight and the same `depends_on`.
     Entry = _ = Struct.new(:method, :arity, :preflight, :depends_on, :native, :module_function, keyword_init: true)
 
+    # An element the fold has no Ruby value for — the receiver, or an object
+    # whose ivars it follows — carried through as the type it stands for. An
+    # entry that looks at its elements confines them in its preflight
+    # (`COMPARABLE`, `ARRAY_JOIN`, `FLATTEN_LEAVES`), and this is none of those.
+    Held = Struct.new(:type) do
+      def inspect = type.to_s
+    end
+
     # The element classes a dispatching fold is allowed to see. Not a
     # convenience: `depends_on` has to be a FINITE list, and it can only be
     # finite if the elements are confined to classes the registry already reads
@@ -240,12 +248,17 @@ module Steep
         case type
         when AST::Types::Literal, AST::Types::RegexpLiteral, AST::Types::RangeLiteral, AST::Types::Nil then true
         when AST::Types::Name::Singleton then MODULE_RECEIVERS.key?(type.name.to_s)
-        when AST::Types::Tuple, AST::Types::FiniteSet then type.types.all? { |element| operand?(element) }
+        when AST::Types::Tuple then type.types.all? { |element| operand?(element) || held?(element) }
+        when AST::Types::FiniteSet then type.types.all? { |element| operand?(element) }
         else false
         end
       end
 
+      def held?(type) = type.is_a?(AST::Types::Self) || type.is_a?(AST::Types::ObjectState)
+
       def operand_value(type)
+        return Held.new(type) if held?(type)
+
         case type
         when AST::Types::Tuple then type.types.map { |element| operand_value(element) }
         when AST::Types::FiniteSet then ::Set.new(type.types.map { |element| operand_value(element) })
@@ -274,6 +287,8 @@ module Steep
         # written in.
         when nil
           AST::Types::Nil.instance
+        when Held
+          value.type
         when ::Regexp
           AST::Types::RegexpLiteral.new(value: value)
         else
