@@ -419,7 +419,7 @@ module Steep
           end
         end
 
-        def reaching(constr) = ->(call) { Specializations::Receivers.reaches?(constr, call) }
+        def reaching(constr) = ->(call, owners) { Specializations::Receivers.reaches?(constr, call, owners) }
 
         # A method the runtime may call with no send written for it: one of
         # `Class`'s, or of a protocol declared as a top-level interface
