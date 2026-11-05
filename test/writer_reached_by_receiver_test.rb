@@ -98,6 +98,9 @@ class WriterReachedByReceiverTest < Minitest::Test
         written[:k] = K.new
       end
     end
+
+    P.new.write
+    P.new.write_by_or
   RUBY
 
   def types

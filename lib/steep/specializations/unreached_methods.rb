@@ -5,8 +5,9 @@ module Steep
     # nowhere, or every call of it has a receiver the checker typed as no value
     # of `target` (`Receivers.calls_on`), or is made inside a method that is
     # itself unreached. A call in a class body, a block or a method no type
-    # names runs; a name `index_uses` did not look for may be called anywhere;
-    # a cycle of methods is taken as reached.
+    # names runs, and so does one in the method being checked, which the check
+    # takes to run; a name `index_uses` did not look for may be called
+    # anywhere; a cycle of methods is taken as reached.
     module UnreachedMethods
       class << self
         def unreached?(constr, target, name, visiting = Set[])
@@ -23,7 +24,7 @@ module Steep
 
         def inside_unreached?(constr, call, visiting)
           method = call.enclosing or return false
-          return false if call.owner.to_s.empty? || initializing?(constr, method)
+          return false if call.owner.to_s.empty? || initializing?(constr, method) || checked_here?(constr, call)
 
           key = [call.owner, method, call.singleton]
           return false if visiting.include?(key)
@@ -35,6 +36,12 @@ module Steep
           unreached?(constr, owner, method, visiting | [key])
         rescue RBS::BaseError
           false
+        end
+
+        def checked_here?(constr, call)
+          constr.method_context&.name == call.enclosing &&
+            call.singleton == constr.self_type.is_a?(AST::Types::Name::Singleton) &&
+            constr.module_context&.class_name.to_s.delete_prefix("::") == call.owner
         end
 
         def initializing?(constr, method)

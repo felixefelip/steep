@@ -40,7 +40,17 @@ class CallsInUnreachedMethodsTest < Minitest::Test
       def self.outer: () -> K
       def self.inner: () -> K
     end
+    class HereLocals
+      @locals: Hash[Symbol, K]?
+      def get_here: (Symbol key) -> K?
+      def put_here: (Symbol key, K value) -> K
+    end
+    module Here
+      @@locals: HereLocals?
+      def self.locals: () -> HereLocals
+    end
     class P
+      def here: () -> untyped
       def uncalled: () -> untyped
       def called: () -> untyped
       def through: () -> untyped
@@ -85,6 +95,21 @@ class CallsInUnreachedMethodsTest < Minitest::Test
       end
     end
 
+    class HereLocals
+      def get_here(key)
+        locals = @locals
+        locals ? locals[key] : nil
+      end
+
+      def put_here(key, value)
+        (@locals ||= {})[key] = value
+      end
+    end
+
+    module Here
+      def self.locals = @@locals ||= HereLocals.allocate
+    end
+
     module Uncalled
       def self.locals = @@locals ||= UncalledLocals.allocate
       def self.clear = locals.put_uncalled(:k, K.new)
@@ -102,6 +127,11 @@ class CallsInUnreachedMethodsTest < Minitest::Test
     end
 
     class P
+      def here
+        Here.locals.put_here(:k, K.new)
+        Here.locals.get_here(:k)
+      end
+
       def uncalled = Uncalled.locals.get_uncalled(:k)
       def called = Called.locals.get_called(:k)
       def through = Through.locals.get_through(:k)
@@ -139,5 +169,9 @@ class CallsInUnreachedMethodsTest < Minitest::Test
 
     assert_equal "(::K | nil)", found.fetch("called")
     assert_equal "(::K | nil)", found.fetch("through")
+  end
+
+  def test_a_call_in_the_method_being_checked_runs_though_nothing_calls_it
+    assert_equal "(::K | nil)", types.fetch("here")
   end
 end
