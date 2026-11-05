@@ -111,7 +111,7 @@ module Steep
 
           owner, body = ObjectStates.resolved_body(constr, singleton, method_name)
           ivar = body&.memoized_hash or return
-          return unless written_only_by?(constr, singleton, ivar, owner, method_name)
+          return unless MemoSlots.written_only_by?(constr, singleton, ivar, owner, method_name)
           uses = [method_name, ivar].flat_map { |name| Specializations::Receivers.uses_on(constr, name, singleton) }
           return unless HashMutation.confined?(constr.literal_method_registry, uses)
 
@@ -122,7 +122,7 @@ module Steep
         # the ivar itself: no method writes it, and the project only stores
         # into it or reads from it.
         def born_hash(constr, singleton, ivar)
-          return unless constr.constructor_bindings.born_hashes(singleton.name).key?(ivar) && written_only_by?(constr, singleton, ivar, nil, nil)
+          return unless constr.constructor_bindings.born_hashes(singleton.name).key?(ivar) && MemoSlots.written_only_by?(constr, singleton, ivar, nil, nil)
 
           ivar if HashMutation.confined?(constr.literal_method_registry, Specializations::Receivers.uses_on(constr, ivar, singleton))
         end
@@ -133,7 +133,7 @@ module Steep
         # (`ForwardedHash`), on the terms `born_hash` keeps a hash's.
         def born_object(constr, singleton, ivar, instance)
           return unless instance.is_a?(AST::Types::Name::Instance) && constr.constructor_bindings.born_objects(singleton.name).key?(ivar)
-          return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, nil, nil)
+          return unless fresh?(constr, instance) && MemoSlots.written_only_by?(constr, singleton, ivar, nil, nil)
 
           nested = ForwardedHash.nested(constr, instance)
           ivar if confined?(constr, singleton, instance, ivar, stores: nested ? ForwardedHash.store_names(constr, instance, nested) : Set[])
@@ -513,7 +513,7 @@ module Steep
           ivar, classes, wrappers, by_self = body&.memo
           return unless ivar && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
           return if by_self && !built_here?(constr, owner, receiver: receiver)
-          return unless fresh?(constr, instance) && written_only_by?(constr, singleton, ivar, owner, method_name)
+          return unless fresh?(constr, instance) && MemoSlots.written_only_by?(constr, singleton, ivar, owner, method_name)
           return unless [method_name, ivar].all? { |used| confined?(constr, singleton, instance, used) }
           return unless wrappers.all? { |name| Tap.resolves?(constr, instance, name) }
 
@@ -533,7 +533,7 @@ module Steep
           instance = call.return_type
           return unless ivar && wrappers.empty? && instance.is_a?(AST::Types::Name::Instance) && classes.include?(instance.name.to_s.delete_prefix("::"))
           return if by_self && !built_here?(constr, owner, receiver: call.receiver_type.is_a?(AST::Types::Self) ? nil : singleton)
-          return unless written_only_by?(constr, singleton, ivar, owner, call.method_name)
+          return unless MemoSlots.written_only_by?(constr, singleton, ivar, owner, call.method_name)
 
           state = ObjectStates.settled(constr, fresh_state(constr, instance) || instance)
           call.with_return_type(state) if state.is_a?(AST::Types::ObjectState)
@@ -587,15 +587,6 @@ module Steep
         def fresh?(constr, instance)
           chain = ObjectStates.initialize_chain(constr, instance) or return false
           KeptSelf.fresh_chain?(constr, instance, chain, "()")
-        end
-
-        def written_only_by?(constr, singleton, ivar, owner, method_name)
-          definition = constr.checker.factory.definition_builder.build_singleton(singleton.name)
-          definition.ancestors.ancestors.none? do |ancestor|
-            constr.postconditions.may_write?(ancestor.name.to_s, ivar, except: ancestor.name == owner ? method_name : nil)
-          end
-        rescue RBS::BaseError
-          false
         end
 
         # A use a method returns (`Use#forwarded_by`) is made wherever that

@@ -35,6 +35,7 @@ module Steep
         @declared = Set[] #: Set[String]
         @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
         @born_objects = {} #: Hash[String, Hash[Symbol, Symbol]]
+        @class_body_cvars = {} #: Hash[String, Set[Symbol]]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
         @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
@@ -246,10 +247,10 @@ module Steep
         end
       end
 
-      # The methods of the project that assign one of `cvars` other than by
-      # `||=`, by name; every one that assigns a class variable that way
-      # without `cvars`. `uses_of` indexes their calls.
-      def cvar_writers(cvars = nil) = TypeInference::OutsideReads.writers([@methods, @singleton_methods], cvars)
+      # `TypeInference::ClassVariableWrites.of` over the project: where it
+      # may set one of `cvars`, or any class variable without them. `uses_of`
+      # indexes the calls of each method.
+      def cvar_writes_of(cvars = nil) = TypeInference::ClassVariableWrites.of([@methods, @singleton_methods], @class_body_cvars, cvars)
 
       # Every call the project makes of `name`, one of `keyed_memo_names`
       # (`TypeInference::ClassMemoAnalyzer.calls`).
@@ -279,9 +280,7 @@ module Steep
       # The class methods that store into the hash `memo` keeps in `ivar`,
       # where every store is made by a class body on its own class; nil
       # otherwise.
-      def class_body_storing(memo, ivar, reaching:)
-        class_body_storing_methods(storing_closure(memo, ivar, reaching: reaching), reaching)
-      end
+      def class_body_storing(memo, ivar, reaching:) = class_body_storing_methods(storing_closure(memo, ivar, reaching: reaching), reaching)
 
       # Whether every call of `method_name`, a method that yields a memo, hands
       # it a block a `yield` checks in place, or none
@@ -404,6 +403,7 @@ module Steep
         merge_bodies(@singleton_methods, scan.singleton_methods)
         merge_bodies(@conditional_methods, scan.conditional_methods)
         scan.aliases.each { |class_name, aliases| (@aliases[class_name] ||= {}).merge!(aliases) }
+        scan.class_body_cvars.each { |class_name, cvars| (@class_body_cvars[class_name] ||= Set[]).merge(cvars) }
         [@reached_methods, @reached_singleton_methods].each(&:clear)
       end
 
@@ -425,7 +425,7 @@ module Steep
         hashes.each { |name, ivar| names << name << ivar }
         @born_objects.each_value { |ivars| names.merge(ivars.keys) }
         @methods.each { |class_name, methods| names.merge(accumulated_names(methods)).merge(bound_names(@initializers.fetch(class_name, []), methods)) }
-        names.merge(keyed_memo_names).merge(cvar_writers)
+        names.merge(keyed_memo_names).merge(cvar_writes_of.filter_map { |_, name, _| name })
         @uses = uses_by_name(names)
         @reader_uses = uses_by_name(reader_names - names)
         calls_named(keyed_memo_names | ivar_using_names)
