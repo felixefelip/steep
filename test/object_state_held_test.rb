@@ -142,6 +142,11 @@ class ObjectStateHeldTest < Minitest::Test
       def over_tags = @tags.each { |tag| tag.to_s }
       def over_hooks = @hooks.each { |tag| tag.to_s }
     end
+
+    # Code that runs the writers, so the objects above may be rewritten.
+    Reflection.new(:seed).refresh
+    Reflection.new(:seed).rename_then_clear(:seed)
+    Walker.new(:seed).rename(:seed)
   RUBY
 
   SIDECAR = [

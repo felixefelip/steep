@@ -243,19 +243,10 @@ module Steep
         initializing || unreached?(constr, instance, name, initializing)
       end
 
-      # A method no call of the project may run on `instance`, that the
-      # runtime does not call on its own either, writes nothing on it: one it
-      # names nowhere, or whose every call has a receiver the checker typed as
-      # no value of `instance` (`Specializations::Receivers.calls_on`). A name
-      # `index_uses` did not look for may be called anywhere.
+      # A method no call of the project may run on `instance` writes nothing
+      # on it (`Specializations::UnreachedMethods`).
       def unreached?(constr, instance, name, initializing)
-        return false if initializing || ObjectStates::ClassMemos.called_implicitly?(constr, [name])
-
-        registry = constr.constructor_bindings
-        calls = registry.calls_of(name)
-        return true unless registry.may_call?(name)
-
-        !calls.empty? && Specializations::Receivers.calls_on(constr, name, instance).empty?
+        !initializing && Specializations::UnreachedMethods.unreached?(constr, instance, name)
       end
 
       def copies_source_body?(registry, ancestors, name)
