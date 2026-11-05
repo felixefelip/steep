@@ -167,7 +167,13 @@ module Steep
         end
 
         def built_by_self?(node)
-          fresh_object?(node) && (node.children[0].nil? || node.children[0].type == :self)
+          (fresh_object?(node) || allocated?(node)) && (node.children[0].nil? || node.children[0].type == :self)
+        end
+
+        # `Klass.allocate` handed nothing: a new object no `initialize` ran on.
+        def allocated?(node)
+          receiver, method_name, *arguments = node.children
+          node.type == :send && method_name == :allocate && arguments.empty? && (receiver.nil? || %i[const self].include?(receiver.type))
         end
       end
     end
