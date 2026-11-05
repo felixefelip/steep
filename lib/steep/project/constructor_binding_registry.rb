@@ -428,7 +428,7 @@ module Steep
         names.merge(keyed_memo_names).merge(cvar_writes_of.filter_map { |_, name, _| name })
         @uses = uses_by_name(names)
         @reader_uses = uses_by_name(reader_names - names)
-        calls_named(keyed_memo_names | ivar_using_names)
+        TypeInference::ClassMemoAnalyzer.index_calls(@nodes, keyed_memo_names | ivar_using_names, @calls, callers: true)
         @hash_memos = hashes.to_set
         @forwarded_stores = forwarded_stores
         scan_closures(hashes)
@@ -506,13 +506,7 @@ module Steep
       # Every call the project makes of one of `names`, each name looked for
       # in the sources once.
       def calls_named(names)
-        unscanned = names.to_set - @calls.keys
-        unless unscanned.empty?
-          unscanned.each { |name| @calls[name] = [] }
-          @nodes.each do |node|
-            TypeInference::ClassMemoAnalyzer.calls(node, names: unscanned).each { |name, calls| @calls[name].concat(calls) }
-          end
-        end
+        TypeInference::ClassMemoAnalyzer.index_calls(@nodes, names, @calls)
         names.flat_map { |name| @calls[name] }
       end
 

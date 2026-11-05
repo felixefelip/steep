@@ -77,6 +77,17 @@ module Steep
         new(names, calls: true).uses(node)
       end
 
+      # Adds to `index` the calls in `nodes` of each of `names` it does not
+      # hold yet (`calls`); with `callers`, those of each method that makes
+      # one of them, and so on, so a reader can follow who runs a call.
+      def self.index_calls(nodes, names, index, callers: false)
+        until (unscanned = names.to_set - index.keys).empty?
+          unscanned.each { |name| index[name] = [] }
+          nodes.each { |node| calls(node, names: unscanned).each { |name, found| index[name].concat(found) } }
+          names = callers ? unscanned.flat_map { |name| index[name].filter_map(&:enclosing) } : []
+        end
+      end
+
       # How each call of one of `names` in `node` is made: `:replayed` on
       # `self` with a block a `yield` can check in place
       # (`ObjectStates::Yields`), `:blockless` with no block at all, `:other`
