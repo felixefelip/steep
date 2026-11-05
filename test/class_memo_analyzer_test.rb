@@ -29,7 +29,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
       end
     RUBY
 
-    assert_equal [:@settings, %w[Wrap::Base::Settings Wrap::Settings Settings], [], false], methods[:settings].first.memo
+    assert_equal [:@settings, %w[Wrap::Base::Settings Wrap::Settings Settings], [], false, false], methods[:settings].first.memo
     assert_nil methods[:computed].first.memo
     assert_nil methods[:argued].first.memo
     assert_equal [:@tapped, %w[Wrap::Base::Settings Wrap::Settings Settings], [:tap], false], methods[:tapped].first.memo
