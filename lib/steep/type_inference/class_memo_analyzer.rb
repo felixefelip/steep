@@ -186,7 +186,7 @@ module Steep
         when :ivar
           record(node.children[0], node, parent, in_statement) if on_class && !@calls
         when :alias
-          node.children.each { |name| @uses[name.children[0].to_sym] << ESCAPE if named?(name) }
+          node.children.each { |name| @uses[name.children[0].to_sym] << alias_use(node) if named?(name) }
         end
 
         walk_children(node, statement: statement, on_class: on_class)
@@ -210,12 +210,12 @@ module Steep
       def record_send(node, parent, in_statement)
         _, name, *arguments = node.children
         record(name, node, parent, in_statement)
-        record_named(name, arguments)
+        record_named(node, name, arguments)
       end
 
       def record_call(node, statement)
         _, name, *arguments = node.children
-        record_named(name, arguments)
+        record_named(node, name, arguments)
         [name, (:"#{name}=" if op_assigned?(node))].compact.each { |called| record_called(node, called, statement) }
       end
 
@@ -236,12 +236,21 @@ module Steep
         end
       end
 
-      def record_named(name, arguments)
+      def record_named(node, name, arguments)
         if REFLECTIVE.include?(name)
-          arguments.each { |argument| @uses[argument.children[0].to_sym] << ESCAPE if named?(argument) }
+          use = name == :alias_method && on_self?(node) ? alias_use(node) : ESCAPE
+          arguments.each { |argument| @uses[argument.children[0].to_sym] << use if named?(argument) }
         elsif STRING_EVALS.include?(name)
           arguments.each { |argument| each_string(argument) { |text| escape_mentioned(text) } }
         end
+      end
+
+      # A statement of a class body aliases a method of that class: only a
+      # value of it may run the method under the new name.
+      def alias_use(node)
+        return ESCAPE unless @statements.include?(node) || in_class_statement?(node)
+
+        ESCAPE.dup.tap { |use| use.owner = owner_of(node) }
       end
 
       def record(name, node, parent, in_statement)
