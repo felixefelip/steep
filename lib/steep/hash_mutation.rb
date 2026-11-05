@@ -223,7 +223,7 @@ module Steep
         ancestors.each_with_index do |ancestor, index|
           registry.possible_bodies(ancestor.name.to_s).each do |name, bodies|
             initializing = Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name)
-            next if (initializing && !kept) || copies_source_body?(registry, ancestors.drop(index), name) || unreached?(constr, name, initializing)
+            next if (initializing && !kept) || copies_source_body?(registry, ancestors.drop(index), name) || unreached?(constr, instance, name, initializing)
 
             bodies.each do |body|
               made = body_writes(constr, instance, ivar, name, body, kept: kept, assigns: initializing) or return
@@ -238,15 +238,24 @@ module Steep
 
       # A method that writes nothing on an object once it is built: one only
       # its construction runs, or one nothing calls.
-      def built_only?(constr, name)
+      def built_only?(constr, instance, name)
         initializing = Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || constr.constructor_bindings.initializing?(name)
-        initializing || unreached?(constr, name, initializing)
+        initializing || unreached?(constr, instance, name, initializing)
       end
 
-      # A method the project names nowhere, that the runtime does not call on
-      # its own either, writes nothing on any object.
-      def unreached?(constr, name, initializing)
-        !initializing && !constr.constructor_bindings.may_call?(name) && !ObjectStates::ClassMemos.called_implicitly?(constr, [name])
+      # A method no call of the project may run on `instance`, that the
+      # runtime does not call on its own either, writes nothing on it: one it
+      # names nowhere, or whose every call has a receiver the checker typed as
+      # no value of `instance` (`Specializations::Receivers.calls_on`). A name
+      # `index_uses` did not look for may be called anywhere.
+      def unreached?(constr, instance, name, initializing)
+        return false if initializing || ObjectStates::ClassMemos.called_implicitly?(constr, [name])
+
+        registry = constr.constructor_bindings
+        calls = registry.calls_of(name)
+        return true unless registry.may_call?(name)
+
+        !calls.empty? && Specializations::Receivers.calls_on(constr, name, instance).empty?
       end
 
       def copies_source_body?(registry, ancestors, name)

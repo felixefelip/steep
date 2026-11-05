@@ -203,7 +203,13 @@ module Steep
       end
 
       def record_call(node, statement)
-        receiver, name, *arguments = node.children
+        _, name, *arguments = node.children
+        record_named(name, arguments)
+        [name, (:"#{name}=" if op_assigned?(node))].compact.each { |called| record_called(node, called, statement) }
+      end
+
+      def record_called(node, name, statement)
+        receiver = node.children[0]
         if @names.include?(name)
           on_self = receiver.nil? || receiver.type == :self
           in_class_body = statement || in_class_statement?(node)
@@ -217,7 +223,6 @@ module Steep
             use.on_ivar = receiver.children[0] if receiver&.type == :ivar
           end
         end
-        record_named(name, arguments)
       end
 
       def record_named(name, arguments)
