@@ -51,11 +51,11 @@ module Steep
           constr.constructor_bindings.calls_of(name).reject { |call| elsewhere?(constr, call, target) }
         end
 
-        # Whether `call` may run the method of the project's it names: its
-        # receiver may be a value of a class that defines it. A receiver typed
-        # `untyped` is taken as none of them.
-        def reaches?(constr, call)
-          owners = constr.constructor_bindings.owners_of(call.called)
+        # Whether `call` may run one of the methods of the project's it names
+        # that `owners` define (`ConstructorBindingRegistry#owners_of`): its
+        # receiver may be a value of one of them. A receiver typed `untyped`
+        # is taken as none of them.
+        def reaches?(constr, call, owners)
           owners.empty? || owners.any? do |class_name, singleton|
             name = RBS::TypeName.parse("::#{class_name}")
             target = singleton ? AST::Types::Name::Singleton.new(name: name) : AST::Types::Name::Instance.new(name: name, args: [])
