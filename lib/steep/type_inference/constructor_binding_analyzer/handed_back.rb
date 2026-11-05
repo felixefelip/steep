@@ -6,6 +6,28 @@ module Steep
       module HandedBack
         module_function
 
+        MEMO_TARGETS = { ivasgn: :ivar, cvasgn: :cvar }.freeze
+
+        # The `@x ||= value` (or `@@x ||= value`) a body is, or that a statement
+        # of it is where every value the body hands back is that variable, read
+        # after it and assigned nowhere else.
+        def memo_assignment(body)
+          return body if body&.type == :or_asgn && MEMO_TARGETS.key?(body.children[0].type)
+          return unless body&.type == :begin
+
+          set = body.children[0...-1].find { |stmt| stmt.type == :or_asgn && MEMO_TARGETS.key?(stmt.children[0].type) } or return
+          target = set.children[0]
+          Accumulators::ReturnedValues.each_return(body) { return }
+          Accumulators::ReturnedValues.each_value(body) { |node| return unless node.type == MEMO_TARGETS[target.type] && node.children[0] == target.children[0] }
+          set if assignments(body, target.type, target.children[0]) == 1
+        end
+
+        def assignments(node, type, name)
+          return 0 unless node.is_a?(::Parser::AST::Node)
+
+          (node.type == type && node.children[0] == name ? 1 : 0) + node.children.sum { |child| assignments(child, type, name) }
+        end
+
         def calls(body)
           names = Set[] #: Set[Symbol]
           Accumulators::ReturnedValues.each_value(body) do |node|

@@ -661,10 +661,8 @@ module Steep
       end
 
       def memo_of(body, nesting, defined_as)
-        return unless body&.type == :or_asgn
-
-        target, value = body.children
-        return unless %i[ivasgn cvasgn].include?(target.type)
+        target, value = HandedBack.memo_assignment(body)&.children
+        return unless target
 
         wrappers = [] #: Array[Symbol]
         while value.type == :block
