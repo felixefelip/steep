@@ -75,8 +75,16 @@ module Steep
         end
 
         def written(type)
-          type = Specializations.rbs_writable(readable(type))
+          type = erase_parameters(Specializations.rbs_writable(readable(type)))
           type.to_s if type.free_variables.empty?
+        end
+
+        # What a value of a class may be does not depend on its parameters.
+        def erase_parameters(type)
+          return type unless type.is_a?(AST::Types::Name::Instance)
+
+          variables = type.free_variables.grep(Symbol)
+          type.subst(Interface::Substitution.build(variables, variables.map { AST::Builtin.any_type }))
         end
 
         def readable(type)
@@ -85,8 +93,7 @@ module Steep
 
         def elsewhere?(constr, use, target)
           factory = constr.checker.factory
-          site = use.at || use.self_at
-          type = site && constr.specializations.receiver_type(site, factory: factory) or return false
+          type = receiver_of(constr, use) or return false
           return true if type.is_a?(AST::Types::Any)
 
           target = factory.instance_type(target.name) if target.is_a?(AST::Types::Name::Instance)
@@ -94,6 +101,16 @@ module Steep
           interpreter.type_case_select0(type, target)[0].empty?
         rescue RBS::BaseError
           false
+        end
+
+        def receiver_of(constr, use)
+          factory = constr.checker.factory
+          site = use.at || use.self_at
+          return constr.specializations.receiver_type(site, factory: factory) if site
+          return if use.kind != :escape || use.owner.to_s.empty?
+
+          name = RBS::TypeName.parse("::#{use.owner}")
+          factory.instance_type(name) if factory.definition_builder.env.module_class_entry(name)
         end
       end
     end
