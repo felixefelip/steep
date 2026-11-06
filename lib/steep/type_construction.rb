@@ -5694,7 +5694,7 @@ module Steep
 
       type = ReflectionIntrinsics.fold(
         call: call,
-        receiver_type: (Specializations.exact_self(self) if receiver_type.is_a?(AST::Types::Self)) || receiver_type,
+        receiver_type: ReflectionIntrinsics.receiver_of(self, call, receiver_type),
         argument_types: argument_types,
         factory: checker.factory,
         override_registry: literal_method_registry

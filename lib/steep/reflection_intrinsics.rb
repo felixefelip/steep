@@ -76,6 +76,17 @@ module Steep
         nil
       end
 
+      # The class a call on `self` reflects on, where the body is known to run
+      # on exactly that class. `allocate` needs less: an object of a subclass
+      # is an object of the class whose body makes the call.
+      def receiver_of(constr, call, receiver_type)
+        return receiver_type unless receiver_type.is_a?(AST::Types::Self)
+
+        exact = Specializations.exact_self(constr)
+        exact ||= constr.self_type if MethodIdentity.key(call) == "::Class#allocate"
+        exact || receiver_type
+      end
+
       # Whether this reflection is one Ruby answers by RAISING: `NameError`,
       # for a method the module does not have. The other half of `fold`, and
       # asked only where the program rescues it (`TypeConstruction`'s
@@ -594,6 +605,16 @@ module Steep
       end
     end
 
+    # An object of the class, as `new` answers, with no `initialize` run on it.
+    # The core signature says `untyped`; only `new` has a definition built per
+    # class.
+    ALLOCATE = lambda do |receiver, argument_types, factory, _override_registry|
+      next nil unless argument_types.empty?
+      next nil unless receiver.is_a?(AST::Types::Name::Singleton)
+
+      factory.instance_type(receiver.name)
+    end
+
     SINGLETON_CLASS = lambda do |receiver, argument_types, _factory, _override_registry|
       next nil unless argument_types.empty?
       next nil unless receiver.is_a?(AST::Types::Name::Singleton)
@@ -666,6 +687,9 @@ module Steep
     ENTRIES = {
       # `Kernel`'s, not `Object`'s — the table is keyed by what the call
       # RESOLVED to, and this is where the core declares it.
+      "::Class#allocate" => Entry.new(
+        method: ::Class.instance_method(:allocate), handler: ALLOCATE
+      ),
       "::Kernel#singleton_class" => Entry.new(
         method: ::Kernel.instance_method(:singleton_class), handler: SINGLETON_CLASS
       ),
