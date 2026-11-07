@@ -49,6 +49,7 @@ module Steep
           states = exit.context.type_env.class_states
           singleton = exit.self_type
           if singleton.is_a?(AST::Types::Name::Singleton)
+            exit.typing.defined_classes << singleton.name
             memos = ClassMemos.memo_values(exit).select { |_, type| type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Record) }
             ivars = held(exit, singleton).merge(memos)
             states = ivars.empty? ? states.except(singleton.name) : states.merge(singleton.name => ivars)

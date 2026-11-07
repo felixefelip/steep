@@ -1061,10 +1061,12 @@ module Steep
       # `receivers`: the types the receiver of each call naming a reader was
       # given (`Receivers`), as RBS, by site.
       # `bodies`: the methods each block was found to be the body of, by site.
+      # `entering`: the class states each file's top level starts with, by path.
       # `reads`: where to record each question a check asks and the answer it
       # got (`Reads`).
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, receivers:, bodies:, reads: nil)
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, receivers:, bodies:, entering: {}, reads: nil)
         @methods = methods
+        @entering = entering
         @receivers = receivers
         @bodies = bodies
         @declarations = declarations
@@ -1114,6 +1116,10 @@ module Steep
 
       def class_exit(name, ivar)
         read(:class_exit, name, ivar) { @class_exits.dig(name, ivar) }
+      end
+
+      def entering_class_states(path)
+        read(:entering_class_states, path) { @entering.fetch(path, {}) }
       end
 
       # The recorded return type for `method_key` called with `argument_key`, as a
@@ -1212,7 +1218,7 @@ module Steep
       def with(active:, reads:)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
-          class_exits: @class_exits, declarations: @declarations, receivers: @receivers, bodies: @bodies, reads: reads
+          class_exits: @class_exits, declarations: @declarations, receivers: @receivers, bodies: @bodies, entering: @entering, reads: reads
         )
       end
 

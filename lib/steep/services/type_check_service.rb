@@ -468,6 +468,7 @@ module Steep
           TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations).merge!,
           TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annotations)
         ).build(type_env)
+        type_env = type_env.update(class_states: specializations.entering_class_states(source.path))
 
         # Top-level constant narrowing (felixefelip/rbs_infer#25): a file
         # checked with `# @type self: <class>` (an ERB view) has no method
@@ -541,7 +542,10 @@ module Steep
           return_alias: return_alias
         )
 
-        construction.synthesize(source.node) if source.node
+        if source.node
+          left = construction.synthesize(source.node).context.type_env.class_states
+          typing.top_level_states = [type_env.class_states, left]
+        end
 
         typing
       end
