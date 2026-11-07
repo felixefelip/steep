@@ -256,7 +256,7 @@ module Steep
       # members or whose members did, a tuple or a generic instance whose
       # elements did.
       def refines?(type, previous)
-        return true if type == previous
+        return true if type == previous || previous.is_a?(AST::Types::Any)
         if type.is_a?(AST::Types::Union) || previous.is_a?(AST::Types::Union)
           return union_members(type).all? { |member| union_members(previous).any? { |other| refines?(member, other) } }
         end
