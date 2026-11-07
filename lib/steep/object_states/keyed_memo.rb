@@ -113,7 +113,7 @@ module Steep
 
         # Every `Klass.new` is the one of a memo the project follows.
         def built_by_memos?(constr, instance)
-          calls = %i[new allocate].flat_map { |name| constr.constructor_bindings.calls_of(name) }.select { |call| builds?(constr, call, instance) }
+          calls = %i[new allocate].flat_map { |name| constr.constructor_bindings.calls_of(name) }.select { |call| builds?(constr, call, instance) && !Specializations::UnreachedMethods.inside_unreached?(constr, call) }
           !calls.empty? && calls.all? do |call|
             next false if call.kind == :escape || call.called != :new || call.at.nil? || !call.singleton || call.owner.to_s.empty?
 
