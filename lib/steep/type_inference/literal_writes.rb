@@ -25,12 +25,15 @@ module Steep
       # `methods` (`{ class name => { method name => [Body or nil] } }`)
       # assigns only a literal, and names a method the project does not define
       # on `Hash` or `Array`. A body this cannot read may assign it anything.
-      def receiver?(call, methods)
+      # `related`, given a class name, says whether its ivars can be the
+      # call's at all; without it, those of any class can.
+      def receiver?(call, methods, related: nil)
         ivar = call.on_ivar or return false
         return false if %w[Hash Array].any? { |name| methods.fetch(name, {}).key?(call.called) }
 
-        methods.each_value.all? do |bodies_by_name|
-          bodies_by_name.each_value.all? { |bodies| bodies.all? { |body| body && (!body.writes.include?(ivar) || body.literal_writes&.include?(ivar)) } }
+        methods.all? do |class_name, bodies_by_name|
+          bodies_by_name.each_value.all? { |bodies| bodies.all? { |body| body && (!body.writes.include?(ivar) || body.literal_writes&.include?(ivar)) } } ||
+            (related && !related.call(class_name))
         end
       end
 

@@ -126,7 +126,7 @@ module Steep
       end
 
       # Whether `call` runs on a plain `Hash` or `Array` (`LiteralWrites`).
-      def literal_receiver?(call) = TypeInference::LiteralWrites.receiver?(call, @methods)
+      def literal_receiver?(call, related: nil) = TypeInference::LiteralWrites.receiver?(call, @methods, related: related)
 
       # Every body the project may define for `class_name#method_name`s,
       # nil for one this cannot read.

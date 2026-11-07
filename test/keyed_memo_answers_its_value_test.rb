@@ -22,6 +22,8 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
       def self.locales: () -> Locales
     end
     class Other
+      @map: Integer
+      def initialize: () -> void
       def add: () -> Integer
     end
     class P
@@ -64,7 +66,11 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
     end
 
     class Other
-      def add = 1
+      def initialize
+        @map = Integer("1")
+      end
+
+      def add = @map
     end
     Other.new.add
 

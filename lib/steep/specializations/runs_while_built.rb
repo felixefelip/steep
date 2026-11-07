@@ -11,8 +11,23 @@ module Steep
 
           calls = Receivers.calls_on(constr, name, target)
           !calls.empty? && calls.all? do |call|
-            registry.literal_receiver?(call) || (call.on_self && !call.singleton && !call.enclosing.nil? && only?(constr, target, call.enclosing, visiting | [name]))
+            registry.literal_receiver?(call, related: related_to(constr, call.owner)) || (call.on_self && !call.singleton && !call.enclosing.nil? && only?(constr, target, call.enclosing, visiting | [name]))
           end
+        end
+
+        private
+
+        # Whether two classes can share an ivar: one descends from the other.
+        def related_to(constr, owner)
+          ->(name) { owner.to_s.empty? || descends?(constr, owner, name) || descends?(constr, name, owner) }
+        end
+
+        def descends?(constr, name, ancestor)
+          constr.checker.factory.definition_builder.ancestor_builder.instance_ancestors(RBS::TypeName.parse("::#{name}")).ancestors.any? do |each|
+            each.name.to_s == "::#{ancestor}"
+          end
+        rescue RBS::BaseError, RuntimeError
+          true
         end
       end
     end
