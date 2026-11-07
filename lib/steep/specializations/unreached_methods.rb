@@ -20,9 +20,7 @@ module Steep
           !calls.empty? && Receivers.calls_on(constr, name, target).all? { |call| inside_unreached?(constr, call, visiting) }
         end
 
-        private
-
-        def inside_unreached?(constr, call, visiting)
+        def inside_unreached?(constr, call, visiting = Set[])
           method = call.enclosing or return false
           return false if call.owner.to_s.empty? || initializing?(constr, method) || checked_here?(constr, call)
 
@@ -37,6 +35,8 @@ module Steep
         rescue RBS::BaseError
           false
         end
+
+        private
 
         def checked_here?(constr, call)
           constr.method_context&.name == call.enclosing &&

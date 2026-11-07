@@ -1523,14 +1523,43 @@ class AccumulatedIvarStateTest < Minitest::Test
     {
       "from another class" => keyed_memo(outside: "\nclass Other\n  def self.go = Locales.fallbacks.clear\nend\n"),
       "through a method of its own" => keyed_memo(extra: "def reset = clear", outside: "\nclass Other\n  def self.go = Locales.fallbacks.reset\nend\n"),
-      "built outside a memo" => keyed_memo(outside: "\nclass Other\n  def self.go = Fallbacks.new\nend\n"),
-      "built in an instance method named like the memo" => keyed_memo(outside: "\nmodule Locales\n  def fallbacks = Fallbacks.new\nend\n"),
+      "built outside a memo" => keyed_memo(outside: "\nclass Other\n  def self.go = Fallbacks.new\nend\nOther.go\n"),
       "cleared before it stores" => keyed_memo(read: "clear"),
       "with a default" => keyed_memo(initialize: "super([:pt])\n@default = :en"),
       "with a default of its own" => keyed_memo(extra: "def default(_key = nil) = [:pt]")
     }.each do |label, ruby|
       assert_equal [[nil], [nil]], chunks(ruby, rbs: KEYED_MEMO_RBS), label
     end
+  end
+
+  def test_declines_a_keyed_memo_built_in_an_instance_method_named_like_the_memo_that_runs
+    rbs = KEYED_MEMO_RBS.sub("def self.fallbacks: () -> Fallbacks", "def self.fallbacks: () -> Fallbacks\n  def fallbacks: () -> Fallbacks") + "class Host\n  include Locales\nend\n"
+    ruby = keyed_memo(outside: "\nmodule Locales\n  def fallbacks = Fallbacks.new\nend\nclass Host\n  include Locales\nend\nHost.new.fallbacks\n")
+
+    assert_equal [[nil], [nil]], chunks(ruby, rbs: rbs)
+  end
+
+  def test_a_build_in_a_method_nothing_calls_leaves_a_keyed_memo_known
+    ruby = keyed_memo(outside: "\nclass Other\n  def self.go = Fallbacks.new\nend\n")
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: KEYED_MEMO_RBS)
+  end
+
+  def keyed_memo_behind(picked)
+    memo = "def self.fallbacks\n    @fallbacks ||= Fallbacks.new\n    Locales.picked || @fallbacks\n  end\n  def self.picked = #{picked}"
+    keyed_memo.sub("def self.fallbacks = @fallbacks ||= Fallbacks.new", memo)
+  end
+
+  def test_a_keyed_memo_behind_a_fallback_that_is_nil_stays_known
+    rbs = KEYED_MEMO_RBS.sub("def self.fallbacks: () -> Fallbacks", "def self.fallbacks: () -> Fallbacks\n  def self.picked: () -> nil")
+
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(keyed_memo_behind("nil"), rbs: rbs)
+  end
+
+  def test_declines_a_keyed_memo_behind_a_fallback_that_may_answer
+    rbs = KEYED_MEMO_RBS.sub("def self.fallbacks: () -> Fallbacks", "def self.fallbacks: () -> Fallbacks\n  def self.picked: () -> Fallbacks?")
+
+    assert_equal [[nil], [nil]], chunks(keyed_memo_behind("[true, false].sample ? Fallbacks.new : nil"), rbs: rbs)
   end
 
   def test_a_method_handing_back_an_element_stored_again_never_answers_the_one_it_replaced
