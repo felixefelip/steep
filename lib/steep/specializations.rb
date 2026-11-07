@@ -43,9 +43,11 @@ module Steep
       # class inherits, which every class an instance of it may be runs alike:
       # its own body already has that class as `self`.
       def keyed_self(constr, call)
-        receiver = Arguments.receiver_self(call, exact_self(constr)) or return nil
+        receiver = Arguments.receiver_self(call, exact_self(constr), constr.typing) or return nil
         reach = ObjectStates::ClassStates.reach(constr, call)
         return receiver if receiver.is_a?(AST::Types::Name::Singleton) && (reach.observes_self || !reach.ivars.empty?)
+
+        return receiver if receiver.is_a?(AST::Types::Literal) && reach.observes_self
 
         receiver if reach.observes_self && (inherited_alike?(constr, receiver, reach.methods) || built_as?(constr, call.receiver_type, receiver))
       end
@@ -187,7 +189,7 @@ module Steep
 
       def exact_self(constr)
         type = constr.self_type
-        return nil unless type.is_a?(AST::Types::Name::Singleton) || type.is_a?(AST::Types::Name::Instance)
+        return nil unless type.is_a?(AST::Types::Name::Singleton) || type.is_a?(AST::Types::Name::Instance) || type.is_a?(AST::Types::Literal)
 
         method_context = constr.context.method_context
         return type.is_a?(AST::Types::Name::Singleton) ? type : nil unless method_context
@@ -447,15 +449,34 @@ module Steep
       #   Widget.generated_methods   # Widget::GeneratedMethods, not Base's
       #   Base.generated_methods     # Base::GeneratedMethods
       #   Dog.new.introduce          # Dog#speak, not Cat's
-      def self.receiver_self(call, exact_self)
+      #
+      # or, for a literal, the value:
+      #
+      #   class String
+      #     def shout = upcase
+      #   end
+      #
+      #   "abc".shout                # "ABC"
+      def self.receiver_self(call, exact_self, typing)
         return nil unless call.is_a?(TypeInference::MethodCall::Typed) && call.method_decls.size == 1
 
-        receiver = call.receiver_type
+        receiver = literal_receiver(call.node, typing) || call.receiver_type
         receiver = exact_self if receiver.is_a?(AST::Types::Self)
         receiver = ObjectStates.state_in(receiver)&.back_type || receiver
-        return nil unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
+        return nil unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance) || receiver.is_a?(AST::Types::Literal)
 
         receiver
+      end
+
+      # The value a call's receiver holds, where its node says more than the
+      # type the call was resolved on: `name.to_s.shout` is resolved on `String`.
+      def self.literal_receiver(node, typing)
+        node = node.children[0] if node.type == :block
+        receiver = node.children[0] if node.type == :send
+        return nil unless receiver
+
+        type = typing.recorded_type_of(node: receiver)
+        type.is_a?(AST::Types::Literal) ? type : written_literal(receiver, typing)
       end
 
       def self.dispatched?(node, typing)
@@ -755,7 +776,7 @@ module Steep
       end
 
       def argument_types
-        [*positionals, *keywords.values, keyword_rest].compact
+        [*positionals, *keywords.values, keyword_rest, (self_type if self_type.is_a?(AST::Types::Literal))].compact
       end
 
       def arguments_key
@@ -807,7 +828,7 @@ module Steep
       end
 
       def fixes_a_value?
-        @narrows_classes || (block_return && !block_return.is_a?(AST::Types::Any)) || !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
+        @narrows_classes || self_type.is_a?(AST::Types::Literal) || (block_return && !block_return.is_a?(AST::Types::Any)) || !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
       end
 
       def empty?

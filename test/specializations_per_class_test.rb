@@ -213,4 +213,97 @@ class SpecializationsPerClassTest < Minitest::Test
       assert_equal({ "(:comments) on singleton(::Post)" => "singleton(::Post)", "(:comments)" => "self" }, methods.fetch("Post.has_many"))
     end
   end
+
+  LITERAL_RECEIVER_RBS = <<~RBS
+    class String
+      def shout: () -> String
+      def forwarded: (?Symbol locale) -> String
+      def constant: () -> String
+      def growing: () -> String
+    end
+    module Ops
+      def self.up: (String text, ?Symbol locale) -> String
+    end
+    class Caller
+      def written: () -> untyped
+      def forwarding: () -> untyped
+      def from_symbol: (Symbol name) -> untyped
+      def symbol: () -> untyped
+      def unobserved: () -> untyped
+      def grows: () -> untyped
+    end
+    class Macro
+      def self.macro: (Symbol name) -> untyped
+    end
+  RBS
+
+  LITERAL_RECEIVER_RUBY = <<~'RUBY'
+    module Ops
+      def self.up(text, locale = :en) = text.upcase
+    end
+
+    class String
+      def shout = upcase
+      def forwarded(locale = :en) = Ops.up(self, locale)
+      def constant = "x"
+      def growing = (self + "x").growing
+    end
+
+    class Caller
+      def written = "abc".shout
+      def forwarding = "abc".forwarded
+      def from_symbol(name) = name.to_s.shout
+      def symbol = from_symbol(:abc)
+      def unobserved = "abc".constant
+      def grows = "abc".growing
+    end
+
+    class Macro
+      def self.macro(name) = class_eval("def #{name.to_s.shout}; end")
+      macro :abc
+    end
+  RUBY
+
+  def literal_receiver_project
+    write("sig/literal_receiver.rbs", LITERAL_RECEIVER_RBS)
+    write("app/literal_receiver.rb", LITERAL_RECEIVER_RUBY)
+    setup_project
+  end
+
+  def test_runner_specializes_a_method_by_its_literal_receiver
+    in_tmpdir do
+      project = literal_receiver_project
+      runner = Specializations::Runner.new(project)
+      methods = runner.run
+
+      assert_equal '"ABC"', methods.fetch("String#shout").fetch('() on "abc"')
+      assert_equal '"ABC"', methods.fetch("String#forwarded").fetch('() on "abc"')
+      assert_equal '"ABC"', methods.fetch("Caller#from_symbol").fetch("(:abc)")
+      assert_equal(["def ABC; end"], runner.evals.values.flatten.map { |chunk| chunk&.source })
+
+      runner.write(methods)
+      project.reload_specializations!
+      types = body_types(project, current_dir + "app/literal_receiver.rb")
+
+      assert_equal '"ABC"', types.fetch("written")
+      assert_equal '"ABC"', types.fetch("forwarding")
+      assert_equal '"ABC"', types.fetch("symbol")
+    end
+  end
+
+  def test_runner_keys_no_literal_receiver_a_body_does_not_observe
+    in_tmpdir do
+      methods = Specializations::Runner.run(literal_receiver_project)
+
+      refute_includes methods.fetch("String#constant", {}).keys.join, "on"
+    end
+  end
+
+  def test_runner_widens_a_literal_receiver_that_keeps_growing
+    in_tmpdir do
+      methods = Specializations::Runner.run(literal_receiver_project)
+
+      assert_operator methods.fetch("String#growing", {}).size, :<=, Specializations::Runner::WIDEN_AFTER + 1
+    end
+  end
 end

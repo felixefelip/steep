@@ -5642,12 +5642,11 @@ module Steep
     # bound: even a buggy intrinsic cannot manufacture a return the RBS method
     # does not permit.
     def literal_intrinsic_call(call, receiver_type:, arguments:, declared_return_type:)
-      receiver_node = call.node.children[0]
       # A tuple the accumulator analysis computed is read as it is. Every other
       # tuple arriving as a type is refused by `literal_operand_type`, because an
       # annotation outlives the mutation that invalidates it — and this one
       # cannot, since the analysis strikes the local on any call but a read.
-      receiver_type = accumulated_type(call.node) || literal_operand_type(receiver_node, receiver_type)
+      receiver_type = accumulated_type(call.node) || literal_operand_type(call.node.children[0], receiver_type)
 
       argument_types = arguments.map do |argument|
         return call unless typing.has_type?(argument)
@@ -5710,6 +5709,7 @@ module Steep
     # against `String`). Specialized calls already arrive here as literal types;
     # this only recovers values that are visibly literal in the source.
     def literal_operand_type(node, inferred_type)
+      inferred_type = self_type if inferred_type.is_a?(AST::Types::Self) && self_type.is_a?(AST::Types::Literal)
       return inferred_type if inferred_type.is_a?(AST::Types::Literal) || inferred_type.is_a?(AST::Types::RegexpLiteral)
       return built_here_only(inferred_type) unless node.is_a?(::Parser::AST::Node)
       return accumulated_type(node) if node.type == :lvar && accumulated_type(node)

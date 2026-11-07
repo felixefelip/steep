@@ -3,14 +3,14 @@ module Steep
     module CalleeSelf
       # What `self` is inside the method `node` calls: its receiver, or — for a
       # call written on `self`, explicitly or not — the self of the frame the
-      # call sits in. nil for a receiver naming no one class, which leaves the
+      # call sits in. nil for a receiver naming neither one class nor one value, which leaves the
       # body to the self its definition gives it.
       def self.of(typing, node)
-        type = typing.call_of(node: node).receiver_type
+        type = Arguments.literal_receiver(node, typing) || typing.call_of(node: node).receiver_type
         type = typing.self_type_of_call(node: node) if type.is_a?(AST::Types::Self)
 
         case type
-        when AST::Types::Name::Singleton, AST::Types::Name::Instance then type
+        when AST::Types::Name::Singleton, AST::Types::Name::Instance, AST::Types::Literal then type
         when AST::Types::Intersection then lexical_self(typing, node, type)
         end
       end
