@@ -179,7 +179,7 @@ module Steep
         def built_objects(constr, instance, chain)
           constructed = ObjectStates.state_in(constr.specializations.return_type(ObjectStates.constructor_key(chain), "()", factory: constr.checker.factory))
           constructed&.ivars&.select do |ivar, value|
-            ObjectStates.state_in(value) || ObjectStates.fixed?(value) || HashMutation.held(constr, instance, ivar, value, followed: true)
+            ObjectStates.state_in(value) || ObjectStates.fixed?(value) || HashMutation.held(constr, instance, ivar, value, followed: true) || ArrayMutation.held(constr, instance, ivar, value)
           end || {}
         end
 

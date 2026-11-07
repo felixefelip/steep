@@ -222,7 +222,7 @@ module Steep
         ancestors = constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors
         ancestors.each_with_index do |ancestor, index|
           registry.possible_bodies(ancestor.name.to_s).each do |name, bodies|
-            initializing = Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name)
+            initializing = Specializations::RunsWhileBuilt.only?(constr, instance, name)
             next if (initializing && !kept) || copies_source_body?(registry, ancestors.drop(index), name) || unreached?(constr, instance, name, initializing)
 
             bodies.each do |body|
@@ -239,7 +239,7 @@ module Steep
       # A method that writes nothing on an object once it is built: one only
       # its construction runs, or one nothing calls.
       def built_only?(constr, instance, name)
-        initializing = Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || constr.constructor_bindings.initializing?(name)
+        initializing = Specializations::RunsWhileBuilt.only?(constr, instance, name)
         initializing || unreached?(constr, instance, name, initializing)
       end
 
