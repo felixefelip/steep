@@ -360,7 +360,7 @@ module Steep
         )
       end
 
-      def method_body(args_node, body, nesting: nil, defined_as: nil)
+      def method_body(args_node, body, nesting: @lexical_nesting || [], defined_as: nil)
         writes = Set[] #: Set[Symbol]
         ivars = Set[] #: Set[Symbol]
         self_sends = Set[] #: Set[Symbol]
@@ -370,7 +370,7 @@ module Steep
           calls ||= CALLS.include?(node.type)
           writes << node.children[0] if node.type == :ivasgn
           ivars << node.children[0] if node.type == :ivar
-          consts.merge(referenced_names(node, nesting || [])) if node.type == :const
+          consts.merge(referenced_names(node, nesting)) if node.type == :const
           self_sends << node.children[1] if %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
         end
         Body.new(
@@ -394,7 +394,7 @@ module Steep
           block_super: HandedBack.block_super(body),
           hands_back_elements: HandedBack.elements(body),
           keyed_memo: HandedBack.keyed_memo(args_node, body),
-          **OutsideReads.of(body) { |const| referenced_names(const, nesting || @lexical_nesting || []) },
+          **OutsideReads.of(body) { |const| referenced_names(const, nesting) },
           memo: defined_as && memo_of(body, nesting, defined_as),
           memoizes: memoized_ivar(body),
           memoized_hash: memoized_hash(body),

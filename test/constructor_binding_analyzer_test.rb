@@ -191,4 +191,19 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
     assert_equal [Set[:@@default], Set[]], [found[:read].cvars, found[:read].cvar_writes]
     assert_equal [Set[], Set[:@@default]], [found[:written].cvars, found[:written].cvar_writes]
   end
+
+  def test_an_instance_method_names_a_constant_under_its_nesting
+    scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY))
+      module Inf
+        class Holder
+        end
+
+        def inflections = Holder
+        def self.instance = Holder
+      end
+    RUBY
+
+    assert_equal Set["Inf::Holder", "Holder"], scan.methods.fetch("Inf").fetch(:inflections).first.consts
+    assert_equal Set["Inf::Holder", "Holder"], scan.singleton_methods.fetch("Inf").fetch(:instance).first.consts
+  end
 end
