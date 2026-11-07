@@ -9,7 +9,9 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
   RBS = <<~RBS
     class Locales < Hash[Symbol, Array[untyped]]
       @defaults: Array[untyped]
-      def initialize: () -> void
+      @map: Hash[Symbol, untyped]
+      def initialize: (*untyped mappings) -> void
+      def add: (untyped mappings) -> untyped
       def defaults=: (Array[untyped] defaults) -> Array[untyped]
       attr_reader defaults: Array[untyped]
       def []: (Symbol locale) -> Array[untyped]
@@ -19,6 +21,9 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
       @@locales: Locales?
       def self.locales: () -> Locales
     end
+    class Other
+      def add: () -> Integer
+    end
     class P
       def en: () -> untyped
     end
@@ -26,8 +31,15 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
 
   RUBY = <<~RUBY
     class Locales < Hash
-      def initialize
+      def initialize(*mappings)
+        @map = {}
+        add(mappings.pop) if mappings.last.is_a?(Hash)
         self.defaults = []
+      end
+
+      def add(mappings)
+        @map[:pt] = mappings
+        @map.map { |key, value| [key, value] }
       end
 
       def defaults=(defaults)
@@ -41,6 +53,7 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
 
       def compute(locale)
         result = [locale]
+        result.push(@map[locale]) if @map[locale]
         result.push(*defaults)
         result
       end
@@ -49,6 +62,11 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
     module Holder
       def self.locales = @@locales ||= Locales.new
     end
+
+    class Other
+      def add = 1
+    end
+    Other.new.add
 
     class P
       def en = Holder.locales[:en]
