@@ -15,12 +15,12 @@ module Steep
           end
         end
 
-        private
-
         # Whether two classes can share an ivar: one descends from the other.
         def related_to(constr, owner)
           ->(name) { owner.to_s.empty? || descends?(constr, owner, name) || descends?(constr, name, owner) }
         end
+
+        private
 
         def descends?(constr, name, ancestor)
           constr.checker.factory.definition_builder.ancestor_builder.instance_ancestors(RBS::TypeName.parse("::#{name}")).ancestors.any? do |each|
