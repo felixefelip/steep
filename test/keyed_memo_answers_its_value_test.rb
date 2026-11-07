@@ -11,7 +11,7 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
       @defaults: Array[untyped]
       @map: Hash[Symbol, untyped]
       def initialize: (*untyped mappings) -> void
-      def add: (untyped mappings) -> untyped
+      def map: (untyped mappings) -> untyped
       def defaults=: (Array[untyped] defaults) -> Array[untyped]
       attr_reader defaults: Array[untyped]
       def []: (Symbol locale) -> Array[untyped]
@@ -24,7 +24,7 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
     class Other
       @map: Integer
       def initialize: () -> void
-      def add: () -> Integer
+      def map: () -> Integer
     end
     class P
       def en: () -> untyped
@@ -35,13 +35,13 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
     class Locales < Hash
       def initialize(*mappings)
         @map = {}
-        add(mappings.pop) if mappings.last.is_a?(Hash)
+        map(mappings.pop) if mappings.last.is_a?(Hash)
         self.defaults = []
       end
 
-      def add(mappings)
+      def map(mappings)
         @map[:pt] = mappings
-        @map.map { |key, value| [key, value] }
+        @map.map(&mappings)
       end
 
       def defaults=(defaults)
@@ -70,9 +70,9 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
         @map = Integer("1")
       end
 
-      def add = @map
+      def map = @map
     end
-    Other.new.add
+    Other.new.map
 
     class P
       def en = Holder.locales[:en]
