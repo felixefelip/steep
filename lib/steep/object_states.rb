@@ -99,10 +99,11 @@ module Steep
       # A `.new` call whose `initialize` binds an ivar from one of the values
       # it was passed, answering the object with that ivar known. Any other
       # call that answers a state answers the ivars that hold under any name,
-      # since only `.new` hands back an object nothing else has.
+      # since only `.new` hands back an object nothing else has, unless it
+      # read them under a class state the caller hands on.
       def built(constr, call, node:, arguments:)
         unless initialize_call?(call)
-          returned = settled(constr, call.return_type)
+          returned = state_in(call.return_type) && !ClassStates.of_call(constr, call).empty? ? call.return_type : settled(constr, call.return_type)
           return returned == call.return_type ? call : call.with_return_type(returned)
         end
         constructed = state_in(call.return_type)
