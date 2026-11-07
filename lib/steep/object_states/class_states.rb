@@ -58,7 +58,7 @@ module Steep
 
         # The class states a call hands its callee: its receiver's, those of
         # the classes it hands on as an argument, and those of the classes its
-        # body, or a method it calls on `self`, names. `self`'s own include the
+        # body, or a method it calls on `self` or on a constant, names. `self`'s own include the
         # memos whose value the env knows, for a callee it is handed to.
         def of_call(constr, call)
           known = constr.context.type_env.class_states
@@ -267,13 +267,16 @@ module Steep
         end
 
         def visit_named(registry, owner, method_name, singleton, names, seen)
-          return unless seen.add?(method_name)
+          return unless seen.add?([owner, method_name, singleton])
 
           body = singleton ? registry.singleton_body_of(owner, method_name) : registry.body_of(owner, method_name)
           return unless body
 
           names.merge(body.consts)
           body.self_sends.each { |sent| visit_named(registry, owner, sent, singleton, names, seen) }
+          body.const_sends.each do |constants, sent|
+            constants.each { |name| visit_named(registry, name, sent, !registry.singleton_body_of(name, sent).nil?, names, seen) }
+          end
         end
       end
     end
