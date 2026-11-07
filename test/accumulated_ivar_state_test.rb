@@ -1947,4 +1947,79 @@ class AccumulatedIvarStateTest < Minitest::Test
     written = chunks(yielded_by_another(**ELEMENT_OF_ANOTHER, call: "inflections(default)"), rbs: ANOTHER_RBS).flatten
     refute_includes written, "def posts_ids; []; end"
   end
+
+  THROUGH_CONSTANT_RUBY = <<~'RUBY'
+    class Rules
+      attr_reader :singulars
+      def initialize
+        @singulars = []
+      end
+      def singular(rule, replacement)
+        @singulars.prepend([rule, replacement])
+      end
+    end
+
+    class Holder
+      def self.instances = @instances ||= {}
+      def self.instance(locale = :en) = (instances[locale] ||= Rules.new)
+      instance(:en).singular(/s\z/, "")
+
+      def self.singularize(word)
+        result = word.dup
+        instance(:en).singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+        result
+      end
+    end
+
+    module Inf
+      %<inf>s
+    end
+
+    class Post
+      def self.m(name) = class_eval("def #{%<call>s(name.to_s)}_ids; []; end")
+      m :posts
+    end
+  RUBY
+
+  THROUGH_CONSTANT_RBS = <<~RBS
+    class Rules
+      attr_reader singulars: Array[untyped]
+      def initialize: () -> Array[untyped]
+      def singular: (untyped rule, untyped replacement) -> Array[untyped]
+    end
+    class Holder
+      self.@instances: Hash[Symbol, Rules]?
+      def self.instances: () -> Hash[Symbol, Rules]
+      def self.instance: (?Symbol locale) -> Rules
+      def self.singularize: (String word) -> String
+    end
+    module Inf
+      %<inf>s
+    end
+    class Post
+      def self.m: (Symbol name) -> untyped
+    end
+  RBS
+
+  def through_constant(inf: "", inf_rbs: "", call: "Inf.singularize")
+    chunks(format(THROUGH_CONSTANT_RUBY, inf: inf, call: call), rbs: format(THROUGH_CONSTANT_RBS, inf: inf_rbs))
+  end
+
+  def test_a_class_s_state_reaches_a_method_named_on_it
+    assert_equal [["def post_ids; []; end"]], through_constant(call: "Holder.singularize")
+  end
+
+  def test_a_class_s_state_passes_through_a_call_on_another_constant
+    assert_equal [["def post_ids; []; end"]], through_constant(inf: "def self.singularize(word) = Holder.singularize(word)", inf_rbs: "def self.singularize: (String word) -> String")
+  end
+
+  def test_a_class_s_state_passes_through_a_module_that_extends_itself
+    inf = "extend self\n  def singularize(word) = Holder.singularize(word)"
+    assert_equal [["def post_ids; []; end"]], through_constant(inf: inf, inf_rbs: "extend Inf\n  def singularize: (String word) -> String")
+  end
+
+  def test_a_class_s_state_passes_through_a_method_the_constant_calls_on_itself
+    inf = "def self.singularize(word) = run(word)\n  def self.run(word) = Holder.singularize(word)"
+    assert_equal [["def post_ids; []; end"]], through_constant(inf: inf, inf_rbs: "def self.singularize: (String word) -> String\n  def self.run: (String word) -> String")
+  end
 end
