@@ -206,6 +206,10 @@ module Steep
     # The hash memos each class body left holding, by class name
     # (`ObjectStates::ClassStates.left`).
     attr_reader :class_exits
+    # The classes and modules whose bodies the file opens, and the class
+    # states its top level entered with and left (`TypeCheckService.type_check`).
+    attr_reader :defined_classes
+    attr_accessor :top_level_states
     # What one `each` pushes on each pass: `{ block node => [{ value node =>
     # type }, …] }`, one hash per element of the collection, or nil for a loop
     # that could not be expanded. Each pass is checked in a typing of its own
@@ -271,6 +275,7 @@ module Steep
       (@call_class_states = {}).compare_by_identity
       (@exit_ivars = {}).compare_by_identity
       @class_exits = {}
+      @defined_classes = Set[]
       (@iterations = {}).compare_by_identity
       (@arms = {}).compare_by_identity
       (@vouched = {}).compare_by_identity
@@ -584,6 +589,7 @@ module Steep
       parent.call_class_states.merge!(call_class_states)
       parent.exit_ivars.merge!(exit_ivars)
       parent.class_exits.merge!(class_exits)
+      parent.defined_classes.merge(defined_classes)
       parent.iterations.merge!(iterations)
       parent.arms.merge!(arms)
       parent.vouched.merge!(vouched)

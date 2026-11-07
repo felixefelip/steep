@@ -96,6 +96,7 @@ module Steep
         @evals = {}
         @exits = {}
         @class_exits = {}
+        @file_states = FileStates.new
         @declarations = {}
         @defined_methods = {}
         @receivers = {}
@@ -173,14 +174,14 @@ module Steep
           # new return can still fix a tuple inside a body it re-checked, and that
           # tuple is what the next generation specializes. So do the exits, which
           # the caller one frame out reads only in the generation after.
-          break if discovered == found && grown == tuples && @exits == exits && @class_exits == class_exits
+          break if discovered == found && grown == tuples && @exits == exits && @class_exits == class_exits && @file_states.stale_paths.empty?
           # A state seen before cannot lead anywhere a later generation has not
           # already been. Widening bounds an entry's literals; this bounds the one
           # shape it says nothing about — a return alternating between two
           # CLASSES, which no amount of widening settles.
-          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup), @class_exits.dup])
+          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup), @class_exits.dup, @file_states.entering])
 
-          paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits))
+          paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits)) | @file_states.stale_paths
           found = discovered
           demanded.clear
           tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers | @definers), generation)
@@ -428,7 +429,7 @@ module Steep
 
       def store(methods)
         Store.new(
-          methods: methods.transform_values { |entries| entries.transform_values(&:to_s) },
+          methods: methods.transform_values { |entries| entries.transform_values(&:to_s) }, entering: @file_states.entering,
           source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies
         )
       end
@@ -537,9 +538,7 @@ module Steep
       end
 
       # The methods whose entries this generation changed.
-      def changed_keys(before, after)
-        (before.keys | after.keys).select { |key| before[key] != after[key] }.to_set
-      end
+      def changed_keys(before, after) = (before.keys | after.keys).select { |key| before[key] != after[key] }.to_set
 
       # Only a file that calls one of `keys` can spell a tuple it did not spell
       # before: a call's argument types change when what the call inside it
@@ -664,6 +663,7 @@ module Steep
       def file_check(context, store, source, active)
         type_check(context, store, source, active).tap do |typing|
           @class_exits.merge!(typing.class_exits) if typing
+          @file_states.record(source.path, typing) if typing
         end
       end
 
