@@ -189,6 +189,7 @@ module Steep
           receiver = call.receiver_type
           receiver = constr.self_type if receiver.is_a?(AST::Types::Self)
           receiver = ObjectStates.state_in(receiver)&.back_type || receiver
+          receiver = receiver.back_type if receiver.is_a?(AST::Types::Literal)
           return reach unless receiver.is_a?(AST::Types::Name::Singleton) || receiver.is_a?(AST::Types::Name::Instance)
 
           reach.methods << call.method_name

@@ -213,4 +213,148 @@ class SpecializationsPerClassTest < Minitest::Test
       assert_equal({ "(:comments) on singleton(::Post)" => "singleton(::Post)", "(:comments)" => "self" }, methods.fetch("Post.has_many"))
     end
   end
+
+  LITERAL_RECEIVER_RBS = <<~RBS
+    class String
+      def shout: () -> String
+      def forwarded: (?Symbol locale) -> String
+      def tagged: (Symbol tag) -> Symbol
+      def growing: () -> String
+      def outer: () -> String
+      def inner: () -> String
+    end
+    module Ops
+      def self.up: (String text, ?Symbol locale) -> String
+    end
+    class Caller
+      def written: () -> untyped
+      def forwarding: () -> untyped
+      def from_symbol: (Symbol name) -> untyped
+      def symbol: () -> untyped
+      def unobserved: () -> untyped
+      def grows: () -> untyped
+      def through_self: () -> untyped
+      def relay: (String text) -> untyped
+      def long: () -> untyped
+    end
+    class Macro
+      def self.macro: (Symbol name) -> untyped
+    end
+  RBS
+
+  LITERAL_RECEIVER_RUBY = <<~'RUBY'
+    module Ops
+      def self.up(text, locale = :en) = text.upcase
+    end
+
+    class String
+      def shout = upcase
+      def forwarded(locale = :en) = Ops.up(self, locale)
+      def tagged(tag) = tag
+      def outer = inner
+      def inner = upcase
+      def growing
+        (self + "x").growing
+        upcase
+      end
+    end
+
+    class Caller
+      def written = "abc".shout
+      def forwarding = "abc".forwarded
+      def from_symbol(name) = name.to_s.shout
+      def symbol = from_symbol(:abc)
+      def unobserved = "abc".tagged(:x)
+      def grows = "abc".growing
+      def through_self = "abc".outer
+      def relay(text) = text.shout
+      def long = relay("%{long}")
+    end
+
+    class Macro
+      def self.macro(name) = class_eval("def #{name.to_s.shout}; end")
+      macro :abc
+    end
+  RUBY
+
+  def literal_receiver_project
+    write("sig/literal_receiver.rbs", LITERAL_RECEIVER_RBS)
+    long = "a" * (Specializations::Runner::LITERAL_WIDTH + 1)
+    write("app/literal_receiver.rb", LITERAL_RECEIVER_RUBY.sub("%{long}", long))
+    setup_project
+  end
+
+  def test_runner_specializes_a_method_by_its_literal_receiver
+    in_tmpdir do
+      project = literal_receiver_project
+      runner = Specializations::Runner.new(project)
+      methods = runner.run
+
+      assert_equal '"ABC"', methods.fetch("String#shout").fetch('() on "abc"')
+      assert_equal '"ABC"', methods.fetch("String#forwarded").fetch('() on "abc"')
+      assert_equal '"ABC"', methods.fetch("Caller#from_symbol").fetch("(:abc)")
+      assert_equal '"ABC"', methods.fetch("String#inner").fetch('() on "abc"')
+      assert_equal(["def ABC; end"], runner.evals.values.flatten.map { |chunk| chunk&.source })
+
+      runner.write(methods)
+      project.reload_specializations!
+      types = body_types(project, current_dir + "app/literal_receiver.rb")
+
+      assert_equal '"ABC"', types.fetch("written")
+      assert_equal '"ABC"', types.fetch("forwarding")
+      assert_equal '"ABC"', types.fetch("symbol")
+    end
+  end
+
+  def test_runner_keys_no_literal_receiver_a_body_does_not_observe
+    in_tmpdir do
+      methods = Specializations::Runner.run(literal_receiver_project)
+
+      assert_equal({ "(:x)" => ":x" }, methods.fetch("String#tagged"))
+    end
+  end
+
+  def test_runner_widens_a_literal_receiver_that_keeps_growing
+    in_tmpdir do
+      methods = Specializations::Runner.run(literal_receiver_project)
+
+      tuples = methods.fetch("String#growing")
+
+      assert_includes tuples.keys, '() on "abc"'
+      assert_operator tuples.size, :<=, Specializations::Runner::WIDEN_AFTER + 1
+    end
+  end
+
+  def test_runner_widens_a_literal_receiver_past_the_width
+    in_tmpdir do
+      methods = Specializations::Runner.run(literal_receiver_project)
+
+      assert_equal ['() on "abc"'], methods.fetch("String#shout").keys.grep(/ on /)
+    end
+  end
+
+  def test_runner_runs_a_macro_on_its_literal_receiver
+    in_tmpdir do
+      write("sig/literal_macro.rbs", <<~RBS)
+        class String
+          def define_it: () -> untyped
+        end
+        class Host
+        end
+      RBS
+      write("app/literal_macro.rb", <<~'RUBY')
+        class String
+          def define_it = Host.class_eval("def #{upcase}; end")
+        end
+
+        class Host
+          "abc".define_it
+        end
+      RUBY
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+
+      assert_includes runner.evals.values.flatten.map { |chunk| chunk&.source }, "def ABC; end"
+    end
+  end
 end
