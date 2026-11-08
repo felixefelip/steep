@@ -80,9 +80,17 @@ class ClassStateAcrossFilesTest < Minitest::Test
     end
   RBS
 
-  def chunks(files)
+  CURRENT = DEFINITIONS.sub("  def self.instances", "  def self.current = @main ||= allocate\n  def self.instances")
+
+  CURRENT_RBS = RBS.sub("  self.@instances", "  self.@main: Holder?\n  def self.current: () -> Holder\n  def self.reset: () -> Holder\n  self.@instances") + <<~RBS
+    module Touch
+      def self.touch: () -> Holder
+    end
+  RBS
+
+  def chunks(files, rbs = RBS)
     in_tmpdir do
-      write("sig/app.rbs", RBS)
+      write("sig/app.rbs", rbs)
       files.each { |name, content| write("app/#{name}", content) }
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
@@ -116,5 +124,29 @@ class ClassStateAcrossFilesTest < Minitest::Test
   def test_declines_a_class_another_file_reopens_in_a_block
     reopened = "[1].each do\n  class Holder\n    instance(:en).singular(/ts\\z/, \"\")\n  end\nend\n"
     assert_equal [nil], chunks("a.rb" => DEFINITIONS + RULES, "b.rb" => reopened, "c.rb" => MACRO)
+  end
+
+  def test_a_memo_of_allocate_another_file_runs_keeps_the_class_carried
+    touch = "module Touch\n  Holder.current\nend\n"
+    assert_equal ["def post_ids; []; end"], chunks({ "a.rb" => CURRENT + RULES, "b.rb" => touch, "c.rb" => MACRO }, CURRENT_RBS)
+  end
+
+  def test_a_memo_of_allocate_another_file_runs_through_a_method_keeps_the_class_carried
+    touch = "module Touch\n  def self.touch = Holder.current\n  touch\nend\n"
+    assert_equal ["def post_ids; []; end"], chunks({ "a.rb" => CURRENT + RULES, "b.rb" => touch, "c.rb" => MACRO }, CURRENT_RBS)
+  end
+
+  def test_a_memo_of_allocate_a_call_with_no_known_exit_runs_keeps_the_class_carried
+    touch = "module Touch\n  def self.inner(*names) = Holder.current\n  def self.touch(*names) = inner(*names)\n  touch(*%i[a])\nend\n"
+    rbs = CURRENT_RBS.sub("def self.touch: () -> Holder", "def self.touch: (*Symbol names) -> Holder\n  def self.inner: (*Symbol names) -> Holder")
+    assert_equal ["def post_ids; []; end"], chunks({ "a.rb" => CURRENT + RULES, "b.rb" => touch, "c.rb" => MACRO }, rbs)
+  end
+
+  def test_declines_a_memo_of_allocate_another_method_reads
+    started = CURRENT.sub("  def self.instances", "  def self.started = @main ? :started : :fresh\n  def self.instances")
+    touch = "module Touch\n  Holder.current\nend\n"
+    macro = "class Post\n  def self.m(name) = class_eval(\"def \#{Holder.started}_\#{name}; end\")\n  m :posts\nend\n"
+    rbs = CURRENT_RBS.sub("  def self.reset: () -> Holder", "  def self.started: () -> Symbol")
+    assert_equal [nil], chunks({ "a.rb" => started + RULES, "b.rb" => touch, "c.rb" => macro }, rbs)
   end
 end
