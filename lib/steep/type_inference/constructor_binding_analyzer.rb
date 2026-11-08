@@ -367,12 +367,14 @@ module Steep
         ivars = Set[] #: Set[Symbol]
         sends = { self: Set[], other: Set[] } #: Hash[Symbol, Set[Symbol]]
         consts = Set[] #: Set[String]
+        scopes = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         calls = false
         each_node(body) do |node|
           calls ||= CALLS.include?(node.type)
           writes << node.children[0] if node.type == :ivasgn
           ivars << node.children[0] if node.type == :ivar
-          consts.merge(referenced_names(node, nesting)) if node.type == :const
+          consts.merge(referenced_names(node, nesting)) if node.type == :const && !scopes.include?(node)
+          scopes << node.children[0] if node.type == :const && node.children[0]
           sends[node.children[0].nil? || node.children[0].type == :self ? :self : :other] << node.children[1] if %i[send csend].include?(node.type) && node.children[0]&.type != :const
         end
         Body.new(

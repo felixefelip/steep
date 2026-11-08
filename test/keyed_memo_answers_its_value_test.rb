@@ -80,10 +80,48 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
     P.new.en
   RUBY
 
-  def types
+  LOCALS = <<~RUBY
+    class Locals
+      def self.current = @main ||= allocate
+
+      def [](key)
+        locals = @locals
+        return nil unless locals
+
+        locals[key]
+      end
+
+      def []=(key, value)
+        (@locals ||= {})[key] = value
+      end
+    end
+
+    module Holder
+      module Tag
+        def self.tag(locale) = [locale]
+      end
+    end
+  RUBY
+
+  LOCALS_RBS = <<~RBS
+    class Locals
+      self.@main: Locals?
+      @locals: Hash[Symbol, untyped]?
+      def self.current: () -> Locals
+      def []: (Symbol key) -> untyped
+      def []=: (Symbol key, untyped value) -> untyped
+    end
+    module Holder
+      module Tag
+        def self.tag: (Symbol locale) -> Array[Symbol]
+      end
+    end
+  RBS
+
+  def types(ruby = RUBY, rbs = RBS)
     in_tmpdir do
-      write("sig/p.rbs", RBS)
-      write("app/p.rb", RUBY)
+      write("sig/p.rbs", rbs)
+      write("app/p.rb", ruby)
       project = setup_project
       postconditions = Steep::Postconditions::Runner.new(project)
       postconditions.write(postconditions.run)
@@ -97,6 +135,13 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
 
   def test_a_keyed_memo_reads_an_array_the_constructor_left_and_answers_its_literal_value
     assert_equal "[:en]", types.fetch("en")
+  end
+
+  def test_a_keyed_memo_behind_a_local_of_the_current_thread_answers_its_literal_value
+    holder = "  @@locales = nil\n\n  def self.locales\n    @@locales ||= Locales.new\n    Locals.current[:locales] || @@locales\n  end\n"
+    ruby = LOCALS + RUBY.sub("  def self.locales = @@locales ||= Locales.new\n", holder).sub("result = [locale]", "result = Holder::Tag.tag(locale)")
+
+    assert_equal "[:en]", types(ruby, RBS + LOCALS_RBS).fetch("en")
   end
 
   def test_any_type_refines_untyped_and_nothing_else_it_does_not_descend_from
