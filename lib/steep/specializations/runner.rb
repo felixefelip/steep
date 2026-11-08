@@ -47,7 +47,7 @@ module Steep
       # fixing, so its tuple widens whatever the generation.
       LITERAL_WIDTH = 64
 
-      STATE_WIDTH = 1024
+      STATE_WIDTH = 8192
 
       class TargetContext
         attr_reader :subtyping, :constant_resolver, :sources
