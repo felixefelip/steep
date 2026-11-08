@@ -332,17 +332,18 @@ module Steep
           end
         end
 
-        # What a call that may store into a hash memo of `singleton`, without
-        # reaching the class object, leaves the class holding: the record its
-        # check left there (`left`), or none. So does one `carried` to the
-        # class (`ClassStates.of_call`) that may run a memo of it still unset,
-        # or a method yielding a memo's object; one not carried to it is
-        # followed only by name, which is not precise enough to say it does.
+        # What a call that may change a memo of `singleton`, without reaching
+        # the class object, leaves the class holding: what its check left
+        # there (`left`), or none. Only one `carried` to the class
+        # (`ClassStates.of_call`) may, by storing into a hash memo, running a
+        # memo still unset or a method yielding a memo's object; one not
+        # carried to it is followed only by name, which is not precise enough
+        # to say it does.
         def stored_through(constr, singleton, ivars, call, left, carried:)
           ivars.filter_map do |ivar, type|
             unset = type.is_a?(AST::Types::Nil)
             held = !unset && hash_held?(constr, singleton, ivar, type)
-            changes = if held then may_store?(constr, singleton, call, ivar, type)
+            changes = if held then may_store?(constr, singleton, call, ivar, type) && carried.call
                       elsif unset then may_set?(constr, singleton, call, ivar, nil, false) && carried.call
                       else ObjectStates.state_in(type) && may_yield?(constr, singleton, call, ivar) && carried.call
                       end
