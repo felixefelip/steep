@@ -192,6 +192,25 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
     assert_equal [Set[], Set[:@@default]], [found[:written].cvars, found[:written].cvar_writes]
   end
 
+  def test_the_ivars_a_body_starts_empty_alone_or_in_a_parallel_assignment
+    found = bodies(<<~RUBY)
+      class Fallbacks
+        def alone = @plurals = []
+        def parallel
+          @plurals, @singulars, @humans, count = [], [], {}, []
+        end
+        def splatted
+          @plurals, @singulars = *defaults, []
+        end
+        def gathered
+          *@humans, @plurals = 1, [], 2
+        end
+      end
+    RUBY
+
+    assert_equal [Set[:@plurals], Set[:@plurals, :@singulars], Set[], Set[]], %i[alone parallel splatted gathered].map { |name| found[name].empties }
+  end
+
   def test_an_instance_method_names_a_constant_under_its_nesting
     scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY))
       module Inf

@@ -62,10 +62,10 @@ class ClassStateAnswerTest < Minitest::Test
 
   WRITER = "class Other\n  def self.add = Holder.instance(:en).singular(/s\\z/, \"z\")\nend\nOther.add\n"
 
-  def chunks(read:, writer: "")
+  def chunks(read:, writer: "", ruby: RUBY)
     in_tmpdir do
-      write("sig/app.rbs", RBS)
-      write("app/app.rb", format(RUBY, read: read, writer: writer))
+      write("sig/app.rbs", RBS.sub("    def initialize: () -> Array[untyped]\n", "    @plurals: Array[untyped]\n    def initialize: () -> Array[untyped]\n"))
+      write("app/app.rb", format(ruby, read: read, writer: writer))
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
       runner = Steep::Specializations::Runner.new(setup_project)
@@ -80,6 +80,10 @@ class ClassStateAnswerTest < Minitest::Test
 
   def test_a_method_reads_the_element_through_another_method_that_answers_it
     assert_equal ["def post_ids; []; end"], chunks(read: "rules")
+  end
+
+  def test_an_object_whose_initialize_starts_its_arrays_in_a_parallel_assignment_is_followed
+    assert_equal ["def post_ids; []; end"], chunks(read: "rules", ruby: RUBY.sub("@singulars = []", "@singulars, @plurals = [], []"))
   end
 
   def test_declines_an_element_another_class_may_write

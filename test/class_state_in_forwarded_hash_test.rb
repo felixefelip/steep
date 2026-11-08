@@ -26,6 +26,8 @@ class ClassStateInForwardedHashTest < Minitest::Test
         def singular(rule, replacement)
           @singulars.prepend([rule, replacement])
         end
+
+        def describe = @singulars.size
       end
 
       def self.inflections(locale = :en)
@@ -44,6 +46,17 @@ class ClassStateInForwardedHashTest < Minitest::Test
       end
     end
     %{writer}
+    class Base
+      def self.define_readers(model, name) = (model.describe if model.respond_to?(:describe))
+    end
+
+    class Coll < Base
+      def self.define_readers(model, name)
+        super
+        model.class_eval("def \#{Post.singularize(name.to_s)}_ids; []; end")
+      end
+    end
+
     class Post
       def self.singularize(word)
         result = word.dup
@@ -51,7 +64,7 @@ class ClassStateInForwardedHashTest < Minitest::Test
         result
       end
 
-      def self.m(name) = class_eval("def \#{singularize(name.to_s)}_ids; []; end")
+      %{macro}
       m :posts
     end
   RUBY
@@ -64,11 +77,18 @@ class ClassStateInForwardedHashTest < Minitest::Test
         def self.instance: (?Symbol locale) -> Rules
         def initialize: () -> void
         def singular: (untyped rule, untyped replacement) -> Array[untyped]
+        def describe: () -> Integer
       end
       def self.inflections: (?Symbol locale) ?{ (untyped) -> untyped } -> untyped
     end
     class Other
       def self.add: () -> untyped
+    end
+    class Base
+      def self.define_readers: (untyped model, Symbol name) -> untyped
+    end
+    class Coll < Base
+      def self.define_readers: (untyped model, Symbol name) -> untyped
     end
     class Post
       def self.singularize: (String word) -> String
@@ -76,11 +96,13 @@ class ClassStateInForwardedHashTest < Minitest::Test
     end
   RBS
 
-  def chunks(writer: "")
+  MACRO = 'def self.m(name) = class_eval("def #{singularize(name.to_s)}_ids; []; end")'
+
+  def chunks(writer: "", macro: MACRO)
     in_tmpdir do
       write("sig/map.rbs", RBS)
       write("sig/app.rbs", APP_RBS)
-      write("app/app.rb", MUTEX + BACKEND + format(RUBY, writer: writer))
+      write("app/app.rb", MUTEX + BACKEND + format(RUBY, writer: writer, macro: macro))
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
       runner = Steep::Specializations::Runner.new(setup_project)
@@ -91,6 +113,10 @@ class ClassStateInForwardedHashTest < Minitest::Test
 
   def test_a_block_writes_the_object_another_class_keeps_in_a_map_it_set_its_ivar_to
     assert_equal ["def post_ids; []; end"], chunks
+  end
+
+  def test_a_super_into_a_body_that_reaches_no_method_of_the_class_keeps_its_state
+    assert_equal ["def post_ids; []; end"], chunks(macro: "def self.m(name) = Coll.define_readers(self, name)")
   end
 
   def test_declines_an_object_kept_in_a_map_another_class_may_write
