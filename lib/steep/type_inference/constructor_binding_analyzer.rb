@@ -117,7 +117,8 @@ module Steep
       # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
       # - `memoized_hash`: the ivar, when that value is `{}`;
       # - `calls`: whether it makes a call or a `yield`, a `super` aside;
-      # - `empties`: the ivars a statement of the body sets to `[]`;
+      # - `empties`: the ivars a statement of the body sets to `[]`, alone or
+      #   in a parallel assignment;
       # - `literal_writes`: the ivars every assignment of the body sets to a
       #   hash or array literal;
       # - `rebuilds`: the ivars it only writes as `@ivar += …`, a new array
@@ -375,7 +376,7 @@ module Steep
           sends[node.children[0].nil? || node.children[0].type == :self ? :self : :other] << node.children[1] if %i[send csend].include?(node.type) && node.children[0]&.type != :const
         end
         Body.new(
-          empties: empties_of(body),
+          empties: Empties.of(body),
           literal_writes: LiteralWrites.of(body, writes),
           rebuilds: rebuilds_of(body),
           handed: handed_ivars(body),
@@ -561,14 +562,6 @@ module Steep
         return [name] if const_node.children[0]&.type == :cbase
 
         nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
-      end
-
-      def empties_of(body)
-        empties = Set[] #: Set[Symbol]
-        each_stmt(body) do |stmt|
-          empties << stmt.children[0] if stmt.type == :ivasgn && stmt.children[1]&.type == :array && stmt.children[1].children.empty?
-        end
-        empties
       end
 
       def rebuilds_of(body)
