@@ -206,4 +206,16 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
     assert_equal Set["Inf::Holder", "Holder"], scan.methods.fetch("Inf").fetch(:inflections).first.consts
     assert_equal Set["Inf::Holder", "Holder"], scan.singleton_methods.fetch("Inf").fetch(:instance).first.consts
   end
+
+  def test_a_method_lists_what_it_calls_on_other_receivers_apart_from_self_and_constants
+    scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY))
+      class Post
+        def self.m(name) = [name.to_s.sing, helper, self.other, Holder.instance]
+      end
+    RUBY
+
+    body = scan.singleton_methods.fetch("Post").fetch(:m).first
+    assert_equal Set[:to_s, :sing], body.other_sends
+    assert_equal Set[:helper, :other], body.self_sends
+  end
 end

@@ -156,7 +156,7 @@ module Steep
       # it, or nil where it was not checked under them.
       def self_exit(constr, node, on_self)
         exit = exit_of(constr, node, under: :stateful?) or return
-        on_self ? exit.ivars : exit.classes[constr.self_type.name]
+        on_self ? exit.ivars : (exit.classes[constr.self_type.name] if constr.self_type.is_a?(AST::Types::Name::Singleton))
       end
 
       # `self_exit`, or every ivar as it stands where the call evaluates a
