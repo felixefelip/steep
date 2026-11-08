@@ -18,14 +18,24 @@ module Steep
       # Whether a method `self` runs reaches no ivar of it: a core one that
       # touches only its own elements, or that answers from its arguments
       # whatever `self` is (`Array(tags)`), or one of the project's that only
-      # reads (`attr_reader`).
+      # reads (`attr_reader`), or the core `allocate`, which runs no method.
       def reaches_no_ivar?(call, constr)
         return false unless call.is_a?(TypeInference::MethodCall::Typed)
 
         key = MethodIdentity.key(call)
-        ArrayMutation.elements_only?(call, constr) || HashMutation.elements_only?(call, constr) ||
+        ArrayMutation.elements_only?(call, constr) || HashMutation.elements_only?(call, constr) || allocates?(call, constr, key) ||
           (!key.nil? && LiteralIntrinsics.self_independent?(key, override_registry: constr.literal_method_registry)) ||
           (constr.self_type.is_a?(AST::Types::Name::Base) && !!ObjectStates.method_effect(constr, constr.self_type, call.method_name)&.reads_only)
+      end
+
+      def allocates?(call, constr, key)
+        key == "::Class#allocate" && !ReflectionIntrinsics.fold(
+          call: call,
+          receiver_type: call.receiver_type.is_a?(AST::Types::Self) ? constr.self_type : call.receiver_type,
+          argument_types: [],
+          factory: constr.checker.factory,
+          override_registry: constr.literal_method_registry
+        ).nil?
       end
 
       # Whether `receiver` reads an ivar whose contents the body was entered

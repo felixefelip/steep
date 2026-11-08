@@ -347,7 +347,7 @@ module Steep
                       elsif unset then may_set?(constr, singleton, call, ivar, nil, false) && carried.call
                       else ObjectStates.state_in(type) && may_yield?(constr, singleton, call, ivar) && carried.call
                       end
-            next [ivar, type] unless changes
+            next [ivar, type] unless changes && !(unset && Allocated.kept_unset?(constr, singleton, ivar))
 
             value = left.call&.[](ivar)
             [ivar, value] if value && ((unset && value.is_a?(AST::Types::Nil)) || hash_held?(constr, singleton, ivar, value) || (!held && ObjectStates.state_in(value)))
