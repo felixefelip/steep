@@ -142,7 +142,8 @@ module Steep
         # The ivar of an object `born_object` keeps, where it holds a hash
         # the object forwards to.
         def forwarded_hash(constr, singleton, ivar)
-          type = constr.context.type_env[ivar]
+          env = constr.context.type_env
+          type = singleton == constr.self_type ? env[ivar] : env.class_states[singleton.name]&.[](ivar)
           ivar if ForwardedHash.record(constr, type) && born_object(constr, singleton, ivar, ObjectStates.state_in(type)&.back_type)
         end
 
@@ -319,7 +320,7 @@ module Steep
 
           singleton = constr.self_type #: AST::Types::Name::Singleton
           moved = memo_values(constr).select do |ivar, type|
-            type.is_a?(AST::Types::Nil) ? may_set?(constr, singleton, call, ivar, reach, hands_self) : hash_held?(constr, singleton, ivar, type) && may_store?(constr, singleton, call, ivar)
+            type.is_a?(AST::Types::Nil) ? may_set?(constr, singleton, call, ivar, reach, hands_self) : hash_held?(constr, singleton, ivar, type) && may_store?(constr, singleton, call, ivar, type)
           end
           moved = moved.merge(yielded_memos(constr, reached)) if reached
           moved = moved.merge(yielded_elsewhere(constr, singleton, call))
@@ -341,7 +342,7 @@ module Steep
           ivars.filter_map do |ivar, type|
             unset = type.is_a?(AST::Types::Nil)
             held = !unset && hash_held?(constr, singleton, ivar, type)
-            changes = if held then may_store?(constr, singleton, call, ivar)
+            changes = if held then may_store?(constr, singleton, call, ivar, type)
                       elsif unset then may_set?(constr, singleton, call, ivar, nil, false) && carried.call
                       else ObjectStates.state_in(type) && may_yield?(constr, singleton, call, ivar) && carried.call
                       end
@@ -354,11 +355,11 @@ module Steep
 
         # Whether `call` may run a store into the hash a memo of `singleton`
         # keeps in `ivar` (`ConstructorBindingRegistry#storing_closure`).
-        def may_store?(constr, singleton, call, ivar)
+        def may_store?(constr, singleton, call, ivar, type)
           return true unless call.is_a?(TypeInference::MethodCall::Typed)
 
           value_memos(constr, singleton).any? do |held, _, method_name|
-            held == ivar && closure_runs?(constr, call, storing_closure(constr, ivar, method_name))
+            held == ivar && closure_runs?(constr, call, storing_closure(constr, ivar, method_name, type))
           end
         end
 
@@ -404,9 +405,9 @@ module Steep
         # The methods that may store into the hash a memo keeps in `ivar`: by
         # the hash's own methods, or by those of the object `ivar` holds that
         # forward to it.
-        def storing_closure(constr, ivar, method_name)
+        def storing_closure(constr, ivar, method_name, type)
           registry = constr.constructor_bindings
-          state = ObjectStates.state_in(constr.context.type_env[ivar])
+          state = ObjectStates.state_in(type)
           nested = state && ForwardedHash.nested(constr, state.back_type)
           unless state && nested
             return constr.specializations.memoize(:"storing_closure #{method_name} #{ivar}") do
