@@ -64,7 +64,8 @@ module Steep
       #   call-site position of the argument passed there, or nil when that is
       #   not one of this method's arguments as given; `:opaque` when the
       #   `super` may not run, or which arguments land where is not known;
-      # - `self_sends`: the methods it calls on `self`;
+      # - `self_sends`: the methods it calls on `self`; `other_sends`, those it
+      #   calls on anything but `self` or a constant;
       # - `exposes_self`: whether `self` may reach anything but those calls,
       #   a block included (felixefelip/steep#205, stage 2);
       # - `exposes_self_besides_return`, `returns_self`, `returned_sends`:
@@ -128,7 +129,7 @@ module Steep
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
         :empties, :literal_writes, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
-        :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, keyword_init: true
+        :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, :other_sends, keyword_init: true
       ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
 
       def self.analyze(node)
@@ -363,7 +364,7 @@ module Steep
       def method_body(args_node, body, nesting: @lexical_nesting || [], defined_as: nil)
         writes = Set[] #: Set[Symbol]
         ivars = Set[] #: Set[Symbol]
-        self_sends = Set[] #: Set[Symbol]
+        sends = { self: Set[], other: Set[] } #: Hash[Symbol, Set[Symbol]]
         consts = Set[] #: Set[String]
         calls = false
         each_node(body) do |node|
@@ -371,7 +372,7 @@ module Steep
           writes << node.children[0] if node.type == :ivasgn
           ivars << node.children[0] if node.type == :ivar
           consts.merge(referenced_names(node, nesting)) if node.type == :const
-          self_sends << node.children[1] if %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
+          sends[node.children[0].nil? || node.children[0].type == :self ? :self : :other] << node.children[1] if %i[send csend].include?(node.type) && node.children[0]&.type != :const
         end
         Body.new(
           empties: empties_of(body),
@@ -382,7 +383,8 @@ module Steep
           writes: writes,
           ivars: ivars,
           super_args: super_args(args_node, body),
-          self_sends: self_sends,
+          self_sends: sends[:self],
+          other_sends: sends[:other],
           exposes_self: !self.class.self_exposures(body).empty?,
           **SelfReturns.facts(body),
           iterations: self_iterations(body),

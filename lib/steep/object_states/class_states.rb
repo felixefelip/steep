@@ -263,21 +263,47 @@ module Steep
 
           method_name = call.method_decls.first.method_name
           singleton = method_name.is_a?(SingletonMethodName)
-          visit_named(constr.constructor_bindings, method_name.type_name.to_s.delete_prefix("::"), method_name.method_name, singleton, names, Set[])
+          visit_named(constr, method_name.type_name.to_s.delete_prefix("::"), method_name.method_name, singleton, names, Set[])
           names
         end
 
-        def visit_named(registry, owner, method_name, singleton, names, seen)
+        # A call on `self` runs the body the class of `self` resolves, which is
+        # `owner` or one of its subclasses; one on a constant, the body that
+        # class object resolves; one on anything else, any body of that name.
+        def visit_named(constr, owner, method_name, singleton, names, seen)
           return unless seen.add?([owner, method_name, singleton])
 
+          registry = constr.constructor_bindings
           body = singleton ? registry.singleton_body_of(owner, method_name) : registry.body_of(owner, method_name)
           return unless body
 
           names.merge(body.consts)
-          body.self_sends.each { |sent| visit_named(registry, owner, sent, singleton, names, seen) }
-          body.const_sends.each do |constants, sent|
-            constants.each { |name| visit_named(registry, name, sent, !registry.singleton_body_of(name, sent).nil?, names, seen) }
+          selves = [owner, *subclasses(constr, owner)]
+          callees = body.self_sends.flat_map { |sent| selves.flat_map { |name| resolved_owners(constr, name, singleton, sent) } }
+          callees += body.const_sends.flat_map { |constants, sent| constants.flat_map { |name| resolved_owners(constr, name, true, sent) } }
+          callees += (body.other_sends || []).flat_map { |sent| registry.owners_of(sent).map { |name, on_class| [name, on_class, sent] } }
+          callees.uniq.each { |name, on_class, sent| visit_named(constr, name, sent, on_class, names, seen) }
+        end
+
+        def subclasses(constr, owner)
+          (constr.checker.factory.descendant_index.descendants(RBS::TypeName.parse("::#{owner}"), limit: ReflectionIntrinsics::MAX_DESCENDANTS) || []).map { |name| name.to_s.delete_prefix("::") }
+        rescue RBS::BaseError, RuntimeError
+          []
+        end
+
+        # Where `name`'s instances, or with `singleton` its class object,
+        # find `sent` among their ancestors, as `[owner, on_class, sent]`.
+        def resolved_owners(constr, name, singleton, sent)
+          type_name = RBS::TypeName.parse("::#{name}")
+          builder = constr.checker.factory.definition_builder
+          definition = singleton ? builder.build_singleton(type_name) : builder.build_instance(type_name)
+          definition.ancestors.ancestors.filter_map do |ancestor|
+            on_class = ancestor.is_a?(RBS::Definition::Ancestor::Singleton)
+            owner = ancestor.name.to_s.delete_prefix("::")
+            [owner, on_class, sent] if constr.constructor_bindings.defines?(owner, sent, singleton: on_class)
           end
+        rescue RBS::BaseError, RuntimeError
+          []
         end
       end
     end
