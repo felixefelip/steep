@@ -51,6 +51,24 @@ class HeldIvarsTest < Minitest::Test
     end
   end
 
+  def test_the_value_a_parallel_assignment_hands_the_ivar_is_held
+    def_node = parse("def run\n  @bar, @foo = [], Foo.new({})\n  foo.my_hash\nend\n")
+    ivars = reader(def_node)
+
+    assert ivars.held?(:@foo)
+    assert ivars.held_value?(new_call(def_node))
+  end
+
+  def test_declines_a_parallel_assignment_that_splats_or_whose_value_something_takes
+    ["@bar, @foo = *bars, Foo.new({})", "@bar, @foo = Foo.new({})", "@bar, *@foo = [], Foo.new({})", "x = (@bar, @foo = [], Foo.new({}))"].each do |assignment|
+      def_node = parse("def run\n  #{assignment}\n  foo.my_hash\nend\n")
+
+      refute reader(def_node).held_value?(new_call(def_node)), assignment
+    end
+    def_node = parse("def run\n  foo.my_hash\n  @bar, @foo = [], Foo.new({})\nend\n")
+    refute reader(def_node).held_value?(new_call(def_node)), "last statement"
+  end
+
   private
 
   def reader(def_node)
