@@ -144,10 +144,11 @@ module Steep
 
       # `delete` of a value on a tuple of values: the tuple without the
       # elements `==` to it, and the call answering it, or `nil` where none
-      # was. Only where equal types are exactly the values that are `==`.
+      # was. Only where equal types are exactly the values that are `==`, or
+      # on an empty tuple, which compares nothing.
       def deleted(constr, node, receiver, receiver_type, arguments, type:)
         argument, = CollectionMutation.operand_types(constr, arguments)
-        unless arguments.size == 1 && argument && compared_by_type?(argument) && compared_by_type?(receiver_type)
+        unless arguments.size == 1 && (receiver_type.types.empty? || (argument && compared_by_type?(argument) && compared_by_type?(receiver_type)))
           return [type, refine(constr, receiver, AST::Builtin::Array.instance_type(element_type(receiver_type)))]
         end
 

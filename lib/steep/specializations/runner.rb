@@ -105,13 +105,9 @@ module Steep
         methods
       end
 
-      def output_path
-        @project.absolute_path(DEFAULT_OUTPUT_PATH)
-      end
+      def output_path = @project.absolute_path(DEFAULT_OUTPUT_PATH)
 
-      def evals_output_path
-        @project.absolute_path(Evals::DEFAULT_OUTPUT_PATH)
-      end
+      def evals_output_path = @project.absolute_path(Evals::DEFAULT_OUTPUT_PATH)
 
       def write(methods)
         exits = @exits.transform_values { |by_key| by_key.transform_values { |exit| Specializations.sidecar_exit(exit) } }.reject { |_, by_key| by_key.empty? }
@@ -165,6 +161,7 @@ module Steep
         loop do
           demanded.clear
           exits = @exits.transform_values(&:dup)
+          @demanded_exits&.each { |key, argument_key| @exits[key]&.delete(argument_key) }
           class_exits = @class_exits.dup
           discovered, revealed = specialize(context, store(found), baselines, tuples, definitions)
           @harvested.adopt(harvest_defines(context, store(found), locations, definitions), definitions, revealed, context.sources)
@@ -254,10 +251,9 @@ module Steep
             (found[key] ||= {})[arguments.key] = type
           end
 
-          outcomes.each_value do |outcome|
-            @harvested.remember(outcome.sites, definitions)
-            outcome.sites.each { |key, arguments| (revealed[key] ||= Set.new).merge(arguments) if definitions.key?(key) }
-          end
+          outcomes.each_value { |outcome| @harvested.remember(outcome.sites, definitions) }
+          [*outcomes.each_value.map(&:sites), @demanded_sites || {}].each { |sites| sites.each { |key, arguments| (revealed[key] ||= Set.new).merge(arguments) if definitions.key?(key) } }
+          @demanded_sites = nil
         end
 
         [found, revealed]
@@ -421,6 +417,8 @@ module Steep
           path, def_node = definitions.fetch(key)
           typing = type_check(context, store.with_reads(nil), context.sources.fetch(path), { node_key(path, def_node, key) => with_defaults(key, arguments, def_node) })
           record_exit(key, arguments, typing, def_node)
+          (@demanded_exits ||= Set[]) << memo
+          typing && Collector.call_sites(typing, overrides: @overrides).each { |site, found| ((@demanded_sites ||= {})[site] ||= Set.new).merge(found) }
         ensure
           @demanding.delete(memo)
         end

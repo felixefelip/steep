@@ -139,4 +139,10 @@ class ClassStateParallelObjectTest < Minitest::Test
 
     assert_equal [nil], chunks(":fish", ruby: ruby, rbs: GENERIC_RBS)
   end
+
+  def test_a_value_not_known_deleted_from_an_empty_array_leaves_it_empty
+    ruby = DELETING_RUBY.sub("  instance(:en).uncountable(\"fish\")\n", "  instance(:en).singular(/sh\\z/, ENV.fetch(\"RULE\"))\n  instance(:en).uncountable(\"fish\")\n")
+
+    assert_equal ["def fish_ids; []; end"], chunks(":fish", ruby: ruby, rbs: GENERIC_RBS)
+  end
 end
