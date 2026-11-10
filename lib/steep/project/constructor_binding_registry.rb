@@ -321,7 +321,7 @@ module Steep
         ingest_constants(node, content)
         @nodes << node
         @uses = nil
-        @defs_by_name = nil
+        @defs_by_name = @handed_by_parameter = nil
         @defined_names = nil
         @keyed_memo_names = nil
       rescue StandardError, ::Parser::SyntaxError => e
@@ -358,15 +358,29 @@ module Steep
         end
       end
 
+      # Kept per parameter only where no cycle through another parameter on
+      # the way here was cut below it: the answer then depends on `handing`.
       def handed_uses(method_name, index, handing)
-        return [] if handing.include?([method_name, index])
+        key = [method_name, index]
+        kept = (@handed_by_parameter ||= {})
+        return kept[key] if kept.key?(key)
+        return [].tap { @cuts&.add(key) } if handing.include?(key)
 
+        outer, @cuts = @cuts, Set[]
+        uses = parameter_handed_uses(method_name, index, handing | [key])
+        cuts = @cuts.delete(key)
+        @cuts = outer&.merge(cuts)
+        kept[key] = uses if cuts.empty?
+        uses
+      end
+
+      def parameter_handed_uses(method_name, index, handing)
         defs = defs_named(method_name)
         return if defs.empty?
 
         defs.flat_map do |def_node|
           uses = TypeInference::ClassMemoAnalyzer.parameter_uses(def_node, index) or return
-          hand_on(uses, handing | [[method_name, index]])
+          hand_on(uses, handing)
           uses
         end
       end
