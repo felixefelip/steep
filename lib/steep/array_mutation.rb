@@ -23,11 +23,13 @@ module Steep
     # The ones that read or change an array's elements, written in C, and reach
     # no ivar of the object they run on: what an `Array` subclass calls on
     # itself (`Inflections::Uncountables#add` runs `concat(words)`).
-    ELEMENT_METHODS = (ENTRIES.keys + IN_PLACE.to_a + ["::Array#concat"]).to_set.freeze
+    DELETE = "::Array#delete"
+
+    ELEMENT_METHODS = (ENTRIES.keys + IN_PLACE.to_a + ["::Array#concat", DELETE]).to_set.freeze
 
     class << self
       def elements_only?(call, constr)
-        return false unless call.is_a?(TypeInference::MethodCall::Typed)
+        return false unless CollectionMutation.resolved?(call)
 
         CollectionMutation.only?(constr, call.method_decls.map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }.uniq, ELEMENT_METHODS)
       end
@@ -56,6 +58,7 @@ module Steep
         return [type, constr] unless receiver_type.is_a?(AST::Types::Tuple) && CollectionMutation.entered_with?(constr, receiver)
 
         keys = array_method_keys(constr, method_name, private: private)
+        return deleted(constr, node, receiver, receiver_type, arguments, type: type) if deletes?(constr, keys)
         return [type, constr] unless foldable?(constr, keys)
 
         folded = fold(constr, keys.first, receiver_type, arguments)
@@ -133,6 +136,33 @@ module Steep
 
       def foldable?(constr, keys)
         keys.size == 1 && IN_PLACE.include?(keys.first) && !constr.literal_method_registry.blocked?(keys.first)
+      end
+
+      def deletes?(constr, keys)
+        keys == [DELETE] && !constr.literal_method_registry.blocked?(DELETE)
+      end
+
+      # `delete` of a value on a tuple of values: the tuple without the
+      # elements `==` to it, and the call answering it, or `nil` where none
+      # was. Only where equal types are exactly the values that are `==`, or
+      # on an empty tuple, which compares nothing.
+      def deleted(constr, node, receiver, receiver_type, arguments, type:)
+        argument, = CollectionMutation.operand_types(constr, arguments)
+        unless arguments.size == 1 && (receiver_type.types.empty? || (argument && compared_by_type?(argument) && compared_by_type?(receiver_type)))
+          return [type, refine(constr, receiver, AST::Builtin::Array.instance_type(element_type(receiver_type)))]
+        end
+
+        kept = receiver_type.types.reject { |element| element == argument }
+        answer = kept.size < receiver_type.types.size ? argument : AST::Builtin.nil_type
+        [answer, refine(constr, receiver, AST::Types::Tuple.new(types: kept)).add_typing(node, type: answer).constr]
+      end
+
+      def compared_by_type?(type)
+        case type
+        when AST::Types::Literal, AST::Types::Nil, AST::Types::RegexpLiteral then true
+        when AST::Types::Tuple then type.types.all? { |element| compared_by_type?(element) }
+        else false
+        end
       end
 
       def fold(constr, key, receiver_type, arguments)

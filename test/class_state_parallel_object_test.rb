@@ -97,10 +97,19 @@ class ClassStateParallelObjectTest < Minitest::Test
     end
   RBS
 
-  def chunks(name)
+  DELETING_RUBY = RUBY
+    .sub("  def add(words)\n", "  def delete(entry)\n    super entry\n    @regex_array.delete(to_regex(entry))\n  end\n\n  def add(words)\n")
+    .sub("  def singular(rule, replacement)\n", "  def singular(rule, replacement)\n    @uncountables.delete(replacement)\n")
+
+  GENERIC_RBS = RBS
+    .sub("class Uncountables < Array[String]", "class Uncountables[T] < Array[T]")
+    .sub("  def add: (Array[untyped] words) -> self\n", "  def add: (Array[untyped] words) -> self\n  def delete: (untyped entry) -> untyped\n")
+    .gsub(/Uncountables$/, "Uncountables[untyped]")
+
+  def chunks(name, ruby: RUBY, rbs: RBS)
     in_tmpdir do
-      write("sig/app.rbs", RBS)
-      write("app/app.rb", format(RUBY, name: name))
+      write("sig/app.rbs", rbs)
+      write("app/app.rb", format(ruby, name: name))
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
       runner = Steep::Specializations::Runner.new(setup_project)
@@ -112,5 +121,28 @@ class ClassStateParallelObjectTest < Minitest::Test
   def test_an_object_an_initialize_starts_in_a_parallel_assignment_answers_its_check
     assert_equal ["def post_ids; []; end"], chunks(":posts")
     assert_equal ["def fish_ids; []; end"], chunks(":fish")
+  end
+
+  def test_a_generic_array_subclass_that_deletes_through_super_keeps_its_state
+    assert_equal ["def post_ids; []; end"], chunks(":posts", ruby: DELETING_RUBY, rbs: GENERIC_RBS)
+    assert_equal ["def fish_ids; []; end"], chunks(":fish", ruby: DELETING_RUBY, rbs: GENERIC_RBS)
+  end
+
+  def test_a_rule_deletes_the_pattern_it_matches_from_the_uncountables
+    ruby = DELETING_RUBY.sub("  instance(:en).uncountable(\"fish\")\n", "  instance(:en).uncountable(\"fish\")\n  instance(:en).singular(/sh\\z/, \"fish\")\n")
+
+    assert_equal ["def fifish_ids; []; end"], chunks(":fish", ruby: ruby, rbs: GENERIC_RBS)
+  end
+
+  def test_declines_a_rule_whose_replacement_is_not_known
+    ruby = DELETING_RUBY.sub("  instance(:en).uncountable(\"fish\")\n", "  instance(:en).uncountable(\"fish\")\n  instance(:en).singular(/sh\\z/, ENV.fetch(\"RULE\"))\n")
+
+    assert_equal [nil], chunks(":fish", ruby: ruby, rbs: GENERIC_RBS)
+  end
+
+  def test_a_value_not_known_deleted_from_an_empty_array_leaves_it_empty
+    ruby = DELETING_RUBY.sub("  instance(:en).uncountable(\"fish\")\n", "  instance(:en).singular(/sh\\z/, ENV.fetch(\"RULE\"))\n  instance(:en).uncountable(\"fish\")\n")
+
+    assert_equal ["def fish_ids; []; end"], chunks(":fish", ruby: ruby, rbs: GENERIC_RBS)
   end
 end

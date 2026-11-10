@@ -98,11 +98,11 @@ class ClassStateInForwardedHashTest < Minitest::Test
 
   MACRO = 'def self.m(name) = class_eval("def #{singularize(name.to_s)}_ids; []; end")'
 
-  def chunks(writer: "", macro: MACRO)
+  def chunks(writer: "", macro: MACRO, ruby: RUBY, app_rbs: APP_RBS)
     in_tmpdir do
       write("sig/map.rbs", RBS)
-      write("sig/app.rbs", APP_RBS)
-      write("app/app.rb", MUTEX + BACKEND + format(RUBY, writer: writer, macro: macro))
+      write("sig/app.rbs", app_rbs)
+      write("app/app.rb", MUTEX + BACKEND + format(ruby, writer: writer, macro: macro))
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
       runner = Steep::Specializations::Runner.new(setup_project)
@@ -123,5 +123,14 @@ class ClassStateInForwardedHashTest < Minitest::Test
     writer = "class Other\n  def self.add = Inf::Rules.instance(:en).singular(/s$/i, \"z\")\nend\nOther.add\n"
 
     assert_equal [nil], chunks(writer: writer)
+  end
+
+  def test_a_rule_written_through_a_helper_folds_once_the_helper_does
+    ruby = RUBY
+      .sub("      @singulars.prepend([rule, replacement])\n", "      @singulars.prepend([rule, tail(replacement)])\n")
+      .sub("    def describe = @singulars.size\n", "    def describe = @singulars.size\n\n    private def tail(replacement) = \"\#{replacement}\"\n")
+    app_rbs = APP_RBS.sub("    def describe: () -> Integer\n", "    def describe: () -> Integer\n    private def tail: (untyped replacement) -> String\n")
+
+    assert_equal ["def post_ids; []; end"], chunks(ruby: ruby, app_rbs: app_rbs)
   end
 end

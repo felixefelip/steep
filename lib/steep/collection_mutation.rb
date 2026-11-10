@@ -20,12 +20,19 @@ module Steep
       # whatever `self` is (`Array(tags)`), or one of the project's that only
       # reads (`attr_reader`), or the core `allocate`, which runs no method.
       def reaches_no_ivar?(call, constr)
-        return false unless call.is_a?(TypeInference::MethodCall::Typed)
+        return false unless resolved?(call)
 
         key = MethodIdentity.key(call)
         ArrayMutation.elements_only?(call, constr) || HashMutation.elements_only?(call, constr) || allocates?(call, constr, key) ||
           (!key.nil? && LiteralIntrinsics.self_independent?(key, override_registry: constr.literal_method_registry)) ||
           (constr.self_type.is_a?(AST::Types::Name::Base) && !!ObjectStates.method_effect(constr, constr.self_type, call.method_name)&.reads_only)
+      end
+
+      # A call whose method was found, even where its arguments do not check
+      # against it (`concat` on a generic `self` handed a tuple): what the
+      # method touches does not depend on them.
+      def resolved?(call)
+        (call.is_a?(TypeInference::MethodCall::Typed) || call.is_a?(TypeInference::MethodCall::Error)) && !call.method_decls.empty?
       end
 
       def allocates?(call, constr, key)
