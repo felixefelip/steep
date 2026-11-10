@@ -88,13 +88,47 @@ class ClassStateAcrossFilesTest < Minitest::Test
     end
   RBS
 
-  def chunks(files, rbs = RBS)
+  BACKED = DEFINITIONS.sub("class Holder\n", <<~'RUBY').sub("instances[locale] ||= Rules.new", "@instances[locale] ||= Rules.new").sub("  def self.instances = @instances ||= {}\n", "")
+    class Backend
+      def initialize
+        @backend = {}
+      end
+
+      def [](key) = @backend[key]
+
+      def []=(key, value)
+        @backend[key] = value
+      end
+    end
+
+    class Map < Backend
+    end
+
+    class Holder
+      @instances = Map.new
+  RUBY
+
+  BACKED_RBS = RBS.sub("class Holder\n  self.@instances: Hash[Symbol, Rules]?\n  def self.instances: () -> Hash[Symbol, Rules]\n", <<~RBS)
+    class Backend
+      @backend: Hash[untyped, untyped]
+      def initialize: () -> void
+      def []: (untyped key) -> untyped
+      def []=: (untyped key, untyped value) -> untyped
+    end
+    class Map < Backend
+    end
+    class Holder
+      self.@instances: Map
+  RBS
+
+  def chunks(files, rbs = RBS, &recorded)
     in_tmpdir do
       write("sig/app.rbs", rbs)
       files.each { |name, content| write("app/#{name}", content) }
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
       runner = Steep::Specializations::Runner.new(setup_project)
+      runner.singleton_class.prepend(Module.new { define_method(:file_check) { |*args| super(*args).tap { |typing| recorded&.call(args[2].path, typing) if typing } } })
       runner.run
       runner.evals.values.flatten.map { |chunk| chunk&.source }
     end
@@ -106,6 +140,17 @@ class ClassStateAcrossFilesTest < Minitest::Test
 
   def test_a_macro_in_a_file_named_first_reads_what_the_defining_file_left
     assert_equal ["def post_ids; []; end"], chunks("z.rb" => DEFINITIONS + RULES, "a.rb" => MACRO)
+  end
+
+  def test_the_defining_file_keeps_leaving_a_hash_memo_an_object_holds
+    holder = ::RBS::TypeName.parse("::Holder")
+    left = [] #: Array[bool]
+    folded = chunks({ "a.rb" => BACKED + RULES, "z.rb" => MACRO }, BACKED_RBS) do |path, typing|
+      left << typing.top_level_states[1].key?(holder) if path.basename.to_s == "a.rb" && typing.top_level_states
+    end
+
+    assert_equal ["def post_ids; []; end"], folded
+    assert_equal [], left.drop_while { |kept| !kept }.reject { |kept| kept }
   end
 
   def test_declines_what_a_file_other_than_the_defining_one_writes

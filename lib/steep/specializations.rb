@@ -86,7 +86,7 @@ module Steep
 
         key = runs.keys.first
         arguments = returned_arguments(constr, node, call, block) or return call
-        type = store.call_return_type(key, arguments, factory: constr.checker.factory) or return call
+        type = recorded_return(constr, key, arguments) or return call
 
         return call.with_return_type(constructed(type, call.return_type)) if ObjectStates.initialize_call?(call)
 
@@ -95,6 +95,13 @@ module Steep
         end
 
         call.with_return_type(type)
+      end
+
+      # A tuple with contents is checked on demand where no generation has
+      # yet (`Store#exit_ivars`), which answers its return as well as its exit.
+      def recorded_return(constr, key, arguments)
+        ObjectStates.recorded_exit(constr, key, arguments) if arguments.stateful? || arguments.hands_records?
+        constr.specializations.call_return_type(key, arguments, factory: constr.checker.factory)
       end
 
       # A body whose answer holds its receiver, which the store records under
@@ -135,7 +142,7 @@ module Steep
         store = constr.specializations
         arguments = returned_arguments(constr, node, call, block) unless store.empty?
         own, *others = runs.map.with_index do |(key, receiver), index|
-          recorded = arguments && store.call_return_type(key, arguments, factory: constr.checker.factory)
+          recorded = arguments && recorded_return(constr, key, arguments)
           recorded = nil if recorded && answers_self?(recorded)
           recorded || (index.zero? ? call.return_type : declared_return(constr, receiver, call.method_name)) or return call
         end
@@ -1064,7 +1071,7 @@ module Steep
       # `entering`: the class states each file's top level starts with, by path.
       # `reads`: where to record each question a check asks and the answer it
       # got (`Reads`).
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, class_exits: {}, declarations: {}, receivers:, bodies:, entering: {}, reads: nil)
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, receivers:, bodies:, entering: {}, reads: nil)
         @methods = methods
         @entering = entering
         @receivers = receivers
@@ -1076,6 +1083,7 @@ module Steep
         @typed = typed
         @exits = exits
         @demand = demand
+        @demanded = demanded
         @class_exits = class_exits
         @reads = reads
       end
@@ -1141,7 +1149,7 @@ module Steep
 
       def return_type(method_key, argument_key, factory:)
         typed = @typed.dig(method_key, argument_key) and return typed
-        parse(method_key, @methods.dig(method_key, argument_key), factory: factory)
+        parse(method_key, @methods.dig(method_key, argument_key), factory: factory) || @demanded[[method_key, argument_key]]&.last
       end
 
       def declaration_type(method_key, factory:)
@@ -1217,7 +1225,7 @@ module Steep
 
       def with(active:, reads:)
         Store.new(
-          methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand,
+          methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand, demanded: @demanded,
           class_exits: @class_exits, declarations: @declarations, receivers: @receivers, bodies: @bodies, entering: @entering, reads: reads
         )
       end

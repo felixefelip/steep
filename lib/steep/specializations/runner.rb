@@ -139,8 +139,8 @@ module Steep
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
         @refinements = Hash.new(0) #: Hash[[String, String], Integer]
-        demanded = {} #: Hash[[String, String], ObjectStates::Exit?]
-        @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, demanded, store, key, arguments, in_checked_body) }
+        @demanded = {} #: Hash[[String, String], [ObjectStates::Exit?, AST::Types::t?]]
+        @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, @demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
         baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers, bodies: {}), locations, writers | @definers)
         definitions.merge!(collected)
@@ -159,7 +159,7 @@ module Steep
         generation = 0
 
         loop do
-          demanded.clear
+          @demanded.clear
           exits = @exits.transform_values(&:dup)
           @demanded_exits&.each { |key, argument_key| @exits[key]&.delete(argument_key) }
           class_exits = @class_exits.dup
@@ -180,7 +180,7 @@ module Steep
 
           paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits)) | @file_states.stale_paths
           found = discovered
-          demanded.clear
+          @demanded.clear
           tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers | @definers), generation)
           generation += 1
         end
@@ -410,7 +410,7 @@ module Steep
         return nil if !(arguments.stateful? || arguments.hands_records?) || !definitions.key?(key) || widened?(key, arguments, 0)
 
         memo = [key, arguments.key] #: [String, String]
-        return demanded[memo] if demanded.key?(memo)
+        return demanded[memo].first if demanded.key?(memo)
         return nil unless @demanding.add?(memo)
 
         begin
@@ -422,13 +422,13 @@ module Steep
         ensure
           @demanding.delete(memo)
         end
-        demanded[memo] = @exits.dig(key, arguments.key)
+        (demanded[memo] = [@exits.dig(key, arguments.key), typing && returned_type(typing, def_node, key)]).first
       end
 
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) }, entering: @file_states.entering,
-          source: nil, typed: methods, exits: @exits, demand: @demand, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies
+          source: nil, typed: methods, exits: @exits, demand: @demand, demanded: @demanded, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies
         )
       end
 
