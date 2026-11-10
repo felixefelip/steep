@@ -288,8 +288,10 @@ module Steep
 
           method_name = call.method_decls.first.method_name
           singleton = method_name.is_a?(SingletonMethodName)
-          visit_named(constr, method_name.type_name.to_s.delete_prefix("::"), method_name.method_name, singleton, names, Set[])
-          names
+          owner = method_name.type_name.to_s.delete_prefix("::")
+          constr.specializations.keep([:named_classes, constr.checker, constr.constructor_bindings, owner, method_name.method_name, singleton]) do
+            names.tap { visit_named(constr, owner, method_name.method_name, singleton, names, Set[]) }.freeze
+          end
         end
 
         # A call on `self` runs the body the class of `self` resolves, which is

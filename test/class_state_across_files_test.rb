@@ -173,6 +173,25 @@ class ClassStateAcrossFilesTest < Minitest::Test
     assert_equal 1, checks['(/s\z/, "") with {@singulars: []}']
   end
 
+  def test_the_classes_a_method_names_are_walked_once_per_method_and_store
+    walks = Hash.new(0)
+    counting = Module.new do
+      define_method(:visit_named) do |constr, owner, method_name, singleton, names, seen|
+        family = constr.specializations.keep(:family) { Object.new }
+        walks[[family, owner, method_name, singleton]] += 1 if seen.empty? && Thread.current[:count_named_walks]
+        super(constr, owner, method_name, singleton, names, seen)
+      end
+    end
+    Steep::ObjectStates::ClassStates.singleton_class.prepend(counting)
+    Thread.current[:count_named_walks] = true
+
+    assert_equal ["def post_ids; []; end"], chunks("a.rb" => DEFINITIONS + RULES, "z.rb" => MACRO)
+    refute_empty walks
+    assert_equal [1], walks.values.uniq
+  ensure
+    Thread.current[:count_named_walks] = nil
+  end
+
   def test_declines_what_a_file_other_than_the_defining_one_writes
     assert_equal [nil], chunks("a.rb" => DEFINITIONS, "b.rb" => RULES, "c.rb" => MACRO)
   end
