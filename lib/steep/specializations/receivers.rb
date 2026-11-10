@@ -48,7 +48,10 @@ module Steep
         # The calls of `name` whose receiver may be a value of `target`
         # (`ConstructorBindingRegistry#calls_of`).
         def calls_on(constr, name, target)
-          constr.constructor_bindings.calls_of(name).reject { |call| elsewhere?(constr, call, target) }
+          registry = constr.constructor_bindings
+          constr.specializations.keep([:calls_on, constr.checker, registry, name, target]) do
+            registry.calls_of(name).reject { |call| elsewhere?(constr, call, target) }.freeze
+          end
         end
 
         # Whether `call` may run one of the methods of the project's it names

@@ -192,6 +192,27 @@ class ClassStateAcrossFilesTest < Minitest::Test
     Thread.current[:count_named_walks] = nil
   end
 
+  def test_the_calls_on_a_receiver_are_sorted_once_per_method_and_store
+    sorts = Hash.new(0)
+    asking = Module.new do
+      define_method(:calls_on) do |constr, name, target|
+        Thread.current[:asked_calls_on] = [constr.specializations.keep(:family) { Object.new }, name, target]
+        super(constr, name, target)
+      ensure
+        Thread.current[:asked_calls_on] = nil
+      end
+    end
+    sorting = Module.new do
+      define_method(:calls_of) { |name| super(name).tap { sorts[Thread.current[:asked_calls_on]] += 1 if Thread.current[:asked_calls_on] } }
+    end
+    Steep::Specializations::Receivers.singleton_class.prepend(asking)
+    Steep::Project::ConstructorBindingRegistry.prepend(sorting)
+
+    assert_equal ["def post_ids; []; end"], chunks("a.rb" => DEFINITIONS + RULES, "z.rb" => MACRO)
+    refute_empty sorts
+    assert_equal [1], sorts.values.uniq
+  end
+
   def test_declines_what_a_file_other_than_the_defining_one_writes
     assert_equal [nil], chunks("a.rb" => DEFINITIONS, "b.rb" => RULES, "c.rb" => MACRO)
   end
