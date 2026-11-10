@@ -68,11 +68,12 @@ module Steep
             own = held(constr, singleton).merge(ClassMemos.memo_values(constr))
             known = known.merge(singleton.name => own) unless own.empty?
           end
-          return known if known.empty?
+          return known if known.empty? && constr.method_context
 
           receiver = call.is_a?(TypeInference::MethodCall::Typed) ? call.receiver_type : nil
           names = named_classes(constr, call)
           handed = handed_classes(constr, call_arguments(call.node))
+          constr.typing.asked_classes.merge(names).merge([receiver, *handed].filter_map { |name| class_name(name) })
           known.select do |name, _|
             (receiver.is_a?(AST::Types::Name::Singleton) && receiver.name == name) || handed.include?(name) || names.include?(name.to_s.delete_prefix("::"))
           end
@@ -92,6 +93,17 @@ module Steep
             ivars = ivars.to_h { |ivar, type| [ivar, held.escapes?(ivar) ? HashMutation.flatten(ObjectStates.settled(constr, type)) : type] }
           end
           env.refine_types(instance_variable_types: ivars).update(class_states: arguments.class_states)
+        end
+
+        # The classes, as `named_classes` spells them, whose entering state a
+        # check of a file may have read: those its calls asked for, any class
+        # object a node was typed as, and those it left otherwise than it
+        # entered them. Any other one it passed on as it got it.
+        def observed(typing, entered, left)
+          names = typing.asked_classes.dup
+          typing.each_typing { |_, type| singletons(type, names) }
+          entered.each { |name, ivars| names << class_name(name) unless left[name] == ivars }
+          names
         end
 
         # The ivars of a class object whose state a call may carry: none a
@@ -252,6 +264,18 @@ module Steep
           end
         rescue RBS::BaseError
           true
+        end
+
+        def singletons(type, names)
+          case type
+          when AST::Types::Name::Singleton then names << class_name(type)
+          when AST::Types::Union, AST::Types::Intersection then type.types.each { |member| singletons(member, names) }
+          end
+        end
+
+        def class_name(name)
+          name = name.name if name.is_a?(AST::Types::Name::Singleton)
+          name.to_s.delete_prefix("::") if name.is_a?(RBS::TypeName)
         end
 
         def memo_ivars(constr, name)

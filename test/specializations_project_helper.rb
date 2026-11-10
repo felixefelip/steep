@@ -41,7 +41,7 @@ module SpecializationsProjectHelper
   end
 
   # An ordinary check of `path` in `project`.
-  def checked(project, path)
+  def checked(project, path, specializations: project.specializations)
     target = project.targets.first or raise
     loader = Steep::Project::Target.construct_env_loader(options: target.options, project: project)
     file_loader = Steep::Services::FileLoader.new(base_dir: project.base_dir)
@@ -60,7 +60,7 @@ module SpecializationsProjectHelper
       contracts: project.contracts,
       postconditions: project.postconditions,
       callbacks: project.callbacks,
-      specializations: project.specializations,
+      specializations: specializations,
       literal_method_registry: project.literal_method_registry,
       delegation_registry: project.delegation_registry,
       constructor_bindings: project.constructor_binding_registry,

@@ -545,6 +545,8 @@ module Steep
         if source.node
           left = construction.synthesize(source.node).context.type_env.class_states
           typing.top_level_states = [type_env.class_states, left]
+          typing.observed_classes = ObjectStates::ClassStates.observed(typing, type_env.class_states, left)
+          specializations.entered_classes(source.path, typing.observed_classes)
         end
 
         typing
