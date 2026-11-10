@@ -140,6 +140,7 @@ module Steep
         @growth = {} #: Hash[String, Set[Integer]]
         @refinements = Hash.new(0) #: Hash[[String, String], Integer]
         @demanded = {} #: Hash[[String, String], [ObjectStates::Exit?, AST::Types::t?]]
+        @demands = Kept.new
         @demand = ->(store, key, arguments, in_checked_body) { demand_exit(context, definitions, @demanded, store, key, arguments, in_checked_body) }
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
         baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers, bodies: {}), locations, writers | @definers)
@@ -385,13 +386,6 @@ module Steep
       # before it, so how deep a frame sits says nothing about growth.
       def kept_growing?(key, generation) = (@growth.fetch(key, Set.new) - [generation]).size >= WIDEN_AFTER
 
-      def record_exit(key, arguments, typing, def_node)
-        return unless typing
-
-        exit = typing.exit_ivars_of(node: def_node)
-        store_exit(key, arguments, exit) if ObjectStates::KeptSelf.exit_kept?(arguments, exit)
-      end
-
       def store_exit(key, arguments, exit)
         exit ? (@exits[key] ||= {})[arguments.key] = exit : @exits[key]&.delete(arguments.key)
       end
@@ -399,7 +393,8 @@ module Steep
       # An exit a call needs before any generation has checked its tuple: the
       # body checked there under it, so a chain of writes to one object
       # settles in the generation that walks it instead of one generation per
-      # write. Memoized per generation, since `store` changes between them.
+      # write. Memoized per generation, and kept across them while the store
+      # answers what the check asked as it did then (`Kept`).
       #
       # Inside such a check, only the body it checks asks: the rest of its file
       # is walked too, under contents nothing has settled. A body that writes
@@ -415,14 +410,18 @@ module Steep
 
         begin
           path, def_node = definitions.fetch(key)
-          typing = type_check(context, store.with_reads(nil), context.sources.fetch(path), { node_key(path, def_node, key) => with_defaults(key, arguments, def_node) })
-          record_exit(key, arguments, typing, def_node)
+          active = { node_key(path, def_node, key) => with_defaults(key, arguments, def_node) }
+          checked, exit, returned, sites = @demands.value(memo, store.with_reads(nil).with_active(active), {}) do |reading, _|
+            typing = type_check(context, reading, context.sources.fetch(path), active)
+            typing ? [true, typing.exit_ivars_of(node: def_node), returned_type(typing, def_node, key), Collector.call_sites(typing, overrides: @overrides)] : [false, nil, nil, {}]
+          end
+          store_exit(key, arguments, exit) if checked && ObjectStates::KeptSelf.exit_kept?(arguments, exit)
           (@demanded_exits ||= Set[]) << memo
-          typing && Collector.call_sites(typing, overrides: @overrides).each { |site, found| ((@demanded_sites ||= {})[site] ||= Set.new).merge(found) }
+          sites.each { |site, found| ((@demanded_sites ||= {})[site] ||= Set.new).merge(found) }
         ensure
           @demanding.delete(memo)
         end
-        (demanded[memo] = [@exits.dig(key, arguments.key), typing && returned_type(typing, def_node, key)]).first
+        (demanded[memo] = [@exits.dig(key, arguments.key), returned]).first
       end
 
       def store(methods)
