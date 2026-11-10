@@ -1126,8 +1126,12 @@ module Steep
         read(:class_exit, name, ivar) { @class_exits.dig(name, ivar) }
       end
 
-      def entering_class_states(path)
-        read(:entering_class_states, path) { @entering.fetch(path, {}) }
+      # What a file's top level starts with. A check is read for the classes
+      # it observed of it (`entered_classes`), not for all of them.
+      def entering_class_states(path) = @entering.fetch(path, {})
+
+      def entered_classes(path, names)
+        read(:entered_classes, path, names) { FileStates.among(entering_class_states(path), names) }
       end
 
       # The recorded return type for `method_key` called with `argument_key`, as a

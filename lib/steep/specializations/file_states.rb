@@ -7,7 +7,7 @@ module Steep
     # with is carried no further.
     class FileStates
       def initialize
-        @by_path = {} #: Hash[Pathname, [Set[RBS::TypeName], Hash[RBS::TypeName, untyped], Hash[RBS::TypeName, untyped]]]
+        @by_path = {} #: Hash[Pathname, [Set[RBS::TypeName], Hash[RBS::TypeName, untyped], Hash[RBS::TypeName, untyped], Set[String]]]
         @rewritten_elsewhere = Set[] #: Set[RBS::TypeName]
       end
 
@@ -16,8 +16,11 @@ module Steep
 
         entered, left = typing.top_level_states
         entered.each { |name, ivars| @rewritten_elsewhere << name unless left[name] == ivars }
-        @by_path[path] = [typing.defined_classes, entered, left]
+        @by_path[path] = [typing.defined_classes, entered, left, typing.observed_classes]
       end
+
+      # `states` of the classes in `names` (`ObjectStates::ClassStates.observed`).
+      def self.among(states, names) = states.select { |name, _| names.include?(name.to_s.delete_prefix("::")) }
 
       def entering
         definers = Hash.new { |hash, name| hash[name] = [] } #: Hash[RBS::TypeName, Array[Pathname]]
@@ -32,8 +35,14 @@ module Steep
         end
       end
 
-      # The files last checked entering with other states than they would now.
-      def stale_paths = entering.filter_map { |path, states| path unless @by_path.fetch(path)[1] == states }
+      # The files last checked entering with other states than they would now,
+      # of the classes that check observed.
+      def stale_paths
+        entering.filter_map do |path, states|
+          _, entered, _, observed = @by_path.fetch(path)
+          path unless FileStates.among(entered, observed) == FileStates.among(states, observed)
+        end
+      end
     end
   end
 end
