@@ -49,7 +49,9 @@ module Steep
       def visit_ivar(node, name, parents, detached)
         if node.type == :ivasgn
           value = node.children[1]
-          value && !detached && statement?(node, parents) ? @assigned << [name, value] : @escaped << name
+          statement, around = value ? [node, parents] : [parents[-2], parents[0...-2] || []]
+          value ||= parallel_value(node, parents)
+          value && !detached && statement?(statement, around) ? @assigned << [name, value] : @escaped << name
         elsif detached || !received?(node, parents, name)
           @escaped << name
         end
@@ -62,6 +64,16 @@ module Steep
         return parents.empty? || (parents.size == 1 && parents[0].type == :begin) if @initializer
 
         parents.size == 1 && parents[0].type == :begin && !parents[0].children.last.equal?(node)
+      end
+
+      # The value `@a, @b = x, y` assigns `node`, the target at its index.
+      def parallel_value(node, parents)
+        mlhs, masgn = parents.last(2).reverse
+        values = masgn&.children&.[](1)
+        return unless mlhs&.type == :mlhs && values&.type == :array && values.children.none? { |value| value.type == :splat }
+
+        index = mlhs.children.index { |target| target.equal?(node) } or return
+        values.children[index]
       end
 
       def ivar_of(node)
