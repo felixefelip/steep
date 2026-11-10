@@ -1152,8 +1152,10 @@ module Steep
       end
 
       def return_type(method_key, argument_key, factory:)
-        typed = @typed.dig(method_key, argument_key) and return typed
-        parse(method_key, @methods.dig(method_key, argument_key), factory: factory) || @demanded[[method_key, argument_key]]&.last
+        read(:return_type, method_key, argument_key, factory: factory) do
+          @typed.dig(method_key, argument_key) ||
+            parse(method_key, @methods.dig(method_key, argument_key), factory: factory) || @demanded[[method_key, argument_key]]&.last
+        end
       end
 
       def declaration_type(method_key, factory:)

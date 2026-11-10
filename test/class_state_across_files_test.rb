@@ -121,7 +121,7 @@ class ClassStateAcrossFilesTest < Minitest::Test
       self.@instances: Map
   RBS
 
-  def chunks(files, rbs = RBS, &recorded)
+  def chunks(files, rbs = RBS, hooks = nil, &recorded)
     in_tmpdir do
       write("sig/app.rbs", rbs)
       files.each { |name, content| write("app/#{name}", content) }
@@ -129,6 +129,7 @@ class ClassStateAcrossFilesTest < Minitest::Test
       postconditions.write(postconditions.run)
       runner = Steep::Specializations::Runner.new(setup_project)
       runner.singleton_class.prepend(Module.new { define_method(:file_check) { |*args| super(*args).tap { |typing| recorded&.call(args[2].path, typing) if typing } } })
+      runner.singleton_class.prepend(hooks) if hooks
       runner.run
       runner.evals.values.flatten.map { |chunk| chunk&.source }
     end
@@ -151,6 +152,25 @@ class ClassStateAcrossFilesTest < Minitest::Test
 
     assert_equal ["def post_ids; []; end"], folded
     assert_equal [], left.drop_while { |kept| !kept }.reject { |kept| kept }
+  end
+
+  def test_a_demanded_check_whose_answers_hold_is_kept_across_generations
+    checks = Hash.new(0)
+    counting = Module.new do
+      define_method(:demand_exit) do |*args|
+        @demanding_depth = (@demanding_depth || 0) + 1
+        super(*args)
+      ensure
+        @demanding_depth -= 1
+      end
+      define_method(:type_check) do |context, store, source, active|
+        active.each_value { |arguments| checks[arguments.key] += 1 } if @demanding_depth&.positive?
+        super(context, store, source, active)
+      end
+    end
+
+    assert_equal ["def post_ids; []; end"], chunks({ "a.rb" => BACKED + RULES, "z.rb" => MACRO }, BACKED_RBS, counting)
+    assert_equal 1, checks['(/s\z/, "") with {@singulars: []}']
   end
 
   def test_declines_what_a_file_other_than_the_defining_one_writes
