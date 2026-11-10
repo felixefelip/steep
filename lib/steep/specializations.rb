@@ -1071,8 +1071,11 @@ module Steep
       # `entering`: the class states each file's top level starts with, by path.
       # `reads`: where to record each question a check asks and the answer it
       # got (`Reads`).
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, receivers:, bodies:, entering: {}, reads: nil)
+      # `kept`: what `keep` computed, shared by every copy of this store. Only
+      # valid while `receivers` and the constructor bindings stay as they are.
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, receivers:, bodies:, entering: {}, reads: nil, kept: {})
         @methods = methods
+        @kept = kept
         @entering = entering
         @receivers = receivers
         @bodies = bodies
@@ -1113,8 +1116,10 @@ module Steep
 
       def receiver_type(site, factory:)
         read(:receiver_type, site, factory: factory) do
-          types = @receivers[site]&.map { |raw| parse(site, raw, factory: factory) or break nil }
-          types && AST::Types::Union.build(types: types)
+          keep([:receiver_type, site]) do
+            types = @receivers[site]&.map { |raw| parse(site, raw, factory: factory) or break nil }
+            types && AST::Types::Union.build(types: types)
+          end
         end
       end
 
@@ -1168,6 +1173,14 @@ module Steep
         return @memo[object] if @memo.key?(object)
 
         @memo[object] = yield
+      end
+
+      # `yield`, computed once per `key` across every copy of this store: for
+      # what reads nothing but the receivers and the constructor bindings.
+      def keep(key)
+        return @kept[key] if @kept.key?(key)
+
+        @kept[key] = yield
       end
 
       def parse(method_key, raw, factory:)
@@ -1232,7 +1245,8 @@ module Steep
       def with(active:, reads:)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand, demanded: @demanded,
-          class_exits: @class_exits, declarations: @declarations, receivers: @receivers, bodies: @bodies, entering: @entering, reads: reads
+          class_exits: @class_exits, declarations: @declarations, receivers: @receivers, bodies: @bodies, entering: @entering, reads: reads,
+          kept: @kept
         )
       end
 

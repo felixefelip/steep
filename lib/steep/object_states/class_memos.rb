@@ -391,7 +391,7 @@ module Steep
         end
 
         def running_closure(constr, method_name)
-          constr.specializations.memoize(:"running_closure #{method_name}") do
+          constr.specializations.keep([:running_closure, method_name]) do
             constr.constructor_bindings.running_closure(method_name, reaching: reaching(constr))
           end
         end
@@ -411,12 +411,12 @@ module Steep
           state = ObjectStates.state_in(type)
           nested = state && ForwardedHash.nested(constr, state.back_type)
           unless state && nested
-            return constr.specializations.memoize(:"storing_closure #{method_name} #{ivar}") do
+            return constr.specializations.keep([:storing_closure, method_name, ivar]) do
               registry.storing_closure(method_name, ivar, reaching: reaching(constr))
             end
           end
 
-          constr.specializations.memoize(:"forwarded_storing_closure #{ivar}") do
+          constr.specializations.keep([:forwarded_storing_closure, ivar]) do
             registry.forwarded_storing_closure(ivar, reaching: reaching(constr))
           end
         end

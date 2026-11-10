@@ -145,6 +145,7 @@ module Steep
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
         baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers, bodies: {}), locations, writers | @definers)
         definitions.merge!(collected)
+        @kept = {}
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
@@ -427,7 +428,7 @@ module Steep
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) }, entering: @file_states.entering,
-          source: nil, typed: methods, exits: @exits, demand: @demand, demanded: @demanded, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies
+          source: nil, typed: methods, exits: @exits, demand: @demand, demanded: @demanded, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies, kept: @kept
         )
       end
 
