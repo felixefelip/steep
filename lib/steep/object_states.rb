@@ -557,11 +557,11 @@ module Steep
       end
 
       def frozen_source?(source)
-        @frozen_sources ||= {}.compare_by_identity
-        @frozen_sources.fetch(source) do
-          comments = Prism.parse(source.buffer.content).magic_comments
-          @frozen_sources[source] = comments.any? { |comment| comment.key == "frozen_string_literal" && comment.value == "true" }
-        end
+        @frozen_sources ||= ObjectSpace::WeakKeyMap.new
+        return @frozen_sources[source] if @frozen_sources.key?(source)
+
+        comments = Prism.parse(source.buffer.content).magic_comments
+        @frozen_sources[source] = comments.any? { |comment| comment.key == "frozen_string_literal" && comment.value == "true" }
       end
 
       # Only a state alone keeps the markers the postcondition left in

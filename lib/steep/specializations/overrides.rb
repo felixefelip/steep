@@ -150,11 +150,11 @@ module Steep
       end
 
       def direct_subclasses(env)
-        env.class_decls.each_with_object(Hash.new { |hash, key| hash[key] = [] }) do |(name, entry), children|
+        env.class_decls.each_with_object({}) do |(name, entry), children|
           next unless entry.is_a?(RBS::Environment::ClassEntry)
 
           parent = entry.primary_decl.super_class&.name or next
-          children[parent] << name
+          (children[parent] ||= []) << name
         end
       end
     end
