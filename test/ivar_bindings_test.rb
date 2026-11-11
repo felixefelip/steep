@@ -226,7 +226,8 @@ class IvarBindingsTest < Minitest::Test
     assert_equal :@priv, registry.body_of("C", :priv)&.returns
     assert_equal :@reader, registry.body_of("C", :reader)&.returns
     assert_equal :@accessor, registry.body_of("C", :accessor)&.returns
-    %i[accessor= writer= aliased alias_m defined wrapped conditional in_block inner].each do |name|
+    assert_equal :@defined, registry.body_of("C", :defined)&.returns
+    %i[accessor= writer= aliased alias_m wrapped conditional in_block inner].each do |name|
       assert registry.defines?("C", name), name.to_s
       assert_nil registry.body_of("C", name)&.returns, name.to_s
     end

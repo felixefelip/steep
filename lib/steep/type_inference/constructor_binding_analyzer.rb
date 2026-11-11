@@ -298,7 +298,8 @@ module Steep
       # A nested class, module or singleton body defines elsewhere.
       def each_method_definition(node, direct:, &block)
         return unless node.is_a?(::Parser::AST::Node)
-        return yield(defined, (method_body(node.children[1], node.children[2]) if direct)) if node.type == :block && (defined, = DefinedMethods.def_parts(node, singleton: false))
+        defined, = DefinedMethods.def_parts(node, singleton: false) if node.type == :block
+        return yield(defined, (method_body(node.children[1], node.children[2]) if direct)) if defined
 
         case node.type
         when :class, :module, :sclass
