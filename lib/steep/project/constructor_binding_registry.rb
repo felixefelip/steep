@@ -218,29 +218,29 @@ module Steep
       # (`StoringClosure`); nil where a store may run from code no method name
       # stands for. `reaching` says whether a call of a method of the closure
       # may run that method.
-      def storing_closure(memo, ivar, reaching:)
+      def storing_closure(memo, ivar, reaching:, in_place:)
         index_uses unless @uses
         key = [memo.to_sym, ivar.to_sym]
-        closure_of_stores(*key, reaching: reaching) if @hash_memos.include?(key)
+        closure_of_stores(*key, reaching: reaching, in_place: in_place) if @hash_memos.include?(key)
       end
 
       # `storing_closure` for the object a class body keeps in `ivar`, where
       # it forwards to a hash it keeps (`ObjectStates::ForwardedHash`): a call
       # of any method of the project's that stores into an ivar's hash may
       # be one of its stores.
-      def forwarded_storing_closure(ivar, reaching:)
+      def forwarded_storing_closure(ivar, reaching:, in_place:)
         index_uses unless @uses
         ivar = ivar.to_sym
-        closure_of_stores(ivar, ivar, @forwarded_stores, reaching: reaching) if @born_objects.each_value.any? { |ivars| ivars.key?(ivar) }
+        closure_of_stores(ivar, ivar, @forwarded_stores, reaching: reaching, in_place: in_place) if @born_objects.each_value.any? { |ivars| ivars.key?(ivar) }
       end
 
       # The calls that may run `method_name` (`StoringClosure`): its own and
       # those of every method that may call it, by name; nil where a call of
       # it is made from code no method name stands for. `reaching` says whether
       # a call of a method of the closure may run that method.
-      def running_closure(method_name, reaching:)
+      def running_closure(method_name, reaching:, in_place:)
         index_uses unless @uses
-        closure_of_calls({ method_name.to_sym => owners_of(method_name).to_set }, reaching: reaching)
+        closure_of_calls({ method_name.to_sym => owners_of(method_name).to_set }, reaching: reaching, in_place: in_place)
       end
 
       # The classes that define `method_name`, on their instances or, with
@@ -285,7 +285,7 @@ module Steep
       # The class methods that store into the hash `memo` keeps in `ivar`,
       # where every store is made by a class body on its own class; nil
       # otherwise.
-      def class_body_storing(memo, ivar, reaching:) = class_body_storing_methods(storing_closure(memo, ivar, reaching: reaching), reaching)
+      def class_body_storing(memo, ivar, reaching:, in_place:) = class_body_storing_methods(storing_closure(memo, ivar, reaching: reaching, in_place: in_place), reaching)
 
       # Whether every call of `method_name`, a method that yields a memo, hands
       # it a block a `yield` checks in place, or none
@@ -470,9 +470,9 @@ module Steep
       end
 
       def scan_closures(hashes)
-        hashes.each { |memo, ivar| closure_of_stores(memo, ivar, reaching: EVERY_CALL) }
-        (memoizing_methods | yielding_methods).each { |name| closure_of_calls({ name => owners_of(name).to_set }, reaching: EVERY_CALL) }
-        @born_objects.each_value.flat_map(&:keys).uniq.each { |ivar| closure_of_stores(ivar, ivar, @forwarded_stores, reaching: EVERY_CALL) }
+        hashes.each { |memo, ivar| closure_of_stores(memo, ivar, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
+        (memoizing_methods | yielding_methods).each { |name| closure_of_calls({ name => owners_of(name).to_set }, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
+        @born_objects.each_value.flat_map(&:keys).uniq.each { |ivar| closure_of_stores(ivar, ivar, @forwarded_stores, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
       end
 
       def yielding_methods
@@ -536,19 +536,19 @@ module Steep
         [memo, ivar].flat_map { |name| @uses.fetch(name, []) }.select { |use| names.include?(use.called) }
       end
 
-      EVERY_CALL = ->(_call, _owners) { true }
+      EVERY_CALL, EVERY_BLOCK = ->(_call, _owners) { true }, ->(_call) { true }
 
       # Grows past a call that escapes, so that `build` scans every name a
       # closure `reaching` fewer calls may ask for: no node is left after it.
-      def closure_of_stores(memo, ivar, names = HASH_STORES, reaching:)
+      def closure_of_stores(memo, ivar, names = HASH_STORES, reaching:, in_place:)
         stores = stores_into(memo, ivar, names)
         return if stores.any? { |use| use.kind != :statement && !use.within }
 
         storing = stores.filter_map(&:within).uniq.to_h { |name| [name, owners_of(name).select { |_, singleton| singleton }.to_set] }
-        closure_of_calls(storing, reaching: reaching)
+        closure_of_calls(storing, reaching: reaching, in_place: in_place)
       end
 
-      def closure_of_calls(owners, reaching:) = StoringClosure.grow(owners, reaching: reaching) { |names| calls_named(names) }
+      def closure_of_calls(owners, reaching:, in_place:) = StoringClosure.grow(owners, reaching: reaching, in_place: in_place) { |names| calls_named(names) }
 
       # The closure, where each call of its methods is a statement of a class
       # body on its own class or is made by one of them on `self`.

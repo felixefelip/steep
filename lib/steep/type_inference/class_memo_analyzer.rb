@@ -44,7 +44,10 @@ module Steep
       # methods of that name do with that parameter, filled in by the registry
       # (`ConstructorBindingRegistry#hand_on`). `self_at`: the call naming it
       # on `self`, by `site`. `on_ivar`: of a call, the ivar it is made on.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed, :self_at, :on_ivar) do
+      # `blocks`: of a call made inside blocks of a method's body, where no
+      # `enclosing` is, `[[name, singleton], [[site, method], ...]]`: that
+      # method, and each call whose block holds it, innermost first.
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed, :self_at, :on_ivar, :blocks) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
           value&.each { |use| use.each_forwarder(&block) }
@@ -84,7 +87,7 @@ module Steep
         until (unscanned = names.to_set - index.keys).empty?
           unscanned.each { |name| index[name] = [] }
           nodes.each { |node| calls(node, names: unscanned).each { |name, found| index[name].concat(found) } }
-          names = callers ? unscanned.flat_map { |name| index[name].filter_map(&:enclosing) } : []
+          names = callers ? unscanned.flat_map { |name| index[name].filter_map { |call| call.enclosing || call.blocks&.dig(0, 0) } } : []
         end
       end
 
@@ -227,6 +230,7 @@ module Steep
           kind = in_class_body && on_self ? :statement : :call
           @uses[name] << Use.new(kind, name, Set[], on_self ? class_method_of(node) : nil, nil, on_self ? nil : ClassMemoAnalyzer.site(node)).tap do |use|
             use.enclosing, use.singleton = defined_in(node)
+            use.blocks = blocks_to_method(node) unless use.enclosing
             use.owner = owner_of(node)
             use.in_class_body = in_class_body
             use.on_self = on_self
@@ -468,8 +472,32 @@ module Steep
       # `[name, singleton]` of the method whose body makes `node`, where it is
       # an instance method or one of `self`'s class.
       def defined_in(node)
-        name = enclosing_method(node) or return
+        enclosing_method(node) or return
         node = @parents[node] until %i[def defs].include?(node.type)
+        method_of_def(node)
+      end
+
+      # `defined_in` of a call some blocks hold (`Use#blocks`), where each
+      # block is given to a call with a site.
+      def blocks_to_method(node)
+        blocks = [] #: Array[[String, Symbol]]
+        child = node
+        until (node = @parents[node]).nil? || %i[def defs].include?(node.type)
+          return if %i[class module sclass].include?(node.type)
+
+          if Accumulators::LAMBDA_BODIES.include?(node.type) && !node.children[0].equal?(child)
+            send = node.children[0]
+            site = %i[send csend].include?(send.type) && ClassMemoAnalyzer.site(send) or return
+            blocks << [site, send.children[1]]
+          end
+          child = node
+        end
+        method = node && method_of_def(node) or return
+        [method, blocks] unless blocks.empty?
+      end
+
+      def method_of_def(node)
+        name = node.type == :def ? node.children[0] : node.children[1]
         return [name, true] if node.type == :defs && node.children[0].type == :self
         return if node.type == :defs
 

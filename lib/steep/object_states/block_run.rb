@@ -14,6 +14,10 @@ module Steep
     # is not handed `self`: its body then has no way to change `self` around
     # the block.
     module BlockRun
+      # Methods of the core's, written in C, that run the block they are
+      # given while the call runs and keep nothing of it.
+      RUNS_IN_PLACE = Set["::String#sub", "::String#sub!", "::String#gsub", "::String#gsub!"].freeze
+
       module_function
 
       def after(constr, node, receiver_type, method_name)
@@ -44,14 +48,26 @@ module Steep
         variables = constr.checker.factory.definition_builder.build_instance(instance.name).instance_variables
         iterations.all? do |ivar, method_name|
           declared = variables[ivar] or next false
-          type = constr.checker.factory.type(declared.type)
-          keys = MethodIdentity.keys(constr, type, method_name, private: false)
-          next true if !keys.empty? && keys.all? { |key| IterationIntrinsics.entry(key, override_registry: constr.literal_method_registry) }
-
-          runs_once?(constr, type, method_name)
+          in_place_on?(constr, constr.checker.factory.type(declared.type), method_name, private: false)
         end
       rescue RBS::BaseError
         false
+      end
+
+      # `in_place?` of the call at `site` (`ClassMemoAnalyzer.site`), by the
+      # type its receiver has there (`Specializations::Receivers`).
+      def runs_in_place?(constr, site, method_name)
+        type = constr.specializations.receiver_type(site, factory: constr.checker.factory) or return false
+        in_place_on?(constr, type, method_name, private: true)
+      rescue RBS::BaseError
+        false
+      end
+
+      def in_place_on?(constr, type, method_name, private:)
+        keys = MethodIdentity.keys(constr, type, method_name, private: private)
+        return true if !keys.empty? && keys.all? { |key| RUNS_IN_PLACE.include?(key) || IterationIntrinsics.entry(key, override_registry: constr.literal_method_registry) }
+
+        runs_once?(constr, type, method_name)
       end
 
       def runs_once?(constr, receiver_type, method_name)
