@@ -7,7 +7,7 @@ module Steep
         def only?(constr, target, name, visiting = Set[])
           registry = constr.constructor_bindings
           return true if Project::ConstructorBindingRegistry::INITIALIZERS.include?(name) || registry.initializing?(name)
-          return false if visiting.include?(name) || !registry.used_names.include?(name)
+          return false if visiting.include?(name) || !registry.used_name?(name)
 
           calls = Receivers.calls_on(constr, name, target)
           !calls.empty? && calls.all? do |call|
