@@ -32,6 +32,7 @@ module Steep
         @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
         @born_objects = {} #: Hash[String, Hash[Symbol, Symbol]]
         @class_body_cvars = {} #: Hash[String, Set[Symbol]]
+        @class_body_ivars = {} #: Hash[String, Hash[Symbol, bool]]
         @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
         @block_calls = {} #: Hash[Symbol, Array[Symbol]]
         @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
@@ -126,7 +127,11 @@ module Steep
       end
 
       # Whether `call` runs on a plain `Hash` or `Array` (`LiteralWrites`).
-      def literal_receiver?(call, related: nil) = TypeInference::LiteralWrites.receiver?(call, @methods, related: related)
+      def literal_receiver?(call, related: nil)
+        return TypeInference::LiteralWrites.receiver?(call, @methods, related: related) unless call.singleton || call.enclosing.nil?
+
+        TypeInference::LiteralWrites.class_object_receiver?(call, @singleton_methods, @class_body_ivars, related: related)
+      end
 
       # Every body the project may define for `class_name#method_name`s,
       # nil for one this cannot read.
@@ -414,6 +419,7 @@ module Steep
         merge_bodies(@conditional_methods, scan.conditional_methods)
         scan.aliases.each { |class_name, aliases| (@aliases[class_name] ||= {}).merge!(aliases) }
         scan.class_body_cvars.each { |class_name, cvars| (@class_body_cvars[class_name] ||= Set[]).merge(cvars) }
+        scan.class_body_ivars.each { |class_name, ivars| (@class_body_ivars[class_name] ||= {}).merge!(ivars) { |_, kept, more| kept && more } }
         [@reached_methods, @reached_singleton_methods].each(&:clear)
       end
 
