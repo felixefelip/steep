@@ -8,16 +8,21 @@ module Steep
       SENDS = %i[send csend].freeze
 
       class << self
-        # Each call in `node` naming one of `names`, with the receiver's type
-        # as RBS: on `self`, the type `self` has where the call is made
-        # (`call`, which a call with a block is recorded on). A site whose
-        # receiver the checker did not type, or typed relative to where it
-        # is, is nil.
+        # Each call in `node` naming one of `names`, and each whose block
+        # makes one (`ObjectStates::BlockRun.runs_in_place?`), with the
+        # receiver's type as RBS: on `self`, the type `self` has where the
+        # call is made (`call`, which a call with a block is recorded on). A
+        # site whose receiver the checker did not type, or typed relative to
+        # where it is, is nil.
         def collect(typing, node, names, found = {}, call: node)
           return found unless node.is_a?(::Parser::AST::Node)
 
           if SENDS.include?(node.type) && names.include?(node.children[1]) && (site = TypeInference::ClassMemoAnalyzer.site(node))
             found[site] = receiver_written(typing, node.children[0], call)
+          end
+          if Accumulators::LAMBDA_BODIES.include?(node.type) && SENDS.include?(node.children[0].type) && names_any?(node.children.drop(1), names) &&
+             (site = TypeInference::ClassMemoAnalyzer.site(node.children[0]))
+            found[site] = receiver_written(typing, node.children[0].children[0], node)
           end
           node.children.each_with_index do |child, index|
             collect(typing, child, names, found, call: Accumulators::LAMBDA_BODIES.include?(node.type) && index.zero? ? node : child)
@@ -67,6 +72,12 @@ module Steep
         end
 
         private
+
+        def names_any?(nodes, names)
+          nodes.any? do |node|
+            node.is_a?(::Parser::AST::Node) && ((SENDS.include?(node.type) && names.include?(node.children[1])) || names_any?(node.children, names))
+          end
+        end
 
         def receiver_written(typing, receiver, call)
           if receiver.nil? || receiver.type == :self

@@ -50,7 +50,7 @@ module Steep
 
           singleton = Specializations.exact_self(constr) or return
           storing = constr.specializations.memoize(:"class_body_storing #{call.method_name} #{ivar}") do
-            constr.constructor_bindings.class_body_storing(call.method_name, ivar, reaching: reaching(constr))
+            constr.constructor_bindings.class_body_storing(call.method_name, ivar, reaching: reaching(constr), in_place: in_place(constr))
           end
           return unless storing
           return if overrides_class_method?(constr, storing)
@@ -392,7 +392,7 @@ module Steep
 
         def running_closure(constr, method_name)
           constr.specializations.keep([:running_closure, method_name]) do
-            constr.constructor_bindings.running_closure(method_name, reaching: reaching(constr))
+            constr.constructor_bindings.running_closure(method_name, reaching: reaching(constr), in_place: in_place(constr))
           end
         end
 
@@ -412,16 +412,18 @@ module Steep
           nested = state && ForwardedHash.nested(constr, state.back_type)
           unless state && nested
             return constr.specializations.keep([:storing_closure, method_name, ivar]) do
-              registry.storing_closure(method_name, ivar, reaching: reaching(constr))
+              registry.storing_closure(method_name, ivar, reaching: reaching(constr), in_place: in_place(constr))
             end
           end
 
           constr.specializations.keep([:forwarded_storing_closure, ivar]) do
-            registry.forwarded_storing_closure(ivar, reaching: reaching(constr))
+            registry.forwarded_storing_closure(ivar, reaching: reaching(constr), in_place: in_place(constr))
           end
         end
 
         def reaching(constr) = ->(call, owners) { Specializations::Receivers.reaches?(constr, call, owners) }
+
+        def in_place(constr) = ->(call) { call.blocks.last.all? { |site, method_name| BlockRun.runs_in_place?(constr, site, method_name) } }
 
         # A method the runtime may call with no send written for it: one of
         # `Class`'s, or of a protocol declared as a top-level interface

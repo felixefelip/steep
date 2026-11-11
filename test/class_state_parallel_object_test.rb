@@ -192,4 +192,32 @@ class ClassStateParallelObjectTest < Minitest::Test
 
     assert_equal [nil], chunks(":posts", ruby: ruby, rbs: rbs)
   end
+
+  INSTANCE = "  def self.instance(locale = :en) = (instances[locale] ||= Rules.new)\n"
+
+  def with_holder_method(body)
+    ruby = RUBY.sub(INSTANCE, INSTANCE + "  #{body}\n")
+    rbs = RBS.sub("  def self.instance: (?Symbol locale) -> Rules\n", "  def self.instance: (?Symbol locale) -> Rules\n  def self.lookup: (String word) -> untyped\n")
+    refute_equal RUBY, ruby
+    refute_equal RBS, rbs
+    [ruby, rbs]
+  end
+
+  def test_the_memo_read_in_a_block_an_iteration_runs_in_place_keeps_its_state
+    ruby, rbs = with_holder_method("def self.lookup(word) = [word].map { |each| instance(:en).uncountables.uncountable?(each) }")
+
+    assert_equal ["def post_ids; []; end"], chunks(":posts", ruby: ruby, rbs: rbs)
+  end
+
+  def test_the_memo_read_in_the_block_of_a_string_substitution_keeps_its_state
+    ruby, rbs = with_holder_method("def self.lookup(word) = word.to_s.gsub(/x/) { |match| instance(:en).uncountables.uncountable?(match) ? match : match }")
+
+    assert_equal ["def post_ids; []; end"], chunks(":posts", ruby: ruby, rbs: rbs)
+  end
+
+  def test_declines_the_memo_read_in_a_block_a_proc_keeps
+    ruby, rbs = with_holder_method("def self.lookup(word) = proc { |each| instance(:en).uncountables.uncountable?(each) }")
+
+    assert_equal [nil], chunks(":posts", ruby: ruby, rbs: rbs)
+  end
 end
