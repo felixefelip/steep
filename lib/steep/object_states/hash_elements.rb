@@ -246,7 +246,7 @@ module Steep
           return followed && constr.constructor_bindings.replayed_everywhere?(use.called) if use.kind == :yielded
           return false if use.kind == :escape || !use.element_calls.empty?
 
-          effect = ObjectStates.method_effect(constr, instance, use.called) or return false
+          effect = ObjectStates::MethodEffects.of(constr, instance, use.called) or return false
           effect.reads_only || (followed && use.kind == :statement)
         end
       end

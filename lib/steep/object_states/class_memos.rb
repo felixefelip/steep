@@ -607,7 +607,7 @@ module Steep
             next constr.constructor_bindings.replayed_everywhere?(use.called) if use.kind == :yielded
             next true if forwarders.empty? && stores.include?(use.called)
 
-            effect = ObjectStates.method_effect(constr, instance, use.called) or next false
+            effect = ObjectStates::MethodEffects.of(constr, instance, use.called) or next false
             effect.reads_only || (use.kind == :statement && forwarders.empty?)
           end
         end
