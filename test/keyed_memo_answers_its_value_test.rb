@@ -144,11 +144,12 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
     assert_equal "[:en]", types(ruby, RBS + LOCALS_RBS).fetch("en")
   end
 
-  def test_any_type_refines_untyped_and_nothing_else_it_does_not_descend_from
+  def test_a_type_refines_untyped_and_what_it_descends_from
     tuple = Steep::AST::Types::Tuple.new(types: [Steep::AST::Types::Literal.new(value: :en)])
     array_of = ->(element) { Steep::AST::Builtin::Array.instance_type(element) }
 
     assert Steep::Specializations.refines?(tuple, array_of[Steep::AST::Builtin.any_type])
+    assert Steep::Specializations.refines?(tuple, array_of[Steep::AST::Builtin::Symbol.instance_type])
     refute Steep::Specializations.refines?(tuple, array_of[Steep::AST::Builtin::Integer.instance_type])
   end
 end
