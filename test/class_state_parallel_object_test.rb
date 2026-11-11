@@ -106,6 +106,34 @@ class ClassStateParallelObjectTest < Minitest::Test
     .sub("  def add: (Array[untyped] words) -> self\n", "  def add: (Array[untyped] words) -> self\n  def delete: (untyped entry) -> untyped\n")
     .gsub(/Uncountables$/, "Uncountables[untyped]")
 
+  SINGULARIZE = <<~RUBY.gsub(/^/, "  ")
+    def self.singularize(word)
+      result = word.dup
+      if word.empty? || rules.uncountables.uncountable?(result)
+        result
+      else
+        rules.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+        result
+      end
+    end
+  RUBY
+
+  HANDED_RUBY = RUBY.sub(SINGULARIZE, <<~RUBY.gsub(/^/, "  "))
+    def self.singularize(word) = apply(word, rules.singulars)
+
+    def self.apply(word, list, locale = :en)
+      result = word.to_s.dup
+      if word.empty? || Holder.instance(locale).uncountables.uncountable?(result)
+        result
+      else
+        list.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
+        result
+      end
+    end
+  RUBY
+
+  HANDED_RBS = RBS.sub("  def self.singularize: (String word) -> String\n", "  def self.singularize: (String word) -> String\n  def self.apply: (untyped word, untyped list, ?Symbol locale) -> untyped\n")
+
   def chunks(name, ruby: RUBY, rbs: RBS)
     in_tmpdir do
       write("sig/app.rbs", rbs)
@@ -144,5 +172,24 @@ class ClassStateParallelObjectTest < Minitest::Test
     ruby = DELETING_RUBY.sub("  instance(:en).uncountable(\"fish\")\n", "  instance(:en).singular(/sh\\z/, ENV.fetch(\"RULE\"))\n  instance(:en).uncountable(\"fish\")\n")
 
     assert_equal ["def fish_ids; []; end"], chunks(":fish", ruby: ruby, rbs: GENERIC_RBS)
+  end
+
+  def test_rules_handed_to_a_method_that_only_reads_them_run_one_by_one
+    refute_equal RUBY, HANDED_RUBY
+    refute_equal RBS, HANDED_RBS
+
+    assert_equal ["def post_ids; []; end"], chunks(":posts", ruby: HANDED_RUBY, rbs: HANDED_RBS)
+    assert_equal ["def fish_ids; []; end"], chunks(":fish", ruby: HANDED_RUBY, rbs: HANDED_RBS)
+  end
+
+  def test_declines_rules_handed_to_a_method_that_changes_them
+    ruby = HANDED_RUBY
+      .sub("    result = word.to_s.dup\n", "    forget(list)\n    result = word.to_s.dup\n")
+      .sub("  def self.apply(word, list, locale = :en)\n", "  def self.forget(list) = list.unshift([/posts\\z/, ENV.fetch(\"RULE\")])\n\n  def self.apply(word, list, locale = :en)\n")
+    rbs = HANDED_RBS.sub("  def self.apply:", "  def self.forget: (untyped list) -> untyped\n  def self.apply:")
+    assert_includes ruby, "    forget(list)\n"
+    assert_includes ruby, "def self.forget"
+
+    assert_equal [nil], chunks(":posts", ruby: ruby, rbs: rbs)
   end
 end

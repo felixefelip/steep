@@ -613,9 +613,13 @@ module Steep
         end
 
         # Whether each use only reads the array, and a block handed its
-        # elements only reads them.
+        # elements only reads them. One handed to a method is made by its body.
         def reading_uses?(constr, uses)
-          uses.all? { |use| use.kind != :escape && collection_read?(constr, use.called) && reads_elements?(constr, use.element_calls) }
+          uses.all? do |use|
+            next reading_uses?(constr, use.handed) if use.handed
+
+            use.kind != :escape && collection_read?(constr, use.called) && reads_elements?(constr, use.element_calls)
+          end
         end
 
         def reads_elements?(constr, calls)
