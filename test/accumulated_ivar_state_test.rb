@@ -1340,9 +1340,9 @@ class AccumulatedIvarStateTest < Minitest::Test
   end
 
   def test_declines_a_method_handing_on_to_an_ivar_something_may_assign_otherwise
-    ruby = delegating_map(outside: "\nclass Other\n  def initialize\n    @map = Object.new\n  end\nend\n")
+    ruby = delegating_map(outside: "\nclass Other < Fallbacks\n  def initialize\n    super\n    @map = { en: [:pt] }\n  end\nend\nOther.new\n")
 
-    assert_equal [[nil], [nil]], chunks(ruby, rbs: DELEGATING_MAP_RBS.sub("class Other\n", "class Other\n  @map: untyped\n"))
+    assert_equal [[nil], [nil]], chunks(ruby, rbs: DELEGATING_MAP_RBS.sub("class Other\n", "class Other < Fallbacks\n  def initialize: () -> void\n"))
   end
 
   def test_declines_a_method_something_may_call_that_writes_the_hash
