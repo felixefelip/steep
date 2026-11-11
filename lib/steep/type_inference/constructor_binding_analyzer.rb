@@ -50,9 +50,11 @@ module Steep
       # `@x = …` and `@x ||= …` set one, the assignment.
       # `class_body_cvars`: for each class or module, the class variables its
       # body, outside its methods, assigns anything but `nil`.
+      # `class_body_ivars`: for each, the ivars it assigns there, true where
+      # each assignment sets a hash or array literal (`LiteralWrites`).
       JOIN_BIRTHS = proc { |_, *hows| hows.include?(:ivasgn) ? :ivasgn : :or_asgn }
 
-      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :conditional_methods, :aliases, :class_bodies, :mixin_bodies, :declared, :born_hashes, :born_objects, :class_body_cvars, keyword_init: true)
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :conditional_methods, :aliases, :class_bodies, :mixin_bodies, :declared, :born_hashes, :born_objects, :class_body_cvars, :class_body_ivars, keyword_init: true)
 
       # One method, as far as the object it runs on goes:
       #
@@ -154,6 +156,7 @@ module Steep
         @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
         @born_objects = {} #: Hash[String, Hash[Symbol, Symbol]]
         @class_body_cvars = {} #: Hash[String, Set[Symbol]]
+        @class_body_ivars = {} #: Hash[String, Hash[Symbol, bool]]
       end
 
       def scan(node)
@@ -161,7 +164,7 @@ module Steep
         Scan.new(
           readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods, conditional_methods: @conditional_methods, aliases: @aliases,
           class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared, born_hashes: @born_hashes,
-          born_objects: @born_objects, class_body_cvars: @class_body_cvars
+          born_objects: @born_objects, class_body_cvars: @class_body_cvars, class_body_ivars: @class_body_ivars
         )
       end
 
@@ -591,6 +594,7 @@ module Steep
         record_births(@born_hashes, names, births(body) { |value| value.type == :hash && value.children.empty? })
         record_births(@born_objects, names, births(body) { |value| HandedBack.fresh_object?(value) })
         ClassVariableWrites.record_class_body(@class_body_cvars, names, body)
+        LiteralWrites.record_class_body(@class_body_ivars, names, body)
         code = body_code(body, nesting) or return
 
         names.each { |name| code == true ? @class_bodies[name] += 1 : (@mixin_bodies[name] ||= []) << code }

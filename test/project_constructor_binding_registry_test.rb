@@ -85,6 +85,23 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
     assert_equal 1, followed[:m9]
   end
 
+  def test_a_call_on_an_ivar_of_a_class_object_is_on_a_plain_hash_only_where_its_class_sets_one
+    {
+      "@memo = {}" => true,
+      "def self.reset = @memo = {}" => true,
+      "@memo = Store.new" => false,
+      "@memo = {}\n  def self.reset = @memo = Store.new" => false,
+      "@memo = {}\n  def write = @memo = Store.new" => true,
+      "" => false
+    }.each do |assigned, literal|
+      registry = ConstructorBindingRegistry.new
+      registry.ingest_source("class Store\n  def put(key) = @key = key\nend\nclass Use\n  #{assigned}\n  def self.read = @memo.put(:a)\nend\n", path_name: "app.rb")
+      call = registry.calls_of(:put).find { |each| each.singleton }
+
+      assert_equal literal, registry.literal_receiver?(call), assigned
+    end
+  end
+
   def class_bodies_of(source, name)
     registry = ConstructorBindingRegistry.new
     registry.ingest_source(source, path_name: "app.rb")

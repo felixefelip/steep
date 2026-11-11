@@ -37,6 +37,36 @@ module Steep
         end
       end
 
+      # `receiver?` for a call on an ivar of a class object, made in a class
+      # method or a class body: `singleton_methods` and the class bodies of
+      # `class_bodies` (`record_class_body`) are what assign it, and at least
+      # one of them must set it to a literal.
+      def class_object_receiver?(call, singleton_methods, class_bodies, related: nil)
+        ivar = call.on_ivar or return false
+        bodies = class_bodies.select { |class_name, ivars| ivars.key?(ivar) && (!related || related.call(class_name)) }
+        literal = !bodies.empty? || singleton_methods.any? do |class_name, bodies_by_name|
+          (!related || related.call(class_name)) && bodies_by_name.each_value.any? { |each| each.any? { |body| body&.literal_writes&.include?(ivar) } }
+        end
+        literal && bodies.each_value.all? { |ivars| ivars[ivar] } && receiver?(call, singleton_methods, related: related)
+      end
+
+      # Adds to `index`, under each of `names`, the ivars `body`, a class or
+      # module body, assigns outside its methods, each true where every one of
+      # those assignments sets a hash or array literal.
+      def record_class_body(index, names, body)
+        written = in_class_body(body, {})
+        names.each { |name| (index[name] ||= {}).merge!(written) { |_, kept, more| kept && more } } unless written.empty?
+      end
+
+      def in_class_body(node, written)
+        return written unless node.is_a?(::Parser::AST::Node) && !%i[def defs class module sclass].include?(node.type)
+
+        target, value = %i[or_asgn and_asgn].include?(node.type) ? node.children : [node, node.children[1]]
+        written[target.children[0]] = written.fetch(target.children[0], true) && COLLECTIONS.include?(value&.type) if target.type == :ivasgn
+        (target.equal?(node) ? node.children : [value]).each { |child| in_class_body(child, written) }
+        written
+      end
+
       def nodes(node, &block)
         return unless node.is_a?(::Parser::AST::Node)
 
