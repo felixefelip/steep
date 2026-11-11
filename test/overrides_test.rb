@@ -98,4 +98,20 @@ class OverridesTest < Minitest::Test
       assert_equal parse_type('"a!"'), exact
     end
   end
+
+  def test_the_subclasses_kept_for_an_environment_hold_nothing_that_reaches_it
+    with_checker(<<~RBS) do |checker|
+      class Base
+      end
+      class Child < Base
+      end
+    RBS
+      overrides = Steep::Specializations::Overrides.new(checker: checker, registry: Steep::Project::ConstructorBindingRegistry.new)
+      overrides.overridden?(RBS::TypeName.parse("::Base"))
+      kept = Steep::Specializations::Overrides::SUBCLASSES[checker.factory.env]
+
+      assert_equal [RBS::TypeName.parse("::Child")], kept[RBS::TypeName.parse("::Base")]
+      assert_nil kept.default_proc
+    end
+  end
 end
