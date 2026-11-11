@@ -213,7 +213,7 @@ class Steep::Server::LSPFormatterTest < Minitest::Test
   def test_ruby_hover_method_call__special
     with_factory do
       typing = type_check(<<~RUBY)
-        [1, nil].compact
+        [Integer.sqrt(4), nil].compact
       RUBY
 
       call = typing.call_of(node: typing.source.node)
