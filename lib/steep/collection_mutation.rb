@@ -25,7 +25,7 @@ module Steep
         key = MethodIdentity.key(call)
         ArrayMutation.elements_only?(call, constr) || HashMutation.elements_only?(call, constr) || allocates?(call, constr, key) ||
           (!key.nil? && LiteralIntrinsics.self_independent?(key, override_registry: constr.literal_method_registry)) ||
-          (constr.self_type.is_a?(AST::Types::Name::Base) && !!ObjectStates.method_effect(constr, constr.self_type, call.method_name)&.reads_only)
+          (constr.self_type.is_a?(AST::Types::Name::Base) && !!ObjectStates::MethodEffects.of(constr, constr.self_type, call.method_name)&.reads_only)
       end
 
       # A call whose method was found, even where its arguments do not check

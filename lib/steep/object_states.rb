@@ -474,7 +474,7 @@ module Steep
           return kept.empty? ? state.back_type : AST::Types::ObjectState.new(back_type: state.back_type, ivars: kept)
         end
 
-        effect = method_effect(constr, state.back_type, method_name) or return settled(constr, state)
+        effect = MethodEffects.of(constr, state.back_type, method_name) or return settled(constr, state)
         plain = arguments.all? { |argument| plain_argument?(argument) }
         rebound = plain ? bound_values(constr, state.back_type, effect.bindings, arguments, followed: false) : {} #: Hash[Symbol, AST::Types::t]
         ivars = (effect.reader ? Nested.handed_out(constr, state, effect.reader) : HashMutation.flatten(state)).ivars.reject { |ivar, value| effect.writes.include?(ivar) || (!fixed?(value) && !effect.reads_only) }
