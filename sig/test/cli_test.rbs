@@ -19,7 +19,13 @@ class CLITest < Minitest::Test
 
   def test_check_success: () -> untyped
 
+  def test_check_auto_infers_contracts_and_writes_sidecar: () -> untyped
+
   def test_check_failure: () -> untyped
+
+  def test_erb_check_failure: () -> untyped
+
+  def test_erb_check_success: () -> untyped
 
   def test_check_failure_with_formatter: () -> untyped
 
@@ -100,6 +106,8 @@ class CLITest < Minitest::Test
   def test_query_hover_returns_result: () -> untyped
 
   def test_query_hover_multiple_locations: () -> untyped
+
+  def test_query_diagnostics_returns_result: () -> untyped
 
   def test_query_definition_missing_argument: () -> untyped
 

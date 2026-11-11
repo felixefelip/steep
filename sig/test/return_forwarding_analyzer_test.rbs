@@ -1,0 +1,23 @@
+# Generated from test/return_forwarding_analyzer_test.rb with RBS::Inline
+
+# Unit tests for the return-forwarding source walk (felixefelip/steep#62): a
+# method returning `K.new(..., self)` forwards K's `self`-bound readers to the
+# call's own receiver.
+class ReturnForwardingAnalyzerTest < Minitest::Test
+  ReturnForwardingAnalyzer: untyped
+
+  # Minimal ConstructorBindingRegistry stand-in.
+  class Bindings
+    def initialize: (untyped map) -> untyped
+
+    def bindings_for: (untyped name) -> untyped
+  end
+
+  def analyze: (untyped source, untyped bindings) -> untyped
+
+  def test_forwards_reader_bound_to_self_argument: () -> untyped
+
+  def test_no_forward_when_argument_is_not_self: () -> untyped
+
+  def test_no_forward_without_constructor_binding: () -> untyped
+end

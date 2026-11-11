@@ -19,6 +19,8 @@ class TypeCheckServiceTest < Minitest::Test
 
   def test_update_file__ruby: () -> untyped
 
+  def test_literal_method_registry_tracks_unsaved_source_changes: () -> untyped
+
   def test_typecheck__ruby_syntax_error: () -> untyped
 
   def test_typecheck__ruby_encoding_error: () -> untyped

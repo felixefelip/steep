@@ -54,6 +54,9 @@ module Steep
       Array = Type.new("::Array", arity: 1)
       Range = Type.new("::Range", arity: 1)
       Hash = Type.new("::Hash", arity: 2)
+      # `::Set`, which `AST::Types::FiniteSet` widens to wherever exactness has
+      # to be written down.
+      Set = Type.new("::Set", arity: 1)
       Module = Type.new("::Module")
       Class = Type.new("::Class")
       Integer = Type.new("::Integer")
@@ -67,6 +70,9 @@ module Steep
       Proc = Type.new("::Proc")
       Kernel = Type.new("::Kernel")
       Method = Type.new("::Method")
+      # The other half of `AST::Types::MethodObject`: a reflection that names
+      # its method widens to one of these wherever the name cannot travel.
+      UnboundMethod = Type.new("::UnboundMethod")
 
       def self.nil_type
         AST::Types::Nil.instance

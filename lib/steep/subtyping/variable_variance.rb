@@ -74,8 +74,12 @@ module Steep
             end
             add_type(type.type.return_type, variance: variance, covariants: contravariants, contravariants: covariants)
           end
-        when AST::Types::Union, AST::Types::Intersection, AST::Types::Tuple
+        when AST::Types::Union, AST::Types::Intersection, AST::Types::Tuple, AST::Types::FiniteSet
           type.types.each do |ty|
+            add_type(ty, variance: variance, covariants: covariants, contravariants: contravariants)
+          end
+        when AST::Types::ObjectState
+          type.each_child do |ty|
             add_type(ty, variance: variance, covariants: covariants, contravariants: contravariants)
           end
         when AST::Types::Name::Interface, AST::Types::Name::Instance, AST::Types::Name::Alias

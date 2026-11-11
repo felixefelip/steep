@@ -24,7 +24,7 @@ class InterfaceBuilderTest < Minitest::Test
           def hello: () -> [::Integer, T, self]
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::_Foo[::String]"), config).tap do |shape|
         assert_equal parse_type("::_Foo[::String]"), shape.type
@@ -49,7 +49,7 @@ class InterfaceBuilderTest < Minitest::Test
           def self.hello: () -> [::Integer, self, instance, class]
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("singleton(::Foo)"), config).tap do |shape|
         assert_equal parse_type("singleton(::Foo)"), shape.type
@@ -79,7 +79,7 @@ class InterfaceBuilderTest < Minitest::Test
           def hello: () -> [::Integer, A, B, C, self, instance, class]
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::Foo[::Object, ::String, ::Integer]"), config).tap do |shape|
         assert_equal parse_type("::Foo[::Object, ::String, ::Integer]"), shape.type
@@ -106,7 +106,7 @@ class InterfaceBuilderTest < Minitest::Test
 
         type bar[T] = T
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::bar[::_Foo]"), config).tap do |shape|
         assert_equal parse_type("::bar[::_Foo]"), shape.type
@@ -135,7 +135,7 @@ class InterfaceBuilderTest < Minitest::Test
           def itself: () -> self
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::_Foo | ::_Bar"), config).tap do |shape|
         assert_equal parse_type("::_Foo | ::_Bar"), shape.type
@@ -147,16 +147,18 @@ class InterfaceBuilderTest < Minitest::Test
         assert_equal [parse_method_type("() -> (::_Foo | self)")], shape.methods[:itself].method_types
       end
 
+      # A composite self type leaves `self` abstract, exactly as a singular one
+      # does — the member hosting the method is not what `self` names.
       builder.shape(parse_type("self"), config(self_type: parse_type("::_Foo | ::_Bar"))).tap do |shape|
         assert_equal parse_type("::_Foo | ::_Bar"), shape.type
-        assert_equal [parse_method_type("() -> (::_Foo | ::_Bar)")], shape.methods[:itself].method_types
+        assert_equal [parse_method_type("() -> self")], shape.methods[:itself].method_types
       end
     end
   end
 
   def test_shape__bool
     with_factory() do
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("bool"), config).tap do |shape|
         assert_equal parse_type("bool"), shape.type
@@ -172,7 +174,7 @@ class InterfaceBuilderTest < Minitest::Test
 
   def test_shape__literal
     with_factory() do
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("1"), config).tap do |shape|
         assert_equal parse_type("1"), shape.type
@@ -200,11 +202,16 @@ interface _Bar
   def h: () -> void
 end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
+      # A value of an intersection type satisfies every member, so every member's
+      # overloads are on it — first member first, since resolution is first-match.
       builder.shape(parse_type("::_Foo & ::_Bar"), config).tap do |shape|
         assert_equal parse_type("::_Foo & ::_Bar"), shape.type
-        assert_equal [parse_method_type("(::String) -> ::_Bar")], shape.methods[:f].method_types
+        assert_equal(
+          [parse_method_type("(::Integer) -> ::_Foo"), parse_method_type("(::String) -> ::_Bar")],
+          shape.methods[:f].method_types
+        )
 
         assert shape.methods[:g]
         assert shape.methods[:h]
@@ -212,12 +219,65 @@ end
 
       builder.shape(parse_type("::_Foo & self"), config(self_type: parse_type("::_Bar"))).tap do |shape|
         assert_equal parse_type("::_Foo & self"), shape.type
-        assert_equal [parse_method_type("(::String) -> self")], shape.methods[:f].method_types
+        assert_equal(
+          [parse_method_type("(::Integer) -> ::_Foo"), parse_method_type("(::String) -> self")],
+          shape.methods[:f].method_types
+        )
       end
 
+      # As with a union, an intersection self type keeps `self` abstract. This
+      # is the shape a module self-type annotation takes
+      # (`@type instance: Card & Card::Eventable`); substituting the hosting
+      # member here made every inherited `-> self` method return that member's
+      # concrete type, which then failed its own `-> self` declaration.
       builder.shape(parse_type("self"), config(self_type: parse_type("::_Foo & ::_Bar"))).tap do |shape|
         assert_equal parse_type("::_Foo & ::_Bar"), shape.type
-        assert_equal [parse_method_type("(::String) -> ::_Bar")], shape.methods[:f].method_types
+        assert_equal(
+          [parse_method_type("(::Integer) -> self"), parse_method_type("(::String) -> self")],
+          shape.methods[:f].method_types
+        )
+      end
+    end
+  end
+
+  def test_shape__intersection_same_call_shape
+    with_factory({ "a.rbs" => <<~RBS }) do
+        module Fields
+          module ClassMethods
+            def default_values: () -> ::Hash[::Symbol, ::String]
+          end
+        end
+
+        class Filter
+          extend Fields::ClassMethods
+          include Fields
+
+          def creator: () -> ::String?
+        end
+
+        class Filter::Validated
+          def creator: () -> ::String
+        end
+      RBS
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
+
+      # Overloads that accept the same arguments cannot both be selected, so they fold
+      # into one whose return type is the intersection of theirs. `Kernel#class` is
+      # baked per type into `object_shape`, so keeping only the last member — as the
+      # merge used to — answered `self.class` under
+      # `@type instance: Filter & Fields` (the shape every module self-type annotation
+      # takes) with `singleton(::Fields)`, and the host's class methods were gone.
+      builder.shape(parse_type("self"), config(self_type: parse_type("::Filter & ::Fields"))).tap do |shape|
+        assert_equal(
+          [parse_method_type("() -> (singleton(::Filter) & singleton(::Fields))")],
+          shape.methods[:class].method_types
+        )
+      end
+
+      # The narrower side absorbs the wider one it implies, so a marker intersection
+      # still answers with the marker's type rather than an unreduced `A & A?`.
+      builder.shape(parse_type("::Filter & ::Filter::Validated"), config).tap do |shape|
+        assert_equal [parse_method_type("() -> ::String")], shape.methods[:creator].method_types
       end
     end
   end
@@ -228,7 +288,7 @@ end
           def special_types: () -> [self, class, instance]
         end
       RBS
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("^(::String) { (::Integer) -> void } -> ::String"), config).tap do |shape|
         assert_equal parse_type("^(::String) { (::Integer) -> void } -> ::String"), shape.type
@@ -278,7 +338,7 @@ end
 
   def test_shape__tuple
     with_factory() do
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("[::Integer, top]"), config).tap do |shape|
         assert_equal parse_type("[::Integer, top]"), shape.type
@@ -299,6 +359,7 @@ end
 
         assert_equal([parse_method_type("() -> ::Integer")], shape.methods[:first].method_types)
         assert_equal([parse_method_type("() -> top")], shape.methods[:last].method_types)
+        assert_equal([parse_method_type("() -> [::Integer, top]")], shape.methods[:to_ary].method_types)
       end
 
       builder.shape(parse_type("[::Integer, self]"), config).tap do |shape|
@@ -319,6 +380,7 @@ end
 
         assert_equal([parse_method_type("() -> ::Integer")], shape.methods[:first].method_types)
         assert_equal([parse_method_type("() -> self")], shape.methods[:last].method_types)
+        assert_equal([parse_method_type("() -> [::Integer, self]")], shape.methods[:to_ary].method_types)
       end
     end
   end
@@ -330,7 +392,7 @@ end
         end
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("{ id: ::Integer, name: ::String }"), config).tap do |shape|
         shape or raise
@@ -339,7 +401,7 @@ end
 
         assert_includes(shape.methods[:[]].method_types, parse_method_type("(:id) -> ::Integer"))
         assert_includes(shape.methods[:[]].method_types, parse_method_type("(:name) -> ::String"))
-        assert_includes(shape.methods[:[]].method_types, parse_method_type("(::Symbol) -> (::String | ::Integer | nil)"))
+        assert_includes(shape.methods[:[]].method_types, parse_method_type("(::Hash::_Key) -> (::String | ::Integer | nil)"))
 
         assert_includes(shape.methods[:[]=].method_types, parse_method_type("(:id, ::Integer) -> ::Integer"))
         assert_includes(shape.methods[:[]=].method_types, parse_method_type("(:name, ::String) -> ::String"))
@@ -357,7 +419,7 @@ end
 
         assert_includes(shape.methods[:[]].method_types, parse_method_type("(:id) -> ::Integer"))
         assert_includes(shape.methods[:[]].method_types, parse_method_type("(:name) -> self"))
-        assert_includes(shape.methods[:[]].method_types, parse_method_type("(::Symbol) -> (self | ::Integer | nil)"))
+        assert_includes(shape.methods[:[]].method_types, parse_method_type("(::Hash::_Key) -> (self | ::Integer | nil)"))
 
         assert_includes(shape.methods[:[]=].method_types, parse_method_type("(:id, ::Integer) -> ::Integer"))
         assert_includes(shape.methods[:[]=].method_types, parse_method_type("(:name, self) -> self"))
@@ -398,7 +460,7 @@ class Symbol
 end
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::Integer | ::String"), config).tap do |shape|
         assert_equal(
@@ -422,7 +484,7 @@ end
         assert_equal(
           shape.methods[:try].method_types,
           [
-            parse_method_type("[T] () { (::Integer | ::String) -> T } -> T"),
+            parse_method_type("[T] () { (self) -> T } -> T"),
           ]
         )
       end
@@ -440,7 +502,7 @@ end
         end
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("A", variables: [:A]), config(variable_bounds: { A: parse_type("::_Foo[::String]") })).tap do |shape|
         assert_equal parse_type("A", variables: [:A]), shape.type
@@ -467,12 +529,100 @@ end
         type names = #{names.join(" | ")}
       RBS
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("::names"), config).tap do |shape|
         assert_equal parse_type("::names"), shape.type
 
         assert_equal [parse_method_type("() -> (#{names.join(" | ")})")], shape.methods[:itself].method_types
+      end
+    end
+  end
+
+  # Every member declares `foo` twice with the same type — the shape `| ...`
+  # gives a method already declared upstream. The union has one thing to say
+  # about `foo`, so it must say it once: pairing the members' overloads off
+  # against each other instead would leave 2 ** members of them, which is what
+  # made a 30-member union of module singletons exhaust the machine's memory.
+  def test_shape__union_does_not_multiply_overloads
+    members = 12.times.map {|i| "::C#{i}" }
+
+    with_factory({ "a.rbs" => <<~RBS }) do
+        class Base
+          def foo: (::Integer) -> void
+        end
+
+        #{members.map {|name| "class #{name} < Base\n  def foo: (::Integer) -> void | ...\nend\n" }.join("\n")}
+      RBS
+
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
+
+      builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
+        assert_equal [parse_method_type("(::Integer) -> void")], shape.methods[:foo].method_types
+
+        # The collapsed overload still knows every member it came from.
+        defined_in = shape.methods[:foo].overloads.flat_map {|overload| overload.method_defs.map {|defn| defn.defined_in.to_s } }
+        assert_equal (["::Base"] + members).sort, defined_in.uniq.sort
+      end
+    end
+  end
+
+  # The members redeclare `foo` with `| ...`, so each has TWO overloads and the second
+  # one — inherited, typed `-> self` — is a different type in every member. Folding the
+  # members pairwise then produces a method type per subset: `-> (::Base | ::C0)`,
+  # `-> (::Base | ::C1)`, ... doubling with each member, 2 ** 19 of them on the union
+  # that motivated this (a generated `Module#include` in rbs_infer's dummy app).
+  #
+  # Both overloads take no arguments, so `foo()` is answered by the first and the
+  # second could never be selected — the union has ONE thing to say about `foo()`.
+  # Saying it once is what keeps the fold linear; see the call-shape test below.
+  def test_shape__union_absorbs_covered_return_types
+    members = 12.times.map {|i| "::C#{i}" }
+
+    with_factory({ "a.rbs" => <<~RBS }) do
+        class Base
+          def foo: () -> self
+        end
+
+        #{members.map {|name| "class #{name} < Base\n  def foo: () -> ::Base | ...\nend\n" }.join("\n")}
+      RBS
+
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
+
+      builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
+        assert_equal [parse_method_type("() -> ::Base")], shape.methods[:foo].method_types
+      end
+    end
+  end
+
+  # Each member declares the two overloads ActiveRecord's `where` has — one taking no
+  # arguments, one taking anything — and every member returns a DIFFERENT type from
+  # both, so nothing absorbs anything. Pairing the overloads off then keeps all four
+  # combinations at every fold step (the two mixed ones intersect their parameters
+  # down to `()`, landing on the same call shape as the first), and the set doubles
+  # per member: 2 ** 27 for the union of models that a Rails app's data-transfer
+  # `record_set_for(model)` infers, which never finishes.
+  #
+  # An overload set is resolved first-match, so two entries taking the same arguments
+  # are one answer, not two: the union returns `A | B | ...` for `where()` and
+  # `A::Rel | B::Rel | ...` for `where(anything)`, and that is all it can return.
+  def test_shape__union_collapses_overloads_by_call_shape
+    members = 20.times.map {|i| "::C#{i}" }
+
+    with_factory({ "a.rbs" => <<~RBS }) do
+        #{members.map {|name| "class #{name}\n  def where: () -> #{name}\n            | (*untyped) -> ::Array[#{name}]\nend\n" }.join("\n")}
+      RBS
+
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
+
+      builder.shape(parse_type(members.join(" | ")), config).tap do |shape|
+        assert_equal(
+          [
+            parse_method_type("() -> (#{members.join(" | ")})"),
+            parse_method_type("(*untyped) -> (#{members.map {|name| "::Array[#{name}]" }.join(" | ")})")
+          ],
+          shape.methods[:where].method_types
+        )
       end
     end
   end
@@ -486,7 +636,7 @@ class Foo
 end
       RUBY
 
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
 
       builder.shape(parse_type("singleton(::Foo)"), config).tap do |shape|
         assert_equal parse_type("singleton(::Foo)"), shape.type

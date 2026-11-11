@@ -117,7 +117,7 @@ end
 
     paths["builtin.rbs"] = BUILTIN unless nostdlib
     with_factory(paths, nostdlib: true) do |factory|
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: false)
       yield Subtyping::Check.new(builder: builder)
     end
   end
@@ -364,6 +364,33 @@ end
     end
   end
 
+  # `self` is a name for a shape, not a shape: expanding it has to happen before
+  # the other side of the relation is decomposed. When `self` stands for a UNION
+  # — which it does for a module mixed into more than one host — the super union
+  # used to be split first, so `self <: (A | B)` was answered by trying
+  # `self <: A` and `self <: B`, expanding `self` to `(A | B)` inside each, and
+  # neither holds. A type was failing to be a subtype of itself
+  # (felixefelip/rbs_infer#221).
+  def test_union_self_against_union
+    with_checker <<-EOS do |checker|
+class Bar
+end
+
+class Other
+end
+    EOS
+
+      union = "(singleton(::Bar) | singleton(::Other))"
+
+      assert_success_check checker, "self", union, self_type: union
+      # Each branch on its own still has to hold on its own.
+      assert_success_check checker, "self", "singleton(::Bar)", self_type: "singleton(::Bar)"
+      assert_fail_check checker, "self", "singleton(::Bar)", self_type: union
+      # And an intersection self keeps working, which shares the moved clause.
+      assert_success_check checker, "self", "::Bar", self_type: "::Bar"
+    end
+  end
+
   def test_interface_block_self
     with_checker <<-EOS do |checker|
 interface _A[X]
@@ -600,17 +627,11 @@ end
         constraints: Subtyping::Constraints.empty
       )
 
-      # Cached because the relation does not have free variables
+      # Cached without the context because the relation does not have free variables
       assert_operator(
-        checker.cache.subtypes,
+        checker.cache.ground_subtypes,
         :key?,
-        [
-          parse_relation("::Integer", "::Object", checker: checker),
-          AST::Types::Self.new,
-          AST::Types::Instance.new,
-          AST::Types::Class.new,
-          {}
-        ]
+        parse_relation("::Integer", "::Object", checker: checker)
       )
     end
   end
@@ -751,6 +772,23 @@ type json = String | Integer | Array[json] | Hash[String, json]
       # Hash[String, Array[json]] <: json doesn't hold.
       # Because json !<: Array[json], which is required by Hash type application.
       assert_fail_check checker, "::Hash[::String, ::Array[::json]]", "::json"
+    end
+  end
+
+  def test_alias_argument_rbs_cannot_spell
+    with_checker <<-EOS do |checker|
+class Tag
+end
+type list[T] = Array[T]
+    EOS
+      tag = parse_type("::Tag", checker: checker)
+      fr = AST::Types::ObjectState.new(back_type: tag, ivars: { :@tag => AST::Types::Literal.new(value: :fr) })
+      x = AST::Types::ObjectState.new(back_type: tag, ivars: { :@tag => AST::Types::Literal.new(value: :x) })
+      list = ->(element) { AST::Types::Name::Alias.new(name: RBS::TypeName.parse("::list"), args: [element]) }
+
+      assert_success_check checker, AST::Builtin::Array.instance_type(fr), list[fr]
+      assert_fail_check checker, AST::Builtin::Array.instance_type(x), list[fr]
+      assert_fail_check checker, AST::Builtin::Array.instance_type(tag), list[fr]
     end
   end
 
@@ -955,6 +993,44 @@ type c = a | b
       assert_success_check checker, "1", "::c"
       assert_success_check checker, '"z"', "::c"
     end
+  end
+
+  def test_literal_union_membership
+    with_checker <<-EOF do |checker|
+type enum_t = 1 | 2 | 3 | "a" | "b" | :c
+    EOF
+      assert_success_check checker, "1", "::enum_t"
+      assert_success_check checker, '"b"', "::enum_t"
+      assert_success_check checker, ":c", "::enum_t"
+
+      assert_fail_check checker, "4", "::enum_t"
+      assert_fail_check checker, '"c"', "::enum_t"
+      assert_fail_check checker, ":a", "::enum_t"
+    end
+  end
+
+  def test_literal_union_with_unknown_variable
+    with_checker do |checker|
+      constraints = Constraints.new(unknowns: [:X])
+
+      # The literal-membership fast path must not apply to unions with unknown
+      # type variables: the constraint has to be recorded.
+      assert_success_check(
+        checker,
+        "1",
+        parse_type("X | 2", checker: checker, variables: [:X]),
+        constraints: constraints
+      )
+
+      assert_operator constraints, :unknown?, :X
+      assert_equal parse_type("1", checker: checker), constraints.lower_bound(:X)
+    end
+  end
+
+  def test_literal_hash
+    assert_equal AST::Types::Literal.new(value: 1).hash, AST::Types::Literal.new(value: 1).hash
+    refute_equal AST::Types::Literal.new(value: 1).hash, AST::Types::Literal.new(value: 2).hash
+    refute_equal AST::Types::Literal.new(value: "a").hash, AST::Types::Literal.new(value: "b").hash
   end
 
   def test_logic_type

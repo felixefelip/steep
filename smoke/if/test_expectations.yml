@@ -25,8 +25,8 @@
         character: 7
     severity: ERROR
     message: |-
-      Cannot assign a value of type `(::String | ::Integer)` to a variable of type `::String`
-        (::String | ::Integer) <: ::String
+      Cannot assign a value of type `("foofoo" | ::Integer)` to a variable of type `::String`
+        ("foofoo" | ::Integer) <: ::String
           ::Integer <: ::String
             ::Numeric <: ::String
               ::Object <: ::String

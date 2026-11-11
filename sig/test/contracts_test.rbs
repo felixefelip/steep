@@ -1,0 +1,34 @@
+# Generated from test/contracts_test.rb with RBS::Inline
+
+class ContractsTest < Minitest::Test
+  Contracts: untyped
+
+  def test_empty_store: () -> untyped
+
+  def test_parses_instance_method_with_chain: () -> untyped
+
+  def test_enforced_defaults_to_true_when_absent: () -> untyped
+
+  def test_parses_enforced_false: () -> untyped
+
+  def test_parses_singleton_method: () -> untyped
+
+  def test_unsupported_version_yields_empty_store: () -> untyped
+
+  def test_invalid_method_key_is_ignored: () -> untyped
+
+  def test_unknown_predicate_kind_drops_method: () -> untyped
+
+  def test_unknown_expr_kind_drops_predicate: () -> untyped
+
+  def test_load_returns_empty_when_file_missing: () -> untyped
+
+  def test_load_reads_yaml_from_disk: () -> untyped
+
+  # A writer that shares an object reference for a repeated node (e.g. the
+  # `{ kind: self }` receiver) makes Psych emit a YAML anchor/alias. The
+  # sidecar is trusted, tool-generated YAML, so the loader must accept aliases
+  # instead of raising Psych::AliasesNotEnabled and crashing the typecheck
+  # worker. See felixefelip/steep (Psych::AliasesNotEnabled regression).
+  def test_load_accepts_yaml_aliases: () -> untyped
+end

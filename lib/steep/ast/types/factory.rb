@@ -18,10 +18,29 @@ module Steep
           @type_cache = {}
           @method_type_cache = {}
           @method_type_cache.compare_by_identity
+          @module_self_types = {}
+          @module_self_types.compare_by_identity
+        end
+
+        # RBS recomputes these on every call, in time quadratic in the number of
+        # declarations reopening the module, and a module body asks once per check.
+        def module_self_types(module_entry)
+          @module_self_types[module_entry] ||= module_entry.self_types
         end
 
         def type_name_resolver
           @type_name_resolver ||= RBS::Resolver::TypeNameResolver.build(definition_builder.env)
+        end
+
+        # Which classes inherit from which — a question about the whole program
+        # rather than about one type, and one that has to be asked wherever a
+        # nominal type is read as naming the class a value actually is.
+        def descendant_index
+          @descendant_index ||= DescendantIndex.new(definition_builder.env)
+        end
+
+        def constant_resolver
+          @constant_resolver ||= RBS::Resolver::ConstantResolver.new(builder: definition_builder)
         end
 
         def type_opt(type)
@@ -208,6 +227,12 @@ module Steep
               types: type.types.map {|ty| type_1(ty) },
               location: nil
             )
+          when NotInRBS
+            # Where exactness stops. A signature cannot say which values a set
+            # holds, which module a singleton class is of or which method a
+            # reflection names, so each of them leaves as the type it is
+            # written as.
+            type_1(type.back_type)
           when Record
             all_fields = {} #: Hash[Symbol, [RBS::Types::t, bool]]
             type.elements.each do |key, value|
@@ -338,12 +363,13 @@ module Steep
         end
 
         def unfold(type_name, args)
-          type(
-            definition_builder.expand_alias2(
-              type_name,
-              args.empty? ? [] : args.map {|t| type_1(t) }
-            )
-          )
+          return type(definition_builder.expand_alias2(type_name, [])) if args.empty?
+
+          # Substituted after the expansion: written into RBS first, an argument
+          # RBS cannot spell (`NotInRBS`) would leave as its `back_type`.
+          params = definition_builder.env.type_alias_decls.fetch(type_name).decl.type_params.map(&:name)
+          body = type(definition_builder.expand_alias2(type_name, params.map { |name| RBS::Types::Variable.new(name: name, location: nil) }))
+          body.subst(Interface::Substitution.build(params, args))
         end
 
         def expand_alias(type)
@@ -353,6 +379,17 @@ module Steep
           else
             type
           end
+        end
+
+        # Whether every class `receiver` may be has `ancestor` above it, so
+        # `receiver < ancestor` holds: a subclass keeps its superclass's ancestors.
+        def descends?(receiver, ancestor)
+          receiver = deep_expand_alias(receiver)
+          return false unless receiver.is_a?(Name::Singleton) && receiver.name != ancestor.name
+
+          definition_builder.ancestor_builder.instance_ancestors(receiver.name).ancestors.any? { |entry| entry.name == ancestor.name }
+        rescue RBS::BaseError
+          false
         end
 
         def deep_expand_alias(type, recursive: Set.new)
@@ -520,9 +557,13 @@ module Steep
             AST::Types::Name::Singleton.new(
               name: env.normalize_module_name(type.name)
             )
+          when AST::Types::MetaClass
+            AST::Types::MetaClass.new(name: env.normalize_module_name(type.name))
+          when AST::Types::MethodObject
+            type.with(type_name: env.normalize_module_name(type.type_name))
           when AST::Types::Any, AST::Types::Boolean, AST::Types::Bot, AST::Types::Nil,
             AST::Types::Top, AST::Types::Void, AST::Types::Literal, AST::Types::Class, AST::Types::Instance,
-            AST::Types::Self, AST::Types::Var, AST::Types::Logic::Base
+            AST::Types::Self, AST::Types::Var, AST::Types::Logic::Base, AST::Types::RegexpLiteral, AST::Types::RangeLiteral
             type
           when AST::Types::Intersection
             AST::Types::Intersection.build(
@@ -538,6 +579,12 @@ module Steep
             AST::Types::Tuple.new(
               types: type.types.map {|type| normalize_type(type) }
             )
+          when AST::Types::FiniteSet
+            AST::Types::FiniteSet.new(
+              types: type.types.map {|type| normalize_type(type) }
+            )
+          when AST::Types::ObjectState
+            type.map_type {|type| normalize_type(type) }
           when AST::Types::Proc
             type.map_type {|type| normalize_type(type) }
           when AST::Types::Name::Alias

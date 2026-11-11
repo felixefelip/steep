@@ -178,7 +178,9 @@ module Steep
         when :lvasgn, :ivasgn, :gvasgn
           name = mlhs.children[0]
           
-          unless TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          # A cast `_` is never stored, so it reads as nil here and falls to
+          # `untyped` like the other cast names.
+          unless name == :__any__ || name == :__skip__
             env[name] || AST::Builtin.any_type
           else
             AST::Builtin.any_type

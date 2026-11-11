@@ -1,0 +1,296 @@
+require_relative "test_helper"
+require "tmpdir"
+require "fileutils"
+
+class CallbacksTest < Minitest::Test
+  Callbacks = Steep::Callbacks
+
+  def test_empty_store
+    store = Callbacks::Store.empty
+    assert_predicate store, :empty?
+    assert_empty store.lookup_callbacks_for_method("Foo", :bar)
+  end
+
+  def test_parses_single_entry
+    raw = {
+      "callbacks" => [
+        {
+          "class" => "PostsController",
+          "apply_postcondition_of" => "set_post",
+          "runs_before" => ["show", "edit", "update", "destroy", "publish"]
+        }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    entries = store.lookup_callbacks_for_method("PostsController", :show)
+
+    assert_equal 1, entries.size
+    entry = entries.first
+    assert_equal "PostsController", entry.class_name
+    assert_equal :set_post, entry.handler_method
+    assert_equal [:show, :edit, :update, :destroy, :publish], entry.runs_before
+    refute entry.singleton
+  end
+
+  def test_lookup_filters_by_method
+    raw = {
+      "callbacks" => [
+        {
+          "class" => "PostsController",
+          "apply_postcondition_of" => "set_post",
+          "runs_before" => ["show", "edit"]
+        }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+
+    assert_equal 1, store.lookup_callbacks_for_method("PostsController", :show).size
+    assert_equal 1, store.lookup_callbacks_for_method("PostsController", :edit).size
+    assert_empty store.lookup_callbacks_for_method("PostsController", :index)
+  end
+
+  def test_lookup_strips_leading_colons
+    raw = {
+      "callbacks" => [
+        { "class" => "PostsController", "apply_postcondition_of" => "set_post", "runs_before" => ["show"] }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+
+    assert_equal 1, store.lookup_callbacks_for_method("::PostsController", :show).size
+    assert_equal 1, store.lookup_callbacks_for_method("PostsController", :show).size
+  end
+
+  def test_multiple_entries_for_same_class_aggregate
+    raw = {
+      "callbacks" => [
+        { "class" => "PostsController", "apply_postcondition_of" => "set_post", "runs_before" => ["show"] },
+        { "class" => "PostsController", "apply_postcondition_of" => "authenticate", "runs_before" => ["show", "index"] }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+
+    entries = store.lookup_callbacks_for_method("PostsController", :show)
+    assert_equal 2, entries.size
+    handlers = entries.map(&:handler_method)
+    assert_equal [:set_post, :authenticate], handlers
+  end
+
+  def test_skips_entry_with_missing_fields
+    raw = {
+      "callbacks" => [
+        { "class" => "X" }, # missing apply_postcondition_of and runs_before
+        { "apply_postcondition_of" => "y", "runs_before" => ["z"] }, # missing class
+        { "class" => "X", "apply_postcondition_of" => "y", "runs_before" => [] }, # empty runs_before
+        { "class" => "X", "apply_postcondition_of" => "y" }, # missing runs_before entirely
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    assert_predicate store, :empty?
+  end
+
+  def test_accepts_symbol_strings_in_runs_before
+    raw = {
+      "callbacks" => [
+        { "class" => "X", "apply_postcondition_of" => "y", "runs_before" => ["a", "b"] }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    entries = store.lookup_callbacks_for_method("X", :a)
+    assert_equal 1, entries.size
+    assert_equal [:a, :b], entries.first.runs_before
+  end
+
+  def test_singleton_flag
+    raw = {
+      "callbacks" => [
+        { "class" => "X", "apply_postcondition_of" => "y", "runs_before" => ["a"], "singleton" => true }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    entry = store.lookup_callbacks_for_method("X", :a).first
+    assert entry.singleton
+  end
+
+  def test_toplevel_entry_needs_no_runs_before
+    raw = {
+      "callbacks" => [
+        {
+          "class" => "ERBPostsShow",
+          "applies_constants" => { "Current" => "singleton(Current) & Current::UserPopulated" },
+          "toplevel" => true
+        }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+
+    entries = store.toplevel_entries("ERBPostsShow")
+    assert_equal 1, entries.size
+    assert entries.first.toplevel
+    assert_equal({ "Current" => "singleton(Current) & Current::UserPopulated" }, entries.first.applies_constants)
+    # Not a method entry — runs_before lookups don't see it.
+    assert_empty store.lookup_callbacks_for_method("ERBPostsShow", :anything)
+  end
+
+  def test_toplevel_lookup_strips_leading_colons
+    raw = {
+      "callbacks" => [
+        { "class" => "ERBPostsShow", "applies_constants" => { "Current" => "singleton(Current)" }, "toplevel" => true }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    assert_equal 1, store.toplevel_entries("::ERBPostsShow").size
+  end
+
+  def test_non_toplevel_entry_excluded_from_toplevel_lookup
+    raw = {
+      "callbacks" => [
+        { "class" => "PostsController", "applies_constants" => { "Current" => "singleton(Current)" }, "runs_before" => ["show"] }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    assert_empty store.toplevel_entries("PostsController")
+  end
+
+  def test_parses_applies_self_entry
+    raw = {
+      "callbacks" => [
+        { "class" => "Dose", "applies_self" => "Dose & Dose::Validated", "runs_before" => ["atualizar_calendario"] }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    entry = store.lookup_callbacks_for_method("Dose", :atualizar_calendario).first
+
+    refute_nil entry
+    assert_equal "Dose & Dose::Validated", entry.applies_self
+    assert_nil entry.handler_method
+    assert_equal [:atualizar_calendario], entry.runs_before
+  end
+
+  def test_handler_entry_has_nil_applies_self
+    raw = {
+      "callbacks" => [
+        { "class" => "PostsController", "apply_postcondition_of" => "set_post", "runs_before" => ["show"] }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    entry = store.lookup_callbacks_for_method("PostsController", :show).first
+
+    assert_equal :set_post, entry.handler_method
+    assert_nil entry.applies_self
+  end
+
+  def test_entry_may_carry_both_handler_and_applies_self
+    raw = {
+      "callbacks" => [
+        {
+          "class" => "X",
+          "apply_postcondition_of" => "set_y",
+          "applies_self" => "X & X::Validated",
+          "runs_before" => ["a"]
+        }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    entry = store.lookup_callbacks_for_method("X", :a).first
+
+    assert_equal :set_y, entry.handler_method
+    assert_equal "X & X::Validated", entry.applies_self
+  end
+
+  def test_parses_applies_constants_entry
+    raw = {
+      "callbacks" => [
+        {
+          "class" => "PostsController",
+          "applies_constants" => { "Current" => "singleton(Current) & Current::UserPopulated" },
+          "runs_before" => ["index"]
+        }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    entry = store.lookup_callbacks_for_method("PostsController", :index).first
+
+    assert_equal({ "Current" => "singleton(Current) & Current::UserPopulated" }, entry.applies_constants)
+    assert_nil entry.handler_method
+    assert_nil entry.applies_self
+  end
+
+  def test_applies_constants_drops_malformed_pairs
+    raw = {
+      "callbacks" => [
+        {
+          "class" => "X",
+          "applies_constants" => { "Current" => "singleton(Current)", "" => "Y", "Z" => 42 },
+          "runs_before" => ["a"]
+        }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    entry = store.lookup_callbacks_for_method("X", :a).first
+
+    assert_equal({ "Current" => "singleton(Current)" }, entry.applies_constants)
+  end
+
+  def test_applies_constants_alone_is_a_valid_entry
+    raw = {
+      "callbacks" => [
+        {
+          "class" => "X",
+          "applies_constants" => { "Current" => "singleton(Current)" },
+          "runs_before" => ["a"]
+        }
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+
+    refute_predicate store, :empty?
+  end
+
+  def test_skips_entry_with_neither_handler_nor_applies_self
+    raw = {
+      "callbacks" => [
+        { "class" => "X", "runs_before" => ["a"] } # no apply_postcondition_of, no applies_self
+      ]
+    }
+    store = Callbacks::Store.from_hash(raw, source: "<test>")
+    assert_predicate store, :empty?
+  end
+
+  def test_load_reads_all_sidecars_under_sig
+    Dir.mktmpdir do |dir|
+      base = Pathname.new(dir)
+      FileUtils.mkdir_p(base / "sig/rbs_rails")
+      FileUtils.mkdir_p(base / "sig/manual")
+      (base / "sig/rbs_rails/.steep_callbacks.yml").write(
+        YAML.dump("callbacks" => [
+          { "class" => "PostsController", "apply_postcondition_of" => "set_post", "runs_before" => ["show", "edit"] }
+        ])
+      )
+      (base / "sig/manual/.steep_callbacks.yml").write(
+        YAML.dump("callbacks" => [
+          { "class" => "PostsController", "apply_postcondition_of" => "extra", "runs_before" => ["show"] },
+          { "class" => "UsersController", "apply_postcondition_of" => "set_user", "runs_before" => ["show", "edit"] }
+        ])
+      )
+
+      store = Callbacks.load(base)
+
+      posts_show = store.lookup_callbacks_for_method("PostsController", :show)
+      assert_equal 2, posts_show.size
+      # Files are loaded in glob-sorted order — `sig/manual/...` precedes
+      # `sig/rbs_rails/...` alphabetically, so `extra` entries come first.
+      assert_equal Set[:set_post, :extra], posts_show.map(&:handler_method).to_set
+
+      assert_equal 1, store.lookup_callbacks_for_method("UsersController", :edit).size
+      assert_empty store.lookup_callbacks_for_method("Other", :foo)
+    end
+  end
+
+  def test_load_returns_empty_when_no_sidecar
+    Dir.mktmpdir do |dir|
+      store = Callbacks.load(Pathname.new(dir))
+      assert_predicate store, :empty?
+    end
+  end
+end

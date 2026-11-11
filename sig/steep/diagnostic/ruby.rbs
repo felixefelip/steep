@@ -2014,6 +2014,49 @@ module Steep
         def header_line: () -> void
       end
 
+      # A `send`, `__send__` or `public_send` written with a literal method name that the
+      # receiver cannot be called with.
+      #
+      # ### Ruby
+      #
+      # ```ruby
+      # Post.new.send(:no_such_method)      # no method by that name
+      # Post.new.public_send(:private_one)  # resolves, but public_send respects visibility
+      # ```
+      #
+      # ### Diagnostic
+      #
+      # ```
+      # app/models/post.rb:1:14: [error] `send` names `no_such_method`, which type `::Post` does not have
+      # │ Diagnostic ID: Ruby::UnresolvedSend
+      # │
+      # └ Post.new.send(:no_such_method)
+      #                ~~~~~~~~~~~~~~~~
+      # ```
+      #
+      class UnresolvedSend < Base
+        attr_reader type: AST::Types::t
+
+        attr_reader method: Symbol
+
+        attr_reader spelling: Symbol
+
+        @private_method: bool
+
+        def initialize: (
+          node: Parser::AST::Node,
+          location: location,
+          type: AST::Types::t,
+          method: Symbol,
+          spelling: Symbol,
+          private_method: bool
+        ) -> void
+
+        def private_method?: () -> bool
+
+        def header_line: () -> ::String
+      end
+
       ALL: Array[singleton(Base)]
 
       type template = Hash[singleton(Base), LSPFormatter::severity?]

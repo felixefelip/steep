@@ -1,0 +1,12 @@
+# Generated from test/diagnostic_ruby_test.rb with RBS::Inline
+
+class DiagnosticRubyTest < Minitest::Test
+  Ruby: untyped
+
+  # Synthetic AST nodes (e.g. the send nodes the delegation-inline path builds
+  # in TypeConstruction#try_delegation_inline) have no `.loc`. Building a
+  # NoMethod diagnostic for such a node must not raise — it used to call
+  # `node.loc.expression` on a nil loc, crashing and flooding the logs with
+  # FATAL backtraces during the contracts passes.
+  def test_no_method_tolerates_send_node_without_location: () -> untyped
+end

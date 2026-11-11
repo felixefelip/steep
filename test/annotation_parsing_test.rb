@@ -72,6 +72,26 @@ class AnnotationParsingTest < Minitest::Test
     end
   end
 
+  def test_self_method
+    with_factory do |factory|
+      annot = parse_annotation("@type self_method: ERBPostsShow#__rbs_infer__body", factory: factory)
+      assert_instance_of Annotation::SelfMethod, annot
+      # Carries the enclosing class as its self instance type...
+      assert_equal parse_type("ERBPostsShow", factory: factory), annot.type
+      # ...plus the method whose entry facts apply to the top-level body.
+      assert_equal :__rbs_infer__body, annot.method_name
+    end
+  end
+
+  def test_self_method_namespaced
+    with_factory do |factory|
+      annot = parse_annotation("@type self_method: A::B::View#render_body", factory: factory)
+      assert_instance_of Annotation::SelfMethod, annot
+      assert_equal parse_type("A::B::View", factory: factory), annot.type
+      assert_equal :render_body, annot.method_name
+    end
+  end
+
   def test_const_type
     with_factory do |factory|
       annot = parse_annotation("@type const Foo::Bar::Baz: String", factory: factory)
@@ -130,6 +150,59 @@ class AnnotationParsingTest < Minitest::Test
       assert_instance_of Annotation::Implements, annot
       assert_equal RBS::TypeName.parse('Array'), annot.name.name
       assert_equal [:A], annot.name.args
+    end
+  end
+
+  # A block replayed onto two classes defines its methods on both, and the
+  # annotation has one line to say so (felixefelip/steep#149).
+  def test_implements_several_modules
+    with_factory do |factory|
+      annot = parse_annotation("@implements ::Wrap::Bar, ::Wrap::BarOther", factory: factory)
+      assert_instance_of Annotation::Implements, annot
+      assert_equal [RBS::TypeName.parse("::Wrap::Bar"), RBS::TypeName.parse("::Wrap::BarOther")],
+                   annot.names.map(&:name)
+      # `name` stays the first, which is all a class or module body reads.
+      assert_equal RBS::TypeName.parse("::Wrap::Bar"), annot.name.name
+    end
+  end
+
+  # The commas are at two levels and only the outer ones separate modules, so
+  # the list is scanned for whole names rather than split on `,`.
+  def test_implements_several_modules_with_type_params
+    with_factory do |factory|
+      annot = parse_annotation("@implements Pair[A, B], String", factory: factory)
+      assert_equal [RBS::TypeName.parse("Pair"), RBS::TypeName.parse("String")], annot.names.map(&:name)
+      assert_equal [[:A, :B], []], annot.names.map(&:args)
+    end
+  end
+
+  # `singleton(::Foo)` names the class object's method table, which is where a
+  # block reopening a singleton defines its methods (felixefelip/steep#152).
+  def test_implements_singleton
+    with_factory do |factory|
+      annot = parse_annotation("@implements singleton(::Wrap::Bar)", factory: factory)
+      assert_equal RBS::TypeName.parse("::Wrap::Bar"), annot.name.name
+      assert_predicate annot.name, :singleton?
+    end
+  end
+
+  # The parentheses travel with the name, so a list mixing the two forms is
+  # taken apart at the right commas.
+  def test_implements_singleton_in_a_list
+    with_factory do |factory|
+      annot = parse_annotation("@implements ::Wrap::Bar, singleton(::Wrap::BarOther)", factory: factory)
+      assert_equal [RBS::TypeName.parse("::Wrap::Bar"), RBS::TypeName.parse("::Wrap::BarOther")],
+                   annot.names.map(&:name)
+      assert_equal [false, true], annot.names.map(&:singleton?)
+    end
+  end
+
+  # A singleton class is one type however its instances are parameterised, so
+  # arguments inside `singleton(...)` say nothing and are refused rather than
+  # dropped.
+  def test_implements_singleton_rejects_type_args
+    with_factory do |factory|
+      assert_nil parse_annotation("@implements singleton(Pair[A, B])", factory: factory)
     end
   end
 

@@ -106,6 +106,56 @@ end
     end
   end
 
+  def test_check_auto_infers_contracts_and_writes_sidecar
+    in_tmpdir do
+      (current_dir + "Steepfile").write(<<-EOF)
+target :app do
+  check "app"
+  signature "sig"
+end
+      EOF
+
+      sig = current_dir + "sig"
+      sig.mkpath
+      (sig + "foo.rbs").write(<<-EOF)
+class Foo
+  attr_reader name: String?
+  def helper: () -> Integer
+  def run: () -> void
+end
+      EOF
+
+      app = current_dir + "app"
+      app.mkpath
+      (app + "foo.rb").write(<<-EOF)
+class Foo
+  def helper
+    name.size
+  end
+
+  def run
+    return unless name
+
+    helper
+  end
+end
+      EOF
+
+      stdout, status = sh(*steep, "check")
+
+      assert_predicate status, :success?, stdout
+      assert_match(/Inferred preconditions/, stdout)
+      assert_match(/Foo#helper/, stdout)
+      assert_match(/No type error detected/, stdout)
+
+      sidecar = current_dir + "sig/generated/.steep_contracts.yml"
+      assert sidecar.file?, "expected sidecar at #{sidecar}"
+      content = sidecar.read
+      assert_includes content, "Foo#helper"
+      assert_includes content, "not_nil"
+    end
+  end
+
   def test_check_failure
     in_tmpdir do
       (current_dir + "Steepfile").write(<<-EOF)
@@ -122,6 +172,52 @@ end
 
       refute_predicate status, :success?, stdout
       assert_match(/Detected 1 problem from 1 file/, stdout)
+    end
+  end
+
+  def test_erb_check_failure
+    in_tmpdir do
+      (current_dir + "Steepfile").write(<<-EOF)
+target :app do
+  check "app/views/**/*.erb"
+end
+      EOF
+
+      (current_dir + "app").mkdir
+      (current_dir + "app/views").mkdir
+      (current_dir + "app/views/companies").mkdir
+
+      (current_dir + "app/views/companies/_form.html.erb").write(<<-EOF)
+<div> Count: <%= 1 + "2" %> </div>
+      EOF
+
+      stdout, status = sh(*steep, "check")
+
+      refute_predicate status, :success?, stdout
+      assert_match(/Detected 1 problem from 1 file/, stdout)
+    end
+  end
+
+  def test_erb_check_success
+    in_tmpdir do
+      (current_dir + "Steepfile").write(<<-EOF)
+target :app do
+  check "app/views/**/*.erb"
+end
+      EOF
+
+      (current_dir + "app").mkdir
+      (current_dir + "app/views").mkdir
+      (current_dir + "app/views/companies").mkdir
+
+      (current_dir + "app/views/companies/_form.html.erb").write(<<-EOF)
+<div> Count: <%= 1 + 2 %> </div>
+      EOF
+
+      stdout, status = sh(*steep, "check")
+
+      assert_predicate status, :success?, stdout
+      assert_match(/No type error detected\./, stdout)
     end
   end
 
@@ -163,7 +259,7 @@ end
 1 + "2"
       EOF
 
-      stdout, status = sh(*steep, "check", "--group=app")
+      stdout, _ = sh(*steep, "check", "--group=app")
 
       assert_match(/^foo.rb:1:0/, stdout)
       refute_match(/^test.rb/, stdout)
@@ -710,7 +806,7 @@ end
 1 + 2
       EOF
 
-      stdout, stderr, status = sh3(*steep, "stats", "--format=table")
+      stdout, _, status = sh3(*steep, "stats", "--format=table")
 
       assert_predicate status, :success?, stdout
       assert_equal <<CSV, stdout
@@ -911,15 +1007,22 @@ end
     end
   end
 
+  def check_expressions(*expressions)
+    in_tmpdir do
+      (current_dir + "Steepfile").write("target :app do\n  check \"lib\"\nend\n")
+      sh(*steep, "check", *expressions.flat_map { |expression| ["-e", expression] })
+    end
+  end
+
   def test_check_expression_success
-    stdout, status = sh(*steep, "check", "-e", "1 + 2")
+    stdout, status = check_expressions("1 + 2")
 
     assert_predicate status, :success?, stdout
     assert_match(/No type error detected\./, stdout)
   end
 
   def test_check_expression_failure
-    stdout, status = sh(*steep, "check", "-e", '123 + "ABC"')
+    stdout, status = check_expressions('123 + "ABC"')
 
     refute_predicate status, :success?, stdout
     assert_match(/Ruby::UnresolvedOverloading/, stdout)
@@ -927,8 +1030,7 @@ end
   end
 
   def test_check_multiple_expressions
-
-    stdout, status = sh(*steep, "check", "-e", '123 + "ABC"', "-e", "1 + 2", "-e", '"hello" + 3')
+    stdout, status = check_expressions('123 + "ABC"', "1 + 2", '"hello" + 3')
 
     refute_predicate status, :success?, stdout
     assert_match(/Detected 2 problems from 3 expressions/, stdout)
@@ -1062,6 +1164,59 @@ end
             assert_equal "foo.rb", result[:file]
             assert result.key?(:result), "Expected result key in #{line}"
           end
+        end
+      ensure
+        sh(*steep, "server", "stop", err: [:child, :out])
+      end
+    end
+  end
+
+  def test_query_diagnostics_returns_result
+    skip "fork() is not available on this platform" unless Steep.can_fork?
+
+    in_tmpdir do
+      (current_dir + "Steepfile").write(<<-EOF)
+target :app do
+  check "foo.rb"
+  signature "foo.rbs"
+end
+      EOF
+
+      (current_dir + "foo.rbs").write(<<~RBS)
+        class Foo
+          def name: () -> String
+        end
+      RBS
+
+      (current_dir + "foo.rb").write(<<~RUBY)
+        class Foo
+          def name
+            42
+          end
+        end
+      RUBY
+
+      sh!(*steep, "server", "start", err: [:child, :out])
+
+      begin
+        # The first response has to wait for the warm-up of the server, which takes long on a loaded machine
+        finally_holds(timeout: 60) do
+          stdout, status = sh(*steep, "query", "diagnostics", "foo.rb")
+          assert_predicate status, :success?
+
+          result = JSON.parse(stdout.lines.first, symbolize_names: true)
+          assert_equal "foo.rb", result[:path]
+          refute_nil result[:diagnostics]
+          assert result[:diagnostics].any? {|d| d[:code] == "Ruby::MethodBodyTypeMismatch" }, result[:diagnostics].inspect
+        end
+
+        # Without arguments, every file the server has diagnostics for is printed
+        finally_holds(timeout: 30) do
+          stdout, status = sh(*steep, "query", "diagnostics")
+          assert_predicate status, :success?
+
+          paths = stdout.lines.map {|line| JSON.parse(line, symbolize_names: true).fetch(:path) }
+          assert_includes paths, "foo.rb"
         end
       ensure
         sh(*steep, "server", "stop", err: [:child, :out])

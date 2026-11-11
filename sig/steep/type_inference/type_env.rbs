@@ -33,11 +33,19 @@ module Steep
 
       attr_reader instance_variable_types: Hash[Symbol, AST::Types::t]
 
+      attr_reader declared_instance_variable_types: Hash[Symbol, AST::Types::t]
+
       attr_reader global_types: Hash[Symbol, AST::Types::t]
 
       attr_reader constant_types: Hash[RBS::TypeName, AST::Types::t]
 
       attr_reader constant_env: ConstantEnv
+
+      # Overlay over `Context::ModuleContext#self_type`, set by
+      # `LogicTypeInterpreter` when a postcondition narrows the receiver
+      # of an implicit-self call (felixefelip/steep#25). When `nil`,
+      # callers fall back to the method-context's `self_type`.
+      attr_reader refined_self_type: AST::Types::t?
 
       @pure_node_descendants: Hash[Parser::AST::Node, Set[Parser::AST::Node]]
 
@@ -45,9 +53,11 @@ module Steep
           ConstantEnv,
           ?local_variable_types: Hash[Symbol, local_variable_entry],
           ?instance_variable_types: Hash[Symbol, AST::Types::t],
+          ?declared_instance_variable_types: Hash[Symbol, AST::Types::t]?,
           ?global_types: Hash[Symbol, AST::Types::t],
           ?constant_types: Hash[RBS::TypeName, AST::Types::t],
-          ?pure_method_calls: Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]]
+          ?pure_method_calls: Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]],
+          ?refined_self_type: AST::Types::t?
         ) -> void
 
       def update: (
@@ -55,7 +65,8 @@ module Steep
           ?instance_variable_types: Hash[Symbol, AST::Types::t],
           ?global_types: Hash[Symbol, AST::Types::t],
           ?constant_types: Hash[RBS::TypeName, AST::Types::t],
-          ?pure_method_calls: Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]]
+          ?pure_method_calls: Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]],
+          ?refined_self_type: AST::Types::t?
         ) -> TypeEnv
 
       def merge: (
@@ -63,8 +74,14 @@ module Steep
           ?instance_variable_types: Hash[Symbol, AST::Types::t],
           ?global_types: Hash[Symbol, AST::Types::t],
           ?constant_types: Hash[RBS::TypeName, AST::Types::t],
-          ?pure_method_calls: Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]]
+          ?pure_method_calls: Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]],
+          ?refined_self_type: AST::Types::t?
         ) -> TypeEnv
+
+      # Returns a new env with `refined_self_type` set to `type`. Use
+      # this from `LogicTypeInterpreter#refine_node_type` when the node
+      # to refine is `:self` (implicit or explicit).
+      def with_refined_self: (AST::Types::t) -> TypeEnv
 
       # Returns type of `name`.
       #
@@ -82,12 +99,29 @@ module Steep
       #
       def assign_local_variable: (Symbol name, AST::Types::t type, AST::Types::t? enforced_type) -> TypeEnv
 
-      # Refines types of local variables and pure calls.
+      # Refines types of local variables, instance variables, and pure calls.
       #
-      # * Receives types of updated local variables and pure calls.
-      # * The local variable types will be
+      # * Receives types of updated local variables, ivars, and pure calls.
+      # * Invalidates pure_method_calls keyed on the refined lvars/ivars.
       #
-      def refine_types: (?local_variable_types: Hash[Symbol, AST::Types::t], ?pure_call_types: Hash[Parser::AST::Node, AST::Types::t]) -> TypeEnv
+      def refine_types: (
+          ?local_variable_types: Hash[Symbol, AST::Types::t],
+          ?instance_variable_types: Hash[Symbol, AST::Types::t],
+          ?pure_call_types: Hash[Parser::AST::Node, AST::Types::t]
+        ) -> TypeEnv
+
+      # Replaces or merges instance variable declarations, keeping both
+      # the _current_ (possibly narrowed) view and the _declared_ shape in
+      # sync. Used by env builders when importing RBS-declared ivars or
+      # `@type ivar` annotations.
+      #
+      def with_instance_variable_declarations: (Hash[Symbol, AST::Types::t], ?merge: bool) -> TypeEnv
+
+      # Returns the originally declared type of `name` — never affected
+      # by narrowing. Use this when an assignment subtype check should
+      # be performed against the wider declared shape (issue #16).
+      #
+      def declared_instance_variable_type: (Symbol name) -> AST::Types::t?
 
       def enforced_type: (Symbol name) -> AST::Types::t?
 

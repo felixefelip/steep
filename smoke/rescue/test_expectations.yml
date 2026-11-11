@@ -10,8 +10,8 @@
         character: 7
     severity: ERROR
     message: |-
-      Cannot assign a value of type `(::String | ::Integer)` to a variable of type `::Integer`
-        (::String | ::Integer) <: ::Integer
+      Cannot assign a value of type `(::String | 1)` to a variable of type `::Integer`
+        (::String | 1) <: ::Integer
           ::String <: ::Integer
             ::Object <: ::Integer
               ::BasicObject <: ::Integer
@@ -25,8 +25,8 @@
         character: 18
     severity: ERROR
     message: |-
-      Cannot assign a value of type `(::String | ::Integer)` to a variable of type `::Integer`
-        (::String | ::Integer) <: ::Integer
+      Cannot assign a value of type `(::String | 1)` to a variable of type `::Integer`
+        (::String | 1) <: ::Integer
           ::String <: ::Integer
             ::Object <: ::Integer
               ::BasicObject <: ::Integer
@@ -40,8 +40,8 @@
         character: 7
     severity: ERROR
     message: |-
-      Cannot assign a value of type `(::String | ::Symbol | ::Integer)` to a variable of type `::Integer`
-        (::String | ::Symbol | ::Integer) <: ::Integer
+      Cannot assign a value of type `(::String | ::Symbol | 1)` to a variable of type `::Integer`
+        (::String | ::Symbol | 1) <: ::Integer
           ::String <: ::Integer
             ::Object <: ::Integer
               ::BasicObject <: ::Integer
@@ -55,8 +55,8 @@
         character: 7
     severity: ERROR
     message: |-
-      Cannot assign a value of type `(::Array[::Integer] | ::Symbol | ::Integer)` to a variable of type `::Integer`
-        (::Array[::Integer] | ::Symbol | ::Integer) <: ::Integer
+      Cannot assign a value of type `(::Array[::Integer] | ::Symbol | 1)` to a variable of type `::Integer`
+        (::Array[::Integer] | ::Symbol | 1) <: ::Integer
           ::Array[::Integer] <: ::Integer
             ::Object <: ::Integer
               ::BasicObject <: ::Integer
@@ -70,8 +70,8 @@
         character: 7
     severity: ERROR
     message: |-
-      Cannot allow method body have type `(::Integer | ::String)` because declared as type `::String`
-        (::Integer | ::String) <: ::String
+      Cannot allow method body have type `(::Integer | "foo")` because declared as type `::String`
+        (::Integer | "foo") <: ::String
           ::Integer <: ::String
             ::Numeric <: ::String
               ::Object <: ::String

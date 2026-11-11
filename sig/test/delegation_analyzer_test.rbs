@@ -1,0 +1,33 @@
+# Generated from test/delegation_analyzer_test.rb with RBS::Inline
+
+# Unit tests for the source-walking part of the delegation chain
+# narrowing pipeline (felixefelip/steep#32). The analyzer only
+# recognizes shapes; semantic application happens in
+# `TypeConstruction` and is covered by integration tests.
+class DelegationAnalyzerTest < Minitest::Test
+  DelegationAnalyzer: untyped
+
+  def parse: (untyped source) -> untyped
+
+  def analyze: (untyped source) -> untyped
+
+  def test_detects_manual_same_name_delegation_via_attr_send: () -> untyped
+
+  def test_detects_renaming_forward: () -> untyped
+
+  def test_detects_manual_same_name_delegation_via_ivar: () -> untyped
+
+  def test_skips_methods_with_transforming_body: () -> untyped
+
+  def test_skips_methods_with_multi_statement_body: () -> untyped
+
+  def test_detects_renaming_wrapper_as_forward: () -> untyped
+
+  def test_handles_nested_modules_correctly: () -> untyped
+
+  def test_skips_singleton_def_self_methods: () -> untyped
+
+  def test_top_level_defs_are_ignored: () -> untyped
+
+  def test_accepts_arg_forwarding_delegation: () -> untyped
+end

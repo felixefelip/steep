@@ -6,6 +6,19 @@ module Steep
       attr_reader :source_files
       attr_reader :signature_services
 
+      # The on-disk project index plus every in-memory source buffer. The
+      # latter matters to editor checks: an unsaved `class String` reopen must
+      # disable folding before the file is written to disk.
+      def literal_method_registry
+        @literal_method_registry ||= project.literal_method_registry.dup.tap do |registry|
+          source_files.each_value do |file|
+            next if file.path.extname == ".erb"
+
+            registry.ingest_source(file.content, path_name: file.path.to_s)
+          end
+        end
+      end
+
       class SourceFile
         attr_reader :path
         attr_reader :target
@@ -105,7 +118,7 @@ module Steep
         @source_files = {}
         @signature_services = project.targets.each.with_object({}) do |target, hash| #$ Hash[Symbol, SignatureService]
           loader = Project::Target.construct_env_loader(options: target.options, project: project)
-          hash[target.name] = SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
+          hash[target.name] = SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts)
         end
         @signature_validation_diagnostics = project.targets.each.with_object({}) do |target, hash| #$ Hash[Symbol, Hash[Pathname, Array[Diagnostic::Signature::Base]]]
           hash[target.name] = {}
@@ -323,19 +336,48 @@ module Steep
       end
 
       def update_sources(changes:)
+        any_change = false
         changes.each do |path, changes|
           if source_file?(path)
             file = source_files[path] || SourceFile.no_data(path: path, content: "")
             content = changes.inject(file.content) {|text, change| change.apply_to(text) }
             source_files[path] = file.update_content(content)
+            any_change = true
           end
         end
+        # Coarse invalidation: any source change blows away the
+        # delegation registry. felixefelip/steep#32 — re-parsing the
+        # project is cheap compared to type-checking, and granular
+        # invalidation would need a path → class-name reverse map
+        # that the registry doesn't carry today.
+        project.invalidate_delegation_registry! if any_change
+        project.invalidate_constructor_binding_registry! if any_change
+        project.invalidate_return_forwarding_registry! if any_change
+        project.invalidate_return_alias_registry! if any_change
+        project.invalidate_literal_method_registry! if any_change
+        @literal_method_registry = nil if any_change
       end
 
       def type_check_file(target:, subtyping:, path:, text:)
         Steep.logger.tagged "#type_check_file(#{path}@#{target.name})" do
           source = Source.parse(text, path: path, factory: subtyping.factory)
-          typing = TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: yield, cursor: nil)
+
+          typing = TypeCheckService.type_check(
+            source: source,
+            subtyping: subtyping,
+            constant_resolver: yield,
+            cursor: nil,
+            contracts: project.contracts,
+            postconditions: project.postconditions,
+            callbacks: project.callbacks,
+            specializations: project.specializations,
+            literal_method_registry: literal_method_registry,
+            delegation_registry: project.delegation_registry,
+            constructor_bindings: project.constructor_binding_registry,
+            return_forwarding: project.return_forwarding_registry,
+            return_alias: project.return_alias_registry
+          )
+
           ignores = Source::IgnoreRanges.new(ignores: source.ignores)
           SourceFile.with_typing(path: path, content: text, node: source.node, typing: typing, ignores: ignores)
         end
@@ -352,18 +394,59 @@ module Steep
         SourceFile.no_data(path: path, content: text)
       end
 
-      def self.type_check(source:, subtyping:, constant_resolver:, cursor:)
+      # `constructor_bindings` defaults to an empty registry: the reader→param
+      # index it carries only feeds the `.new`-site obligation harvesting during
+      # the contracts enforcement fixpoint (felixefelip/steep#60). The main
+      # check and the LSP providers read already-persisted, already-enforced
+      # contracts, so they legitimately need no registry — only the Enforcement
+      # / Runner paths pass the real one.
+      def self.type_check(
+        source:,
+        subtyping:,
+        constant_resolver:,
+        cursor:,
+        contracts:,
+        postconditions:,
+        callbacks:,
+        specializations:,
+        literal_method_registry:,
+        delegation_registry:,
+        constructor_bindings:,
+        return_forwarding:,
+        return_alias:,
+        # Opt-in: only the inference passes that consume `typing.branch_envs` ask
+        # for them. The check driver and the LSP leave this false and pay nothing.
+        record_branch_envs: false
+      )
         annotations = source.annotations(block: source.node, factory: subtyping.factory, context: nil)
 
+        # An annotated self type whose name the environment does not declare falls back to
+        # the same `Object` this uses when there is NO annotation, and is reported
+        # (felixefelip/steep#101). `build_instance` answers an unknown name by raising a
+        # bare RuntimeError, so without this a single un-declared name took the whole run
+        # down — and the name is typically generated code (`ERBFoo` for a template whose
+        # RBS has not been inferred yet), i.e. one the user never wrote.
+        unknown_self_type = nil #: RBS::TypeName?
+
         case annotations.self_type
-        when AST::Types::Name::Instance
-          module_name = annotations.self_type.name
-          module_type = AST::Types::Name::Singleton.new(name: module_name)
-          instance_type = annotations.self_type
-        when AST::Types::Name::Singleton
-          module_name = annotations.self_type.name
-          module_type = annotations.self_type
-          instance_type = annotations.self_type
+        when AST::Types::Name::Instance, AST::Types::Name::Singleton
+          annotated_name = annotations.self_type.name
+
+          if subtyping.factory.env.class_decls.key?(annotated_name)
+            module_name = annotated_name
+            module_type =
+              if annotations.self_type.is_a?(AST::Types::Name::Singleton)
+                annotations.self_type
+              else
+                AST::Types::Name::Singleton.new(name: annotated_name)
+              end
+            instance_type = annotations.self_type
+          else
+            unknown_self_type = annotated_name
+            module_name = AST::Builtin::Object.module_name
+            module_type = AST::Builtin::Object.module_type
+            instance_type = AST::Builtin::Object.instance_type
+          end
         else
           module_name = AST::Builtin::Object.module_name
           module_type = AST::Builtin::Object.module_type
@@ -382,9 +465,38 @@ module Steep
           TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annotations),
           TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(subtyping.factory),
           TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, subtyping.factory),
-          TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations),
+          TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations).merge!,
           TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annotations)
         ).build(type_env)
+        type_env = type_env.update(class_states: specializations.entering_class_states(source.path))
+
+        # Top-level constant narrowing (felixefelip/rbs_infer#25): a file
+        # checked with `# @type self: <class>` (an ERB view) has no method
+        # to hang `applies_constants` on, so apply the class's `toplevel`
+        # callback entries to the top-level env here — the analogue of
+        # `apply_callbacks_for_method`. E.g. `Current` reads in a guarded
+        # view then dispatch on the marker-decorated singleton.
+        unless callbacks.empty?
+          toplevel_updates = callbacks.toplevel_entries(module_name.to_s).each_with_object({}) do |entry, acc|
+            acc.merge!(Callbacks::ConstantNarrowing.constant_type_updates(entry.applies_constants, factory: subtyping.factory))
+          end
+          type_env = type_env.merge(constant_types: toplevel_updates) unless toplevel_updates.empty?
+        end
+
+        # Top-level method-entry facts: a body checked with
+        # `@type self_method: Klass#method` (an ERB view template, which at
+        # runtime IS a method) is the body of that method, so apply the method's
+        # entry facts here — the top-level analogue of `apply_method_entry_facts`.
+        # Reuses the const-path fact representation and the read-site narrowing
+        # (`method_entry_narrowed_type`) verbatim; the annotation supplies the key.
+        if (entry_method = annotations.self_method_name) &&
+            (facts = postconditions.lookup_method_entry_facts(module_name.to_s, entry_method))
+          consts = facts[:consts].transform_values { |rbs_type| subtyping.factory.type(rbs_type) }
+          self_methods = facts[:self_methods].transform_values { |rbs_type| subtyping.factory.type(rbs_type) }
+          unless consts.empty? && self_methods.empty?
+            type_env = type_env.with_method_entry_facts(self_methods: self_methods, consts: consts)
+          end
+        end
 
         context = TypeInference::Context.new(
           block_context: nil,
@@ -405,17 +517,37 @@ module Steep
           variable_context: TypeInference::Context::TypeVariableContext.empty
         )
 
-        typing = Typing.new(source: source, root_context: context, cursor: cursor)
+        typing = Typing.new(source: source, root_context: context, cursor: cursor, record_branch_envs: record_branch_envs)
+
+        if unknown_self_type && source.node
+          typing.add_error(
+            Diagnostic::Ruby::UnknownSelfTypeAnnotation.new(node: source.node, name: unknown_self_type)
+          )
+        end
 
         construction = TypeConstruction.new(
           checker: subtyping,
           annotations: annotations,
           source: source,
           context: context,
-          typing: typing
+          typing: typing,
+          contracts: contracts,
+          postconditions: postconditions,
+          callbacks: callbacks,
+          specializations: specializations,
+          literal_method_registry: literal_method_registry,
+          delegation_registry: delegation_registry,
+          constructor_bindings: constructor_bindings,
+          return_forwarding: return_forwarding,
+          return_alias: return_alias
         )
 
-        construction.synthesize(source.node) if source.node
+        if source.node
+          left = construction.synthesize(source.node).context.type_env.class_states
+          typing.top_level_states = [type_env.class_states, left]
+          typing.observed_classes = ObjectStates::ClassStates.observed(typing, type_env.class_states, left)
+          specializations.entered_classes(source.path, typing.observed_classes)
+        end
 
         typing
       end

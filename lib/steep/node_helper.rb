@@ -29,7 +29,12 @@ module Steep
         true
       when :true, :false, :str, :sym, :int, :float, :nil
         true
-      when :lvar
+      when :lvar, :ivar
+        # Treat ivar reads as stable between two evaluations within the same
+        # method body (issue felixefelip/steep#8). Reassignment via `@x = …`
+        # is invalidated in `TypeConstruction#ivasgn`. Mutation through
+        # collaborators (a non-pure self-send that writes the ivar) is left
+        # unsound on purpose — same trade-off TypeScript makes for `this.x`.
         true
       when :const
         each_child_node(node).all? {|child| child.type == :cbase || value_node?(child) }
@@ -220,7 +225,7 @@ module Steep
 
     def private_send?(node)
       case node.type
-      when :block, :numblock
+      when :block, :numblock, :itblock
         private_send?(node.children[0])
       when :send, :csend
         receiver, = deconstruct_send_node!(node)
@@ -243,7 +248,7 @@ module Steep
         when :send, :csend, :super
           if block_node
             case block_node.type
-            when :block, :numblock
+            when :block, :numblock, :itblock
               if send_node.equal?(block_node.children[0])
                 return [send_node, block_node]
               end
@@ -256,6 +261,48 @@ module Steep
           [send_node, nil]
         end
       end
+    end
+
+    # A `super` given no block of its own passes the method's, as `&` would.
+    def with_method_block(super_node)
+      arguments = super_node.children
+      return arguments if arguments.any? { |arg| arg.is_a?(Parser::AST::Node) && arg.type == :block_pass }
+
+      [*arguments, Parser::AST::Node.new(:block_pass, [nil], location: super_node.location)]
+    end
+
+    # The block a `super` passes without saying so, which a method that takes
+    # none silently drops. It spans the whole call — so does the `&block` a bare
+    # `super` stands for (`explicit_super`) — where a written `&` spans itself.
+    def method_block_pass?(block_pass, call)
+      block_pass.location.expression == call.location.expression
+    end
+
+    # The `super(...)` a bare `super` in `def_node` stands for: every parameter,
+    # as the local it is where `super` stands. nil where one has no name to
+    # pass (`*`, `**`, `&`, `...`).
+    def explicit_super(zsuper, def_node)
+      params = def_node.children[def_node.type == :defs ? 2 : 1].children
+      return nil if params.any? { |param| !param.children[0].is_a?(Symbol) }
+
+      local = ->(param) { zsuper.updated(:lvar, [param.children[0]]) }
+      positionals = [] #: Array[Parser::AST::Node]
+      keywords = [] #: Array[Parser::AST::Node]
+      block = [] #: Array[Parser::AST::Node]
+
+      params.each do |param|
+        case param.type
+        when :arg, :optarg then positionals << local[param]
+        when :restarg then positionals << zsuper.updated(:splat, [local[param]])
+        when :kwarg, :kwoptarg then keywords << zsuper.updated(:pair, [zsuper.updated(:sym, [param.children[0]]), local[param]])
+        when :kwrestarg then keywords << zsuper.updated(:kwsplat, [local[param]])
+        when :blockarg then block << zsuper.updated(:block_pass, [local[param]])
+        else return nil
+        end
+      end
+
+      kwargs = keywords.empty? ? [] : [zsuper.updated(:kwargs, keywords)] #: Array[Parser::AST::Node]
+      zsuper.updated(:super, positionals + kwargs + block)
     end
 
     def clone_node(node)

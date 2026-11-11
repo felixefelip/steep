@@ -1,0 +1,249 @@
+module Steep
+  module Contracts
+    class Inferrer
+      def self.infer(source, typing, return_aliases:)
+        new(source, typing, return_aliases: return_aliases).infer
+      end
+
+      def initialize(source, typing, return_aliases:)
+        @source = source
+        @typing = typing
+        @return_aliases = return_aliases
+        @diagnostics_by_node = nil
+      end
+
+      def infer
+        return [] unless @source.node
+
+        results = {}
+        walk_classes(@source.node, nesting: []) do |def_node, class_name|
+          next unless def_node.type == :def
+
+          obligations = collect_obligations(def_node, class_name)
+          next if obligations.empty? && !self_rooted_argument_mismatch?(def_node)
+
+          key = "#{class_name}##{def_node.children[0]}"
+          merged = (results[key] || []) + obligations
+          results[key] = dedupe(merged)
+        end
+
+        results.map do |key, requires|
+          type_name, separator, method = key.partition(/[#.]/)
+          MethodContract.new(
+            type_name: type_name,
+            method_name: method.to_sym,
+            singleton: separator == ".",
+            requires: requires
+          )
+        end
+      end
+
+      private
+
+      def walk_classes(node, nesting:, &block)
+        return unless node.is_a?(Parser::AST::Node)
+
+        case node.type
+        when :class
+          const_node, _super, body = node.children
+          name = extract_const_name(const_node)
+          new_nesting = name ? nesting + [name] : nesting
+          walk_classes(body, nesting: new_nesting, &block) if body
+        when :module
+          const_node, body = node.children
+          name = extract_const_name(const_node)
+          new_nesting = name ? nesting + [name] : nesting
+          walk_classes(body, nesting: new_nesting, &block) if body
+        when :def
+          unless nesting.empty?
+            yield node, nesting.join("::")
+          end
+        when :begin, :kwbegin
+          node.children.each { |child| walk_classes(child, nesting: nesting, &block) }
+        when :sclass
+          walk_classes(node.children[1], nesting: nesting, &block)
+        else
+          node.children.each do |child|
+            walk_classes(child, nesting: nesting, &block)
+          end
+        end
+      end
+
+      def extract_const_name(node)
+        return nil unless node.is_a?(Parser::AST::Node)
+        case node.type
+        when :const
+          parent, name = node.children
+          parent_name = parent ? extract_const_name(parent) : nil
+          parent_name ? "#{parent_name}::#{name}" : name.to_s
+        end
+      end
+
+      def collect_obligations(def_node, class_name)
+        body = def_node.children[2]
+        return [] unless body
+
+        body_range = node_range(def_node)
+        # felixefelip/steep#62: `{ [local, attr] => [path_syms] }` so a deref
+        # through a local aliased to a self path (`record.post` <- `self.owner`,
+        # directly or via `record = build`) is rooted at `self`.
+        aliases = Contracts::AliasResolver.local_attr_aliases(body, class_name: class_name, return_aliases: @return_aliases)
+        # …and a local that IS a self path (`_ = user`), so `_.full_name` is
+        # rooted at `self.user`.
+        locals = Contracts::AliasResolver.local_aliases(body)
+        parents = chain_parents(body)
+        obligations = []
+
+        no_method_errors_within(body_range).each do |error|
+          call_node = error.node
+          next unless call_node && call_node.is_a?(Parser::AST::Node)
+
+          # The failing call's receiver must be non-nil (`post` for `post.user`).
+          if (expr = self_path_to_expr(call_node.children[0], aliases, locals))
+            obligations << Predicate::NotNil.new(expr)
+          end
+
+          # felixefelip/steep#64: a `self.a.b.c` chain has a nilable hop per
+          # intermediate, but a single inference pass only errors on the first;
+          # the deeper hops stay masked. Walk up the enclosing chain: each node
+          # that is itself the receiver of a further call must also be non-nil,
+          # so `post.user.name` (error on `.user`) additionally requires
+          # `not_nil self.post.user`. When the error is already on the outermost
+          # call (`record.post.user.name` → error on `.name`) there is no parent,
+          # so nothing extra is emitted and single-hop cases are unchanged.
+          node = call_node
+          while (parent = parents[node])
+            if (expr = self_path_to_expr(node, aliases, locals))
+              obligations << Predicate::NotNil.new(expr)
+            end
+            node = parent
+          end
+        end
+
+        obligations
+      end
+
+      # Whether the body has an argument the enclosing `self` decides
+      # (felixefelip/steep#158): a self-rooted send passed to a method that
+      # wanted a narrower type. `export_user(creator)` inside `Card::Exportable`
+      # is one — the argument is `self.creator`, and whether it is `User?` or
+      # `(User & User::Validated)` depends entirely on which `self` the callers
+      # supply.
+      #
+      # No predicate can be written from this diagnostic. `NotNil` narrows by
+      # subtracting nil, which does not produce a marker, and the type the
+      # parameter wants is a fact about the ARGUMENT, not about `self`. All it
+      # yields is candidacy: the method gets an empty contract so
+      # `Enforcement` observes its call sites, and if they agree on a receiver
+      # type the Runner turns that into the `self_type` predicate that does the
+      # work. A candidate that acquires nothing is dropped before writing.
+      def self_rooted_argument_mismatch?(def_node)
+        body = def_node.children[2]
+        return false unless body
+
+        range = node_range(def_node)
+        @typing.errors.any? do |error|
+          next false unless error.is_a?(Steep::Diagnostic::Ruby::ArgumentTypeMismatch)
+          loc = error.node&.location&.expression
+          next false unless loc && range.cover?(loc.begin_pos)
+
+          !self_path_to_expr(error.node).nil?
+        end
+      end
+
+      # Map each send node to the send that calls a method on it, so the
+      # enclosing deref chain can be walked upward from any inner node.
+      def chain_parents(body)
+        parents = {}.compare_by_identity
+        walk_nodes(body) do |node|
+          next unless node.type == :send
+          receiver = node.children[0]
+          parents[receiver] = node if receiver.is_a?(Parser::AST::Node) && receiver.type == :send
+        end
+        parents
+      end
+
+      def walk_nodes(node, &block)
+        return unless node.is_a?(Parser::AST::Node)
+        yield node
+        node.children.each { |c| walk_nodes(c, &block) }
+      end
+
+      def no_method_errors_within(range)
+        @typing.errors.select do |error|
+          next false unless error.is_a?(Steep::Diagnostic::Ruby::NoMethod)
+          loc = error.node&.location&.expression
+          loc && range.cover?(loc.begin_pos)
+        end
+      end
+
+      def node_range(node)
+        loc = node.location.expression
+        loc.begin_pos..loc.end_pos
+      end
+
+      def self_path_to_expr(node, aliases = {}, locals = {})
+        return nil unless node.is_a?(Parser::AST::Node)
+
+        if (path = Contracts::AliasResolver.local_path(node, locals))
+          return Expr::Send.new(receiver: Expr::SelfRef.instance, method: path.first, chain: path.drop(1))
+        end
+        return nil unless node.type == :send
+
+        methods = []
+        current = node
+        while current.is_a?(Parser::AST::Node) && current.type == :send
+          recv, mname, *args = current.children
+          return nil unless args.empty?
+
+          # `local.attr` aliased to a self path (`record.post` ← `self.owner`):
+          # splice that self path in and chain the methods gathered so far on top
+          # (`record.post.user` → `self.owner.user`).
+          if recv.is_a?(Parser::AST::Node) && recv.type == :lvar &&
+              (path = aliases[[recv.children[0], mname]])
+            full = path + methods
+            return Expr::Send.new(receiver: Expr::SelfRef.instance, method: full.first, chain: full.drop(1))
+          end
+
+          methods.unshift(mname)
+          current = recv
+        end
+
+        if (path = Contracts::AliasResolver.local_path(current, locals))
+          full = path + methods
+          return Expr::Send.new(receiver: Expr::SelfRef.instance, method: full.first, chain: full.drop(1))
+        end
+
+        unless current.nil? || (current.is_a?(Parser::AST::Node) && current.type == :self)
+          return nil
+        end
+
+        head = methods.shift
+        Expr::Send.new(receiver: Expr::SelfRef.instance, method: head, chain: methods)
+      end
+
+      def dedupe(predicates)
+        seen = {}
+        predicates.each do |pred|
+          key = predicate_key(pred)
+          seen[key] ||= pred
+        end
+        seen.values
+      end
+
+      def predicate_key(pred)
+        case pred
+        when Predicate::NotNil
+          [:not_nil, expr_key(pred.expr)]
+        end
+      end
+
+      def expr_key(expr)
+        case expr
+        when Expr::SelfRef then [:self]
+        when Expr::Send then [:send, expr_key(expr.receiver), expr.method, expr.chain]
+        end
+      end
+    end
+  end
+end

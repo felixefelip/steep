@@ -1,0 +1,37 @@
+# Generated from test/source/erb_self_type_resolver_test.rb with RBS::Inline
+
+class Steep::Source::ErbSelfTypeResolverTest < Minitest::Test
+  Resolver: untyped
+
+  def test_regular_view: () -> untyped
+
+  def test_index_view: () -> untyped
+
+  def test_new_view: () -> untyped
+
+  def test_edit_view: () -> untyped
+
+  def test_partial: () -> untyped
+
+  def test_partial_in_shared: () -> untyped
+
+  def test_layout: () -> untyped
+
+  def test_namespaced_controller: () -> untyped
+
+  def test_namespaced_partial: () -> untyped
+
+  def test_mailer: () -> untyped
+
+  def test_turbo_stream_erb: () -> untyped
+
+  def test_full_path: () -> untyped
+
+  def test_pathname: () -> untyped
+
+  def test_non_view_returns_nil: () -> untyped
+
+  def test_non_erb_returns_nil: () -> untyped
+
+  def test_no_app_views_returns_nil: () -> untyped
+end

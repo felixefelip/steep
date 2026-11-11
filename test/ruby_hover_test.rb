@@ -177,7 +177,7 @@ RUBY
         assert_equal [5, 7]...[5, 11], [content.location.line,content.location.column]...[content.location.last_line, content.location.last_column]
         assert_instance_of TypeInference::MethodCall::Typed, content.method_call
         assert_equal [MethodName("::Array#join")], content.method_call.method_decls.map(&:method_name)
-        assert_equal "(::String | nil)", content.method_call.return_type.to_s
+        assert_equal "::String", content.method_call.return_type.to_s
       end
     end
   end
@@ -201,7 +201,12 @@ RUBY
         assert_instance_of HoverProvider::MethodCallContent, content
         assert_equal [1,8]...[1,11], [content.location.line,content.location.column]...[content.location.last_line, content.location.last_column]
         assert_instance_of TypeInference::MethodCall::Typed, content.method_call
-        assert_equal "::Array[::String]", content.method_call.return_type.to_s
+        # The block runs once per element of a collection the checker knows
+        # (#198), so the call answers the value. Hover shows what the check
+        # sees, and the declaration is still there underneath.
+        assert_equal '["1", "2", "3"]', content.method_call.return_type.to_s
+        assert_equal '["1", "2", "3"]', content.narrowed_type.to_s
+        assert_equal "::Array[::String]", content.method_call.actual_method_type.type.return_type.to_s
       end
 
       hover.content_for(target: target, path: Pathname("hello.rb"), line: 1, column: 21).tap do |content|
@@ -404,7 +409,7 @@ RBS
         assert_instance_of HoverProvider::ConstantContent, content
         assert_equal [2,2]...[2,7], [content.location.line,content.location.column]...[content.location.last_line, content.location.last_column]
         assert_equal RBS::TypeName.parse("::Hello::World"), content.full_name
-        assert_equal "::String", content.type.to_s
+        assert_equal '"Hello World!"', content.type.to_s
         assert_equal service.signature_services[:lib].latest_env.constant_decls[RBS::TypeName.parse("::Hello::World")], content.decl
       end
     end
@@ -472,6 +477,61 @@ RUBY
         assert_instance_of HoverProvider::MethodCallContent, content
         assert_equal [4,8]...[4,12], [content.location.line,content.location.column]...[content.location.last_line, content.location.last_column]
         assert_instance_of TypeInference::MethodCall::Typed, content.method_call
+
+        # Pure-call narrowing (#9) refined `hello.name` to non-nil
+        # inside the truthy branch. The narrowing lives in `env.pure_method_calls`,
+        # not on the MethodCall::Typed, so hover used to keep showing the
+        # method's declared return type (`String?`). Verify the fix shows
+        # the refined non-nil type.
+        assert_equal "::String", content.narrowed_type.to_s
+      end
+    end
+  end
+
+  def test_hover_on_attr_reader_with_union_narrowed_ivar
+    # Phase 2 of felixefelip/steep#16: when an attr_reader resolves on
+    # self and the backing ivar's declared type is a union, the type
+    # checker narrows reads to the env's current ivar type. Hover must
+    # show that narrowed type — not the declared method return — so the
+    # editor view matches what `steep check` actually sees.
+    in_tmpdir do
+      service = typecheck_service()
+
+      service.update(
+        changes: {
+          Pathname("hello.rbs") => [ContentChange.string(<<RBS)],
+class HelloIntSource
+  def fetch: () -> Integer
+end
+
+class HelloAttrUnion
+  attr_accessor company: (Integer | String)
+
+  def load_then_read: (HelloIntSource) -> void
+end
+RBS
+          Pathname("hello.rb") => [ContentChange.string(<<RUBY)]
+class HelloAttrUnion
+  # @dynamic company, company=
+
+  def load_then_read(src)
+    self.company = src.fetch
+    self.company
+  end
+end
+RUBY
+        }
+      ) {}
+
+      target = service.project.targets.find {|target| target.name == :lib }
+      hover = HoverProvider::Ruby.new(service: service)
+
+      # Cursor on `company` of `self.company` at line 6 — after the
+      # setter has narrowed the backing ivar to `Integer`. The hover
+      # should display `::Integer`, not the declared union.
+      hover.content_for(target: target, path: Pathname("hello.rb"), line: 6, column: 11).tap do |content|
+        assert_instance_of HoverProvider::MethodCallContent, content
+        assert_equal "::Integer", content.narrowed_type.to_s
       end
     end
   end

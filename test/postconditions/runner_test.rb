@@ -1,0 +1,2368 @@
+require_relative "../test_helper"
+
+class PostconditionsRunnerTest < Minitest::Test
+  include TestHelper
+  include ShellHelper
+
+  Postconditions = Steep::Postconditions
+  Project = Steep::Project
+
+  def dirs
+    @dirs ||= []
+  end
+
+  def envs
+    @envs ||= []
+  end
+
+  def write(relative, content)
+    path = current_dir + relative
+    path.parent.mkpath
+    path.write(content)
+    path
+  end
+
+  def setup_project(steepfile:)
+    write("Steepfile", steepfile)
+    project = Project.new(steepfile_path: current_dir + "Steepfile")
+    Project::DSL.parse(project, steepfile, filename: (current_dir + "Steepfile").to_s)
+    project
+  end
+
+  FIXTURE_STEEPFILE = <<~STEEPFILE
+    target :app do
+      signature "sig"
+      check "app"
+    end
+  STEEPFILE
+
+  FIXTURE_RBS = <<~RBS
+    class PCRunnerCompany
+      def self.find: (Integer) -> (PCRunnerCompany & PCRunnerCompany::Validated)
+    end
+
+    module PCRunnerCompany::Validated
+    end
+
+    class PCRunnerController
+      @company: (PCRunnerCompany & PCRunnerCompany::Validated) | PCRunnerCompany
+
+      def set_company: () -> (PCRunnerCompany & PCRunnerCompany::Validated)
+    end
+  RBS
+
+  NARROWING_RUBY = <<~RUBY
+    class PCRunnerController
+      def set_company
+        @company = PCRunnerCompany.find(1)
+      end
+    end
+  RUBY
+
+  SAFE_RUBY = <<~RUBY
+    class PCRunnerController
+      def set_company
+        1 + 2
+      end
+    end
+  RUBY
+
+  def test_runner_infers_unconditional_ivar_entry
+    in_tmpdir do
+      write("sig/company.rbs", FIXTURE_RBS)
+      write("app/controller.rb", NARROWING_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+
+      assert_equal 1, entries.size
+      entry = entries.first
+      assert_equal "PCRunnerController", entry.class_name
+      assert_equal :set_company, entry.method_name
+      refute entry.singleton
+      assert_equal [:"@company"], entry.ivars.keys
+      assert_equal "(::PCRunnerCompany & ::PCRunnerCompany::Validated)", entry.ivars[:"@company"].to_s
+    end
+  end
+
+  def test_runner_write_creates_sidecar_with_inferred_content
+    in_tmpdir do
+      write("sig/company.rbs", FIXTURE_RBS)
+      write("app/controller.rb", NARROWING_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      entries = runner.run
+      runner.write(entries)
+
+      sidecar = runner.output_path
+      assert sidecar.file?, "expected sidecar at #{sidecar}"
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(sidecar.read), source: sidecar.to_s)
+      entry = reparsed.lookup_instance("PCRunnerController", :set_company)
+      refute_nil entry, "expected entry to round-trip through the loader"
+      refute_nil entry.unconditional, "expected unconditional branch"
+      assert_equal({ :"@company" => "(::PCRunnerCompany & ::PCRunnerCompany::Validated)" }, entry.unconditional.ivar_type_strings)
+      assert_equal "::PCRunnerController & ::PCRunnerController::AfterSetCompany",
+                   entry.unconditional.self_type_string
+    end
+  end
+
+  def test_runner_write_removes_sidecar_when_no_entries
+    in_tmpdir do
+      write("sig/company.rbs", FIXTURE_RBS)
+      write("app/controller.rb", SAFE_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      sidecar = runner.output_path
+      sidecar.parent.mkpath
+      sidecar.write("stale\n")
+
+      entries = runner.run
+      runner.write(entries)
+
+      assert_empty entries
+      refute sidecar.file?, "expected stale sidecar to be removed when no entries are inferred"
+    end
+  end
+
+  MAY_WRITE_RBS = <<~RBS
+    class MWController
+      @halted: bool
+
+      def redirect_to: () -> void
+      def guard: () -> void
+      def wrap: () -> void
+    end
+  RBS
+
+  # felixefelip/steep#68 (item 1): the effect is closed over the self-call
+  # graph, so a method whose only "write" is a call to a writer still reports
+  # it — through any depth, and through a block.
+  MAY_WRITE_RUBY = <<~RUBY
+    class MWController
+      def redirect_to
+        @halted = true
+      end
+
+      def guard
+        redirect_to
+      end
+
+      def wrap
+        [1].each do
+          guard
+        end
+      end
+    end
+  RUBY
+
+  CONST_LIFT_RBS = <<~RBS
+    class CEThing
+    end
+
+    class CEStore
+      def self.thing: () -> CEThing?
+      def self.thing=: (CEThing?) -> CEThing?
+    end
+
+    class CEController
+      def thing: () -> CEThing
+      def write_it: () -> bool
+      def one_hop: () -> void
+      def two_hops: () -> void
+      def assigned_hop: () -> void
+      def branch_hop: () -> void
+    end
+  RBS
+
+  # felixefelip/steep#117 gap 3a: an establishment is lifted into the CALLER over
+  # every-exit call edges, so it no longer stops at the frame holding the write.
+  # `branch_hop` is the boundary — and the shape that motivated the gap, a
+  # `resume_session` whose establisher is called inside an `if` establishes on
+  # some exits only.
+  CONST_LIFT_RUBY = <<~RUBY
+    class CEController
+      def write_it
+        CEStore.thing = thing
+        true
+      end
+
+      def one_hop
+        write_it
+      end
+
+      def two_hops
+        one_hop
+      end
+
+      def assigned_hop
+        ok = write_it
+      end
+
+      def branch_hop
+        if thing
+          write_it
+        end
+      end
+    end
+  RUBY
+
+  def test_runner_lifts_const_establishments_into_callers
+    in_tmpdir do
+      write("sig/ce.rbs", CONST_LIFT_RBS)
+      write("app/ce.rb", CONST_LIFT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      # The direct write (#100).
+      assert_equal "::CEThing", by_method[:write_it].const_establishments["CEStore.thing"].to_s
+      # One hop: the caller establishes what its callee does.
+      assert_equal "::CEThing", by_method[:one_hop].const_establishments["CEStore.thing"].to_s
+      # Two hops — the fixpoint, not a single lookahead.
+      assert_equal "::CEThing", by_method[:two_hops].const_establishments["CEStore.thing"].to_s
+      # The call is the value of an assignment, still on every exit.
+      assert_equal "::CEThing", by_method[:assigned_hop].const_establishments["CEStore.thing"].to_s
+      # A call inside an `if` runs on some exits only, so it lifts NOTHING — and
+      # the entry is dropped entirely, having no other fact to carry.
+      refute by_method[:branch_hop]&.const_establishments&.key?("CEStore.thing"),
+             "a conditional call must not establish unconditionally"
+    end
+  end
+
+  # felixefelip/steep#117 gap 3b, in the shape that motivated it: the clause holds
+  # a CALL, so the fact only appears once 3a's closure has given the callee its
+  # establishment. `always_hop` is the contrast — an unconditional call is an
+  # unconditional establishment, not a truthy-exit one.
+  WHEN_TRUE_RUBY = <<~RUBY
+    class CEController
+      def write_it
+        CEStore.thing = thing
+        true
+      end
+
+      def truthy_hop
+        if thing
+          write_it
+        end
+      end
+
+      def always_hop
+        write_it
+      end
+
+      def with_else
+        if thing
+          write_it
+        else
+          thing
+        end
+      end
+    end
+  RUBY
+
+  WHEN_TRUE_RBS = <<~RBS
+    class CEThing
+    end
+
+    class CEStore
+      def self.thing: () -> CEThing?
+      def self.thing=: (CEThing?) -> CEThing?
+    end
+
+    class CEController
+      def thing: () -> CEThing
+      def write_it: () -> bool
+      def truthy_hop: () -> void
+      def always_hop: () -> void
+      def with_else: () -> void
+    end
+  RBS
+
+  def test_runner_lifts_when_true_consts_from_a_truthy_only_clause
+    in_tmpdir do
+      write("sig/wt.rbs", WHEN_TRUE_RBS)
+      write("app/wt.rb", WHEN_TRUE_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      # The clause's call resolves to what the callee establishes.
+      assert_equal "::CEThing", by_method[:truthy_hop].when_true_consts["CEStore.thing"].to_s
+      # …and it is NOT claimed unconditionally, which is the whole point.
+      refute by_method[:truthy_hop].const_establishments.key?("CEStore.thing")
+
+      # An unconditional call is an unconditional establishment (3a), and has
+      # nothing to say about the truthy exit specifically.
+      assert_equal "::CEThing", by_method[:always_hop].const_establishments["CEStore.thing"].to_s
+      assert_empty by_method[:always_hop].when_true_consts
+
+      # With an `else`, a truthy return no longer implies the clause ran.
+      refute by_method[:with_else]&.when_true_consts&.key?("CEStore.thing"),
+             "an else clause is a second way to return truthy"
+    end
+  end
+
+  DISJ_RBS = <<~RBS
+    class DJThing
+    end
+
+    class DJStore
+      def self.thing: () -> DJThing?
+      def self.thing=: (DJThing?) -> DJThing?
+    end
+
+    class DJController
+      @halted: bool
+
+      def thing: () -> DJThing
+      def always: () -> void
+      def flag?: () -> bool
+      def run: () -> void
+      def loose: () -> void
+      def truthy_only: () -> void
+      def or_halt: () -> void
+      def give_up: () -> void
+      def halt: () -> void
+    end
+  RBS
+
+  # felixefelip/steep#117 gap 3c. `a || b || c` where `c` always halts: an exit
+  # that did not halt means `a` or `b` answered, so what BOTH establish holds.
+  # `truthy_only` establishes on its truthy exit (3b), `or_halt` on its unhalted
+  # exit (the two-clause guard) — different routes, same conclusion.
+  DISJ_RUBY = <<~RUBY
+    class DJController
+      def run
+        truthy_only || or_halt || give_up
+      end
+
+      def loose
+        truthy_only || or_halt || flag?
+      end
+
+      def truthy_only
+        if flag?
+          DJStore.thing = thing
+        end
+      end
+
+      def always
+        DJStore.thing = thing
+      end
+
+      def or_halt
+        if flag?
+          DJStore.thing = thing
+        else
+          halt
+        end
+      end
+
+      def give_up
+        halt
+      end
+
+      def halt
+        @halted = true
+      end
+    end
+  RUBY
+
+  def test_runner_proves_a_const_across_a_disjunction_whose_last_operand_halts
+    in_tmpdir do
+      write("sig/dj.rbs", DISJ_RBS)
+      write("app/dj.rb", DISJ_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      spec = by_method[:run].conditional_const_returns["DJStore.thing"]
+      refute_nil spec, "expected the chain to prove the const on its unhalted exit"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::DJThing", spec[:type].to_s
+
+      # `loose` ends in `flag?`, which halts nothing: every operand returning
+      # falsy is then an exit that established nothing, so the chain proves
+      # nothing.
+      refute by_method[:loose]&.conditional_const_returns&.key?("DJStore.thing"),
+             "a chain whose last operand does not halt proves nothing"
+    end
+  end
+
+  def test_runner_drops_a_disjunction_fact_when_one_operand_establishes_nothing
+    in_tmpdir do
+      write("sig/dj.rbs", DISJ_RBS)
+      write("app/dj.rb", DISJ_RUBY.sub("truthy_only || or_halt || give_up", "truthy_only || flag? || give_up"))
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      # It is an INTERSECTION: `flag?` answering means nothing was established.
+      refute by_method[:run]&.conditional_const_returns&.key?("DJStore.thing")
+    end
+  end
+
+  # A method defined in two places — a reopen, a concern and its host, a sidecar
+  # modelling app code — merges into one entry. The fields added by #119, #120
+  # and #122 were left out of that merge, which did not keep the first entry's:
+  # it reset them to empty, so the facts vanished exactly when a second
+  # definition existed.
+  def test_runner_keeps_the_new_fact_fields_when_a_method_is_defined_twice
+    in_tmpdir do
+      write("sig/dj.rbs", DISJ_RBS.sub("class DJController\n", "class DJController\n      @scratch: Integer?\n"))
+      write("app/dj.rb", DISJ_RUBY)
+      write("app/dj_reopen.rb", <<~RUBY)
+        class DJController
+          def truthy_only
+            @scratch = 1
+          end
+
+          def always
+            @scratch = 2
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      assert_equal ["DJStore.thing"], by_method[:truthy_only].when_true_consts.keys
+      # And the chain that reads them is unaffected by the second definition.
+      refute_nil by_method[:run].conditional_const_returns["DJStore.thing"]
+      # `const_establishments` (#100) was left out when its siblings were fixed,
+      # and was reset to empty by the very same mechanism.
+      assert_equal ["DJStore.thing"], by_method[:always].const_establishments.keys
+    end
+  end
+
+  def test_runner_closes_may_write_over_self_call_graph
+    in_tmpdir do
+      write("sig/mw.rbs", MAY_WRITE_RBS)
+      write("app/mw.rb", MAY_WRITE_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      entries = Postconditions::Runner.run(project)
+      by_method = entries.to_h { |e| [e.method_name, e] }
+
+      # Direct write.
+      assert_equal Set[:@halted], by_method[:redirect_to].may_write_ivars
+      # One hop: guard -> redirect_to.
+      assert_equal Set[:@halted], by_method[:guard].may_write_ivars
+      # Two hops, the second through a block: wrap -> (block) guard -> redirect_to.
+      assert_equal Set[:@halted], by_method[:wrap].may_write_ivars
+    end
+  end
+
+  def test_runner_serializes_may_write_effect
+    in_tmpdir do
+      write("sig/mw.rbs", MAY_WRITE_RBS)
+      write("app/mw.rb", MAY_WRITE_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      entry = reparsed.lookup_instance("MWController", :guard)
+      refute_nil entry, "a method with only a may-write effect must still round-trip"
+      assert_equal Set[:@halted], entry.may_write_ivars
+    end
+  end
+
+  CR_RBS = <<~RBS
+    class User
+    end
+
+    class CRBase
+      @halted: bool
+      def redirect_to: () -> void
+    end
+
+    class CRController < CRBase
+      def current_user: () -> User?
+      def authenticate_user: () -> void
+    end
+  RBS
+
+  # felixefelip/steep#68 item 2: the guard halts through an INHERITED
+  # `redirect_to`, so the gate is recorded `via: redirect_to` and the Runner
+  # must resolve it — across the superclass boundary — to `@halted`.
+  CR_RUBY = <<~RUBY
+    class CRBase
+      def redirect_to
+        @halted = true
+      end
+    end
+
+    class CRController < CRBase
+      def authenticate_user
+        unless current_user
+          redirect_to
+          return
+        end
+      end
+    end
+  RUBY
+
+  CC_RBS = <<~RBS
+    class User
+    end
+
+    class Current
+      def self.user: () -> User?
+      def self.user=: (User?) -> User?
+    end
+
+    class CCBase
+      @halted: bool
+      def redirect_to: () -> void
+    end
+
+    class CCController < CCBase
+      def current_user: () -> User?
+      def authenticate_user: () -> void
+    end
+  RBS
+
+  CC_RUBY = <<~RUBY
+    class CCBase
+      def redirect_to
+        @halted = true
+      end
+    end
+
+    class CCController < CCBase
+      def authenticate_user
+        unless current_user
+          redirect_to
+          return
+        end
+        Current.user = current_user
+      end
+    end
+  RUBY
+
+  # felixefelip/steep#68 item 3: the constant-attribute fact round-trips and its
+  # gate resolves through the inherited `redirect_to`, like the self-method one.
+  def test_runner_serializes_conditional_const_return
+    in_tmpdir do
+      write("sig/cc.rbs", CC_RBS)
+      write("app/cc.rb", CC_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      entry = reparsed.lookup_instance("CCController", :authenticate_user)
+      refute_nil entry
+      spec = entry.conditional_const_returns["Current.user"]
+      refute_nil spec, "constant conditional return should survive gate resolution"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::User", spec[:type].to_s
+    end
+  end
+
+  BG_RBS = <<~RBS
+    class User
+    end
+
+    class BGBase
+      @halted: bool
+      def redirect_to: () -> void
+      def with_format: () ?{ (untyped) -> untyped } -> untyped
+    end
+
+    class BGController < BGBase
+      def current_user: () -> User?
+      def authenticate_user: () -> void
+    end
+  RBS
+
+  BG_RUBY = <<~RUBY
+    class BGBase
+      def redirect_to
+        @halted = true
+      end
+
+      def with_format(&block)
+        block&.call(:html)
+      end
+    end
+
+    class BGController < BGBase
+      def authenticate_user
+        unless current_user
+          with_format do |_format|
+            redirect_to
+          end
+          return
+        end
+      end
+    end
+  RUBY
+
+  # felixefelip/steep#105 gap 3. The halt is two frames in — inside a block, of a
+  # method that writes nothing itself. The clause's first self-send is therefore
+  # `with_format`, and keying the gate on it left nothing to resolve, so the whole
+  # spec was dropped and the guard proved nothing. With candidates, `with_format`
+  # resolves to no ivar, `redirect_to` resolves to `@halted`, and the fact lands.
+  #
+  # This is `respond_to { |f| f.html { redirect_to ... } }` with the framework
+  # names removed — the shape a real authorization callback halts with.
+  def test_runner_resolves_a_gate_whose_halt_is_nested_in_a_block
+    in_tmpdir do
+      write("sig/bg.rbs", BG_RBS)
+      write("app/bg.rb", BG_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      entry = reparsed.lookup_instance("BGController", :authenticate_user)
+      refute_nil entry
+      spec = entry.conditional_returns[:current_user]
+      refute_nil spec, "the block-nested halt should still resolve a gate"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::User", spec[:type].to_s
+    end
+  end
+
+  def test_runner_resolves_conditional_return_gate_through_inheritance
+    in_tmpdir do
+      write("sig/cr.rbs", CR_RBS)
+      write("app/cr.rb", CR_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      entry = reparsed.lookup_instance("CRController", :authenticate_user)
+      refute_nil entry
+      spec = entry.conditional_returns[:current_user]
+      refute_nil spec, "conditional return should survive gate resolution"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::User", spec[:type].to_s
+    end
+  end
+
+  ME_RBS = <<~RBS
+    class User
+    end
+
+    class Current
+      def self.user: () -> User?
+      def self.user=: (User?) -> User?
+    end
+
+    class MEController
+      @performed: bool
+      def current_user: () -> User?
+      def redirect_to: () -> void
+      def performed?: () -> bool
+      def authenticate_user: () -> void
+      def log_it: () -> void
+      def __rbs_infer__run_index: () -> void
+    end
+  RBS
+
+  ME_RUBY = <<~RUBY
+    class MEController
+      def redirect_to
+        @performed = true
+      end
+      def performed?
+        @performed
+      end
+      def authenticate_user
+        unless current_user
+          redirect_to
+          return
+        end
+        Current.user = current_user
+      end
+      def log_it
+      end
+      def __rbs_infer__run_index
+        authenticate_user
+        return if performed?
+        log_it
+        return if performed?
+      end
+    end
+  RUBY
+
+  # felixefelip/steep#68 item 4: the runner shows `log_it` runs after
+  # `authenticate_user`, so authenticate_user's proven facts (item 2 + 3) hold
+  # at log_it's entry.
+  def test_runner_infers_method_entry_facts_from_runner
+    in_tmpdir do
+      write("sig/me.rbs", ME_RBS)
+      write("app/me.rb", ME_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      facts = reparsed.lookup_method_entry_facts("MEController", :log_it)
+      refute_nil facts, "log_it should get authenticate_user's facts at entry"
+      assert_equal "::User", facts[:self_methods][:current_user].to_s
+      assert_equal "::User", facts[:consts]["Current.user"].to_s
+    end
+  end
+
+  def test_runner_propagates_facts_transitively_to_the_second_hop
+    in_tmpdir do
+      write("sig/fp.rbs", <<~RBS)
+        class User
+        end
+        class Current
+          def self.user: () -> User?
+          def self.user=: (User?) -> User?
+        end
+        class FPController
+          @performed: bool
+          def current_user: () -> User?
+          def redirect_to: () -> void
+          def performed?: () -> bool
+          def authenticate_user: () -> void
+          def one_hop: () -> void
+          def two_hop: () -> void
+          def __rbs_infer__run_index: () -> void
+        end
+      RBS
+      write("app/fp.rb", <<~RUBY)
+        class FPController
+          def redirect_to
+            @performed = true
+          end
+          def performed?
+            @performed
+          end
+          def authenticate_user
+            unless current_user
+              redirect_to
+              return
+            end
+            Current.user = current_user
+          end
+          def one_hop
+            two_hop
+          end
+          def two_hop
+          end
+          def __rbs_infer__run_index
+            authenticate_user
+            return if performed?
+            one_hop
+            return if performed?
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      # First hop: `one_hop` is called directly from the runner, where the guard proved
+      # `Current.user` — the one-hop propagation that already worked.
+      one = reparsed.lookup_method_entry_facts("FPController", :one_hop)
+      refute_nil one, "one_hop should get the guard's Current.user at entry"
+      assert_equal "::User", one[:consts]["Current.user"].to_s
+
+      # Second hop: `two_hop` is reached ONLY through `one_hop`. The fixpoint seeds `one_hop`
+      # with its own entry fact, so it forwards `Current.user` to `two_hop`.
+      two = reparsed.lookup_method_entry_facts("FPController", :two_hop)
+      refute_nil two, "two_hop should inherit Current.user transitively through one_hop"
+      assert_equal "::User", two[:consts]["Current.user"].to_s
+    end
+  end
+
+  # felixefelip/steep#96. The end-to-end shape the issue is about: a fact proven in a
+  # controller runner has to survive the hop THROUGH a template — a top-level body with no
+  # `def` at all — into the partial that template renders.
+  #
+  # Before #96 the chain stopped at `VWView#__rbs_infer__body`: the template contributed no
+  # flow, so `VWView#render` had no call site, no entry facts, and neither did the partial.
+  def test_runner_carries_facts_through_a_self_method_template_into_its_partial
+    in_tmpdir do
+      write("sig/vw.rbs", <<~RBS)
+        class User
+        end
+        class Current
+          def self.user: () -> User?
+          def self.user=: (User?) -> User?
+        end
+        class VWController
+          @performed: bool
+          def current_user: () -> User?
+          def redirect_to: () -> void
+          def performed?: () -> bool
+          def authenticate_user: () -> void
+          def render: () -> void
+          def __rbs_infer__run_show: () -> void
+        end
+        class VWView
+          def __rbs_infer__body: () -> void
+          def render: () -> void
+        end
+        class VWPartial
+          def __rbs_infer__body: () -> void
+        end
+      RBS
+      write("app/vw.rb", <<~RUBY)
+        class VWController
+          def redirect_to
+            @performed = true
+          end
+          def performed?
+            @performed
+          end
+          def authenticate_user
+            unless current_user
+              redirect_to
+              return
+            end
+            Current.user = current_user
+          end
+          def render
+            VWView.new.__rbs_infer__body
+          end
+          def __rbs_infer__run_show
+            authenticate_user
+            return if performed?
+            render
+          end
+        end
+
+        class VWView
+          def render
+            VWPartial.new.__rbs_infer__body
+          end
+          def __rbs_infer__body
+          end
+        end
+
+        class VWPartial
+          def __rbs_infer__body
+          end
+        end
+      RUBY
+      # The template. Its compiled body has no `def`; the annotation is what says which
+      # method it is — exactly what STEEP_ERB_CONVENTION injects for an `.erb`.
+      write("app/vw_template.rb", <<~RUBY)
+        # @type self_method: VWView#__rbs_infer__body
+        render
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      view = reparsed.lookup_method_entry_facts("VWView", :__rbs_infer__body)
+      refute_nil view, "the view body should get the guard's Current.user (worked before #96)"
+      assert_equal "::User", view[:consts]["Current.user"].to_s
+
+      # The two hops #96 adds: the template body IS the flow of `__rbs_infer__body`, so its
+      # `render` call carries the fact into `VWView#render`, whose own (ordinary) def body
+      # carries it into the partial.
+      render = reparsed.lookup_method_entry_facts("VWView", :render)
+      refute_nil render, "the template's `render` call should give VWView#render entry facts"
+      assert_equal "::User", render[:consts]["Current.user"].to_s
+
+      partial = reparsed.lookup_method_entry_facts("VWPartial", :__rbs_infer__body)
+      refute_nil partial, "the partial should inherit Current.user through the template"
+      assert_equal "::User", partial[:consts]["Current.user"].to_s
+    end
+  end
+
+  # felixefelip/steep#100, end to end: a `before_action` handler that populates global
+  # state proves it populated for everything the runner calls after it.
+  #
+  # `set_current_account` cannot halt, so it has no gate for `conditional_const_returns` to
+  # key on and used to prove nothing — the establishment died in its own body and reached
+  # neither the action nor the view the action renders.
+  #
+  # The write reads a method that is non-nil in its OWN right. Writing
+  # `Current.account = current_account` — non-nil only because the guard proved it — also
+  # works, but not in a single run: the Inferrer walks the body before any entry fact
+  # exists, so the RHS still looks nilable and nothing is established until a later run
+  # sees the fact. Fine for the sidecar (it is regenerated to a fixed point), wrong to hide
+  # inside a test that would then pass for the wrong reason.
+  def test_runner_carries_an_unconditional_const_establishment_to_later_calls
+    in_tmpdir do
+      write("sig/uc.rbs", <<~RBS)
+        class Account
+          def label: () -> String
+        end
+        class Current
+          def self.account: () -> Account?
+          def self.account=: (Account?) -> Account?
+        end
+        class UCController
+          @performed: bool
+          def current_account: () -> Account?
+          def proven_account: () -> Account
+          def redirect_to: () -> void
+          def performed?: () -> bool
+          def authenticate_account!: () -> void
+          def set_current_account: () -> void
+          def show: () -> void
+          def __rbs_infer__run_show: () -> void
+        end
+      RBS
+      write("app/uc.rb", <<~RUBY)
+        class UCController
+          def redirect_to
+            @performed = true
+          end
+          def performed?
+            @performed
+          end
+          def authenticate_account!
+            unless current_account
+              redirect_to
+              return
+            end
+          end
+          def set_current_account
+            Current.account = proven_account
+          end
+          def show
+          end
+          def __rbs_infer__run_show
+            authenticate_account!
+            return if performed?
+            set_current_account
+            return if performed?
+            show
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      # The handler still sits past the guard, so it keeps the facts it always had...
+      handler = reparsed.lookup_method_entry_facts("UCController", :set_current_account)
+      refute_nil handler, "the handler runs past the guard"
+      assert_equal "::Account", handler[:self_methods][:current_account].to_s
+
+      # ...and THAT is what this issue adds: the establishment reaches the action.
+      action = reparsed.lookup_method_entry_facts("UCController", :show)
+      refute_nil action, "expected the populated constant to reach the action"
+      assert_equal "::Account", action[:consts]["Current.account"].to_s
+    end
+  end
+
+  # felixefelip/steep#103. `expand_transitive_const_returns` gave a HALTING guard the
+  # sibling attributes its setter override establishes; the ungated establishments (#100)
+  # had no such expansion. So the same `Current.user = <non-nil>` write proved
+  # `Current.name` too when it sat in a guard that redirects, and did not when it sat in a
+  # plain `before_action` — the shape every Rails app actually writes.
+  def test_runner_expands_an_ungated_establishment_through_the_setter_override
+    in_tmpdir do
+      write("sig/tr.rbs", <<~RBS)
+        class TRUser
+          def name: () -> String
+        end
+        class TRCurrent
+          def self.user: () -> TRUser?
+          def self.user=: (TRUser?) -> TRUser?
+          def self.name: () -> String?
+          def self.name=: (String?) -> String?
+          def self.instance: () -> TRCurrent
+          def user=: (TRUser?) -> void
+          def name=: (String?) -> String?
+        end
+        class TRController
+          def proven_user: () -> TRUser
+          def set_current: () -> void
+          def act: () -> void
+          def __rbs_infer__run_act: () -> void
+        end
+      RBS
+      write("app/tr.rb", <<~RUBY)
+        class TRCurrent
+          def user=(value)
+            @user = value
+            self.name = value&.name
+          end
+          def self.user=(value)
+            @user = value
+            instance.user = value
+          end
+        end
+
+        class TRController
+          def set_current
+            TRCurrent.user = proven_user
+          end
+          def act
+          end
+          def __rbs_infer__run_act
+            set_current
+            act
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      facts = reparsed.lookup_method_entry_facts("TRController", :act)
+      refute_nil facts, "the write should reach the action"
+      assert_equal "::TRUser", facts[:consts]["TRCurrent.user"].to_s
+      assert_equal "::String", facts[:consts]["TRCurrent.name"].to_s,
+                   "the setter override's sibling establishment must come along, gate or no gate"
+    end
+  end
+
+  TC_RBS = <<~RBS
+    class User
+      def full_name: () -> String
+    end
+
+    class Current
+      def self.user: () -> User?
+      def self.user=: (User?) -> User?
+      def self.author_name: () -> String?
+      def self.instance: () -> Current
+      def user=: (User?) -> void
+      def author_name=: (String?) -> String?
+    end
+
+    class TCHost
+      @halted: bool
+      def current_user: () -> User?
+      def redirect_to: () -> void
+      def authenticate_user: () -> void
+    end
+  RBS
+
+  TC_RUBY = <<~RUBY
+    class Current
+      def user=(value)
+        @user = value
+        self.author_name = value&.full_name
+      end
+      def self.user=(value)
+        @user = value
+        instance.user = value
+      end
+    end
+
+    class TCHost
+      def redirect_to
+        @halted = true
+      end
+      def authenticate_user
+        unless current_user
+          redirect_to
+          return
+        end
+        Current.user = current_user
+      end
+    end
+  RUBY
+
+  # felixefelip/steep#68 item 5: `Current.user = <non-nil>` also proves
+  # `Current.author_name`, because the (delegated) instance setter establishes it.
+  def test_runner_expands_transitive_const_returns
+    in_tmpdir do
+      write("sig/tc.rbs", TC_RBS)
+      write("app/tc.rb", TC_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      entry = reparsed.lookup_instance("TCHost", :authenticate_user)
+      refute_nil entry
+      assert entry.conditional_const_returns.key?("Current.user")
+      author = entry.conditional_const_returns["Current.author_name"]
+      refute_nil author, "the setter's establishment should promote to a const return"
+      assert_equal "::String", author[:type].to_s
+    end
+  end
+
+  def test_runner_is_idempotent
+    in_tmpdir do
+      write("sig/company.rbs", FIXTURE_RBS)
+      write("app/controller.rb", NARROWING_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      first = runner.run
+      runner.write(first)
+      first_bytes = runner.output_path.read
+
+      second = Postconditions::Runner.run(project)
+      runner.write(second)
+      second_bytes = runner.output_path.read
+
+      assert_equal first_bytes, second_bytes, "expected idempotent sidecar across two runs"
+    end
+  end
+
+  ALIAS_RBS = <<~RBS
+    class PCUser
+      def name: () -> String
+    end
+    class PCPost
+      def user: () -> PCUser?
+      def assignments: () -> PCProxy
+    end
+    class PCPost::Validated
+      def user: () -> PCUser
+    end
+    class PCRecord
+      def post=: (PCPost) -> PCPost
+      def post: () -> PCPost
+    end
+    class PCProxy
+      @cached: PCUser?
+      def initialize: (PCPost owner) -> void
+      def owner: () -> PCPost
+      def build: () -> PCRecord
+      def capture: () -> void
+    end
+    class PCAliasController
+      @post: (PCPost & PCPost::Validated)
+      def run: () -> void
+    end
+  RBS
+
+  ALIAS_RUBY = <<~RUBY
+    class PCProxy
+      def initialize(owner)
+        @owner = owner
+      end
+
+      def owner
+        @owner
+      end
+
+      def build
+        record = PCRecord.new
+        record.post = owner
+        record
+      end
+
+      def capture
+        record = build
+        record.post.user.name
+        @cached = record.post.user
+      end
+    end
+
+    class PCPost
+      def assignments
+        PCProxy.new(self)
+      end
+    end
+
+    class PCAliasController
+      def run
+        @post.assignments.capture
+      end
+    end
+  RUBY
+
+  # felixefelip/steep#62: the postconditions pass must type-check with the
+  # project's real return-alias registry. `PCProxy#capture` establishes
+  # `@cached = record.post.user`, where `record = build` return-aliases
+  # `record.post` to `self.owner`; with `capture` enforced (via forwarding at
+  # `@post.assignments.capture`), that deref narrows to `::PCUser`, so `@cached`
+  # is refined from its declared `PCUser?`. If the runner type-checks with an
+  # empty registry the deref stays `(::PCUser | nil)` and no refinement is
+  # emitted — the bug this guards.
+  def test_runner_applies_return_alias_narrowing_to_ivar_refinement
+    in_tmpdir do
+      write("sig/alias.rbs", ALIAS_RBS)
+      write("app/alias.rb", ALIAS_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      # Persist contracts so `PCProxy#capture` is enforced before the
+      # postconditions pass reads them.
+      contracts = Steep::Contracts::Runner.new(project)
+      contracts.write(contracts.run)
+
+      project2 = setup_project(steepfile: FIXTURE_STEEPFILE)
+      entries = Postconditions::Runner.run(project2)
+
+      capture = entries.find { |e| e.class_name == "PCProxy" && e.method_name == :capture }
+      refute_nil capture, "expected a postcondition entry for PCProxy#capture"
+      assert_equal "::PCUser", capture.ivars[:"@cached"]&.to_s,
+                   "the return-aliased `record.post.user` should narrow to ::PCUser so @cached is refined"
+    end
+  end
+
+  def test_runner_sidecar_consumable_by_consumer_on_next_run
+    # The whole point of the runner: write a sidecar that the *next*
+    # project load picks up and applies. Verifies the loop closes:
+    # narrow detected → written → re-loaded → available at the new
+    # project's `postconditions` store.
+    in_tmpdir do
+      write("sig/company.rbs", FIXTURE_RBS)
+      write("app/controller.rb", NARROWING_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      entries = runner.run
+      runner.write(entries)
+
+      project2 = setup_project(steepfile: FIXTURE_STEEPFILE)
+      entry = project2.postconditions.lookup_instance("PCRunnerController", :set_company)
+      refute_nil entry, "expected Project#postconditions to load the freshly-written sidecar"
+      assert_equal "(::PCRunnerCompany & ::PCRunnerCompany::Validated)",
+                   entry.unconditional.ivar_type_strings[:"@company"]
+    end
+  end
+
+  ARG_FACTS_RBS = <<~RBS
+    class AFFoo
+      def self.name: () -> String?
+      def self.name=: (String?) -> void
+    end
+    class AFAge
+      def self.value: () -> Integer?
+      def self.value=: (Integer?) -> void
+    end
+    class AFDispatcher
+      def show: (Symbol) -> void
+    end
+    class AFRun
+      def run_name: () -> void
+      def run_age: () -> void
+    end
+  RBS
+
+  ARG_FACTS_RUBY = <<~RUBY
+    class AFFoo
+      def self.name
+        @name
+      end
+      def self.name=(value)
+        @name = value
+      end
+    end
+    class AFAge
+      def self.value
+        @value
+      end
+      def self.value=(value)
+        @value = value
+      end
+    end
+    class AFDispatcher
+      def show(which)
+        case which
+        when :name then AFFoo.name
+        when :age  then AFAge.value
+        end
+      end
+    end
+    class AFRun
+      def run_name
+        AFFoo.name = "John Doe"
+        AFDispatcher.new.show(:name)
+      end
+      def run_age
+        AFAge.value = 42
+        AFDispatcher.new.show(:age)
+      end
+    end
+  RUBY
+
+  def test_runner_partitions_entry_facts_by_literal_argument
+    # Argument-sensitive entry facts (peça 3). `show` is called with `:name` from a site
+    # where `AFFoo.name` is established, and with `:age` from a site where `AFAge.value`
+    # is. The whole-method entry fact is the MEET over both sites, so it holds NEITHER.
+    # Partitioning by the literal argument keeps each fact attached to the callers that
+    # actually prove it.
+    in_tmpdir do
+      write("sig/af.rbs", ARG_FACTS_RBS)
+      write("app/af.rb", ARG_FACTS_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      # The unconditional entry fact for `show` carries neither const — the meet drops both.
+      unconditional = reparsed.lookup_method_entry_facts("AFDispatcher", :show)
+      if unconditional
+        refute unconditional[:consts].key?("AFFoo.name"), "the meet over both call sites cannot prove AFFoo.name"
+        refute unconditional[:consts].key?("AFAge.value"), "the meet over both call sites cannot prove AFAge.value"
+      end
+
+      partitions = reparsed.lookup_argument_entry_facts("AFDispatcher", :show)
+      assert_equal 2, partitions.size, "one partition per literal argument"
+
+      by_pattern = partitions.to_h { |p| [p[:pattern], p] }
+
+      name_partition = by_pattern[":name"]
+      refute_nil name_partition
+      assert_equal :which, name_partition[:param_name], "the call-site index resolves to the callee's param name"
+      assert_equal "::String", name_partition[:consts]["AFFoo.name"].to_s
+      refute name_partition[:consts].key?("AFAge.value"), "the :name partition must not carry the :age caller's fact"
+
+      age_partition = by_pattern[":age"]
+      refute_nil age_partition
+      assert_equal :which, age_partition[:param_name]
+      assert_equal "::Integer", age_partition[:consts]["AFAge.value"].to_s
+      refute age_partition[:consts].key?("AFFoo.name"), "the :age partition must not carry the :name caller's fact"
+    end
+  end
+
+  def test_runner_meets_argument_facts_across_call_sites_with_the_same_literal
+    # Two callers pass `:name`, but only one establishes `AFFoo.name`. A partition is the
+    # MEET over its own call sites, so the fact must be dropped — soundness is per-literal,
+    # not per-caller.
+    in_tmpdir do
+      write("sig/af.rbs", ARG_FACTS_RBS)
+      write("app/af.rb", <<~RUBY)
+        #{ARG_FACTS_RUBY}
+        class AFRun
+          def run_name_unestablished
+            AFDispatcher.new.show(:name)
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      partitions = reparsed.lookup_argument_entry_facts("AFDispatcher", :show)
+      name_partition = partitions.find { |p| p[:pattern] == ":name" }
+
+      assert_nil name_partition, "a :name caller that establishes nothing must drop the partition"
+    end
+  end
+
+  def test_runner_drops_argument_facts_when_a_call_site_passes_a_non_literal
+    # SOUNDNESS. A caller that passes a variable (`show(sym)`) establishes nothing and may
+    # reach ANY branch at runtime — including `when :name`, whose partition claims
+    # `AFFoo.name`. Since that argument cannot be pinned to a literal, no partition on that
+    # parameter is provable and all of them must be dropped. Without this, one dynamic call
+    # site silently invalidates the whole correlation.
+    in_tmpdir do
+      write("sig/af.rbs", <<~RBS)
+        #{ARG_FACTS_RBS}
+        class AFRun
+          def run_dynamic: (Symbol) -> void
+        end
+      RBS
+      write("app/af.rb", <<~RUBY)
+        #{ARG_FACTS_RUBY}
+        class AFRun
+          def run_dynamic(sym)
+            AFDispatcher.new.show(sym)
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      assert_empty runner.argument_entry_facts,
+                   "a non-literal call site must drop every partition on that parameter"
+    end
+  end
+
+  def test_runner_keeps_argument_facts_for_a_different_parameter
+    # The drop is per PARAMETER, not per method: an unpinned argument at one position must
+    # not take down a partition proven at another.
+    in_tmpdir do
+      write("sig/af.rbs", <<~RBS)
+        class AFFoo
+          def self.name: () -> String?
+          def self.name=: (String?) -> void
+        end
+        class AFTwo
+          def show: (Symbol, Symbol) -> void
+        end
+        class AFRunTwo
+          def run_a: (Symbol) -> void
+          def run_b: (Symbol) -> void
+        end
+      RBS
+      write("app/af.rb", <<~RUBY)
+        class AFFoo
+          def self.name
+            @name
+          end
+          def self.name=(value)
+            @name = value
+          end
+        end
+        class AFTwo
+          def show(first, second)
+            case second
+            when :name then AFFoo.name
+            end
+          end
+        end
+        class AFRunTwo
+          def run_a(sym)
+            AFFoo.name = "John Doe"
+            AFTwo.new.show(sym, :name)
+          end
+          def run_b(sym)
+            AFTwo.new.show(sym, :other)
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      partitions = runner.argument_entry_facts["AFTwo#show"] || []
+      params = partitions.map { |p| p[:param] }.uniq
+
+      refute_includes params, :first, "the unpinned first parameter must have no partition"
+      assert_includes params, :second, "the literal-pinned second parameter keeps its partition"
+    end
+  end
+
+  def test_runner_establishes_ivars_from_a_setter_method_call
+    # felixefelip/steep#92 item 1. The flow walk used to react only to a literal
+    # `@x = ...`, so a `before_action`-style setter — the commonest shape there is —
+    # established nothing, even though the fact was already computed and sitting in
+    # the setter's own `unconditional.ivars`.
+    in_tmpdir do
+      write("sig/iv.rbs", <<~RBS)
+        #{IVAR_FACTS_RBS.chomp.sub(/\nend\z/, "\n  def set_name: () -> void\nend")}
+      RBS
+      write("app/iv.rb", <<~RUBY)
+        class IVHost
+          def set_name
+            @name = 'John Doe'
+          end
+          def run_name
+            set_name
+            show(:name)
+          end
+          def run_age
+            @value = 42
+            show(:age)
+          end
+          def show(which)
+            case which
+            when :name then @name
+            when :age then @value
+            end
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      partitions = runner.argument_entry_facts["IVHost#show"] || []
+      name_partition = partitions.find { |p| p[:pattern] == ":name" }
+
+      refute_nil name_partition, "a setter CALL must establish the ivar it proves"
+      assert_equal "::String", name_partition[:ivars][:@name].to_s
+    end
+  end
+
+  def test_runner_does_not_establish_an_ivar_a_call_only_nils_out
+    # A method that sets an ivar to nil records that faithfully, but "it is nil now"
+    # narrows nothing — and re-adding it would undo the may-write invalidation. Same
+    # rule a literal nilable write follows.
+    in_tmpdir do
+      write("sig/iv.rbs", IVAR_FACTS_RBS)
+      write("app/iv.rb", <<~RUBY)
+        class IVHost
+          def clobber
+            @name = nil
+          end
+          def run_name
+            @name = 'John Doe'
+            clobber
+            show(:name)
+          end
+          def run_age
+            @value = 42
+            show(:age)
+          end
+          def show(which)
+            case which
+            when :name then @name
+            when :age then @value
+            end
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      partitions = runner.argument_entry_facts["IVHost#show"] || []
+      name_partition = partitions.find { |p| p[:pattern] == ":name" }
+
+      refute name_partition && name_partition[:ivars].key?(:@name),
+             "an establishment of nil must not resurrect the invalidated ivar"
+    end
+  end
+
+  def test_runner_records_ivars_in_method_entry_facts
+    # felixefelip/steep#92 item 4. `method_entry_facts` carried self-methods and
+    # consts only; an ivar established before a call did not reach that call's entry.
+    in_tmpdir do
+      write("sig/iv.rbs", <<~RBS)
+        class IVHost
+          @name: String?
+          def set_name: () -> void
+          def helper: () -> void
+          def other: () -> void
+          def run: () -> void
+        end
+        class IVOther
+          def helper: () -> void
+        end
+      RBS
+      write("app/iv.rb", <<~RUBY)
+        class IVHost
+          def set_name
+            @name = 'John Doe'
+          end
+          def helper
+            @name.to_s
+            nil
+          end
+          def run
+            set_name
+            helper
+            IVOther.new.helper
+          end
+        end
+        class IVOther
+          def helper
+            nil
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+
+      facts = reparsed.lookup_method_entry_facts("IVHost", :helper)
+      refute_nil facts, "helper runs after set_name, so @name holds at its entry"
+      assert_equal "::String", facts[:ivars][:@name].to_s
+
+      # An ivar fact is about the CALLER's self, so it must not cross to another object.
+      cross = reparsed.lookup_method_entry_facts("IVOther", :helper)
+      assert cross.nil? || cross[:ivars].empty?, "a cross-object call carries no ivar facts"
+    end
+  end
+
+  def test_runner_carries_an_argument_fact_across_a_hop
+    # felixefelip/steep#93. The dispatching body establishes nothing itself — the
+    # establishment happened one frame up — so the walk used to contribute `{}` for that
+    # call site, and since a partition is the MEET over its call sites, that emptied it.
+    # Seeding each flow with its owner's (already converged) entry facts carries the fact
+    # across the hop.
+    in_tmpdir do
+      write("sig/iv.rbs", <<~RBS)
+        class IVHost
+          @name: String?
+          @value: Integer?
+          def run_name: () -> void
+          def run_age: () -> void
+          def dispatch_name: () -> void
+          def dispatch_age: () -> void
+          def show: (Symbol) -> void
+        end
+      RBS
+      write("app/iv.rb", <<~RUBY)
+        class IVHost
+          def run_name
+            @name = 'John Doe'
+            dispatch_name
+          end
+          def run_age
+            @value = 42
+            dispatch_age
+          end
+          def dispatch_name
+            show(:name)
+          end
+          def dispatch_age
+            show(:age)
+          end
+          def show(which)
+            case which
+            when :name then @name
+            when :age then @value
+            end
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      partitions = runner.argument_entry_facts["IVHost#show"] || []
+      by_pattern = partitions.to_h { |p| [p[:pattern], p] }
+
+      refute_nil by_pattern[":name"], "the :name partition must survive the hop"
+      assert_equal '"John Doe"', by_pattern[":name"][:ivars][:@name].to_s
+      refute by_pattern[":name"][:ivars].key?(:@value), "the :name partition keeps only its own caller's fact"
+
+      refute_nil by_pattern[":age"], "the :age partition must survive the hop"
+      assert_equal "42", by_pattern[":age"][:ivars][:@value].to_s
+    end
+  end
+
+  def test_runner_still_meets_away_a_partition_when_one_hop_establishes_nothing
+    # Seeding does not weaken the meet: a dispatching path that proves nothing — at any
+    # depth — still empties the partition, because the fact must hold on EVERY path.
+    in_tmpdir do
+      write("sig/iv.rbs", <<~RBS)
+        class IVHost
+          @name: String?
+          def run_name: () -> void
+          def run_bare: () -> void
+          def dispatch_name: () -> void
+          def dispatch_bare: () -> void
+          def show: (Symbol) -> void
+        end
+      RBS
+      write("app/iv.rb", <<~RUBY)
+        class IVHost
+          def run_name
+            @name = 'John Doe'
+            dispatch_name
+          end
+          def run_bare
+            dispatch_bare
+          end
+          def dispatch_name
+            show(:name)
+          end
+          def dispatch_bare
+            show(:name)
+          end
+          def show(which)
+            case which
+            when :name then @name
+            end
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      partitions = runner.argument_entry_facts["IVHost#show"] || []
+      assert_empty partitions, "a hop that establishes nothing must still empty the partition"
+    end
+  end
+
+  def test_runner_drops_argument_facts_after_a_splat
+    # A splat makes every following position unknowable — the literal `:name` written after
+    # it could land on any parameter — so nothing past it may be pinned.
+    in_tmpdir do
+      write("sig/af.rbs", <<~RBS)
+        class AFFoo
+          def self.name: () -> String?
+          def self.name=: (String?) -> void
+        end
+        class AFSplat
+          def show: (*Symbol) -> void
+        end
+        class AFRunSplat
+          def run: (Array[Symbol]) -> void
+        end
+      RBS
+      write("app/af.rb", <<~RUBY)
+        class AFFoo
+          def self.name
+            @name
+          end
+          def self.name=(value)
+            @name = value
+          end
+        end
+        class AFSplat
+          def show(first, second)
+            case second
+            when :name then AFFoo.name
+            end
+          end
+        end
+        class AFRunSplat
+          def run(list)
+            AFFoo.name = "John Doe"
+            AFSplat.new.show(*list, :name)
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      assert_empty runner.argument_entry_facts["AFSplat#show"] || [],
+                   "a literal written after a splat cannot be pinned to a parameter"
+    end
+  end
+
+  IVAR_FACTS_RBS = <<~RBS
+    class IVHost
+      @name: String?
+      @value: Integer?
+      def run_name: () -> void
+      def run_age: () -> void
+      def show: (Symbol) -> void
+      def clobber: () -> void
+    end
+  RBS
+
+  def test_runner_partitions_ivar_facts_by_literal_argument
+    # The ivar analogue of the const partitioning: each caller establishes a DIFFERENT ivar
+    # before dispatching, so the whole-method meet proves neither, and only the per-literal
+    # partition keeps each branch readable.
+    in_tmpdir do
+      write("sig/iv.rbs", IVAR_FACTS_RBS)
+      write("app/iv.rb", <<~RUBY)
+        class IVHost
+          def run_name
+            @name = 'John Doe'
+            show(:name)
+          end
+          def run_age
+            @value = 42
+            show(:age)
+          end
+          def show(which)
+            case which
+            when :name then @name
+            when :age then @value
+            end
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.write(runner.run)
+
+      reparsed = Postconditions::Store.from_hash(YAML.safe_load(runner.output_path.read), source: runner.output_path.to_s)
+      partitions = reparsed.lookup_argument_entry_facts("IVHost", :show)
+      by_pattern = partitions.to_h { |p| [p[:pattern], p] }
+
+      name_partition = by_pattern[":name"]
+      refute_nil name_partition
+      assert_equal '"John Doe"', name_partition[:ivars][:@name].to_s
+      refute name_partition[:ivars].key?(:@value), "the :name partition must not carry the :age caller's ivar"
+
+      age_partition = by_pattern[":age"]
+      refute_nil age_partition
+      assert_equal "42", age_partition[:ivars][:@value].to_s
+      refute age_partition[:ivars].key?(:@name), "the :age partition must not carry the :name caller's ivar"
+    end
+  end
+
+  def test_runner_drops_ivar_facts_across_a_cross_object_call
+    # An ivar fact is about the CALLER's `self`. Dispatching on ANOTHER object reaches a
+    # receiver whose ivars this flow says nothing about, so the partition must carry none.
+    in_tmpdir do
+      write("sig/iv.rbs", IVAR_FACTS_RBS)
+      write("app/iv.rb", <<~RUBY)
+        class IVHost
+          def run_name
+            @name = 'John Doe'
+            IVHost.new.show(:name)
+          end
+          def run_age
+            @value = 42
+            IVHost.new.show(:age)
+          end
+          def show(which)
+            case which
+            when :name then @name
+            when :age then @value
+            end
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      partitions = runner.argument_entry_facts["IVHost#show"] || []
+      assert partitions.all? { |p| p[:ivars].empty? },
+             "a cross-object call carries no ivar facts"
+    end
+  end
+
+  def test_runner_drops_ivar_facts_written_by_an_intervening_call
+    # `clobber` may write `@name`, so the narrowing established before it does not survive
+    # to the dispatch — the may-write closure applied to the flow walk.
+    in_tmpdir do
+      write("sig/iv.rbs", IVAR_FACTS_RBS)
+      write("app/iv.rb", <<~RUBY)
+        class IVHost
+          def clobber
+            @name = nil
+          end
+          def run_name
+            @name = 'John Doe'
+            clobber
+            show(:name)
+          end
+          def run_age
+            @value = 42
+            show(:age)
+          end
+          def show(which)
+            case which
+            when :name then @name
+            when :age then @value
+            end
+          end
+        end
+      RUBY
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      runner = Postconditions::Runner.new(project)
+      runner.run
+
+      partitions = runner.argument_entry_facts["IVHost#show"] || []
+      name_partition = partitions.find { |p| p[:pattern] == ":name" }
+
+      refute name_partition && name_partition[:ivars].key?(:@name),
+             "an ivar a callee may write cannot survive to the dispatch"
+    end
+  end
+
+  # felixefelip/rbs_infer#144 stage 2. "A truthy return means the block answered
+  # truthy" travels the delegation chain — Rails is three deep, and entries
+  # arrive in whatever order the files do, so the closure runs to a fixpoint.
+  # The chain below is written top-down on purpose: a single pass in definition
+  # order would prove nothing.
+  # felixefelip/steep#126. The halt lands on an ARGUMENT: `refuse` hands itself
+  # to a module function, which halts what it was handed. Neither frame proves
+  # it alone — `deny` writes nothing on its own `self`, and `refuse` writes
+  # nothing at all — which is the shape the framework itself has.
+  #
+  # `host` is TYPED here, and that is load-bearing: the callee half records the
+  # declarations `host.halt` dispatches to, so an `untyped` parameter resolves
+  # to nothing and the proof never starts. Rails is exactly that case, which is
+  # why the framework chain is still out of reach.
+  PH_RBS = <<~RBS
+    class PHThing
+    end
+
+    class PHStore
+      def self.thing: () -> PHThing?
+      def self.thing=: (PHThing?) -> PHThing?
+    end
+
+    class PHController
+      @halted: bool
+
+      def thing: () -> PHThing
+
+      def run: () -> void
+      def loose: () -> void
+      def refuse: () -> void
+      def refuse_other: () -> void
+      def establish: () -> void
+      def flag?: () -> bool
+      def halt: () -> void
+      def record: () -> void
+    end
+
+    class PHResponder
+      def self.deny: (PHController host) -> void
+      def self.note: (PHController host) -> void
+    end
+  RBS
+
+  PH_RUBY = <<~RUBY
+    class PHController
+      def run
+        establish || refuse
+      end
+
+      # `note` only records — nothing it calls on the host halts, so the chain
+      # proves nothing.
+      def loose
+        establish || refuse_other
+      end
+
+      def establish
+        if flag?
+          PHStore.thing = thing
+        end
+      end
+
+      def refuse
+        PHResponder.deny(self)
+      end
+
+      def refuse_other
+        PHResponder.note(self)
+      end
+
+      def halt
+        @halted = true
+      end
+
+      def record
+      end
+    end
+
+    class PHResponder
+      def self.deny(host)
+        host.halt
+      end
+
+      def self.note(host)
+        host.record
+      end
+    end
+  RUBY
+
+  BT_RBS = <<~RBS
+    class BTUser
+    end
+
+    class BTRegistry
+      def self.user: () -> BTUser?
+      def self.user=: (BTUser?) -> BTUser?
+    end
+
+    class BTBlocks
+      @halted: bool
+
+      def from_gated: () -> untyped
+      def from_ungated: () -> untyped
+      def from_nothing: () -> untyped
+      def from_nested: () -> untyped
+      def from_nested_ungated_callee: () -> untyped
+      def from_nested_else_carries: () -> untyped
+      def from_nested_without_a_halt: () -> untyped
+      def lookup: (String) -> BTUser?
+      def bearer?: () -> bool
+      def json?: () -> bool
+
+      def top: () { (String) -> untyped } -> untyped
+      def middle: () { (String) -> untyped } -> untyped
+      def direct: () { (String) -> untyped } -> untyped
+      def sideways: () ?{ (String) -> untyped } -> untyped
+      def unrelated: () ?{ (String) -> untyped } -> untyped
+      def or_halt: () { (String) -> untyped } -> untyped
+      def or_carry_on: () ?{ (String) -> untyped } -> untyped
+      def or_without_the_block: () ?{ (String) -> untyped } -> untyped
+      def deny: () -> void
+      def halt: () -> void
+      def fetch: () -> String
+    end
+  RBS
+
+  BT_RUBY = <<~RUBY
+    class BTBlocks
+      def top(&login)
+        middle(&login)
+      end
+
+      def middle(&login)
+        direct(&login)
+      end
+
+      def direct(&login)
+        login.call("t")
+      end
+
+      def sideways(&login)
+        unrelated(&login)
+      end
+
+      def unrelated(&login)
+        fetch
+      end
+
+      def or_halt(&login)
+        middle(&login) || deny
+      end
+
+      def or_carry_on(&login)
+        middle(&login) || fetch
+      end
+
+      def or_without_the_block(&login)
+        middle(&login) || unrelated || deny
+      end
+
+      def from_gated
+        or_halt do |token|
+          if user = lookup(token)
+            BTRegistry.user = user
+          end
+        end
+      end
+
+      def from_ungated
+        direct do |token|
+          if user = lookup(token)
+            BTRegistry.user = user
+          end
+        end
+      end
+
+      def from_nothing
+        unrelated do |token|
+          if user = lookup(token)
+            BTRegistry.user = user
+          end
+        end
+      end
+
+      def from_nested
+        if bearer?
+          if json?
+            or_halt do |token|
+              if user = lookup(token)
+                BTRegistry.user = user
+              end
+            end
+          else
+            deny
+          end
+        end
+      end
+
+      def from_nested_ungated_callee
+        if json?
+          direct do |token|
+            if user = lookup(token)
+              BTRegistry.user = user
+            end
+          end
+        else
+          deny
+        end
+      end
+
+      def from_nested_else_carries
+        if json?
+          deny
+        else
+          direct do |token|
+            if user = lookup(token)
+              BTRegistry.user = user
+            end
+          end
+        end
+      end
+
+      def from_nested_without_a_halt
+        if json?
+          direct do |token|
+            if user = lookup(token)
+              BTRegistry.user = user
+            end
+          end
+        else
+          fetch
+        end
+      end
+
+      def bearer?
+        fetch.empty?
+      end
+
+      def json?
+        fetch.empty?
+      end
+
+      def lookup(token)
+        BTUser.new if token.empty?
+      end
+
+      def deny
+        halt
+      end
+
+      def halt
+        @halted = true
+      end
+    end
+  RUBY
+
+  def test_runner_carries_block_truthiness_down_a_delegation_chain
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert by_method[:direct].when_true_block_truthy, "the method whose value IS the block's call"
+      assert by_method[:middle].when_true_block_truthy, "one forward away"
+      assert by_method[:top].when_true_block_truthy, "two forwards away"
+    end
+  end
+
+  # Forwarding into a callee with nothing to say proves nothing: `unrelated`
+  # never calls the block, so a truthy `sideways` says nothing about it.
+  def test_runner_proves_nothing_by_forwarding_into_a_method_without_the_fact
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      refute by_method[:sideways]&.when_true_block_truthy
+      refute by_method[:unrelated]&.when_true_block_truthy
+    end
+  end
+
+  # felixefelip/rbs_infer#144 stage 2b. `middle(&login) || deny`, where `deny`
+  # halts: a truthy answer is `middle`'s unless `deny` answered, and `deny` never
+  # returns without halting. So on the UNHALTED exit the answer is the block's,
+  # and the fact is gated like every other fact about such an exit.
+  def test_runner_proves_block_truthiness_across_a_disjunction_that_ends_in_a_halt
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert_equal :@halted, by_method[:or_halt].conditional_block_truthy
+      # Gated, NOT unconditional: `deny` answering is a truthy return the block
+      # had no part in.
+      refute by_method[:or_halt].when_true_block_truthy
+    end
+  end
+
+  # `fetch` halts nothing, so the tail answering truthy is an exit where the
+  # block was never called — the fact would be a lie on exactly that path.
+  def test_runner_proves_nothing_when_the_disjunction_tail_does_not_halt
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert_nil by_method[:or_carry_on]&.conditional_block_truthy
+    end
+  end
+
+  # The chain does not say WHICH operand answered, so an operand that never
+  # received the block would make the fact a claim about somebody else's.
+  def test_runner_proves_nothing_when_an_operand_did_not_get_the_block
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert_nil by_method[:or_without_the_block]&.conditional_block_truthy
+    end
+  end
+
+  # felixefelip/rbs_infer#144 stage 3, the call site — what all of it was for.
+  # The write happens INSIDE the block, and the caller learns it only because
+  # the callee's answer is known to be its block's.
+  #
+  # The callee's fact decides the shape: `or_halt` proves it only of the exit
+  # that did not halt, so the caller's fact carries the same gate.
+  def test_runner_turns_what_a_block_established_into_a_fact_about_the_caller
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      spec = by_method[:from_gated].conditional_const_returns["BTRegistry.user"]
+      refute_nil spec, "expected the block's establishment to reach the caller"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::BTUser", spec[:type].to_s
+    end
+  end
+
+  # An UNGATED callee (`direct` simply calls the block) proves it of every
+  # truthy exit, so the caller's fact needs no halt check either.
+  def test_runner_needs_no_gate_when_the_callee_needs_none
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      assert_equal "::BTUser", by_method[:from_ungated].when_true_consts["BTRegistry.user"].to_s
+      refute by_method[:from_ungated].conditional_const_returns.key?("BTRegistry.user")
+    end
+  end
+
+  # `unrelated` never calls its block, so a truthy answer says nothing about it
+  # — and the block may not have run at all.
+  def test_runner_proves_nothing_from_a_block_the_callee_may_ignore
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      entry = by_method[:from_nothing]
+      refute entry&.when_true_consts&.key?("BTRegistry.user")
+      refute entry&.conditional_const_returns&.key?("BTRegistry.user")
+    end
+  end
+
+  # felixefelip/rbs_infer#144, the shape an app writes: the block call two
+  # conditionals deep, and the inner `else` is the 401. Both gates are the same
+  # ivar here — the callee's `||` tail and this method's own `else` halt the same
+  # way — so one check covers them.
+  def test_runner_reads_a_call_site_two_conditionals_deep_with_a_halting_else
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      spec = by_method[:from_nested].conditional_const_returns["BTRegistry.user"]
+      refute_nil spec, "expected the nested block's establishment to reach the caller"
+      assert_equal :@halted, spec[:gate_ivar]
+      assert_equal "::BTUser", spec[:type].to_s
+    end
+  end
+
+  # `direct` needs no gate of its own, but the `else` still means a truthy
+  # return could be `deny`'s — so the site's own halt gates what the callee left
+  # ungated, and the fact lands in the conditional slot rather than the
+  # unconditional one.
+  def test_runner_gates_an_ungated_callee_on_the_sites_own_halt
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      entry = by_method[:from_nested_ungated_callee]
+      refute entry.when_true_consts.key?("BTRegistry.user"),
+             "an else that may answer truthy cannot prove it of every truthy exit"
+      assert_equal :@halted, entry.conditional_const_returns["BTRegistry.user"][:gate_ivar]
+    end
+  end
+
+  # The same proof written the other way round — the halt in the `if`, the block
+  # in the `else`.
+  def test_runner_reads_the_block_from_either_arm
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      spec = by_method[:from_nested_else_carries].conditional_const_returns["BTRegistry.user"]
+      refute_nil spec
+      assert_equal :@halted, spec[:gate_ivar]
+    end
+  end
+
+  # `fetch` halts nothing, so the `else` is an ordinary way to return truthy
+  # having established nothing — exactly the path the fact would be a lie on.
+  # The Inferrer offered the candidate; refusing it is the Runner's call, since
+  # only it knows what `fetch` does.
+  def test_runner_proves_nothing_when_the_alternative_does_not_halt
+    in_tmpdir do
+      write("sig/bt.rbs", BT_RBS)
+      write("app/bt.rb", BT_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      entry = by_method[:from_nested_without_a_halt]
+      refute entry&.when_true_consts&.key?("BTRegistry.user")
+      refute entry&.conditional_const_returns&.key?("BTRegistry.user")
+    end
+  end
+
+  # felixefelip/steep#126. `refuse` hands `self` to `PHResponder.deny`, which
+  # halts what it was handed. Neither frame states it: `deny` writes nothing on
+  # its own `self`, and `refuse` writes nothing at all. Together they do, and
+  # the `||` above can then be gated.
+  def test_runner_proves_a_halt_that_lands_on_an_argument
+    in_tmpdir do
+      write("sig/ph.rbs", PH_RBS)
+      write("app/ph.rb", PH_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      # The proof itself is internal — it is consumed by the passes that ask
+      # whether something halts, and never serialized — so what is asserted is
+      # its effect: the chain gets gated, which nothing else here could do.
+      spec = by_method[:run].conditional_const_returns["PHStore.thing"]
+      refute_nil spec, "expected the chain to be gated on that halt"
+      assert_equal :@halted, spec[:gate_ivar]
+    end
+  end
+
+  # `note` calls `record` on the host, and `record` halts nothing — passing
+  # yourself to somebody proves nothing on its own.
+  def test_runner_proves_nothing_when_the_callee_does_not_halt_what_it_was_handed
+    in_tmpdir do
+      write("sig/ph.rbs", PH_RBS)
+      write("app/ph.rb", PH_RUBY)
+      project = setup_project(steepfile: FIXTURE_STEEPFILE)
+
+      by_method = Postconditions::Runner.run(project).to_h { |e| [e.method_name, e] }
+
+      refute by_method[:loose]&.conditional_const_returns&.key?("PHStore.thing")
+    end
+  end
+end

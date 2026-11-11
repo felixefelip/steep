@@ -12,7 +12,7 @@ class SignatureServiceTest < Minitest::Test
   end
 
   def test_update
-    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, service.status
 
@@ -46,7 +46,7 @@ RBS
   end
 
   def test_update_nested
-    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, controller.status
 
@@ -103,7 +103,7 @@ RBS
   end
 
   def test_update_syntax_error
-    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, controller.status
 
@@ -123,7 +123,7 @@ RBS
   end
 
   def test_update_syntax_error2
-    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, controller.status
 
@@ -143,7 +143,7 @@ RBS
   end
 
   def test_update_loading_error1
-    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, controller.status
 
@@ -166,7 +166,7 @@ RBS
   end
 
   def test_update_loading_error2
-    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, controller.status
 
@@ -187,7 +187,7 @@ RBS
   end
 
   def test_update_after_syntax_error
-    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    controller = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, controller.status
 
@@ -233,7 +233,7 @@ RBS
   end
 
   def test_const_decls
-    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, service.status
 
@@ -256,7 +256,7 @@ RBS
   end
 
   def test_global_decls
-    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, service.status
 
@@ -275,7 +275,7 @@ RBS
   end
 
   def test__inline__update
-    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, service.status
 
@@ -321,7 +321,7 @@ RUBY
   end
 
   def test__inline__update_syntax_error1
-    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, service.status
 
@@ -360,7 +360,7 @@ RUBY
   end
 
   def test__inline__update_syntax_error2
-    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, service.status
 
@@ -382,7 +382,7 @@ RUBY
   end
 
   def test__inline__update_empty_comment
-    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true)
+    service = SignatureService.load_from(environment_loader, implicitly_returns_nil: true, underscore_casts: false)
 
     assert_instance_of SignatureService::LoadedStatus, service.status
 

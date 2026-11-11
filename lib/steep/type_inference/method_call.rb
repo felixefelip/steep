@@ -127,16 +127,17 @@ module Steep
         end
 
         def pure?
+          # Optimistic-default: every method is pure unless its RBS sig
+          # carries `%a{impure}`. The previous version layered a name-suffix
+          # heuristic on top (setters via `=`, bang methods via `!`) but it
+          # cut against the rest of the fork's "useful > sound" stance for
+          # narrowing (felixefelip/steep#8, #9, #12). The structural marker
+          # for impurity is the annotation; methods that mutate without
+          # being annotated trade slight soundness for more narrowing in
+          # real Rails code — the same trade-off TypeScript makes for
+          # `this.x`.
           method_decls.all? do |method_decl|
-            case method_decl.method_def.member
-            when RBS::AST::Members::Attribute
-              # The attribute writer is not pure
-              !method_decl.method_name.method_name.end_with?("=")
-            else
-              method_decl.method_def.each_annotation.any? do |annotation|
-                annotation.string == "pure"
-              end
-            end
+            method_decl.method_def.each_annotation.none? { |a| a.string == "impure" }
           end
         end
 

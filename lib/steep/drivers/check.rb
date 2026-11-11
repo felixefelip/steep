@@ -45,6 +45,69 @@ module Steep
         @expressions = []
       end
 
+      def infer_contracts(project)
+        runner = Contracts::Runner.new(project)
+        contracts = runner.run
+        runner.write(contracts)
+
+        if contracts.any?
+          stdout.puts Rainbow("# Inferred preconditions:").bold
+          contracts.each do |contract|
+            sep = contract.singleton ? "." : "#"
+            stdout.puts "  #{contract.type_name}#{sep}#{contract.method_name}"
+          end
+          stdout.puts "  → #{project.relative_path(runner.output_path)}"
+          stdout.puts
+        end
+      rescue => e
+        stderr.puts "Warning: precondition inference failed: #{e.class}: #{e.message}"
+      end
+
+      def infer_specializations(project)
+        runner = Specializations::Runner.new(project)
+        methods = runner.run
+        runner.write(methods)
+
+        if methods.any?
+          stdout.puts Rainbow("# Inferred specializations (return types per argument tuple):").bold
+          methods.each do |key, entries|
+            entries.each_key { |arguments| stdout.puts "  #{key}#{arguments}" }
+          end
+          stdout.puts "  → #{project.relative_path(runner.output_path)}"
+          stdout.puts
+        end
+
+        if runner.evals.any?
+          stdout.puts Rainbow("# Inferred string evals (code a call site writes):").bold
+          runner.evals.each_key { |site| stdout.puts "  #{site}" }
+          stdout.puts "  → #{project.relative_path(runner.evals_output_path)}"
+          stdout.puts
+        end
+      rescue => e
+        stderr.puts "Warning: specialization inference failed: #{e.class}: #{e.message}"
+      end
+
+      def infer_postconditions(project)
+        runner = Postconditions::Runner.new(project)
+        entries = runner.run
+        runner.write(entries)
+
+        if entries.any?
+          stdout.puts Rainbow("# Inferred postconditions (ivar refinements):").bold
+          entries.each do |entry|
+            sep = entry.singleton ? "." : "#"
+            stdout.puts "  #{entry.class_name}#{sep}#{entry.method_name}"
+            entry.ivars.each do |name, type|
+              stdout.puts "    #{name}: #{type}"
+            end
+          end
+          stdout.puts "  → #{project.relative_path(runner.output_path)}"
+          stdout.puts
+        end
+      rescue => e
+        stderr.puts "Warning: postcondition inference failed: #{e.class}: #{e.message}"
+      end
+
       def active_group?(group)
         return true if active_group_names.empty?
 
@@ -67,6 +130,17 @@ module Steep
         unless expressions.empty?
           return run_expressions(project)
         end
+
+        # Postconditions first: contract enforcement (inside `infer_contracts`)
+        # observes call sites, and a call site's satisfaction can depend on a
+        # postcondition establishment — `x = build` importing `x.attr` non-nil
+        # so a later `x.save` satisfies `requires self.attr` (felixefelip/steep#56).
+        # Reload the memoized store after writing so enforcement sees it.
+        infer_postconditions(project)
+        project.reload_postconditions!
+        infer_contracts(project)
+        infer_specializations(project)
+        project.reload_specializations!
 
         params = build_typecheck_params(project)
 
@@ -109,7 +183,7 @@ module Steep
         stdout.puts
 
         loader = Project::Target.construct_env_loader(options: target.options, project: project)
-        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
+        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts)
         subtyping = signature_service.current_subtyping or raise "Failed to build subtyping"
 
         lsp_formatter = Diagnostic::LSPFormatter.new(target.code_diagnostics_config)
@@ -130,7 +204,16 @@ module Steep
             source: source,
             subtyping: subtyping,
             constant_resolver: signature_service.latest_constant_resolver,
-            cursor: nil
+            cursor: nil,
+            contracts: project.contracts,
+            postconditions: project.postconditions,
+            callbacks: project.callbacks,
+            specializations: project.specializations,
+            literal_method_registry: project.literal_method_registry,
+            delegation_registry: project.delegation_registry,
+            constructor_bindings: project.constructor_binding_registry,
+            return_forwarding: project.return_forwarding_registry,
+            return_alias: project.return_alias_registry
           )
 
           diagnostics = typing.errors.filter_map { |error| lsp_formatter.format(error) }
@@ -353,6 +436,8 @@ module Steep
 
         server_reader = LSP::Transport::Io::Reader.new(server_read)
         server_writer = LSP::Transport::Io::Writer.new(server_write)
+
+        compact_heap_before_fork
 
         typecheck_workers = Server::WorkerProcess.start_typecheck_workers(
           steepfile: project.steepfile_path,

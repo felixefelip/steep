@@ -3,6 +3,7 @@ target :test do
   signature "*.rbs"
 
   implicitly_returns_nil! true
+  underscore_casts!
 
   configure_code_diagnostics(Steep::Diagnostic::Ruby.all_error)
 end

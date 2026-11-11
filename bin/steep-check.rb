@@ -67,7 +67,7 @@ class Command
     target.options.load_collection_lock
 
     signature_service = Steep::Project::Target.construct_env_loader(options: target.options, project: project).yield_self do |loader|
-      Steep::Services::SignatureService.load_from(loader)
+      Steep::Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil)
     end
 
     env = signature_service.latest_env
@@ -76,8 +76,8 @@ class Command
 
     signature_files.each do |path, content|
       buffer = RBS::Buffer.new(name: path.to_s, content: content)
-      buffer, dirs, decls = RBS::Parser.parse_signature(buffer)
-      env.add_signature(buffer: buffer, directives: dirs, decls: decls)
+      _, dirs, decls = RBS::Parser.parse_signature(buffer)
+      env.add_source(RBS::Source::RBS.new(buffer, dirs, decls))
       new_decls.merge(decls)
     end
 
@@ -94,7 +94,7 @@ class Command
 
     definition_builder = RBS::DefinitionBuilder.new(env: env)
     factory = AST::Types::Factory.new(builder: definition_builder)
-    builder = Interface::Builder.new(factory)
+    builder = Interface::Builder.new(factory, implicitly_returns_nil: target.implicitly_returns_nil)
     subtyping = Subtyping::Check.new(builder: builder)
 
     typings = {}
@@ -110,7 +110,7 @@ class Command
 
       type_env = TypeInference::TypeEnvBuilder.new(
         TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(factory),
-        TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations),
+        TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations).merge!,
         TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annotations),
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annotations)
       ).build(TypeInference::TypeEnv.new(const_env))

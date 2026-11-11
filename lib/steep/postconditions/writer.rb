@@ -1,0 +1,241 @@
+module Steep
+  module Postconditions
+    # Serializes `InferredEntry` instances to the `.steep_postconditions.yml`
+    # schema consumed by `Postconditions::Store.from_hash`. The output is
+    # round-trip-compatible with hand-written sidecars: a Steep-generated
+    # entry and a rbs_rails-generated entry sit side-by-side in `sig/**/`
+    # and are merged by the loader.
+    class Writer
+      def self.dump(entries)
+        new(entries).dump
+      end
+
+      def self.write(path, entries, **sections)
+        new(entries, **sections).write(path)
+      end
+
+      def initialize(entries, method_entry_facts: {}, argument_entry_facts: {}, unreached_definitions: Set[], conditional_definitions: Set[])
+        @entries = entries
+        @method_entry_facts = method_entry_facts
+        @argument_entry_facts = argument_entry_facts
+        @unreached_definitions = unreached_definitions
+        @conditional_definitions = conditional_definitions
+      end
+
+      def dump
+        YAML.dump(payload)
+      end
+
+      def write(path)
+        path = Pathname(path) unless path.is_a?(Pathname)
+        path.parent.mkpath
+        path.write(dump)
+      end
+
+      private
+
+      def payload
+        rows = @entries
+          .sort_by { |entry| sort_key(entry) }
+          .map { |entry| serialize_entry(entry) }
+
+        document = {
+          "version" => 1,
+          "postconditions" => rows
+        }
+        document["method_entry_facts"] = method_entry_rows unless @method_entry_facts.empty?
+        document["argument_entry_facts"] = argument_entry_rows unless @argument_entry_facts.empty?
+        document["unreached_definitions"] = @unreached_definitions.sort unless @unreached_definitions.empty?
+        document["conditional_definitions"] = @conditional_definitions.sort unless @conditional_definitions.empty?
+        document
+      end
+
+      # Argument-sensitive entry facts (peça 3): facts holding at a method's entry only for
+      # the callers that passed a specific literal at a given parameter.
+      #
+      #   argument_entry_facts:
+      #   - class: Example7::Dispatcher
+      #     method: show
+      #     param: which
+      #     pattern: ":name"
+      #     consts: { Example7::Foo.name: "::String" }
+      #     ivars: { "@name": "::String" }
+      def argument_entry_rows
+        rows = [] #: Array[Hash[String, untyped]]
+        @argument_entry_facts.sort.each do |key, partitions|
+          class_name, method_name = key.split("#", 2)
+          partitions
+            .sort_by { |p| [p[:param].to_s, p[:pattern]] }
+            .each do |partition|
+              row = {
+                "class" => class_name,
+                "method" => method_name,
+                "param" => partition[:param].to_s,
+                "pattern" => partition[:pattern]
+              }
+              consts = partition[:consts] || {}
+              ivars = partition[:ivars] || {}
+              row["consts"] = consts.sort.to_h unless consts.empty?
+              row["ivars"] = ivars.sort_by { |n, _| n.to_s }.to_h { |n, t| [n.to_s, t] } unless ivars.empty?
+              rows << row
+            end
+        end
+        rows
+      end
+
+      # felixefelip/steep#68 item 4: facts holding at each method's entry.
+      #
+      #   method_entry_facts:
+      #   - class: C
+      #     method: log_it
+      #     self_methods: { current_user: "::User" }
+      #     consts: { Current.user: "::User" }
+      #     ivars: { "@post": "::Post" }
+      def method_entry_rows
+        @method_entry_facts.sort.map do |key, facts|
+          class_name, method_name = key.split("#", 2)
+          row = { "class" => class_name, "method" => method_name }
+          row["self_methods"] = facts[:self_methods].sort.to_h { |m, t| [m.to_s, t] } unless facts[:self_methods].empty?
+          row["consts"] = facts[:consts].sort.to_h unless facts[:consts].empty?
+          ivars = facts[:ivars] || {}
+          row["ivars"] = ivars.sort_by { |n, _| n.to_s }.to_h { |n, t| [n.to_s, t] } unless ivars.empty?
+          row
+        end
+      end
+
+      def sort_key(entry)
+        [entry.class_name, entry.singleton ? 1 : 0, entry.method_name.to_s]
+      end
+
+      def serialize_entry(entry)
+        row = {
+          "class" => entry.class_name,
+          "method" => entry.method_name.to_s
+        }
+        # `unconditional` carries the ivar refinement (set_x pattern) AND
+        # the return-value establishment (build pattern). Either can be
+        # present without the other — `build` establishes a return
+        # attribute while setting no ivar — so the branch is assembled
+        # from whatever slots the entry has, and emitted only if non-empty.
+        unconditional = {}
+        unless entry.ivars.empty?
+          unconditional.merge!(serialize_branch(
+            ivars: entry.ivars,
+            self_type_string: entry.self_type_string
+          ))
+        end
+        unless entry.returns_establishes.empty?
+          unconditional["returns"] = {
+            "establishes" => entry.returns_establishes.map(&:to_s).sort
+          }
+        end
+        unless entry.param_establishments.empty?
+          unconditional["params"] = entry.param_establishments.sort.to_h do |index, attrs|
+            [index, attrs.sort_by { |attr, _| attr.to_s }.to_h { |attr, type| [attr.to_s, type.to_s] }]
+          end
+        end
+        # felixefelip/rbs_infer#71 (piece 1): sibling const attributes this setter
+        # proves non-nil at a `Const.attr =` write site. The Runner has already
+        # gated these on a delegating singleton, so serialize whatever survives.
+        unless entry.establishes_consts.empty?
+          unconditional["establishes_consts"] = entry.establishes_consts
+            .sort_by { |name, _| name.to_s }
+            .each_with_object({}) { |(name, type), h| h[name.to_s] = type.to_s }
+        end
+        # felixefelip/steep#100: constant attributes written non-nil on every exit. Same
+        # `"Const.attr" => type` shape as a `method_entry_facts` row's `consts:`, since it
+        # is exactly what the Runner copies into one at each call site.
+        unless entry.const_establishments.empty?
+          unconditional["consts"] = entry.const_establishments
+            .sort
+            .each_with_object({}) { |(path, type), h| h[path] = type.to_s }
+        end
+        row["unconditional"] = unconditional unless unconditional.empty?
+        # The MAY-write effect (felixefelip/steep#68): not a refinement, so it
+        # sits outside the branches — it applies at every call site, and only
+        # tells the caller to stop trusting its narrowing of these ivars.
+        effects = {}
+        effects["may_write"] = entry.may_write_ivars.map(&:to_s).sort unless entry.may_write_ivars.empty?
+        # felixefelip/steep#68 item 2: halt-check getter link.
+        effects["returns_ivar"] = entry.returns_ivar.to_s if entry.returns_ivar
+        effects["runs_block"] = "once" if entry.runs_block
+        row["effects"] = effects unless effects.empty?
+
+        # felixefelip/steep#68 item 2: self-methods proven non-nil on the
+        # unhalted exit, keyed by the gate ivar.
+        unless entry.conditional_returns.empty?
+          row["conditional_returns"] = entry.conditional_returns.sort_by { |m, _| m.to_s }.each_with_object({}) do |(method, spec), acc|
+            acc[method.to_s] = {
+              "gate_ivar" => spec[:gate_ivar].to_s,
+              "type" => spec[:type].to_s
+            }
+          end
+        end
+        # felixefelip/steep#68 item 3: constant attributes proven non-nil on the
+        # unhalted exit, keyed by the `Const.attr` path.
+        unless entry.conditional_const_returns.empty?
+          row["conditional_const_returns"] = entry.conditional_const_returns.sort.each_with_object({}) do |(path, spec), acc|
+            acc[path] = {
+              "gate_ivar" => spec[:gate_ivar].to_s,
+              "type" => spec[:type].to_s
+            }
+          end
+        end
+        # felixefelip/rbs_infer#144 stage 2b: the same fact, held only by the
+        # exit that did not halt — so it sits beside the other gated facts
+        # rather than in the truthy branch.
+        if entry.conditional_block_truthy
+          row["conditional_block_truthy"] = { "gate_ivar" => entry.conditional_block_truthy.to_s }
+        end
+        unless entry.when_true_ivars.empty? && entry.when_true_methods.empty? &&
+               entry.when_true_consts.empty? && !entry.when_true_block_truthy
+          branch = serialize_branch(
+            ivars: entry.when_true_ivars,
+            self_type_string: entry.when_true_self_type_string,
+            consts: entry.when_true_consts,
+            methods: entry.when_true_methods
+          )
+          # felixefelip/rbs_infer#144 stage 2. Not a refinement like its
+          # neighbours — it names WHOSE answer a truthy return is, which is what
+          # a call site needs before it can believe the block's own facts. It
+          # belongs in this branch because it is only true of a truthy exit.
+          branch["block_truthy"] = true if entry.when_true_block_truthy
+          row["when_true"] = branch
+        end
+        row
+      end
+
+      # `consts` are the constant attributes established on the truthy exit
+      # (felixefelip/steep#117 gap 3b), keyed by `Const.attr` like every other
+      # const fact. `Branch` does not parse them back yet — 3c consumes them
+      # in-process, from the same Runner pass that infers them — but they are
+      # written because a fact nobody can see is a fact nobody can check.
+      # `methods` are the zero-arity self-method slots the branch proves
+      # narrower. Like `consts`, `Branch` does not parse them back: the
+      # refinement a consumer applies is the `self:` intersection, and the
+      # marker module named there is where these types actually live. They are
+      # written because the sidecar is how one reads what was inferred, and a
+      # `self:` pointing at a marker says nothing about WHY on its own.
+      def serialize_branch(ivars:, self_type_string:, consts: {}, methods: {})
+        branch = {
+          "ivars" => ivars.sort_by { |k, _| k.to_s }.each_with_object({}) do |(name, type), hash|
+            hash[name.to_s] = type.to_s
+          end
+        }
+        branch.delete("ivars") if ivars.empty?
+        unless consts.empty?
+          branch["consts"] = consts.sort.each_with_object({}) { |(path, type), hash| hash[path] = type.to_s }
+        end
+        unless methods.empty?
+          branch["methods"] = methods.sort_by { |name, _| name.to_s }.each_with_object({}) do |(name, type), hash|
+            hash[name.to_s] = type.to_s
+          end
+        end
+        if self_type_string.is_a?(String) && !self_type_string.empty?
+          branch["self"] = self_type_string
+        end
+        branch
+      end
+    end
+  end
+end

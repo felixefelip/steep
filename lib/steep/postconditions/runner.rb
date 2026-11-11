@@ -1,0 +1,1118 @@
+module Steep
+  module Postconditions
+    # Drives postcondition inference across all source files in a project.
+    # Modeled after `Steep::Contracts::Runner` (preconditions side).
+    #
+    # Flow per target:
+    #
+    #   1. Load the target's RBS signatures into a fresh `SignatureService`.
+    #   2. For each Ruby source file in the target's `source_pattern`,
+    #      parse + type-check with the *already-loaded* postconditions in
+    #      scope (so previously-inferred entries inform later inference —
+    #      e.g. a call site that consumes a refined ivar gets the right
+    #      type).
+    #   3. Run `Inferrer.infer` on the typed result, accumulating
+    #      `InferredEntry` values.
+    #
+    # Across targets, entries with the same `(class, method)` are merged
+    # by union of `ivars` (entries that disagree on a key keep the first
+    # one wins, with a warning — defensive default).
+    class Runner
+      DEFAULT_OUTPUT_PATH = Pathname("sig/generated/.steep_postconditions.yml").freeze
+
+      def self.run(project)
+        new(project).run
+      end
+
+      def initialize(project)
+        @project = project
+      end
+
+      def run
+        entries = []
+        @sequences = [] #: Array[MethodEntryInferrer::RunnerSequence]
+        @defined_method_keys = Set.new #: Set[String]
+        @method_param_names = {} #: Hash[String, Array[Symbol]]
+        @project.targets.each do |target|
+          target_entries, target_sequences = infer_for_target(target)
+          entries.concat(target_entries)
+          @sequences.concat(target_sequences)
+        end
+        resolved = close_ivar_effects(merge(entries))
+        @method_entry_facts = infer_method_entry_facts(resolved, @sequences)
+        @argument_entry_facts = infer_argument_entry_facts(resolved, @sequences)
+        resolved
+      end
+
+      # felixefelip/steep#68 item 4: { "Class#method" => { self_methods:, consts: } }
+      # — the facts proven at each method's entry by the guards that the runner
+      # shows run before it. Nil until `run`.
+      attr_reader :method_entry_facts
+
+      # Argument-sensitive entry facts (peça 3): { [class, method] => [{ param_name:,
+      # pattern:, consts: }] } — facts that hold at a method's entry only for the callers
+      # that passed a specific literal at a given parameter. Nil until `run`.
+      attr_reader :argument_entry_facts
+
+      def output_path
+        @project.absolute_path(DEFAULT_OUTPUT_PATH)
+      end
+
+      def write(entries)
+        sidecar = {
+          method_entry_facts: @method_entry_facts || {}, argument_entry_facts: @argument_entry_facts || {},
+          unreached_definitions: @definitions&.unreached || Set[], conditional_definitions: @definitions&.conditional || Set[]
+        }
+        if entries.empty? && sidecar.each_value.all?(&:empty?)
+          output_path.delete if output_path.file?
+        else
+          Writer.write(output_path, entries, **sidecar)
+        end
+      end
+
+      private
+
+      # Closes `may_write_ivars` over the self-call graph (felixefelip/steep#68,
+      # item 1): a method may write every ivar its callees may write.
+      #
+      #   redirect_to        writes @halted directly
+      #   authenticate_user  calls redirect_to  => may write @halted
+      #
+      # Without the closure the caller of `authenticate_user` keeps a narrowing
+      # of `@halted` that the callee already invalidated — the write is real,
+      # just one frame down (and, in the Rails guard shape, two blocks deep as
+      # well).
+      #
+      # Iterates to a fixpoint, so a chain of any depth converges; cycles are
+      # handled by the fixpoint itself (the sets only grow, and are bounded by
+      # the declared ivars).
+      def close_ivar_effects(entries)
+        by_key = entries.to_h { |entry| [entry_key(entry), entry] }
+        effects = by_key.transform_values { |entry| entry.may_write_ivars.dup }
+
+        loop do
+          changed = false
+          by_key.each do |key, entry|
+            entry.self_call_deps.each do |dep|
+              callee_effect = effects[dep] or next
+              before = effects[key].size
+              effects[key].merge(callee_effect)
+              changed ||= effects[key].size != before
+            end
+          end
+          break unless changed
+        end
+
+        resolved = by_key.transform_values do |entry|
+          entry.with_may_write(effects[key_of(entry)])
+        end
+
+        # felixefelip/steep#68 item 2: resolve each conditional-return whose gate
+        # is expressed `via` a self-method (`redirect_to`) to the ivar that
+        # method actually writes, now that the may-write closure is known. A gate
+        # that resolves to no ivar (the "halt" didn't write anything) is dropped.
+        resolved.each_value do |entry|
+          resolve_gates!(entry.conditional_returns, entry, effects)
+          resolve_gates!(entry.conditional_const_returns, entry, effects)
+        end
+
+        # felixefelip/steep#68 item 5: a `Const.user = <non-nil>` write also
+        # proves the OTHER constant attributes the setter establishes (its
+        # override does `self.author_name = value&.full_name`). Expand each
+        # guard's const-returns with those, when the singleton setter is
+        # confirmed to delegate to the instance one.
+        resolved.each_value { |entry| expand_transitive_const_returns(entry, resolved) }
+
+        # felixefelip/steep#103: the same expansion for the UNCONDITIONAL establishments
+        # (#100). A handler that cannot halt has no gate, so its facts live in
+        # `const_establishments` and were never expanded — meaning
+        # `Current.user = current_user` in a plain `before_action` proved `Current.user`
+        # and stopped there, while the identical write in a HALTING guard also proved
+        # `Current.caderneta`. Same write, same setter, different answer depending on
+        # whether the enclosing method happened to redirect.
+        resolved.each_value { |entry| expand_transitive_const_establishments(entry, resolved) }
+
+        # felixefelip/steep#117 gap 3a: lift what a callee establishes into its
+        # CALLER, transitively. The two expansions above walk from a write to the
+        # SETTER's siblings; this one walks the CALL GRAPH, so an establishment no
+        # longer stops at the frame that performs the write. Runs after them, so
+        # what propagates upward is each callee's already-expanded set.
+        close_const_establishments(resolved)
+
+        # felixefelip/steep#117 gap 3b: the same lift for the TRUTHY-exit edges.
+        # Runs AFTER the unconditional closure, so a clause calling a method that
+        # only establishes transitively still gets the fact — and needs no
+        # fixpoint of its own, since a truthy-exit fact is never lifted further
+        # (a caller invoking such a method unconditionally establishes nothing;
+        # it would have to test the result first).
+        lift_when_true_consts(resolved)
+
+        # felixefelip/steep#126: a method that halts by handing `self` to
+        # somebody who halts it. Runs before every pass that asks whether
+        # something halts — 2b and 3c both do.
+        close_param_halts(resolved)
+
+        # felixefelip/rbs_infer#144 stage 2: carry "a truthy return means the
+        # block answered truthy" down the delegation chain. Independent of the
+        # const passes above — it proves nothing about constants, it says whose
+        # answer a truthy return IS, which is what lets a caller believe the
+        # facts the block itself established.
+        close_block_truthy(resolved)
+
+        # felixefelip/rbs_infer#144 stage 2b: the same fact for a method that
+        # answers with a `||` whose tail halts. Runs after the closure above, so
+        # the earlier operands already carry whatever the chain gave them.
+        apply_disjunction_block_truthy(resolved)
+
+        # felixefelip/rbs_infer#144 stage 3: spend those facts at the call site,
+        # turning what a BLOCK established into an ordinary const fact about the
+        # method that passed it.
+        apply_block_call_establishments(resolved)
+
+        # felixefelip/steep#117 gap 3c: what a `||` chain of handlers proves on
+        # the exit that did not halt. Runs last of the const passes, so each
+        # operand's facts are already complete — including the ones 3a and 3b
+        # lifted into it, and now the ones a block established (#144 stage 3),
+        # which is what carries a fact from INSIDE a block out to the chain.
+        apply_disjunction_facts(resolved)
+
+        # felixefelip/rbs_infer#71 (piece 1): gate the UNCONDITIONAL establishment
+        # (`Const.attr =` proves a sibling non-nil for the rest of the frame) on a
+        # confirmed delegation. An instance setter's `establishes_consts` fires at
+        # a `Const.attr =` write only when the singleton `Const.attr=` forwards to
+        # it — otherwise the singleton could do anything and the establishment is
+        # unsound. Drop the establishments where no delegating singleton exists so
+        # the Writer serializes them only for the memoized-singleton shape.
+        gate_establishes_consts_on_delegation!(resolved)
+
+        resolved.values.reject(&:empty?)
+      end
+
+      # For each instance setter carrying `establishes_consts`, keep them only if
+      # the sibling singleton setter (`Const.attr=`) is confirmed to delegate to
+      # it; otherwise clear them. Runs before the `empty?` reject, so an instance
+      # setter left with nothing to say is then dropped.
+      def gate_establishes_consts_on_delegation!(resolved)
+        resolved.each do |key, entry|
+          next if entry.singleton || entry.establishes_consts.empty?
+
+          method = entry.method_name.to_s
+          next unless method.end_with?("=")
+
+          singleton = resolved["#{entry.class_name}.#{method}"]
+          next if singleton&.delegates_to_instance
+
+          resolved[key] = entry.with_establishes_consts({})
+        end
+      end
+
+      # Resolve each spec whose gate is expressed `via` self-methods to the ivar one
+      # of them actually writes (via item 1's self-call edges, which carry the
+      # declaring class so an inherited `redirect_to` resolves correctly), then drop
+      # any spec left without a gate ivar.
+      #
+      # The inferrer offers CANDIDATES in source order because no position in the
+      # abort clause is reliably the halt (felixefelip/steep#105 gap 3); which of
+      # them writes an ivar is known here and not there. First one that resolves
+      # wins — a candidate that writes nothing (`respond_to`, a path helper) simply
+      # falls through.
+      def resolve_gates!(specs, entry, effects)
+        specs.each_value do |spec|
+          next if spec[:gate_ivar]
+
+          candidates = Array(spec[:gate_via])
+          next if candidates.empty?
+
+          spec[:gate_ivar] = candidates.filter_map { |via|
+            dep = entry.self_call_deps.find { |d| d.end_with?("##{via}") }
+            dep && effects[dep]&.first
+          }.first
+        end
+        specs.reject! { |_, spec| spec[:gate_ivar].nil? }
+      end
+
+      def key_of(entry)
+        entry_key(entry)
+      end
+
+      # For each proven `Const.attr`, if the singleton `Const.attr=` delegates to
+      # the instance setter and that setter establishes further attributes, add
+      # `Const.<other>` under the same gate. `by_key` holds the setter entries.
+      def expand_transitive_const_returns(entry, by_key)
+        entry.conditional_const_returns.dup.each do |path, spec|
+          const_name, attr = path.split(".", 2)
+          next unless const_name && attr
+
+          singleton = by_key["#{const_name}.#{attr}="]
+          next unless singleton&.delegates_to_instance
+
+          instance_setter = by_key["#{const_name}##{attr}="]
+          next unless instance_setter
+
+          instance_setter.establishes_consts.each do |other, type|
+            other_path = "#{const_name}.#{other}"
+            next if entry.conditional_const_returns.key?(other_path)
+
+            entry.conditional_const_returns[other_path] = { gate_ivar: spec[:gate_ivar], type: type }
+          end
+        end
+      end
+
+      # `expand_transitive_const_returns` for the ungated establishments. Keyed the same
+      # way (`"Const.attr"`), carrying the type directly instead of a gate spec.
+      def expand_transitive_const_establishments(entry, by_key)
+        entry.const_establishments.dup.each do |path, _type|
+          const_name, attr = path.split(".", 2)
+          next unless const_name && attr
+
+          singleton = by_key["#{const_name}.#{attr}="]
+          next unless singleton&.delegates_to_instance
+
+          instance_setter = by_key["#{const_name}##{attr}="]
+          next unless instance_setter
+
+          instance_setter.establishes_consts.each do |other, other_type|
+            other_path = "#{const_name}.#{other}"
+            next if entry.const_establishments.key?(other_path)
+
+            entry.const_establishments[other_path] = other_type
+          end
+        end
+      end
+
+      # felixefelip/steep#117 gap 3a. Merges each callee's `const_establishments`
+      # into its callers', to a fixpoint, over the every-exit call edges
+      # (`unconditional_call_deps`). A caller that unconditionally calls a method
+      # which establishes `Const.attr` establishes it too — that is the whole
+      # content of the rule, and it is what lets a chain of plain handlers carry a
+      # fact up to the frame that can act on it.
+      #
+      # Mirrors `close_ivar_effects`: sets only grow and the (method, const-path)
+      # space is finite, so a cycle in the call graph terminates instead of
+      # looping. Only the edges the inferrer deemed unconditional are followed —
+      # a call inside an `if`, or after something that can halt, is not one, so
+      # nothing here has to reason about branches.
+      #
+      # An establishment already present is never overwritten: the caller's own
+      # write carries the written value's type and is more specific than what it
+      # would inherit, the same precedence the expansions above apply.
+      def close_const_establishments(resolved)
+        loop do
+          changed = false
+
+          resolved.each_value do |entry|
+            entry.unconditional_call_deps.each do |dep|
+              callee = resolved[dep] or next
+
+              callee.const_establishments.each do |path, type|
+                next if entry.const_establishments.key?(path)
+
+                entry.const_establishments[path] = type
+                changed = true
+              end
+            end
+          end
+
+          break unless changed
+        end
+      end
+
+      # felixefelip/steep#117 gap 3b. Resolves the calls a truthy-only clause
+      # makes against what those callees establish, so
+      #
+      #   def resume_session
+      #     if session = find_session_by_cookie
+      #       set_current_session session
+      #     end
+      #   end
+      #
+      # carries `Current.session` on its truthy exit. The clause containing a
+      # CALL rather than a write is the common case — which is why this needs
+      # 3a's closure to have run first, and why 3b is worth nothing without it.
+      #
+      # A fact the clause writes directly is never overwritten: it carries the
+      # written value's own type, the same precedence used throughout.
+      # felixefelip/rbs_infer#144 stage 2. The fact travels the delegation chain:
+      #
+      #   def authenticate_with_http_token(&login_procedure)
+      #     Token.authenticate(self, &login_procedure)
+      #   end
+      #
+      # This method hands the callee both its block AND its answer, so if the
+      # callee's truthy return means the block answered truthy, so does this
+      # one's. Rails is three deep, and nothing orders the entries, so it repeats
+      # to a fixpoint — sets only grow and the fact is a single boolean, so it
+      # terminates.
+      def close_block_truthy(resolved)
+        loop do
+          changed = false
+
+          resolved.each_value do |entry|
+            next if entry.when_true_block_truthy
+            next unless entry.block_forward_deps.any? { |dep| resolved[dep]&.when_true_block_truthy }
+
+            entry.prove_block_truthy!
+            changed = true
+          end
+
+          break unless changed
+        end
+      end
+
+      # felixefelip/rbs_infer#144 stage 2b.
+      #
+      #   authenticate_with_http_token(&login_procedure) || request_http_token_authentication(realm, message)
+      #
+      # A truthy answer is the LEFT operand's — unless the right one answered,
+      # and the right one halts. So on the exit that did NOT halt, a truthy
+      # return is the block's, and the fact is halt-gated like every other fact
+      # about an unhalted exit.
+      #
+      # The tail's halt is what makes this sound rather than plausible, exactly
+      # as in #122: without it, the tail answering truthy is an exit where the
+      # block was never even called, and the fact would be a lie on that path.
+      # `always_halting_ivar` is the same proof, reused.
+      #
+      # Every earlier operand must carry the fact, because the chain does not say
+      # which one answered — and the Inferrer has already refused a chain whose
+      # earlier operands did not all receive this method's block.
+      def apply_disjunction_block_truthy(resolved)
+        resolved.each_value do |entry|
+          next if entry.when_true_block_truthy || entry.conditional_block_truthy
+          next if entry.block_disjunction.empty?
+
+          *earlier, last = entry.block_disjunction
+          next if earlier.empty?
+
+          gate_ivar = always_halting_ivar(last, resolved) or next
+          next unless earlier.all? { |keys| keys.any? { |key| resolved[key]&.when_true_block_truthy } }
+
+          entry.prove_block_truthy_unless_halted!(gate_ivar)
+        end
+      end
+
+      # felixefelip/rbs_infer#144 stage 3. The Inferrer read what the block
+      # establishes; the callee says whose answer a truthy return is. Together:
+      #
+      #   from_token returns truthy
+      #     => with_token's answer was its block's        (stage 2)
+      #     => the block ran and answered truthy
+      #     => what the block established holds           (stage 3)
+      #
+      # The callee's fact decides the SHAPE of the result. Ungated
+      # (`when_true_block_truthy`) makes it a truthy-exit fact; halt-gated
+      # (`conditional_block_truthy`) makes it a fact about the unhalted exit,
+      # under the callee's own gate — a `||` whose tail halts cannot prove more
+      # than that, and the block's establishment inherits the limit.
+      #
+      # The SITE can be gated too: an `else` that renders a 401 is what makes
+      # reaching the block the only unhalted way out, and the Inferrer can only
+      # name the calls that alternative makes — whether one of them always halts
+      # is the callee's own fact, resolved here. A site gate downgrades an
+      # otherwise ungated callee to the same halt-gated shape; two gates that
+      # disagree leave no single check a caller could make, so nothing is
+      # recorded rather than a fact nobody can spend.
+      #
+      # Every resolved callee must carry the fact: a union receiver whose halves
+      # disagree says nothing about whose answer came back.
+      def apply_block_call_establishments(resolved)
+        resolved.each_value do |entry|
+          entry.block_call_establishments.each do |site|
+            callees = site[:keys].filter_map { |key| resolved[key] }
+            next if callees.empty?
+
+            halt_keys = site[:halt_keys]
+            site_gate = nil #: Symbol?
+            if halt_keys && !halt_keys.empty?
+              site_gate = always_halting_ivar(halt_keys, resolved) or next
+            end
+
+            if callees.all?(&:when_true_block_truthy)
+              record_block_call_facts(entry, site, site_gate)
+              next
+            end
+
+            gate = common_block_truthy_gate(callees) or next
+            next if site_gate && site_gate != gate
+
+            record_block_call_facts(entry, site, gate)
+          end
+        end
+      end
+
+      # Ungated, what the block established is a fact about this method's truthy
+      # exit; gated, one about its unhalted exit.
+      def record_block_call_facts(entry, site, gate)
+        site[:consts].each do |path, type|
+          if gate
+            entry.conditional_const_returns[path] ||= { gate_ivar: gate, type: type }
+          else
+            entry.when_true_consts[path] ||= type
+          end
+        end
+      end
+
+      # The one gate every callee agrees on, or nil. Callees gated differently
+      # leave no single check a caller could make.
+      def common_block_truthy_gate(callees)
+        gates = callees.map { |callee| callee.conditional_block_truthy || callee.when_true_block_truthy }
+        return nil if gates.any? { |gate| gate.nil? || gate == false }
+
+        symbols = gates.grep(Symbol).uniq
+        symbols.size == 1 ? symbols.first : nil
+      end
+
+      def lift_when_true_consts(resolved)
+        resolved.each_value do |entry|
+          entry.when_true_call_deps.each do |dep|
+            callee = resolved[dep] or next
+
+            callee.const_establishments.each do |path, type|
+              next if entry.when_true_consts.key?(path)
+
+              entry.when_true_consts[path] = type
+            end
+          end
+        end
+      end
+
+      # felixefelip/steep#117 gap 3c. A `||` chain of handlers:
+      #
+      #   def require_authentication
+      #     resume_session || authenticate_by_bearer_token || request_authentication
+      #   end
+      #
+      # If the LAST operand always halts, then an exit that did NOT halt means an
+      # earlier operand returned truthy — so whatever ALL of them establish on
+      # such an exit holds for the chain. The fact is halt-gated, like every
+      # other fact about an unhalted exit, and lands in the same slot.
+      #
+      # The last operand's halt is what makes this sound rather than plausible:
+      # without it, every operand returning falsy is an exit that halted nothing
+      # and established nothing, and the fact would be a lie on that path.
+      #
+      # It is an INTERSECTION because the chain does not say which operand
+      # answered. One operand with nothing to offer empties it, which is the
+      # correct answer and not a limitation to work around.
+      def apply_disjunction_facts(resolved)
+        resolved.each_value do |entry|
+          entry.disjunction_chains.each do |operands|
+            *earlier, last = operands
+
+            gate_ivar = always_halting_ivar(last, resolved) or next
+
+            per_operand = earlier.map { |keys| unhalted_truthy_facts(keys, resolved, gate_ivar) }
+            next if per_operand.empty? || per_operand.any?(&:empty?)
+
+            common = per_operand.reduce do |acc, facts|
+              acc.select { |path, spec| facts[path] && facts[path][:type].to_s == spec[:type].to_s }
+            end
+
+            common.each do |path, spec|
+              next if entry.conditional_const_returns.key?(path)
+
+              entry.conditional_const_returns[path] = { gate_ivar: gate_ivar, type: spec[:type] }
+            end
+          end
+        end
+      end
+
+      # felixefelip/steep#126. The halt that neither frame can see alone.
+      #
+      #   def refuse
+      #     Responder.deny(self, "denied")     # hands ITSELF over
+      #   end
+      #
+      #   def self.deny(host, message)         # self here is the module
+      #     host.halt                          # halts the ARGUMENT
+      #   end
+      #
+      # `deny` writes nothing on its own `self`, so nothing proved `refuse`
+      # halts — and the framework's own code has exactly this shape, one module
+      # acting on the controller it was handed.
+      #
+      # The two halves are collected apart because neither is knowable alone:
+      # the callee records the calls it makes on each parameter, and the caller
+      # records where it passed `self`. Put together, a call on that parameter
+      # is a call on the caller itself.
+      #
+      # A fixpoint: a method proven to halt this way can itself be the `halt`
+      # somebody else reaches. It terminates because the proofs only accumulate
+      # and each entry takes one.
+      def close_param_halts(resolved)
+        loop do
+          changed = false
+
+          resolved.each_value do |entry|
+            next if entry.halts_via_param
+
+            ivar = param_halt_ivar(entry, resolved) or next
+
+            entry.prove_halts_via_param!(ivar)
+            changed = true
+          end
+
+          break unless changed
+        end
+      end
+
+      # The ivar a method sets on its own `self` by passing itself to a callee
+      # that halts that parameter, or nil.
+      def param_halt_ivar(entry, resolved)
+        entry.self_arg_calls.each do |key, indices|
+          callee = resolved[key] or next
+
+          indices.each do |index|
+            (callee.param_call_deps[index] || []).each do |call_keys|
+              found = call_always_halts(call_keys, resolved) or next
+
+              return found
+            end
+          end
+        end
+        nil
+      end
+
+      # The ivar a single call on the parameter ALWAYS sets, or nil.
+      #
+      # Every declaration it could dispatch to has to halt, and on the same
+      # ivar. A parameter typed `(Alpha | Beta)` resolves `host.halt` to both
+      # `Alpha#halt` and `Beta#halt`; if only one of them halts, the call halts
+      # only for some callers, and the chain gating on it would be a lie for the
+      # rest.
+      def call_always_halts(call_keys, resolved)
+        ivars = call_keys.map { |key| always_halting_ivar(Set[key], resolved) }
+        return nil if ivars.empty? || ivars.any?(&:nil?)
+
+        ivars.uniq.size == 1 ? ivars.first : nil
+      end
+
+      # The ivar an operand ALWAYS sets truthy, i.e. the one that says it halted
+      # — directly (`def halt; @halted = true; end`, an unconditional ivar
+      # refinement to a truthy literal) or through the every-exit calls it makes
+      # (`def deny; halt; end`). nil when nothing proves it always halts, which
+      # is the conservative answer: the chain then proves nothing.
+      def always_halting_ivar(keys, resolved, seen = Set.new)
+        keys.each do |key|
+          next unless seen.add?(key)
+
+          entry = resolved[key] or next
+          entry.ivars.each { |name, type| return name if type.to_s == "true" }
+          # felixefelip/steep#126: the same proof, reached by handing `self` to
+          # a callee that halts it.
+          return entry.halts_via_param if entry.halts_via_param
+
+          found = always_halting_ivar(entry.unconditional_call_deps, resolved, seen)
+          return found if found
+        end
+        nil
+      end
+
+      # What an operand establishes on an exit that is both truthy and unhalted:
+      # what it always establishes, what it establishes on its truthy exit (3b),
+      # and what it establishes on its unhalted exit under the SAME gate.
+      def unhalted_truthy_facts(keys, resolved, gate_ivar)
+        facts = {} #: Hash[String, untyped]
+        keys.each do |key|
+          entry = resolved[key] or next
+
+          entry.const_establishments.each { |path, type| facts[path] ||= { type: type } }
+          entry.when_true_consts.each { |path, type| facts[path] ||= { type: type } }
+          entry.conditional_const_returns.each do |path, spec|
+            next unless spec[:gate_ivar] == gate_ivar
+
+            facts[path] ||= { type: spec[:type] }
+          end
+        end
+        facts
+      end
+
+      def infer_for_target(target)
+        loader = Project::Target.construct_env_loader(options: target.options, project: @project)
+        file_loader = Services::FileLoader.new(base_dir: @project.base_dir)
+
+        file_loader.each_path_in_patterns(target.signature_pattern) do |path|
+          absolute = @project.absolute_path(path)
+          loader.add(path: absolute) if absolute.file?
+        end
+
+        signature_service = Services::SignatureService.load_from(loader, implicitly_returns_nil: target.implicitly_returns_nil, underscore_casts: target.underscore_casts)
+        status = signature_service.status
+        # Two values, like the happy-path return below: `run` destructures this,
+        # and a bare `[]` gave it `nil, nil` — which took the whole inference pass
+        # down with a TypeError whenever ONE target failed to load its signatures.
+        return [[], []] unless status.is_a?(Services::SignatureService::LoadedStatus)
+
+        subtyping = status.subtyping
+        resolver = status.constant_resolver
+        out = []
+        sequences = [] #: Array[MethodEntryInferrer::RunnerSequence]
+
+        file_loader.each_path_in_patterns(target.source_pattern) do |path|
+          absolute = @project.absolute_path(path)
+          # `.erb` too: a template checked with `@type self_method: X#m` (ERB
+          # convention) is the source body of `X#m`, so it must contribute
+          # `X#m` to `defined_method_keys` — otherwise the fact a guarded action
+          # records for the view's entry is dropped by the defined-key filter.
+          next unless absolute.file? && [".rb", ".erb"].include?(absolute.extname)
+
+          text = absolute.read
+          source = begin
+                     Source.parse(text, path: absolute, factory: subtyping.factory)
+                   rescue ::Parser::SyntaxError, AnnotationParser::SyntaxError
+                     next
+                   end
+
+          # Use the project's loaded postconditions so a method that
+          # consumes an ivar refined by an earlier-discovered postcondition
+          # types correctly — without this, an inference pass could
+          # spuriously report "method on Union does not exist" inside the
+          # body, and downstream code would see the call as Type::Error,
+          # masking real refinements.
+          typing = Services::TypeCheckService.type_check(
+            source: source,
+            subtyping: subtyping,
+            constant_resolver: resolver,
+            cursor: nil,
+            contracts: @project.contracts,
+            postconditions: @project.postconditions,
+            callbacks: @project.callbacks,
+            specializations: @project.specializations,
+            literal_method_registry: @project.literal_method_registry,
+            delegation_registry: @project.delegation_registry,
+            constructor_bindings: @project.constructor_binding_registry,
+            return_forwarding: @project.return_forwarding_registry,
+            return_alias: @project.return_alias_registry,
+            # The guard collector reads these back instead of re-deriving from the
+            # AST what a condition proves.
+            record_branch_envs: true
+          )
+
+          (@definitions ||= UnreachedDefinitions.new).add(source, typing)
+          out.concat(Inferrer.infer(source, typing, subtyping))
+          sequences.concat(MethodEntryInferrer.sequences(source, typing))
+          @defined_method_keys.merge(MethodEntryInferrer.defined_method_keys(source))
+          @method_param_names.merge!(MethodEntryInferrer.method_param_names(source))
+        end
+
+        [out, sequences]
+      end
+
+      # felixefelip/steep#68 item 4. Turns each runner sequence into the facts
+      # holding at each called method's entry: walk the calls in order, carrying
+      # the union of every preceding guard's proven facts (a guard M running
+      # after G runs only if G didn't halt, so G's facts hold unconditionally at
+      # M's entry). A method appearing in more than one runner keeps the
+      # INTERSECTION — a fact only holds at entry if every path there proves it.
+      def infer_method_entry_facts(resolved, sequences)
+        by_key = resolved.to_h { |e| [entry_key(e), e] }
+
+        # Fixpoint over the call graph. Each pass seeds a flow with its owner's entry facts
+        # from the previous pass, so facts propagate transitively (M establishes F, calls N,
+        # N carries F to its own callees). Facts only GROW pass to pass — a larger seed can
+        # only widen the per-call-site intersection — and the (method, fact) space is finite,
+        # so this converges; the iteration cap is a belt-and-braces guard. Pass 0 (empty seed)
+        # reproduces the one-hop result.
+        prev = {} #: Hash[String, Hash[Symbol, Hash[untyped, String]]]
+        (sequences.size + 2).times do
+          per_method = run_entry_fact_pass(by_key, sequences, prev)
+          # Keep only facts for methods whose bodies are re-type-checked from source (the only
+          # ones a fact can narrow). Drops the dead facts a chain walk records for builtin/stdlib
+          # calls (`String#upcase`, `Class#new`).
+          per_method = per_method.select { |key, _| @defined_method_keys.include?(key) }
+          per_method = per_method.reject do |_, facts|
+            facts[:self_methods].empty? && facts[:consts].empty? && (facts[:ivars] || {}).empty?
+          end
+          break if per_method == prev
+          prev = per_method
+        end
+        prev
+      end
+
+      # One pass of the fixpoint: walk every flow with its `accumulated` seeded from `prev`.
+      def run_entry_fact_pass(by_key, sequences, prev)
+        per_method = {} #: Hash[String, Hash[Symbol, Hash[untyped, String]]]
+        seen = {} #: Hash[String, bool]
+
+        sequences.each do |sequence|
+          accumulated = seed_entry_facts(prev, sequence.owner)
+          pending_guards = [] #: Array[[untyped, bool]]
+
+          sequence.events.each do |event|
+            case event[:kind]
+            when :call
+              key = "#{event[:class_name]}##{event[:method_name]}"
+              entry = by_key[key]
+              # A transparent halt-ivar getter (`def performed?; @halted; end`, `returns_ivar`)
+              # is a predicate, not a fact-producing handler — the tool-neutral replacement for
+              # the old `HALT_CHECK = :performed?` name-match (felixefelip/steep#78).
+              next if halt_predicate?(entry)
+              record_entry_facts(per_method, seen, key, accumulated, same_self: event[:same_self])
+              apply_call_ivar_effects(accumulated, entry, same_self: event[:same_self])
+              apply_call_const_establishments(accumulated, entry)
+              # A call's guard facts (`conditional_*`) are proven only on its NON-halting exit,
+              # so they hold downstream only once a halt check has ruled out the halting exit.
+              # Hold them until a `:halt` promotes them.
+              pending_guards << [entry, event[:same_self]] if entry
+            when :halt
+              # Past the halt, the pending calls did NOT halt — promote their conditional facts.
+              pending_guards.each { |entry, same_self| accumulate_guard_facts(accumulated, entry, same_self: same_self) }
+              pending_guards.clear
+            when :const_write
+              apply_const_write_facts(accumulated, by_key, event)
+            when :ivar_write
+              apply_ivar_write(accumulated, event)
+            end
+          end
+        end
+
+        per_method
+      end
+
+      # The starting facts for a flow: its owner's entry facts from the previous pass (a copy,
+      # so the walk's mutations don't leak back). Empty for a top-level flow or the first pass.
+      def seed_entry_facts(prev, owner)
+        facts = owner && prev[owner]
+        return { self_methods: {}, consts: {}, ivars: {} } unless facts
+
+        { self_methods: facts[:self_methods].dup, consts: facts[:consts].dup, ivars: (facts[:ivars] || {}).dup }
+      end
+
+      # A method that transparently returns an ivar is a predicate (a halt check like
+      # `performed?`), not a handler whose entry we track.
+      def halt_predicate?(entry)
+        entry ? !entry.returns_ivar.nil? : false
+      end
+
+      # Merge `accumulated` into `key`'s entry facts — intersecting with any
+      # facts already recorded for `key` (from another sequence), since a fact
+      # must hold on every path to be sound at entry. A cross-object call
+      # (`same_self: false`) carries only const (global) facts — the caller's
+      # `self`-method facts are about a different receiver.
+      def record_entry_facts(per_method, seen, key, accumulated, same_self: true)
+        # Ivars, like self-methods, are about the CALLER's `self`: a cross-object call
+        # reaches a receiver whose ivars this flow says nothing about. Consts are global
+        # and cross freely.
+        self_methods = same_self ? accumulated[:self_methods] : {}
+        ivars = same_self ? accumulated[:ivars] : {}
+        snapshot = { self_methods: self_methods.dup, consts: accumulated[:consts].dup, ivars: ivars.dup }
+        if seen[key]
+          existing = per_method[key]
+          existing[:self_methods] = intersect(existing[:self_methods], snapshot[:self_methods])
+          existing[:consts] = intersect(existing[:consts], snapshot[:consts])
+          existing[:ivars] = intersect(existing[:ivars] || {}, snapshot[:ivars])
+        else
+          per_method[key] = snapshot
+          seen[key] = true
+        end
+      end
+
+      def accumulate_guard_facts(accumulated, entry, same_self: true)
+        return unless entry
+
+        if same_self
+          entry.conditional_returns.each do |method, spec|
+            accumulated[:self_methods][method] = spec.fetch(:type).to_s
+          end
+        end
+        entry.conditional_const_returns.each do |path, spec|
+          accumulated[:consts][path] = spec.fetch(:type).to_s
+        end
+      end
+
+      # A `Const.attr = <rhs>` in the flow establishes (non-nil rhs) or invalidates (nilable
+      # rhs) every const the setter's `establishes_consts` proves — the sequence-level analogue
+      # of `TypeConstruction#apply_const_establishes_on_write` (felixefelip/steep#78). The setter
+      # entry is keyed the same whether instance (`#`) or singleton (`.`).
+      def apply_const_write_facts(accumulated, by_key, event)
+        base = event[:base]
+        setter = by_key["#{base}##{event[:attr]}="] || by_key["#{base}.#{event[:attr]}="]
+        return unless setter
+
+        setter.establishes_consts.each do |other, type|
+          path = "#{base}.#{other}"
+          if event[:nonnil]
+            accumulated[:consts][path] = type.to_s
+          else
+            accumulated[:consts].delete(path)
+          end
+        end
+      end
+
+      # Argument-sensitive entry facts (peça 3). Walks each flow like the entry-fact pass, but
+      # instead of attributing the accumulated facts to a callee unconditionally, it buckets
+      # them by the LITERAL the caller passed: `run_name` establishes `Foo.name` then calls
+      # `show(:name)`, so `Foo.name` is attributed to `show` ONLY for the `:name` partition.
+      # The whole-app entry fact (`infer_method_entry_facts`) is the MEET over all sites and
+      # drops both here — this partitioning is what keeps a shared dispatcher precise.
+      #
+      # No fixpoint: the establishing write and the call sit in the SAME flow (a caller sets
+      # up state, then dispatches), so one walk with an empty seed captures it. Const facts
+      # only — a `case <param>` branch narrows const reads; self-method partitioning is out
+      # of scope.
+      def infer_argument_entry_facts(resolved, sequences)
+        by_key = resolved.to_h { |e| [entry_key(e), e] }
+
+        buckets = {} #: Hash[[String, Symbol, String], Hash[Symbol, untyped]]
+        seen = {} #: Hash[[String, Symbol, String], bool]
+        # (method key, param) pairs where some call site passed something we cannot pin to a
+        # literal. Such a caller may reach ANY branch, so no partition on that parameter is
+        # provable — see `record_argument_facts`.
+        unpinned = Set.new #: Set[[String, Symbol]]
+
+        sequences.each do |sequence|
+          # felixefelip/steep#93. Seeded with the OWNER's entry facts, not empty.
+          #
+          # The walk used to start each flow from nothing, on the assumption that the
+          # establishing write and the dispatch sit in the same body. They do not in the
+          # shape this feature exists to serve: a `before_action` establishes `@post`, the
+          # action body calls `render :edit`, and the establishment is one frame up. That
+          # body established nothing itself, so it contributed `{}` — and since a partition
+          # is the MEET over its call sites, one such caller emptied it for everyone.
+          #
+          # No second fixpoint is needed: `@method_entry_facts` is already converged (its
+          # own fixpoint ran just above), and argument partitions are consumed by the
+          # checker at branch level — nothing feeds them back into entry facts. One seeded
+          # pass therefore reaches the same result a fixpoint would.
+          accumulated = seed_entry_facts(@method_entry_facts, sequence.owner) #: Hash[Symbol, Hash[untyped, String]]
+          pending_guards = [] #: Array[[untyped, bool]]
+
+          sequence.events.each do |event|
+            case event[:kind]
+            when :call
+              entry = by_key["#{event[:class_name]}##{event[:method_name]}"]
+              next if halt_predicate?(entry)
+              record_argument_facts(buckets, seen, unpinned, event, accumulated)
+              apply_call_ivar_effects(accumulated, entry, same_self: event[:same_self])
+              pending_guards << [entry, event[:same_self]] if entry
+            when :halt
+              pending_guards.each { |e, ss| accumulate_guard_facts(accumulated, e, same_self: ss) }
+              pending_guards.clear
+            when :const_write
+              apply_const_write_facts(accumulated, by_key, event)
+            when :ivar_write
+              apply_ivar_write(accumulated, event)
+            end
+          end
+        end
+
+        finalize_argument_facts(buckets, unpinned)
+      end
+
+      # Record the accumulated consts for each literal positional argument of a call, MEETing
+      # with any facts already bucketed for the same (method, param, literal) — a fact must
+      # hold at every such site to survive. The call site's positional INDEX is translated to
+      # the callee's parameter NAME so the consumer can match it against a `case <param>`.
+      #
+      # A parameter this call site does NOT pin to a literal — a variable (`show(sym)`), a
+      # splat, or an argument left to its default — marks the parameter UNPINNED. That caller
+      # may reach any branch, including one whose partition claims facts it never established,
+      # so every partition on that parameter has to be dropped. Without this, a single
+      # dynamic-argument call site silently invalidates the whole correlation.
+      def record_argument_facts(buckets, seen, unpinned, event, accumulated)
+        key = "#{event[:class_name]}##{event[:method_name]}"
+        names = @method_param_names[key] or return
+
+        by_index = (event[:arg_keys] || []).to_h
+        # An ivar fact is about the CALLER's `self`, so it transfers only to a call on that
+        # same object. A cross-object call (`other.show(:name)`) reaches a different receiver
+        # whose ivars this flow says nothing about — the same gate `record_entry_facts`
+        # applies to self-method facts. Consts are global and cross freely.
+        ivars = event[:same_self] ? accumulated[:ivars] : {}
+
+        names.each_with_index do |param, index|
+          pattern = by_index[index]
+          unless pattern
+            unpinned << [key, param]
+            next
+          end
+
+          bucket_key = [key, param, pattern]
+          if seen[bucket_key]
+            bucket = buckets[bucket_key]
+            bucket[:consts] = intersect(bucket[:consts], accumulated[:consts])
+            bucket[:ivars] = intersect(bucket[:ivars], ivars)
+          else
+            buckets[bucket_key] = { consts: accumulated[:consts].dup, ivars: ivars.dup }
+            seen[bucket_key] = true
+          end
+        end
+      end
+
+      # The ivar effect of a call, in the order the callee produces it: every ivar it MAY
+      # write is invalidated, then every ivar its postcondition PROVES populated is
+      # established.
+      #
+      # The establishment half is felixefelip/steep#92 item 1. A flow walk that reacts only
+      # to a literal `@x = ...` misses the commonest shape there is — a `before_action`-style
+      # setter — even though the fact is already computed and sitting in `unconditional.ivars`.
+      # Establishing after invalidating matters: a setter both may-writes and proves the same
+      # ivar, and what it proves is the more precise statement.
+      #
+      # A constant attribute the callee writes on every exit holds for everything AFTER the
+      # call, the same way a write in this very body would (felixefelip/steep#100). Unlike
+      # ivar effects this is NOT same-self gated: a constant is global state, so
+      # `Foo.new.populate` establishes it just as `populate` does — the same reason
+      # `record_entry_facts` carries const facts across an explicit receiver.
+      def apply_call_const_establishments(accumulated, entry)
+        return unless entry
+
+        establishments = entry.const_establishments
+        return if establishments.nil? || establishments.empty?
+
+        establishments.each { |path, type| accumulated[:consts][path] = type.to_s }
+      end
+
+      # Same-self only: a call on another object neither writes nor proves anything about
+      # this object's ivars.
+      def apply_call_ivar_effects(accumulated, entry, same_self:)
+        return unless entry && same_self
+
+        entry.may_write_ivars.each { |name| accumulated[:ivars].delete(name) }
+
+        # `InferredEntry#ivars` — the producer's own shape for what the Writer
+        # serializes as `unconditional.ivars`.
+        established = entry.ivars
+        return if established.nil? || established.empty?
+
+        established.each do |name, type|
+          # A method that sets an ivar to nil (`def clobber; @name = nil; end`) records
+          # that faithfully, but "it is nil now" narrows nothing — and re-adding it here
+          # would undo the may-write invalidation just applied. Same rule the literal
+          # write follows: an informative type establishes, anything else only clears.
+          accumulated[:ivars][name] = type.to_s if informative_type?(type)
+        end
+      end
+
+      # Whether a type says anything useful about an ivar being populated. Mirrors
+      # `MethodEntryInferrer#nonnil_rhs?`, over an AST type rather than a node.
+      def informative_type?(type)
+        return false if type.nil?
+        return false if type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Any)
+        return type.types.none? { |t| t.is_a?(AST::Types::Nil) || t.is_a?(AST::Types::Any) } if type.is_a?(AST::Types::Union)
+
+        true
+      end
+
+      # An `@x = <rhs>` establishes (non-nil rhs) or invalidates (nilable rhs) the ivar.
+      def apply_ivar_write(accumulated, event)
+        if event[:nonnil]
+          accumulated[:ivars][event[:name]] = event[:type]
+        else
+          accumulated[:ivars].delete(event[:name])
+        end
+      end
+
+      # Turn the raw buckets into the serializable `{ "Class#method" => [{param:, pattern:,
+      # consts:}] }`: keep only methods whose bodies are re-type-checked from source, drop the
+      # facts already unconditional at the method's entry (a partition carries only what is
+      # SPECIFIC to its argument), and drop a partition left with nothing.
+      def finalize_argument_facts(buckets, unpinned)
+        result = {} #: Hash[String, Array[Hash[Symbol, untyped]]]
+
+        buckets.each do |(key, param, pattern), facts|
+          next unless @defined_method_keys.include?(key)
+          next if unpinned.include?([key, param])
+
+          consts = facts[:consts]
+          if (uncond = @method_entry_facts[key])
+            consts = consts.reject { |path, type| uncond[:consts][path] == type }
+          end
+          ivars = facts[:ivars]
+          next if consts.empty? && ivars.empty?
+
+          (result[key] ||= []) << { param: param, pattern: pattern, consts: consts, ivars: ivars }
+        end
+
+        result
+      end
+
+      # Keys common to both, keeping a value only when the two agree (a
+      # conflicting proof at entry is dropped conservatively).
+      def intersect(a, b)
+        (a.keys & b.keys).each_with_object({}) do |k, acc|
+          acc[k] = a[k] if a[k] == b[k]
+        end
+      end
+
+      # Two definitions of one method: only what both always leave holds,
+      # whichever runs.
+      def common_param_establishments(left, right)
+        left.each_with_object({}) do |(index, attrs), result|
+          common = attrs.select { |attr, type| right.dig(index, attr) == type }
+          result[index] = common unless common.empty?
+        end
+      end
+
+      def merge(entries)
+        by_key = {}
+        entries.each do |entry|
+          key = entry_key(entry)
+          if (existing = by_key[key])
+            merged_ivars = existing.ivars.dup
+            entry.ivars.each do |name, type|
+              if merged_ivars.key?(name) && merged_ivars[name] != type
+                Steep.logger.warn { "[postconditions] inferred conflicting types for #{key} #{name}: #{merged_ivars[name]} vs #{type}; keeping first" }
+                next
+              end
+              merged_ivars[name] = type
+            end
+            merged_establishes = (existing.returns_establishes | entry.returns_establishes)
+            by_key[key] = InferredEntry.new(
+              class_name: existing.class_name,
+              method_name: existing.method_name,
+              singleton: existing.singleton,
+              ivars: merged_ivars,
+              self_type_string: existing.self_type_string || entry.self_type_string,
+              when_true_ivars: existing.when_true_ivars,
+              # Merged rather than kept-first like its ivar sibling above: a
+              # predicate defined in two places contributes the slots of both,
+              # and a hash of disjoint method names has nothing to conflict over.
+              when_true_methods: existing.when_true_methods.merge(entry.when_true_methods),
+              when_true_self_type_string: existing.when_true_self_type_string,
+              returns_establishes: merged_establishes,
+              may_write_ivars: existing.may_write_ivars | entry.may_write_ivars,
+              self_call_deps: existing.self_call_deps | entry.self_call_deps,
+              # Same union/merge as their siblings above. Omitting them did not
+              # keep the first entry's — it silently reset them to empty, so a
+              # method defined in two places (a reopen, a concern and its host,
+              # a sidecar modelling app code) lost every fact #119, #120 and
+              # #122 infer.
+              unconditional_call_deps: existing.unconditional_call_deps | entry.unconditional_call_deps,
+              when_true_consts: existing.when_true_consts.merge(entry.when_true_consts),
+              when_true_call_deps: existing.when_true_call_deps | entry.when_true_call_deps,
+              disjunction_chains: existing.disjunction_chains | entry.disjunction_chains,
+              when_true_block_truthy: existing.when_true_block_truthy || entry.when_true_block_truthy,
+              block_forward_deps: existing.block_forward_deps | entry.block_forward_deps,
+              block_disjunction: existing.block_disjunction.empty? ? entry.block_disjunction : existing.block_disjunction,
+              conditional_block_truthy: existing.conditional_block_truthy || entry.conditional_block_truthy,
+              block_call_establishments: existing.block_call_establishments + entry.block_call_establishments,
+              param_call_deps: existing.param_call_deps.merge(entry.param_call_deps),
+              param_establishments: common_param_establishments(existing.param_establishments, entry.param_establishments),
+              self_arg_calls: existing.self_arg_calls.merge(entry.self_arg_calls),
+              halts_via_param: existing.halts_via_param || entry.halts_via_param,
+              returns_ivar: existing.returns_ivar || entry.returns_ivar,
+              conditional_returns: existing.conditional_returns.merge(entry.conditional_returns),
+              conditional_const_returns: existing.conditional_const_returns.merge(entry.conditional_const_returns),
+              establishes_consts: existing.establishes_consts.merge(entry.establishes_consts),
+              # Left out when its siblings were fixed, and silently reset to
+              # empty ever since — the same #100 facts the comment above
+              # describes, lost for any method defined in two places.
+              const_establishments: existing.const_establishments.merge(entry.const_establishments),
+              delegates_to_instance: existing.delegates_to_instance || entry.delegates_to_instance,
+              runs_block: existing.runs_block && entry.runs_block
+            )
+          else
+            by_key[key] = entry
+          end
+        end
+        by_key.values
+      end
+
+      def entry_key(entry)
+        sep = entry.singleton ? "." : "#"
+        "#{entry.class_name}#{sep}#{entry.method_name}"
+      end
+    end
+  end
+end

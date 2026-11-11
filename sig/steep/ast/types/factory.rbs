@@ -40,6 +40,10 @@ module Steep
 
         @method_type_cache: Hash[RBS::MethodType, Interface::MethodType]
 
+        @module_self_types: Hash[RBS::Environment::ModuleEntry, Array[RBS::AST::Declarations::Module::Self]]
+
+        def module_self_types: (RBS::Environment::ModuleEntry) -> Array[RBS::AST::Declarations::Module::Self]
+
         def method_type: (RBS::MethodType method_type) -> Interface::MethodType
 
         def method_type_1: (Interface::MethodType method_type) -> RBS::MethodType

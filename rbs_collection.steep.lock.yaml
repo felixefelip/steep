@@ -1,6 +1,14 @@
 ---
 path: ".gem_rbs_collection"
 gems:
+- name: concurrent-ruby
+  version: '1.1'
+  source:
+    type: git
+    name: ruby/gem_rbs_collection
+    revision: 9e17daa08b1710667699a208981cffd21dbf15f6
+    remote: https://github.com/ruby/gem_rbs_collection.git
+    repo_dir: gems
 - name: csv
   version: '0'
   source:

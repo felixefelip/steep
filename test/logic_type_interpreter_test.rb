@@ -28,6 +28,84 @@ class LogicTypeInterpreterTest < Minitest::Test
     )
   end
 
+  # Delegation inlining (felixefelip/steep#32) retypes `source.windowed?` as
+  # `source.window.present?` and mirrors the INLINED call's decls onto the
+  # original node, so `method_decls` names `present?` while `method_name` still
+  # says `windowed?`. The postcondition lookup has to read the name the source
+  # called, or the entry for the method actually written is never found.
+  def test_postcondition_lookup_uses_the_called_name_not_the_inlined_decls
+    with_checker(<<~RBS) do |checker|
+      class LTISource
+        def window: () -> LTIWindow?
+        def windowed?: () -> bool
+        def present?: () -> bool
+      end
+
+      class LTIWindow
+      end
+
+      module LTISource::AfterWindowed
+      end
+    RBS
+      source = parse_ruby("source.windowed?")
+      send_node = source.node
+      receiver_node = send_node.children[0]
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      typing.add_typing(send_node, parse_type("bool"), nil)
+      typing.add_typing(receiver_node, parse_type("::LTISource"), nil)
+
+      receiver_call = TypeInference::MethodCall::Typed.new(
+        node: receiver_node,
+        context: TypeInference::MethodCall::TopLevelContext.new,
+        method_name: :source,
+        receiver_type: AST::Builtin::Object.instance_type,
+        actual_method_type: parse_method_type("() -> ::LTISource"),
+        method_decls: Set[],
+        return_type: parse_type("::LTISource")
+      )
+      # The mirrored call: the name the source wrote, the decls of the body it
+      # was inlined to.
+      present_def = checker.factory.definition_builder.build_instance(RBS::TypeName.parse("::LTISource")).methods[:present?]
+      typing.add_call(
+        send_node,
+        TypeInference::MethodCall::Typed.new(
+          node: send_node,
+          context: TypeInference::MethodCall::TopLevelContext.new,
+          method_name: :windowed?,
+          receiver_type: parse_type("::LTISource"),
+          actual_method_type: parse_method_type("() -> bool"),
+          method_decls: Set[TypeInference::MethodCall::MethodDecl.new(method_name: MethodName("::LTISource#present?"), method_def: present_def.defs.first)],
+          return_type: parse_type("bool")
+        ),
+        self_type: AST::Builtin::Object.instance_type,
+        exact_self: nil,
+        keyed_self: nil,
+        self_ivars: {},
+        class_states: {}
+      )
+
+      store = Steep::Postconditions::Store.from_hash(
+        {
+          "postconditions" => [
+            {
+              "class" => "LTISource",
+              "method" => "windowed?",
+              "when_true" => { "self" => "::LTISource & ::LTISource::AfterWindowed" }
+            }
+          ]
+        },
+        source: "<test>"
+      )
+
+      env = type_env.add_pure_call(receiver_node, receiver_call, nil)
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config, postconditions: store)
+      truthy_result, _falsy_result = interpreter.eval(env: env, node: send_node)
+
+      assert_equal parse_type("(::LTISource & ::LTISource::AfterWindowed)"), truthy_result.env[receiver_node]
+    end
+  end
+
   def test_lvar_assignment
     with_checker do |checker|
       source = parse_ruby("a = @x")
@@ -45,6 +123,50 @@ class LogicTypeInterpreterTest < Minitest::Test
       assert_equal parse_type("nil"), falsy_result.type
       assert_equal parse_type("::String"), truthy_result.env[:a]
       assert_equal parse_type("nil"), falsy_result.env[:a]
+    end
+  end
+
+  # `if @x` has to narrow `@x` the way `if x` narrows a local. Before
+  # felixefelip/steep#146 an `:ivar` condition fell through `evaluate_node`'s
+  # `else` and both branches kept the declared `::String?`, so the one test that
+  # names the ivar taught the checker nothing about it.
+  def test_ivar
+    with_checker do |checker|
+      source = parse_ruby("@x")
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      typing.add_typing(dig(source.node), parse_type("::String?"), nil)
+
+      env = type_env.merge(instance_variable_types: { :@x => parse_type("::String?") })
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: source.node)
+
+      assert_equal parse_type("::String"), truthy_result.type
+      assert_equal parse_type("nil"), falsy_result.type
+      assert_equal parse_type("::String"), truthy_result.env[:@x]
+      assert_equal parse_type("nil"), falsy_result.env[:@x]
+    end
+  end
+
+  # A non-nilable ivar has no falsy member, so the falsy branch is unreachable —
+  # the same answer `:lvar` gives, and what makes `else` dead code rather than a
+  # branch typed against a type that cannot occur.
+  def test_ivar_unreachable_falsy_branch
+    with_checker do |checker|
+      source = parse_ruby("@x")
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      typing.add_typing(dig(source.node), parse_type("::String"), nil)
+
+      env = type_env.merge(instance_variable_types: { :@x => parse_type("::String") })
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: source.node)
+
+      refute truthy_result.unreachable
+      assert falsy_result.unreachable
+      assert_equal parse_type("::String"), truthy_result.env[:@x]
     end
   end
 
@@ -71,6 +193,120 @@ class LogicTypeInterpreterTest < Minitest::Test
       assert_equal parse_type("::Integer"), truthy_result.env[:b]
       assert_equal parse_type("nil"), falsy_result.env[:a]
       assert_equal parse_type("nil"), falsy_result.env[:b]
+    end
+  end
+
+  # `x&.m` answers nil whenever `x` does, so narrowing the chain's VALUE to
+  # something non-nil proves the receiver was not nil — and each link hands the
+  # next one a non-nil type, so a chain reaches its root. The comparison here is
+  # `== "opened"`, which Steep already types `Logic::ReceiverIsArg` and already
+  # partitions to the literal alone; what was missing was `refine_node_type`
+  # having anything to say about a `:csend` node.
+  def test_csend_chain_narrows_its_receiver_when_the_value_is_proven_non_nil
+    with_checker(<<~RBS) do |checker|
+      class CSEntry
+        attr_reader label: String?
+      end
+
+      class CSHolder
+        attr_reader latest: CSEntry?
+      end
+    RBS
+      source = parse_ruby(%q{holder = nil; holder.latest&.label&.to_s == "opened"})
+      node = source.node.children[1]
+
+      chain = dig(node, 0)          # holder.latest&.label&.to_s
+      label = dig(node, 0, 0)       # holder.latest&.label
+      latest = dig(node, 0, 0, 0)   # holder.latest
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      # What `String#==` really carries: Steep types it `Logic::ReceiverIsArg`, and
+      # the literal partition below is what already excludes nil from the CHAIN.
+      typing.add_typing(dig(node), AST::Types::Logic::ReceiverIsArg.instance, nil)
+      typing.add_typing(chain, parse_type("::String?"), nil)
+      typing.add_typing(label, parse_type("::String?"), nil)
+      typing.add_typing(latest, parse_type("::CSEntry?"), nil)
+      typing.add_typing(dig(node, 0, 0, 0, 0), parse_type("::CSHolder"), nil)
+      typing.add_typing(dig(node, 2), parse_type("::String"), nil)
+
+      latest_call = TypeInference::MethodCall::Typed.new(
+        node: latest,
+        context: TypeInference::MethodCall::TopLevelContext.new,
+        method_name: :latest,
+        receiver_type: parse_type("::CSHolder"),
+        actual_method_type: parse_method_type("() -> ::CSEntry?"),
+        method_decls: [],
+        return_type: parse_type("::CSEntry?")
+      )
+
+      env = type_env
+        .assign_local_variable(:holder, parse_type("::CSHolder"), nil)
+        .add_pure_call(latest, latest_call, nil)
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: node)
+
+      assert_equal parse_type("::CSEntry"), truthy_result.env[latest]
+      # The falsy branch separates nothing: the chain is nil both when `latest`
+      # is nil and when `label` is.
+      assert_equal parse_type("::CSEntry?"), falsy_result.env[latest]
+    end
+  end
+
+  # The same chain, but compared against something that is not a literal and with
+  # an `untyped` link in the middle — which is what Rails hands you in practice,
+  # and what the literal path cannot read: `literal_var_type_case_select` switches
+  # on the argument NODE's type and knows `:nil`, `:true`, `:false`, `:int`,
+  # `:str`, `:sym`, so a `:dstr` answers nothing. Nil-ness needs no literal: `a ==
+  # b` dispatches on `a`, and a nil `a` resolves `==` to identity.
+  def test_equality_against_a_non_literal_narrows_through_an_untyped_link
+    with_checker(<<~RBS) do |checker|
+      class EQEntry
+        def marker: () -> untyped
+      end
+
+      class EQHolder
+        attr_reader latest: EQEntry?
+      end
+    RBS
+      source = parse_ruby(%q{holder = nil; suffix = ""; holder.latest&.marker&.to_s == "opened_#{suffix}"})
+      node = source.node.children[2]
+
+      chain = dig(node, 0)
+      marker = dig(node, 0, 0)
+      latest = dig(node, 0, 0, 0)
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      # `untyped` all the way out, exactly as one unresolved link makes it.
+      typing.add_typing(dig(node), parse_type("untyped"), nil)
+      typing.add_typing(chain, parse_type("untyped"), nil)
+      typing.add_typing(marker, parse_type("untyped"), nil)
+      typing.add_typing(latest, parse_type("::EQEntry?"), nil)
+      typing.add_typing(dig(node, 0, 0, 0, 0), parse_type("::EQHolder"), nil)
+      typing.add_typing(dig(node, 2), parse_type("::String"), nil)
+
+      latest_call = TypeInference::MethodCall::Typed.new(
+        node: latest,
+        context: TypeInference::MethodCall::TopLevelContext.new,
+        method_name: :latest,
+        receiver_type: parse_type("::EQHolder"),
+        actual_method_type: parse_method_type("() -> ::EQEntry?"),
+        method_decls: [],
+        return_type: parse_type("::EQEntry?")
+      )
+
+      env = type_env
+        .assign_local_variable(:holder, parse_type("::EQHolder"), nil)
+        .assign_local_variable(:suffix, parse_type("::String"), nil)
+        .add_pure_call(latest, latest_call, nil)
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: node)
+
+      # The untyped links are walked THROUGH — there is nothing to subtract from
+      # `untyped` — and the root, which does have a nilable type, is refined.
+      assert_equal parse_type("::EQEntry"), truthy_result.env[latest]
+      assert_equal parse_type("::EQEntry?"), falsy_result.env[latest]
     end
   end
 
@@ -125,22 +361,6 @@ end
 
       node = source.node.children[1]
 
-      call = TypeInference::MethodCall::Typed.new(
-        node: node,
-        context: TypeInference::MethodCall::TopLevelContext.new,
-        method_name: :is_a?,
-        receiver_type: parse_type("::String?"),
-        actual_method_type: parse_method_type("(::Class) -> void").yield_self do |method_type|
-          method_type.with(
-            type: method_type.type.with(
-              return_type: AST::Types::Logic::ReceiverIsArg.new()
-            )
-          )
-        end,
-        method_decls: [],
-        return_type: AST::Types::Logic::ReceiverIsArg.new()
-      )
-
       typing = Typing.new(source: source, root_context: nil, cursor: nil)
       typing.add_typing(dig(node), AST::Types::Logic::ReceiverIsArg.new(), nil)
       typing.add_typing(dig(node, 0), parse_type("::String?"), nil)
@@ -166,22 +386,6 @@ end
 
       node = source.node.children[1]
 
-      call = TypeInference::MethodCall::Typed.new(
-        node: node,
-        context: TypeInference::MethodCall::TopLevelContext.new,
-        method_name: :is_a?,
-        receiver_type: parse_type("::String?"),
-        actual_method_type: parse_method_type("() -> bool").yield_self do |method_type|
-          method_type.with(
-            type: method_type.type.with(
-              return_type: AST::Types::Logic::ReceiverIsNil.new()
-            )
-          )
-        end,
-        method_decls: [],
-        return_type: AST::Types::Logic::ReceiverIsNil.new()
-      )
-
       typing = Typing.new(source: source, root_context: nil, cursor: nil)
       typing.add_typing(dig(node), AST::Types::Logic::ReceiverIsNil.new(), nil)
       typing.add_typing(dig(node, 0), parse_type("::String?"), nil)
@@ -205,22 +409,6 @@ end
       source = parse_ruby("email = foo; String === email")
 
       node = source.node.children[1]
-
-      call = TypeInference::MethodCall::Typed.new(
-        node: node,
-        context: TypeInference::MethodCall::TopLevelContext.new,
-        method_name: :is_a?,
-        receiver_type: parse_type("singleton(::String)"),
-        actual_method_type: parse_method_type("(untyped) -> bool").yield_self do |method_type|
-          method_type.with(
-            type: method_type.type.with(
-              return_type: AST::Types::Logic::ArgIsReceiver.new()
-            )
-          )
-        end,
-        method_decls: [],
-        return_type: AST::Types::Logic::ArgIsReceiver.new()
-      )
 
       typing = Typing.new(source: source, root_context: nil, cursor: nil)
       typing.add_typing(dig(node), AST::Types::Logic::ArgIsReceiver.new(), nil)
@@ -247,22 +435,6 @@ end
 
       node = source.node.children[1]
 
-      call = TypeInference::MethodCall::Typed.new(
-        node: node,
-        context: TypeInference::MethodCall::TopLevelContext.new,
-        method_name: :is_a?,
-        receiver_type: parse_type("::String"),
-        actual_method_type: parse_method_type("(untyped) -> bool").yield_self do |method_type|
-          method_type.with(
-            type: method_type.type.with(
-              return_type: AST::Types::Logic::ArgEqualsReceiver.new()
-            )
-          )
-        end,
-        method_decls: [],
-        return_type: AST::Types::Logic::ArgEqualsReceiver.new()
-      )
-
       typing = Typing.new(source: source, root_context: nil, cursor: nil)
       typing.add_typing(dig(node), AST::Types::Logic::ArgEqualsReceiver.new(), nil)
       typing.add_typing(dig(node, 0), parse_type("::String"), nil)
@@ -286,22 +458,6 @@ end
       source = parse_ruby("klass = Foo; klass < String")
 
       node = source.node.children[1]
-
-      call = TypeInference::MethodCall::Typed.new(
-        node: node,
-        context: TypeInference::MethodCall::TopLevelContext.new,
-        method_name: :<,
-        receiver_type: parse_type("singleton(::Object)"),
-        actual_method_type: parse_method_type("(::Module) -> bool?").yield_self do |method_type|
-          method_type.with(
-            type: method_type.type.with(
-              return_type: AST::Types::Logic::ArgIsAncestor.new()
-            )
-          )
-        end,
-        method_decls: [],
-        return_type: AST::Types::Logic::ArgIsAncestor.new()
-      )
 
       typing = Typing.new(source: source, root_context: nil, cursor: nil)
       typing.add_typing(dig(node), AST::Types::Logic::ArgIsAncestor.new(), nil)
@@ -328,22 +484,6 @@ end
       source = parse_ruby("email = foo; !email")
 
       node = source.node.children[1]
-
-      call = TypeInference::MethodCall::Typed.new(
-        node: node,
-        context: TypeInference::MethodCall::TopLevelContext.new,
-        method_name: :is_a?,
-        receiver_type: parse_type("::String?"),
-        actual_method_type: parse_method_type("() -> bool").yield_self do |method_type|
-          method_type.with(
-            type: method_type.type.with(
-              return_type: AST::Types::Logic::Not.new()
-            )
-          )
-        end,
-        method_decls: [],
-        return_type: AST::Types::Logic::Not.new()
-      )
 
       typing = Typing.new(source: source, root_context: nil, cursor: nil)
       typing.add_typing(dig(node), AST::Types::Logic::Not.new(), nil)
@@ -383,16 +523,6 @@ end
       source = parse_ruby("email = foo; email.void!")
 
       node = source.node.children[1]
-
-      call = TypeInference::MethodCall::Typed.new(
-        node: node,
-        context: TypeInference::MethodCall::TopLevelContext.new,
-        method_name: :void!,
-        receiver_type: parse_type("::String"),
-        actual_method_type: parse_method_type("() -> void"),
-        method_decls: [],
-        return_type: AST::Types::Void.new()
-      )
 
       typing = Typing.new(source: source, root_context: nil, cursor: nil)
       typing.add_typing(dig(node), AST::Types::Void.new(), nil)
@@ -444,6 +574,24 @@ end
 
       assert_equal [parse_type("::TestChild1"), parse_type("::String")],
                    interpreter.type_case_select(parse_type("::TestChild1 | ::String"), RBS::TypeName.parse("::TestParent"))
+    end
+  end
+
+  def test_type_case_select_module
+    with_checker(<<-RBS) do |checker|
+module TestTagged end
+class TestPlain end
+    RBS
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: nil, config: config)
+
+      assert_equal [parse_type("::TestTagged & ::TestPlain"), parse_type("::TestTagged")],
+                   interpreter.type_case_select(parse_type("::TestTagged"), RBS::TypeName.parse("::TestPlain"))
+
+      assert_equal [parse_type("::TestPlain & ::TestTagged"), parse_type("::TestPlain")],
+                   interpreter.type_case_select(parse_type("::TestPlain"), RBS::TypeName.parse("::TestTagged"))
+
+      assert_equal [nil, parse_type("::String")],
+                   interpreter.type_case_select(parse_type("::String"), RBS::TypeName.parse("::TestPlain"))
     end
   end
 

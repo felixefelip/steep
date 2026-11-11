@@ -1,0 +1,16 @@
+# Generated from test/return_alias_analyzer_test.rb with RBS::Inline
+
+# Unit tests for the return-alias source walk (felixefelip/steep#62): a method
+# returning a local whose attributes were assigned self paths exposes those as
+# aliases on its result.
+class ReturnAliasAnalyzerTest < Minitest::Test
+  ReturnAliasAnalyzer: untyped
+
+  def analyze: (untyped source) -> untyped
+
+  def test_maps_returned_local_attr_to_self_path: () -> untyped
+
+  def test_ignores_write_to_a_non_returned_local: () -> untyped
+
+  def test_ignores_non_self_rhs: () -> untyped
+end

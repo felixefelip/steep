@@ -10,7 +10,9 @@ module Steep
         attr_reader :forward_arg_type
         attr_reader :block_param_name
 
-        def initialize(name:, method:, method_type:, return_type:, super_method:, forward_arg_type:, block_param_name: nil)
+        attr_reader :node
+
+        def initialize(name:, method:, method_type:, return_type:, super_method:, forward_arg_type:, node:, block_param_name: nil)
           @name = name
           @method = method
           @return_type = return_type
@@ -18,6 +20,32 @@ module Steep
           @super_method = super_method
           @forward_arg_type = forward_arg_type
           @block_param_name = block_param_name
+          @node = node
+        end
+
+        # Parameter names the body reassigns (`which = :name`). Argument-sensitive entry
+        # facts (peça 3) correlate a branch with the CALLER's argument, so a parameter that
+        # no longer holds what the caller passed must not carry that correlation.
+        def reassigned_parameters
+          @reassigned_parameters ||= ArgumentFacts.reassigned_parameters(node)
+        end
+
+        def held_locals
+          @held_locals ||= HeldLocals.of(node, reassigned: reassigned_parameters)
+        end
+
+        # `reader`: the ivar a method of `self` called with no arguments
+        # answers (`HeldIvars`).
+        def held_ivars(&reader)
+          @held_ivars ||= HeldIvars.new(node, reader)
+        end
+
+        def value_uses
+          @value_uses ||= ValueUses.new(node)
+        end
+
+        def reassigned_parameter?(name)
+          reassigned_parameters.include?(name)
         end
 
         def block_type
@@ -32,12 +60,27 @@ module Steep
       class BlockContext
         attr_reader :body_type
 
-        def initialize(body_type:)
+        # The module contexts this block body must ALSO be checked under, beyond
+        # the one already entered — `# @implements A, B` names two definees and
+        # a `class_eval`ed block genuinely runs against both, so a body valid
+        # for one and not the other is only caught by checking both.
+        #
+        # Empty for every ordinary block, which is every block that does not
+        # name more than one module. Required rather than defaulted: both
+        # construction sites decide it, and a site that forgot would silently
+        # check one definee and report nothing about the rest
+        # (felixefelip/steep#149).
+        attr_reader :reopened_modules
+
+        def initialize(body_type:, reopened_modules:)
           @body_type = body_type
+          @reopened_modules = reopened_modules
         end
 
         def subst(s)
-          BlockContext.new(body_type: body_type&.subst(s))
+          # `reopened_modules` are module contexts, not types: nothing in them
+          # is substitutable, so they travel unchanged.
+          BlockContext.new(body_type: body_type&.subst(s), reopened_modules: reopened_modules)
         end
       end
 

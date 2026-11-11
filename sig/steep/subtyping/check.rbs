@@ -54,7 +54,31 @@ module Steep
 
       def check: (Relation[AST::Types::t] relation, constraints: Constraints, self_type: AST::Types::t?, instance_type: AST::Types::t?, class_type: AST::Types::t?) -> Result::t
 
+      # Drops the union members another member strictly covers. Returns the type
+      # unchanged when it is not a union, when it has free variables, or when nothing
+      # absorbs.
+      def simplify_union: (AST::Types::t type) -> AST::Types::t
+
+      # Drops the intersection members another member strictly covers -- the dual of
+      # `simplify_union`. Returns the type unchanged when it is not an intersection,
+      # when it has free variables, or when nothing absorbs.
+      def simplify_intersection: (AST::Types::t type) -> AST::Types::t
+
+      # Collapses whichever composite the type is, if any.
+      def simplify: (AST::Types::t type) -> AST::Types::t
+
+      def covers_strictly?: (AST::Types::t sup, AST::Types::t sub) -> bool
+
+      def subtype?: (AST::Types::t sub_type, AST::Types::t super_type) -> bool
+
       def check_type: (Relation[AST::Types::t] relation) -> Result::t
+
+      # Returns the result to store in the cache
+      #
+      # A successful result is stored without its derivation tree, which is only read
+      # through `Result::Base#failure_path` to explain a failure.
+      #
+      def cache_value: (Relation[AST::Types::t] relation, Result::t result) -> Result::t
 
       def cache_bounds: (Relation[AST::Types::t] relation) -> Hash[Symbol, AST::Types::t?]
 

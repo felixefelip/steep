@@ -1,0 +1,25 @@
+# Generated from test/constructor_binding_analyzer_test.rb with RBS::Inline
+
+# Unit tests for the source-walking part of the constructor reader→parameter
+# binding pipeline (felixefelip/steep#60). The analyzer only recognizes shapes;
+# the `.new`-site translation happens in `TypeConstruction` and is covered by
+# integration tests.
+class ConstructorBindingAnalyzerTest < Minitest::Test
+  ConstructorBindingAnalyzer: untyped
+
+  def parse: (untyped source) -> untyped
+
+  def analyze: (untyped source) -> untyped
+
+  def test_maps_reader_to_its_constructor_parameter_index: () -> untyped
+
+  def test_handles_endless_reader_and_nested_class_names: () -> untyped
+
+  def test_maps_multiple_readers: () -> untyped
+
+  def test_ignores_reader_whose_ivar_is_not_a_constructor_parameter: () -> untyped
+
+  def test_ignores_computed_reader: () -> untyped
+
+  def test_ignores_class_without_matching_binding: () -> untyped
+end

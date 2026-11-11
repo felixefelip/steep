@@ -20,6 +20,10 @@ module Steep
 
     SPECIAL_LVAR_NAMES: Set[Symbol]
 
+    def self.cast_lvar?: (Symbol name, underscore_casts: bool) -> bool
+
+    def cast_lvar?: (Symbol name) -> bool
+
     ANONYMOUS_BLOCK_PASSABLE_LVAR: Symbol
 
     include NodeHelper
@@ -91,6 +95,10 @@ module Steep
     def implement_module: (module_name: RBS::TypeName, annotations: AST::Annotation::Collection, ?super_name: RBS::TypeName?) -> AST::Annotation::Implements::Module?
 
     def default_module_context: (AST::Annotation::Implements::Module? implement_module_name, nesting: RBS::Resolver::context) -> TypeInference::Context::ModuleContext
+
+    # The context a `class << self` body has, named by `@implements singleton(::Foo)`
+    # instead of opened lexically.
+    def singleton_module_context: (RBS::TypeName module_name, AST::Annotation::Implements::Module implement_module_name, nesting: RBS::Resolver::context) -> TypeInference::Context::ModuleContext
 
     def for_module: (untyped node, untyped new_module_name) -> TypeConstruction
 
@@ -211,7 +219,8 @@ module Steep
       block_params: Parser::AST::Node?,
       block_body: Parser::AST::Node?,
       tapp: AST::Node::TypeApplication?,
-      hint: Types::t?
+      hint: Types::t?,
+      send_dispatch: SendDispatch?
     ) -> Pair
 
     # The third step to type check method calls, which tries all of the overloads defined for the method
@@ -231,6 +240,27 @@ module Steep
       tapp: AST::Node::TypeApplication?,
       hint: Types::t?
     ) -> [TypeInference::MethodCall::t, TypeConstruction]?
+
+    # True when `overload` accepted the call only because an `untyped` argument is
+    # compatible with a parameter keyed on a value — `nil`, or a literal.
+    #
+    # Such an overload is held back so another one, matching on more than
+    # `untyped`'s universal compatibility, can win instead.
+    #
+    def untyped_arg_matched_value_param?: (
+      Parser::AST::Node node,
+      Interface::Shape::MethodOverload overload,
+      Array[Parser::AST::Node] arguments,
+      Typing typing
+    ) -> bool
+
+    # A type that names values rather than a set of them: `nil`, a literal, or a union of those
+    #
+    def value_keyed_type?: (AST::Types::t) -> bool
+
+    # True when `node` is typed `untyped`, looking through the parent typings too
+    #
+    def untyped_node?: (Parser::AST::Node node, typing: Typing) -> bool
 
     # The core to type check method calls, which implements type checking arguments including blocks and type inference
     #
@@ -272,6 +302,54 @@ module Steep
     #
     def calculate_interface: (AST::Types::t `type`, private: bool) -> Interface::Shape?
                            | (AST::Types::t `type`, Symbol method_name, private: bool) -> Interface::Shape::Entry?
+
+    # The spellings of `send`, mapped to whether the dispatch reaches private methods
+    # (felixefelip/steep#137).
+    SEND_SPELLINGS: Hash[Symbol, bool]
+
+    # The types that declare those spellings, so a same-named method of the receiver's own
+    # (`Ractor#send`) is not read as a dispatch.
+    SEND_OWNERS: Set[RBS::TypeName]
+
+    # The call a literal-name `send` stands for.
+    class SendDispatch
+      attr_reader name_node: Parser::AST::Node
+
+      attr_reader method_name: Symbol
+
+      attr_reader arguments: Array[Parser::AST::Node]
+
+      attr_reader spelling: Symbol
+
+      @reaches_private: bool
+
+      def initialize: (
+        name_node: Parser::AST::Node,
+        method_name: Symbol,
+        arguments: Array[Parser::AST::Node],
+        spelling: Symbol,
+        reaches_private: bool
+      ) -> void
+
+      def reaches_private?: () -> bool
+    end
+
+    # Returns the call a literal-name `send` stands for, or `nil` when the shape is not
+    # that: a computed name, or a `send` the receiver declares itself.
+    def send_dispatch: (
+      receiver_type: AST::Types::t?,
+      method_name: Symbol,
+      arguments: Array[Parser::AST::Node]
+    ) -> SendDispatch?
+
+    # The method name a node spells, for a symbol or string literal; `nil` otherwise.
+    def literal_method_name: (Parser::AST::Node node) -> Symbol?
+
+    # Whether `method_name` on `receiver_type` is the language's `send`/`__send__`/`public_send`.
+    def core_send?: (AST::Types::t receiver_type, Symbol method_name) -> bool
+
+    # Whether the receiver has the method but declares it private.
+    def declares_private_method?: (AST::Types::t receiver_type, Symbol method_name) -> bool
 
     def expand_self: (AST::Types::t `type`) -> AST::Types::t
 
@@ -368,6 +446,21 @@ module Steep
       block_body: Parser::AST::Node?
     ) -> AST::Types::t
 
+    # The type the body synthesizes to, before any annotation replaces it, and
+    # the context it leaves.
+    def synthesize_block_body: (
+      node: Parser::AST::Node & Parser::AST::_BlockNode,
+      block_type_hint: AST::Types::t?,
+      block_body: Parser::AST::Node
+    ) -> [AST::Types::t, TypeInference::Context]
+
+    # Re-checks `block_body` under every module `@implements` named beyond the
+    # first, reporting only the diagnostics those runs add.
+    def check_reopened_modules: (Parser::AST::Node, hint: AST::Types::t?) -> void
+
+    # What makes two diagnostics the same complaint, for the deduplication above.
+    def error_signature: (Diagnostic::Ruby::Base) -> [Class, Integer?, String]
+
     %a{pure} def nesting: () -> RBS::Resolver::context
 
     def absolute_name: (untyped name) -> untyped
@@ -422,6 +515,7 @@ module Steep
 
     def expand_alias: (AST::Types::t `type`) -> AST::Types::t
                     | [A] (AST::Types::t) { (AST::Types::t) -> A } -> A
+
 
     def test_literal_type: (untyped literal, untyped hint) -> (untyped | nil)
 

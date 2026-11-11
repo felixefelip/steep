@@ -59,7 +59,11 @@ module Steep
       end
 
       class KeywordRestParameter < BaseRestParameter
-        def var_type: () -> AST::Types::Name::Instance
+        attr_reader record: AST::Types::Record?
+
+        def initialize: (name: Symbol, type: AST::Types::t?, node: Node, ?record: AST::Types::Record?) -> void
+
+        def var_type: () -> AST::Types::t
       end
 
       class BlockParameter
@@ -123,7 +127,7 @@ module Steep
 
       def self.empty: (node: Node) -> MethodParams
 
-      def self.build: (node: Node, method_type: MethodType) -> MethodParams
+      def self.build: (node: Node, method_type: MethodType, keyword_rest: AST::Types::Record?) -> MethodParams
     end
   end
 end

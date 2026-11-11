@@ -4,6 +4,7 @@ source 'https://rubygems.org'
 gemspec
 
 gem "rake"
+gem "rubocop", require: false
 gem "minitest", "~> 5.25"
 gem "minitest-hooks"
 gem 'minitest-slow_test'
@@ -17,4 +18,3 @@ group :development, optional: true do
 end
 
 # gem "rbs", path: "../rbs"
-# gem "rbs", git: "https://github.com/ruby/rbs.git", branch: "master"

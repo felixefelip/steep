@@ -9,6 +9,15 @@ module Steep
       attr_reader :type_check_thread
       attr_reader :jobs_option
       attr_accessor :refork
+      attr_accessor :command_socket
+
+      # Whether to re-infer the contract/postcondition sidecars at startup.
+      #
+      # On by default, which is what a first run needs. Off is for an editor: the
+      # sidecars are project output, written by `steep check` and normally committed, so
+      # re-deriving them on every window open buys a fresher store at the price of
+      # answering nothing at all for minutes (felixefelip/steep#114).
+      attr_accessor :inference
 
       include Utils::DriverHelper
 
@@ -20,6 +29,8 @@ module Steep
         @type_check_queue = Queue.new
         @jobs_option = Utils::JobsOption.new(jobs_count_modifier: -1)
         @refork = false
+        @inference = true
+        @command_socket = true
       end
 
       def writer
@@ -37,6 +48,29 @@ module Steep
       def run
         @project = load_config()
 
+        if inference
+          # Postconditions first, then the reload, then contracts — the same order and
+          # the same reason as `Drivers::Check#run`: contract enforcement observes call
+          # sites whose satisfaction can depend on a postcondition establishment
+          # (`x = build` importing `x.attr` non-nil so a later `x.save` satisfies
+          # `requires self.attr`), so it has to see the freshly written store.
+          #
+          # Inferring contracts FIRST, as this did, read the store from the previous
+          # run, which let the editor's diagnostics disagree with `steep check`'s on
+          # exactly those call sites.
+          infer_postconditions(@project)
+          @project.reload_postconditions!
+          infer_contracts(@project)
+          infer_specializations(@project)
+          @project.reload_specializations!
+        else
+          Steep.logger.info { "Skipping sidecar inference; using the stores already on disk" }
+        end
+
+        compact_heap_before_fork
+
+        compact_heap_before_fork
+
         interaction_worker = Server::WorkerProcess.start_worker(:interaction, name: "interaction", steepfile: project.steepfile_path, steep_command: jobs_option.steep_command)
         typecheck_workers = Server::WorkerProcess.start_typecheck_workers(steepfile: project.steepfile_path, args: [], steep_command: jobs_option.steep_command, count: jobs_option.jobs_count_value)
 
@@ -50,9 +84,82 @@ module Steep
         )
         master.typecheck_automatically = true
 
-        master.start()
+        socket = start_command_socket(master)
+
+        begin
+          master.start()
+        ensure
+          socket&.stop
+        end
 
         0
+      end
+
+      # Starts accepting `steep query`/`steep check` connections on the UNIX socket
+      #
+      # Returns `nil` when the command socket is disabled, is not supported on the platform,
+      # or is already served by another process.
+      #
+      def start_command_socket(master)
+        return nil unless command_socket
+
+        configuration = Daemon::Configuration.new(base_dir: project.base_dir.to_s)
+        socket = Server::CommandSocket.new(master: master, configuration: configuration)
+
+        if socket.start
+          stderr.puts "Steep command socket is ready: #{configuration.socket_path}"
+          socket
+        else
+          stderr.puts "Steep command socket is not available: #{configuration.socket_path}"
+          nil
+        end
+      rescue NotImplementedError, StandardError => error
+        Steep.logger.error { "Failed to start command socket: #{error.inspect}" }
+        stderr.puts "Failed to start Steep command socket: #{error.message}"
+        nil
+      end
+
+      private
+
+      def infer_contracts(project)
+        runner = Contracts::Runner.new(project)
+        contracts = runner.run
+        runner.write(contracts)
+        Steep.logger.info do
+          if contracts.any?
+            "Inferred #{contracts.size} precondition(s); sidecar at #{project.relative_path(runner.output_path)}"
+          else
+            "Inferred 0 preconditions; sidecar #{runner.output_path.file? ? "kept" : "absent"}"
+          end
+        end
+      rescue => e
+        Steep.logger.warn "Precondition inference failed: #{e.class}: #{e.message}"
+      end
+
+      def infer_specializations(project)
+        runner = Specializations::Runner.new(project)
+        methods = runner.run
+        runner.write(methods)
+        Steep.logger.info do
+          "Inferred #{methods.values.sum(&:size)} specialization(s); sidecar #{methods.any? ? "at #{project.relative_path(runner.output_path)}" : (runner.output_path.file? ? "kept" : "absent")}"
+        end
+      rescue => e
+        Steep.logger.warn "Specialization inference failed: #{e.class}: #{e.message}"
+      end
+
+      def infer_postconditions(project)
+        runner = Postconditions::Runner.new(project)
+        entries = runner.run
+        runner.write(entries)
+        Steep.logger.info do
+          if entries.any?
+            "Inferred #{entries.size} postcondition(s); sidecar at #{project.relative_path(runner.output_path)}"
+          else
+            "Inferred 0 postconditions; sidecar #{runner.output_path.file? ? "kept" : "absent"}"
+          end
+        end
+      rescue => e
+        Steep.logger.warn "Postcondition inference failed: #{e.class}: #{e.message}"
       end
     end
   end

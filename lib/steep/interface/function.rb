@@ -157,6 +157,28 @@ module Steep
 
           # Calculates xs + ys.
           # Never fails.
+          #
+          # Where a required position meets an OPTIONAL one, the merged position is optional
+          # and its type gains `nil` — an argument may be absent, and the merged signature
+          # says so in the type. That is deliberate, and `InterfaceTest#test_method_type_plus`
+          # pins it.
+          #
+          # Where a required position meets a REST, it is not: `nil` there is a phantom
+          # (felixefelip/steep#139). A rest parameter is not a position that can be absent —
+          # it COLLECTS, and every value it collects was passed. Nothing on either side
+          # declared `nil`, and nothing can pass one.
+          #
+          # Observable because this merge has exactly one consumer:
+          # `MethodType#unify_overload` <- `#+` <- `TypeConstruction#for_new_method`, which
+          # types a `def` BODY (call sites never see it — they try each overload separately
+          # via `method.overloads`). `MethodParams.build` folds each merged position into the
+          # def's `*rest` element union, so the phantom landed in `Array[T?]` and every
+          # element read came out nilable.
+          #
+          # It surfaced through `Module#include`: rbs_infer generates `(*(singleton(A) | …))`
+          # alongside core's `(Module module, *Module additional_modules)`, a `Rest` meeting
+          # a `Required`, so `def include(*modules)` saw `modules` as
+          # `Array[singleton(A) | … | Module | nil]` and no method resolved on an element.
           def self.merge_for_overload(xs, ys)
             x = xs&.head
             y = ys&.head
@@ -180,7 +202,7 @@ module Steep
               xs or raise
               ys or raise
               optional(
-                union(x.type, y.type, null: true),
+                union(x.type, y.type),
                 merge_for_overload(xs.tail, ys)
               )
             when x.is_a?(Required) && !y
@@ -220,7 +242,7 @@ module Steep
               xs or raise
               ys or raise
               optional(
-                union(x.type, y.type, null: true),
+                union(x.type, y.type),
                 merge_for_overload(xs, ys.tail)
               )
             when x.is_a?(Rest) && y.is_a?(Optional)

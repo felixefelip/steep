@@ -20,18 +20,28 @@ class TypeCheckTest < Minitest::Test
   # @rbs code: Hash[String, String]
   # @rbs inline_code: Hash[String, String]
   # @rbs expectations: String?
+  # @rbs postconditions: Steep::Postconditions::Store
+  # @rbs callbacks: Steep::Callbacks::Store
   # @rbs &block: ? (Hash[String, Steep::Typing]) -> void
   # @rbs return: void
-  def run_type_check_test(signatures: {}, code: {}, inline_code: {}, expectations: nil, &block)
+  # `underscore_casts:` on, as in `with_checker`: these tests set their scene up
+  # with upstream's `(_ = nil)` casts.
+  def run_type_check_test(signatures: {}, code: {}, inline_code: {}, expectations: nil, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, underscore_casts: true, &block)
     typings = {}
 
+    delegation_registry = build_test_delegation_registry(code.merge(inline_code))
+    literal_method_registry = Steep::Project::LiteralMethodRegistry.new
+    code.merge(inline_code).each do |path, content|
+      literal_method_registry.ingest_source(content, path_name: path)
+    end
+
     with_factory(signatures, inline_code, nostdlib: false) do |factory|
-      builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: underscore_casts)
       subtyping = Subtyping::Check.new(builder: builder)
 
       code.merge(inline_code).each do |path, content|
         source = Source.parse(content, path: Pathname(path), factory: factory)
-        with_standard_construction(subtyping, source) do |construction, typing|
+        with_standard_construction(subtyping, source, postconditions: postconditions, callbacks: callbacks, literal_method_registry: literal_method_registry, delegation_registry: delegation_registry) do |construction, typing|
           if source.node
             construction.synthesize(source.node)
           end
@@ -59,6 +69,2673 @@ class TypeCheckTest < Minitest::Test
       exps.to_yaml
 
       assert_equal expectations, exps.to_yaml
+    end
+  end
+
+  def test_literal_intrinsics_fold_closed_core_operations
+    run_type_check_test(
+      signatures: {
+        "literal_intrinsics.rbs" => <<~RBS
+          class LiteralIntrinsicsExample
+            def string_upcase: () -> String
+            def string_downcase: () -> String
+            def string_capitalize: () -> String
+            def string_reverse: () -> String
+            def string_strip: () -> String
+            def string_concat: () -> String
+            def string_repeat: () -> String
+            def string_length: () -> Integer
+            def string_to_sym: () -> Symbol
+            def integer_add: () -> Integer
+            def integer_subtract: () -> Integer
+            def integer_multiply: () -> Integer
+            def integer_divide: () -> Integer
+            def integer_modulo: () -> Integer
+            def integer_power: () -> Integer
+            def integer_abs: () -> Integer
+            def integer_succ: () -> Integer
+            def integer_to_s: () -> String
+            def symbol_to_s: () -> String
+          end
+        RBS
+      },
+      code: {
+        "literal_intrinsics.rb" => <<~RUBY
+          class LiteralIntrinsicsExample
+            def string_upcase = "yellow".upcase
+            def string_downcase = "ABC".downcase
+            def string_capitalize = "yellow".capitalize
+            def string_reverse = "abc".reverse
+            def string_strip = " x ".strip
+            def string_concat = "a" + "b"
+            def string_repeat = "x" * 3
+            def string_length = "abc".length
+            def string_to_sym = "tag".to_sym
+            def integer_add = 31 + 10
+            def integer_subtract = 10 - 3
+            def integer_multiply = 6 * 7
+            def integer_divide = 7 / 2
+            def integer_modulo = 7 % 4
+            def integer_power = 2 ** 5
+            def integer_abs = (-3).abs
+            def integer_succ = 3.succ
+            def integer_to_s = 31.to_s
+            def symbol_to_s = :tag.to_s
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("literal_intrinsics.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal(
+        {
+          "string_upcase" => '"YELLOW"',
+          "string_downcase" => '"abc"',
+          "string_capitalize" => '"Yellow"',
+          "string_reverse" => '"cba"',
+          "string_strip" => '"x"',
+          "string_concat" => '"ab"',
+          "string_repeat" => '"xxx"',
+          "string_length" => "3",
+          "string_to_sym" => ":tag",
+          "integer_add" => "41",
+          "integer_subtract" => "7",
+          "integer_multiply" => "42",
+          "integer_divide" => "3",
+          "integer_modulo" => "3",
+          "integer_power" => "32",
+          "integer_abs" => "3",
+          "integer_succ" => "4",
+          "integer_to_s" => '"31"',
+          "symbol_to_s" => '"tag"'
+        },
+        actual
+      )
+    end
+  end
+
+  def test_literal_intrinsics_fold_collection_operands
+    run_type_check_test(
+      signatures: {
+        "literal_collections.rbs" => <<~RBS
+          class LiteralCollectionExample
+            def joined: () -> String
+            def included: () -> bool
+            def intersected: () -> bool
+            def wide: () -> String
+            def interpolated: (:content) -> String
+          end
+        RBS
+      },
+      code: {
+        "literal_collections.rb" => <<~'RUBY'
+          class LiteralCollectionExample
+            def joined = ["def x", "end"].join(";")
+            def included = ["class", "def", "end"].include?("while")
+            def intersected = [:req, :opt].intersect?([:opt, :rest])
+            def wide = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccc"].join("-")
+            def interpolated(name) = ["def #{name}", "end"].join(";")
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("literal_collections.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"def x;end"', actual.fetch("joined")
+      # These two answer by CALLING — `==` for one, `eql?`/`hash` for the other
+      # — so they fold only while nothing the project writes has replaced those.
+      assert_equal "false", actual.fetch("included")
+      assert_equal "true", actual.fetch("intersected")
+      # Past MAX_LITERAL_WIDTH, and affordable because every byte of it is
+      # already written in the operands.
+      assert_equal(
+        '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-cccccccccccccccccccccccccccccc"',
+        actual.fetch("wide")
+      )
+      # The element that widened into the array's element type is recovered from
+      # the node, so the interpolation still reaches the join.
+      assert_equal '"def content;end"', actual.fetch("interpolated")
+    end
+  end
+
+  # An array built by `<<` carries what was pushed into it — the contents come
+  # from reading the pushes, since an array's TYPE says what its elements are
+  # and never how many.
+  def test_an_array_built_by_push_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "accumulators.rbs" => <<~RBS
+          class AccumulatorExample
+            def straight: () -> String
+            def from_a_literal: () -> String
+            def read_midway: () -> String
+          end
+        RBS
+      },
+      code: {
+        "accumulators.rb" => <<~RUBY
+          class AccumulatorExample
+            def straight
+              parts = []
+              parts << "a"
+              parts << "b"
+              parts.join(";")
+            end
+
+            def from_a_literal
+              parts = ["a"]
+              parts << "b"
+              parts.join(";")
+            end
+
+            def read_midway
+              parts = []
+              parts << "a"
+              midway = parts.join(";")
+              parts << "b"
+              midway
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("accumulators.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"a;b"', actual.fetch("straight")
+      assert_equal '"a;b"', actual.fetch("from_a_literal")
+      # The contents where it is READ, not at the end of the body.
+      assert_equal '"a"', actual.fetch("read_midway")
+    end
+  end
+
+  # An `each` over a collection whose length is written out runs its body once
+  # per element, NOW — so its pushes are counted the way a straight line's are,
+  # each pass checked with the parameter bound to its element.
+  def test_an_array_built_in_a_loop_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "looped.rbs" => <<~RBS
+          class LoopedAccumulator
+            def looped: () -> String
+            def chained: () -> String
+            def looped_and_chained: () -> String
+            def through_a_local: () -> String
+            def around_a_loop: () -> String
+            def two_arrays: () -> String
+            def built: () -> untyped
+          end
+        RBS
+      },
+      code: {
+        "looped.rb" => <<~RUBY
+          class LoopedAccumulator
+            def looped
+              parts = []
+              ["x", "y"].each { |piece| parts << piece }
+              parts.join(";")
+            end
+
+            # `<<` hands back the array, so every link pushes onto it.
+            def chained
+              parts = []
+              parts << "a" << "b" << "c"
+              parts.join(";")
+            end
+
+            def looped_and_chained
+              parts = []
+              [:a, :b].each do |name|
+                parts << "def \#{name}" << "end"
+              end
+              parts.join(";")
+            end
+
+            def through_a_local
+              parts = []
+              [:a, :b].each do |name|
+                text = "\#{name}!"
+                parts << text
+              end
+              parts.join(";")
+            end
+
+            def around_a_loop
+              parts = ["begin"]
+              ["x", "y"].each { |piece| parts << piece }
+              parts << "end"
+              parts.join(";")
+            end
+
+            def two_arrays
+              heads = []
+              tails = []
+              ["x", "y"].each do |piece|
+                heads << "h\#{piece}"
+                tails << "t\#{piece}"
+              end
+              heads.join(",") + tails.join(",")
+            end
+
+            def built
+              parts = []
+              [:a, :b].each { |name| parts << "def \#{name}" }
+              parts
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("looped.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"x;y"', actual.fetch("looped")
+      assert_equal '"a;b;c"', actual.fetch("chained")
+      assert_equal '"def a;end;def b;end"', actual.fetch("looped_and_chained")
+      assert_equal '"a!;b!"', actual.fetch("through_a_local")
+      assert_equal '"begin;x;y;end"', actual.fetch("around_a_loop")
+      assert_equal '"hx,hytx,ty"', actual.fetch("two_arrays")
+      assert_equal '["def a", "def b"]', actual.fetch("built")
+    end
+  end
+
+  # A push under a conditional the check DECIDES counts as the arm it left
+  # reachable — the shape `ActiveSupport::Delegation.generate` builds its
+  # source in, where every push sits under `if nilable == false / elsif
+  # allow_nil / else` and each of those is fixed by the call site.
+  def test_a_push_under_a_decided_condition_counts_its_arm
+    run_type_check_test(
+      signatures: {
+        "decided.rbs" => <<~RBS
+          class DecidedAccumulator
+            def modifier_off: (nil flag) -> String
+            def modifier_on: (true flag) -> String
+            def elsif_chain: (false nilable, nil allow_nil) -> String
+            def per_pass: () -> String
+            def per_pass_modifier: () -> String
+            def delegation_shaped: (true nilable, true allow_nil) -> String
+            def last_push: (true flag) -> untyped
+            def open: (bool flag) -> String
+          end
+        RBS
+      },
+      code: {
+        "decided.rb" => <<~'RUBY'
+          class DecidedAccumulator
+            def modifier_off(flag)
+              parts = ["a"]
+              parts << "b" if flag
+              parts.join(";")
+            end
+
+            def modifier_on(flag)
+              parts = ["a"]
+              parts << "b" if flag
+              parts.join(";")
+            end
+
+            def elsif_chain(nilable, allow_nil)
+              parts = []
+              if nilable == false
+                parts << "strict"
+              elsif allow_nil
+                parts << "lenient"
+              else
+                parts << "raising" << "rescue"
+              end
+              parts.join(";")
+            end
+
+            # Decided once per pass: the arm can differ from one element to the
+            # next.
+            def per_pass
+              parts = []
+              ["x", "y"].each do |piece|
+                if piece == "x"
+                  parts << "first #{piece}"
+                else
+                  parts << "then #{piece}"
+                end
+              end
+              parts.join(";")
+            end
+
+            def per_pass_modifier
+              parts = []
+              ["x", "y"].each { |piece| parts << piece if piece == "x" }
+              parts.join(";")
+            end
+
+            def delegation_shaped(nilable, allow_nil)
+              method_def = []
+              [:email, :name].each do |method|
+                if nilable == false
+                  method_def << "def #{method}" << "end"
+                elsif allow_nil
+                  method = method.to_s
+                  method_def << "def #{method}" << "  _ = user" << "end"
+                else
+                  method_def << "raise"
+                end
+              end
+              method_def.join(";")
+            end
+
+            # The conditional is the last push, so the local is complete there.
+            def last_push(flag)
+              parts = ["a"]
+              parts << "b" if flag
+              parts
+            end
+
+            # The condition stays `bool`: one content or two.
+            def open(flag)
+              parts = ["a"]
+              parts << "b" if flag
+              parts.join(";")
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("decided.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"a"', actual.fetch("modifier_off")
+      assert_equal '"a;b"', actual.fetch("modifier_on")
+      assert_equal '"strict"', actual.fetch("elsif_chain")
+      assert_equal '"first x;then y"', actual.fetch("per_pass")
+      assert_equal '"x"', actual.fetch("per_pass_modifier")
+      assert_equal '"def email;  _ = user;end;def name;  _ = user;end"', actual.fetch("delegation_shaped")
+      assert_equal '["a", "b"]', actual.fetch("last_push")
+      assert_equal "::String", actual.fetch("open")
+    end
+  end
+
+  # The value a body ENDS on leaves it, and nothing in the body runs afterwards
+  # to be told a lie about it — so a local handed back carries what was pushed
+  # into it, where one handed MID-BODY to something this cannot read still does
+  # not.
+  def test_an_array_handed_back_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "returned.rbs" => <<~RBS
+          class ReturnedAccumulator
+            def built: () -> untyped
+            def from_a_literal: () -> untyped
+            def escapes_first: () -> untyped
+            def leaks: (untyped) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "returned.rb" => <<~RUBY
+          class ReturnedAccumulator
+            def built
+              parts = []
+              parts << "a"
+              parts << "b"
+              parts
+            end
+
+            def from_a_literal
+              parts = ["a"]
+              parts << "b"
+              parts
+            end
+
+            # Handed out BEFORE the end to a body that hands it on again: what
+            # follows could read an array changed in a way nothing here can
+            # count, so this one is still struck.
+            def escapes_first
+              parts = []
+              parts << "a"
+              leaks(parts)
+              parts
+            end
+
+            def leaks(parts)
+              other = parts
+              other << "z"
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("returned.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '["a", "b"]', actual.fetch("built")
+      assert_equal '["a", "b"]', actual.fetch("from_a_literal")
+      assert_equal "::Array[untyped]", actual.fetch("escapes_first")
+    end
+  end
+
+  # A call is a body this walk may or may not have. Where it has one — a method
+  # of the same class, written in this file, that only appends to the parameter
+  # it is handed — what the call does to the array is as readable as a `<<`
+  # written here.
+  def test_a_call_whose_body_is_here_appends_to_the_array
+    run_type_check_test(
+      signatures: {
+        "builders.rbs" => <<~RBS
+          class ArrayBuilders
+            def handed_back: () -> untyped
+            def read_after: () -> String
+            def twice: () -> untyped
+            def kept_value: () -> untyped
+            def by_a_singleton: () -> String
+            def defined_twice: () -> String
+            def fill: (untyped) -> untyped
+            def stamp: (untyped) -> untyped
+          end
+
+          class ArrayBuilders::Neighbour
+            def borrowed: () -> String
+            def fill: (untyped) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "builders.rb" => <<~RUBY
+          class ArrayBuilders
+            def handed_back
+              parts = []
+              fill(parts)
+              parts
+            end
+
+            def read_after
+              parts = []
+              fill(parts)
+              parts.join(";")
+            end
+
+            # Twice, and a push of its own before them: the appends land in the
+            # order the statements run.
+            def twice
+              parts = []
+              parts << "z"
+              fill(parts)
+              fill(parts)
+              parts
+            end
+
+            # The VALUE is kept, so the array now has a second name and the
+            # pushes counted here are not all of them.
+            def kept_value
+              parts = []
+              other = fill(parts)
+              parts
+            end
+
+            # `fill` named with no receiver inside `def self.` is a singleton
+            # method, and the one written here is not.
+            def self.by_a_singleton
+              parts = []
+              fill(parts)
+              parts.join(";")
+            end
+
+            # A class of its own. `fill` is declared on it, and the only body
+            # of that name in this file is in the class AROUND it — which is
+            # not a body this class calls.
+            class Neighbour
+              def borrowed
+                parts = []
+                fill(parts)
+                parts.join(";")
+              end
+            end
+
+            def defined_twice
+              parts = []
+              stamp(parts)
+              parts.join(";")
+            end
+
+            def fill(parts)
+              parts << "a"
+              parts
+            end
+
+            def stamp(parts)
+              parts << "s"
+            end
+
+            # Written over: which of the two a call runs is not this walk's to
+            # say, so neither answers.
+            def stamp(parts)
+              parts << "t"
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("builders.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def || node.type == :defs
+
+        name = node.type == :defs ? node.children[1] : node.children[0]
+        body = node.type == :defs ? node.children[3] : node.children[2]
+        actual[name.to_s] = typing.type_of(node: body).to_s
+      end
+
+      assert_equal '["a"]', actual.fetch("handed_back")
+      assert_equal '"a"', actual.fetch("read_after")
+      assert_equal '["z", "a", "a"]', actual.fetch("twice")
+      assert_equal "::Array[untyped]", actual.fetch("kept_value")
+      assert_equal "::String", actual.fetch("by_a_singleton")
+      assert_equal "::String", actual.fetch("borrowed")
+      assert_equal "::String", actual.fetch("defined_twice")
+    end
+  end
+
+  # Where the walk has to STOP. Each of these is a way to name one array and
+  # read another, and each is wrong in its own way: one reads an array that does
+  # not exist yet, one reads at a time other than the one it runs at, and one
+  # reads a different variable that shares a name.
+  def test_an_array_written_out_where_a_body_ends_is_its_tuple
+    run_type_check_test(
+      signatures: {
+        "handed_back.rbs" => <<~RBS
+          class HandedBackArray
+            def fixed: () -> untyped
+            def satisfies_the_declaration: () -> Array[String]
+            def contradicts_the_declaration: () -> Array[Integer]
+            def one_arm_each: (untyped) -> untyped
+            def early: (untyped) -> untyped
+            def from_a_block: (untyped) -> untyped
+            def held_by_a_name: () -> untyped
+            def not_written_out: () -> untyped
+            def nothing_in_it: () -> untyped
+            def name: () -> String
+          end
+        RBS
+      },
+      code: {
+        "handed_back.rb" => <<~RUBY
+          class HandedBackArray
+            def fixed
+              ["a", "b", "c"]
+            end
+
+            # A tuple is what the declaration asks for, spelled exactly.
+            def satisfies_the_declaration
+              ["d", "e"]
+            end
+
+            # And where it is not, the declaration wins: this is the answer the
+            # body owes, not a place to be more precise than it.
+            def contradicts_the_declaration
+              ["f", "g"]
+            end
+
+            # A body that ends on an `if` ends on whichever arm ran.
+            def one_arm_each(flag)
+              if flag
+                ["h"]
+              else
+                ["i", "j"]
+              end
+            end
+
+            # `return` is the end written earlier.
+            def early(flag)
+              return ["k"] if flag
+              ["l"]
+            end
+
+            # Including from inside a block, which returns from the method
+            # around it rather than from itself.
+            def from_a_block(xs)
+              xs.each { return ["m"] }
+              ["n"]
+            end
+
+            # A name can reach this one, and `parts << "p"` written after it
+            # would be an error the widening exists to prevent.
+            def held_by_a_name
+              parts = ["o", "p"]
+              parts
+            end
+
+            # Nothing to read: an element that is not written out here has no
+            # literal to recover, and one element short is the whole tuple.
+            def not_written_out
+              [name, "q"]
+            end
+
+            # The literal the checker already asks to be annotated.
+            def nothing_in_it
+              []
+            end
+
+            def name
+              "r"
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("handed_back.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :array
+
+        actual[node.location.expression.source] = typing.type_of(node: node).to_s
+      end
+
+      assert_equal %q(["a", "b", "c"]), actual.fetch(%q(["a", "b", "c"]))
+      assert_equal %q(["d", "e"]), actual.fetch(%q(["d", "e"]))
+      assert_equal "::Array[::String]", actual.fetch(%q(["f", "g"]))
+      assert_equal %q(["h"]), actual.fetch(%q(["h"]))
+      assert_equal %q(["i", "j"]), actual.fetch(%q(["i", "j"]))
+      assert_equal %q(["k"]), actual.fetch(%q(["k"]))
+      assert_equal %q(["l"]), actual.fetch(%q(["l"]))
+      assert_equal %q(["m"]), actual.fetch(%q(["m"]))
+      assert_equal %q(["n"]), actual.fetch(%q(["n"]))
+      assert_equal "::Array[::String]", actual.fetch(%q(["o", "p"]))
+      assert_equal "::Array[::String]", actual.fetch(%q([name, "q"]))
+      assert_equal "::Array[untyped]", actual.fetch("[]")
+    end
+  end
+
+  def test_the_walk_stops_at_time_and_at_scope
+    run_type_check_test(
+      signatures: {
+        "boundaries.rbs" => <<~RBS
+          class AccumulatorBoundaries
+            def read_before_init: (Array[String]) -> String
+            def read_in_a_closure: () -> String
+            def outer: () -> Symbol
+            def inner: (Array[String]) -> String
+          end
+        RBS
+      },
+      code: {
+        "boundaries.rb" => <<~RUBY
+          class AccumulatorBoundaries
+            # The `parts` read on the first line is the ARGUMENT. The local of
+            # the same name is born on the second, and what goes into it says
+            # nothing about what was read above it.
+            def read_before_init(parts)
+              result = parts.join(";")
+              parts = []
+              parts << "later"
+              result
+            end
+
+            # The lambda runs after the second push, so the contents where it is
+            # WRITTEN are not the contents where it runs.
+            def read_in_a_closure
+              parts = []
+              parts << "a"
+              reader = -> { parts.join(";") }
+              parts << "b"
+              reader.call
+            end
+
+            # `inner` has a body of its own: its `parts` is its own parameter,
+            # and the array out here is not it.
+            def outer
+              parts = []
+              parts << "outer"
+
+              def inner(parts)
+                parts.join(";")
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("boundaries.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::String", actual.fetch("read_before_init")
+      assert_equal "::String", actual.fetch("read_in_a_closure")
+      assert_equal "::String", actual.fetch("inner")
+    end
+  end
+
+  # The answers that must not come out. Each of these hands the array to
+  # something that can push into it, pushes where the count is unknown, or
+  # writes the name over so the pushes counted so far were into a different
+  # array — and an implementation that answered anyway would be confidently
+  # wrong rather than vague, which is the worse failure of the two.
+  def test_an_array_that_can_be_reached_another_way_is_not_read
+    run_type_check_test(
+      signatures: {
+        "accumulators.rbs" => <<~RBS
+          class AccumulatorFallbacks
+            def aliased: () -> String
+            def through_a_foreign_call: (AccumulatorFallbacks) -> String
+            def through_a_call_that_does_more: () -> String
+            def fill: (Array[String]) -> void
+            def leaks: (Array[String]) -> void
+            def looped: (Array[String]) -> String
+            def looped_with_next: () -> String
+            def looped_and_read: () -> String
+            def conditional: (bool) -> String
+            def reassigned: () -> String
+            def reassigned_by_masgn: () -> String
+            def reassigned_by_or_asgn: () -> String
+            def mutated: () -> String
+            def element_mutated: () -> String
+            def returned: () -> Array[String]
+          end
+        RBS
+      },
+      code: {
+        "accumulators.rb" => <<~RUBY
+          class AccumulatorFallbacks
+            def fill(parts)
+              parts << "a"
+            end
+
+            # Appends too, but through a second name — so what this call does to
+            # the array is not readable, however plain the effect is.
+            def leaks(parts)
+              other = parts
+              other << "a"
+            end
+
+            # Two names for one array: the push happens through the other.
+            def aliased
+              parts = []
+              other = parts
+              other << "a"
+              parts.join(";")
+            end
+
+            # A receiver of its own: which `fill` runs is a question about a
+            # TYPE, and this walk reads the source.
+            def through_a_foreign_call(other)
+              parts = []
+              other.fill(parts)
+              parts.join(";")
+            end
+
+            # The body is here, and still says nothing: it hands the array to a
+            # second name before pushing.
+            def through_a_call_that_does_more
+              parts = []
+              leaks(parts)
+              parts.join(";")
+            end
+
+            # Runs once per element, and nothing says how many there are.
+            def looped(pieces)
+              parts = []
+              pieces.each { |piece| parts << piece }
+              parts.join(";")
+            end
+
+            # A pass that may end before its push: one per element no longer.
+            def looped_with_next
+              parts = []
+              ["x", "y"].each do |piece|
+                next if piece == "x"
+                parts << piece
+              end
+              parts.join(";")
+            end
+
+            # Named inside the body as well as pushed onto — the read sees an
+            # array mid-loop, and the loop is a closure like any other.
+            def looped_and_read
+              parts = []
+              ["x", "y"].each { |piece| parts << parts.join(piece) }
+              parts.join(";")
+            end
+
+            # One content or two, and nothing here decides which.
+            def conditional(flag)
+              parts = []
+              parts << "a"
+              parts << "b" if flag
+              parts.join(";")
+            end
+
+            # WRITTEN over: the pushes above went into an array the name no
+            # longer holds, so this is `"b"` at runtime.
+            def reassigned
+              parts = []
+              parts << "a"
+              parts = Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
+            # The same write, reached through an `masgn` target.
+            def reassigned_by_masgn
+              parts = []
+              parts << "a"
+              _other, parts = 1, Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
+            # And through an `or_asgn`, which may or may not write at all.
+            def reassigned_by_or_asgn
+              parts = []
+              parts << "a"
+              parts ||= Array.new
+              parts << "b"
+              parts.join(";")
+            end
+
+            # A call that is not a read can do anything, `reverse!` included.
+            def mutated
+              parts = []
+              parts << "a"
+              parts.reverse!
+              parts.join(";")
+            end
+
+            # `first` hands back an ELEMENT, and the call after it changes that
+            # element in place — so what the array holds is no longer what was
+            # pushed into it.
+            def element_mutated
+              parts = []
+              parts << "a"
+              parts.first << "b"
+              parts.join(";")
+            end
+
+            # Handed back, which `test_an_array_handed_back_carries_its_contents`
+            # is about — here only to pin that a tuple still satisfies the
+            # `Array[String]` the declaration asks for.
+            def returned
+              parts = []
+              parts << "a"
+              parts
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("accumulators.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::String", actual.fetch("aliased")
+      assert_equal "::String", actual.fetch("through_a_foreign_call")
+      assert_equal "::String", actual.fetch("through_a_call_that_does_more")
+      assert_equal "::String", actual.fetch("looped")
+      assert_equal "::String", actual.fetch("looped_with_next")
+      assert_equal "::String", actual.fetch("looped_and_read")
+      assert_equal "::String", actual.fetch("conditional")
+      assert_equal "::String", actual.fetch("reassigned")
+      assert_equal "::String", actual.fetch("reassigned_by_masgn")
+      assert_equal "::String", actual.fetch("reassigned_by_or_asgn")
+      assert_equal "::String", actual.fetch("mutated")
+      assert_equal "::String", actual.fetch("element_mutated")
+    end
+  end
+
+  # `join` renders a Symbol through `to_s`, after probing it for `to_str` and
+  # `to_ary` — and the probes go through `respond_to?`, `respond_to_missing?`
+  # and `method_missing` anywhere in Symbol's chain. Each of those is watched;
+  # replacing any one of them turns the fold off.
+  def test_join_over_symbols_folds_unless_the_project_replaces_what_it_calls
+    overrides = {
+      nil => '"a,b"',
+      "class Symbol\n  def to_s = \"S\"\nend\n" => "::String",
+      "class Symbol\n  def to_str = \"T\"\nend\n" => "::String",
+      "class Object\n  def to_ary = [1]\nend\n" => "::String",
+      "module Comparable\n  def method_missing(*) = nil\nend\n" => "::String",
+      "module Probing\n  def to_str = \"T\"\nend\n\nSymbol.include Probing\n" => "::String"
+    }
+
+    overrides.each do |override, expected|
+      code = { "joined.rb" => "class Joined\n  def symbols = [:a, :b].join(\",\")\nend\n" }
+      code["override.rb"] = override if override
+
+      run_type_check_test(
+        signatures: { "joined.rbs" => "class Joined\n  def symbols: () -> String\nend\n" },
+        code: code
+      ) do |typings|
+        typing = typings.fetch("joined.rb")
+        actual = nil
+        typing.each_typing do |node, _type|
+          actual = typing.type_of(node: node.children[2]).to_s if node.type == :def
+        end
+
+        assert_equal expected, actual, "with #{override.inspect}"
+      end
+    end
+  end
+
+  def test_literal_intrinsics_decline_collections_that_fix_nothing
+    run_type_check_test(
+      signatures: {
+        "literal_collections.rbs" => <<~RBS
+          class LiteralCollectionFallbacks
+            def with_unknown: (String) -> String
+            def accumulated: () -> String
+            def splatted: (Array[String]) -> String
+            def taken_first: () -> String?
+            def joined_bare: () -> String
+            def stale_tuple: () -> String
+          end
+        RBS
+      },
+      code: {
+        "literal_collections.rb" => <<~RUBY
+          class LiteralCollectionFallbacks
+            def with_unknown(part) = ["def x", part].join(";")
+
+            def accumulated
+              parts = ["def x", "end"]
+              parts << "more"
+              parts.join(";")
+            end
+
+            def splatted(rest) = ["def x", *rest].join(";")
+
+            # Folds as safely as the others and is held out of the table on
+            # purpose — see the comment beside ENTRIES.
+            def taken_first = ["def x", "end"].first
+
+            # Reads `$,`, which this cannot see.
+            def joined_bare = ["a", "b"].join
+
+            def stale_tuple
+              # @type var parts: ["a", "b"]
+              parts = ["a", "b"]
+              parts.reverse!
+              parts.join(";")
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("literal_collections.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::String", actual.fetch("with_unknown")
+      # Folds since `Accumulators`: a local born from an array literal and pushed
+      # to in the body's straight line carries what was pushed into it.
+      assert_equal '"def x;end;more"', actual.fetch("accumulated")
+      assert_equal "::String", actual.fetch("splatted")
+      assert_equal "(::String | nil)", actual.fetch("taken_first")
+      assert_equal "::String", actual.fetch("joined_bare")
+      # The tuple describes an array this call did not build, and `reverse!` has
+      # run since: folding it would answer "a;b" where the program says "b;a".
+      assert_equal "::String", actual.fetch("stale_tuple")
+    end
+  end
+
+  def test_literal_intrinsics_decline_unsafe_or_unbounded_calls
+    run_type_check_test(
+      signatures: {
+        "literal_intrinsics.rbs" => <<~RBS
+          class LiteralIntrinsicFallbacks
+            def dynamic: (Integer) -> Integer
+            def mutating: () -> String
+            def divide_by_zero: () -> Integer
+            def huge_string: () -> String
+            def huge_integer: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "literal_intrinsics.rb" => <<~RUBY
+          class LiteralIntrinsicFallbacks
+            def dynamic(value) = 31 + value
+            def mutating = "yellow".upcase!
+            def divide_by_zero = 1 / 0
+            def huge_string = "x" * 1_000_000
+            def huge_integer = 10 ** 1_000_000
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("literal_intrinsics.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::Integer", actual.fetch("dynamic")
+      assert_equal "(::String | nil)", actual.fetch("mutating")
+      assert_equal "::Integer", actual.fetch("divide_by_zero")
+      assert_equal "::String", actual.fetch("huge_string")
+      assert_equal "::Numeric", actual.fetch("huge_integer")
+    end
+  end
+
+  def test_literal_intrinsics_decline_project_core_overrides
+    run_type_check_test(
+      signatures: {
+        "literal_intrinsics.rbs" => <<~RBS
+          class LiteralIntrinsicOverride
+            def call: () -> String
+          end
+        RBS
+      },
+      code: {
+        "override.rb" => <<~RUBY,
+          class String
+            def upcase = "project implementation"
+          end
+        RUBY
+        "call.rb" => <<~RUBY
+          class LiteralIntrinsicOverride
+            def call = "yellow".upcase
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("call.rb")
+      call_def = typing.each_typing.find { |node, _type| node.type == :def && node.children[0] == :call }&.first
+
+      assert call_def
+      assert_equal "::String", typing.type_of(node: call_def.children[2]).to_s
+    end
+  end
+
+  # `x = y if cond` with no `else`: the branch the condition rules out must not
+  # be joined back in. The truthy side has always been guarded this way; the
+  # falsy side was not, so a decided condition still produced a union of both.
+  def test_a_decided_condition_does_not_join_the_branch_that_cannot_run
+    run_type_check_test(
+      signatures: {
+        "decided.rbs" => <<~RBS
+          class DecidedCondition
+            def taken: (true, "a") -> String
+            def skipped: (false, "a") -> String
+            def undecided: (bool, "a") -> String
+          end
+        RBS
+      },
+      code: {
+        "decided.rb" => <<~'RUBY'
+          class DecidedCondition
+            # `piece` arrives literal, the way a macro's keyword does: a local
+            # written `piece = "a"` here would widen before the `if` is reached.
+            def taken(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+
+            def skipped(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+
+            # Nothing decides this one, and both values reach the end.
+            def undecided(flag, piece)
+              piece = "self.#{piece}" if flag
+              piece
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("decided.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"self.a"', actual.fetch("taken")
+      assert_equal '"a"', actual.fetch("skipped")
+      assert_equal '("self.a" | "a")', actual.fetch("undecided")
+    end
+  end
+
+  # A set written out in the source, and the one question a set is asked. The
+  # chain is `ActiveSupport::Delegation`'s, spelled exactly as it writes it.
+  def test_a_set_written_out_answers_what_is_in_it
+    run_type_check_test(
+      signatures: {
+        "sets.rbs" => <<~RBS
+          class WrittenSets
+            KEYWORDS: Array[String]
+            EXTRA: Array[String]
+            RESERVED: Set[String]
+            HANDED_OVER: Set[String]
+
+            def spelled_out: () -> Set[String]
+            def concatenated: () -> Array[String]
+            def frozen: () -> Set[String]
+            def plain_name: (:user) -> bool
+            def reserved_name: (:class) -> bool
+            def handed_over: () -> bool
+            def sink: (Set[String]) -> void
+            def leak: () -> void
+          end
+        RBS
+      },
+      code: {
+        "sets.rb" => <<~'RUBY'
+          class WrittenSets
+            KEYWORDS = ["class", "def", "end"]
+            EXTRA = ["_", "arg"]
+            RESERVED = (KEYWORDS + EXTRA).to_set.freeze
+            HANDED_OVER = ["class"].to_set
+
+            def spelled_out = ["a", "b"].to_set
+            def concatenated = KEYWORDS + EXTRA
+            def frozen = ["a"].to_set.freeze
+
+            # The one line the whole chain exists for.
+            def plain_name(to) = RESERVED.include?(to.to_s)
+            def reserved_name(to) = RESERVED.include?(to.to_s)
+
+            # Handed to something that can change it, so the members are no
+            # longer what the file wrote.
+            def handed_over = HANDED_OVER.include?("class")
+            def leak
+              sink(HANDED_OVER)
+            end
+
+            def sink(names)
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("sets.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal %q(Set{"a", "b"}), actual.fetch("spelled_out")
+      assert_equal %q(["class", "def", "end", "_", "arg"]), actual.fetch("concatenated")
+      # `freeze` hands back what it was given, members and all.
+      assert_equal %q(Set{"a"}), actual.fetch("frozen")
+
+      assert_equal "false", actual.fetch("plain_name")
+      assert_equal "true", actual.fetch("reserved_name")
+
+      assert_equal "bool", actual.fetch("handed_over")
+    end
+  end
+
+  # A pattern written out in the source, and the question it is asked. The
+  # setter line is `ActiveSupport::Delegation.generate`'s, spelled exactly as
+  # it writes it, with `method` arriving as the literal a call site passes.
+  def test_a_regexp_written_out_answers_what_it_matches
+    run_type_check_test(
+      signatures: {
+        "patterns.rbs" => <<~RBS
+          class WrittenPatterns
+            SETTER: Regexp
+
+            def setter: (:email=) -> bool
+            def reader: (:email) -> bool
+            def index_setter: (:[]=) -> bool
+            def prefix: (:_user) -> bool
+            def ignoring_case: ("EMAIL") -> bool
+            def from_the_string: ("email=") -> bool
+            def from_the_symbol: (:email=) -> bool
+            def position: ("email") -> Integer?
+            def no_position: ("user") -> Integer?
+            def through_a_constant: (:email=) -> bool
+            def branch: (:email=) -> String
+            def interpolated: (:email=, String) -> bool
+            def undecided: (Symbol) -> bool
+          end
+        RBS
+      },
+      code: {
+        "patterns.rb" => <<~'RUBY'
+          class WrittenPatterns
+            SETTER = /[^\]]=\z/
+
+            def setter(method) = /[^\]]=\z/.match?(method)
+            def reader(method) = /[^\]]=\z/.match?(method)
+            def index_setter(method) = /[^\]]=\z/.match?(method)
+            def prefix(to) = /^[^a-z_]/.match?(to)
+            def ignoring_case(name) = /email/i.match?(name)
+            def from_the_string(name) = name.match?(/=\z/)
+            def from_the_symbol(name) = name.match?(/=\z/)
+            def position(name) = name =~ /ma/
+            def no_position(name) = name =~ /ma/
+            def through_a_constant(method) = SETTER.match?(method)
+
+            def branch(method)
+              if /[^\]]=\z/.match?(method)
+                "setter"
+              else
+                "reader"
+              end
+            end
+
+            # Neither of these is a value the file fixes.
+            def interpolated(method, suffix) = /#{suffix}\z/.match?(method)
+            def undecided(method) = /=\z/.match?(method)
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("patterns.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "true", actual.fetch("setter")
+      assert_equal "false", actual.fetch("reader")
+      assert_equal "false", actual.fetch("index_setter")
+      assert_equal "false", actual.fetch("prefix")
+      assert_equal "true", actual.fetch("ignoring_case")
+      assert_equal "true", actual.fetch("from_the_string")
+      assert_equal "true", actual.fetch("from_the_symbol")
+      assert_equal "1", actual.fetch("position")
+      assert_equal "nil", actual.fetch("no_position")
+      assert_equal "true", actual.fetch("through_a_constant")
+      assert_equal '"setter"', actual.fetch("branch")
+
+      assert_equal "bool", actual.fetch("interpolated")
+      assert_equal "bool", actual.fetch("undecided")
+    end
+  end
+
+  # A match the checker cannot run safely, or cannot run as the program would,
+  # stays `bool`.
+  def test_a_regexp_declines_a_match_it_cannot_run_as_written
+    run_type_check_test(
+      signatures: {
+        "patterns.rbs" => <<~RBS
+          class DeclinedPatterns
+            def backtracking: () -> bool
+            def encoding_flag: () -> bool
+            def overridden: () -> bool
+          end
+        RBS
+      },
+      code: {
+        "override.rb" => <<~'RUBY',
+          class Regexp
+            def match?(subject, position = 0) = true
+          end
+        RUBY
+        "patterns.rb" => <<~'RUBY'
+          class DeclinedPatterns
+            # A backreference turns Ruby's memoization off, so this backtracks
+            # for as long as it is allowed to.
+            def backtracking = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!".match?(/^(a|aa)+\1$/)
+            def encoding_flag = "a".match?(/a/n)
+            def overridden = /a/.match?("a")
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("patterns.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "bool", actual.fetch("backtracking")
+      assert_equal "bool", actual.fetch("encoding_flag")
+      # The project's own `match?` runs, not the one this process has.
+      assert_equal "bool", actual.fetch("overridden")
+    end
+  end
+
+  # A block run once per element of a collection the checker knows, and the
+  # values it hands back collected in order. The chains are
+  # `ActiveSupport::Delegation`'s reflection branch, spelled as it writes them.
+  # What `Inflections::Uncountables` runs on the words it is given
+  # (felixefelip/steep#264).
+  def test_the_operations_an_uncountable_list_runs_fold
+    run_type_check_test(
+      signatures: {
+        "uncountables.rbs" => <<~RBS
+          class Uncountable
+            def flattened: () -> Array[String]
+            def escaped: () -> String
+            def pattern: () -> Regexp
+            def patterns: () -> Array[Regexp]
+            def matched: () -> bool
+            def unmatched: () -> bool
+          end
+        RBS
+      },
+      code: {
+        "uncountables.rb" => <<~'RUBY'
+          class Uncountable
+            def flattened = [["News", "Fish"]].flatten.map(&:downcase)
+            def escaped = ::Regexp.escape("a.b")
+            def pattern = /\b#{::Regexp.escape("news")}\Z/i
+            def patterns = ["news"].map { |word| /\b#{word}\Z/i }
+            def matched = [/\bnews\Z/i].any? { |regex| regex.match?("news") }
+            def unmatched = [/\bnews\Z/i].any? { |regex| regex.match?("posts") }
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("uncountables.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '["news", "fish"]', actual.fetch("flattened")
+      assert_equal '"a\\\\.b"', actual.fetch("escaped")
+      assert_equal "/\\bnews\\Z/i", actual.fetch("pattern")
+      assert_equal "[/\\bnews\\Z/i]", actual.fetch("patterns")
+      assert_equal "true", actual.fetch("matched")
+      assert_equal "false", actual.fetch("unmatched")
+    end
+  end
+
+  def test_a_block_over_known_elements_answers_each_of_them
+    run_type_check_test(
+      signatures: {
+        "iterated.rbs" => <<~RBS
+          class Iterated
+            def self.human_name: (String index) -> String
+            def self.many: (String a, ?Integer b) -> String
+
+            def kinds: () -> Array[Symbol]
+            def any_optional: () -> bool
+            def none_optional: () -> bool
+            def required: () -> Array[Symbol]
+            def upcased: () -> Array[String]
+            def collected: () -> Array[String]
+            def undecided: (Symbol) -> Array[Symbol]
+            def first_of_each: () -> Array[String?]
+            def whole: () -> Array[Array[String]]
+            def not_exact: (String) -> Array[String]
+            def jumps: () -> Array[String]
+          end
+        RBS
+      },
+      code: {
+        "iterated.rb" => <<~'RUBY'
+          class Iterated
+            def self.human_name(index) = index
+            def self.many(a, b = 1) = a
+
+            def kinds = Iterated.singleton_class.public_instance_method(:many).parameters.map(&:first)
+            def any_optional = Iterated.singleton_class.public_instance_method(:many).parameters.map(&:first).intersect?([:opt, :rest, :keyreq, :key, :keyrest])
+            def none_optional = Iterated.singleton_class.public_instance_method(:human_name).parameters.map(&:first).intersect?([:opt, :rest, :keyreq, :key, :keyrest])
+            def required = Iterated.singleton_class.public_instance_method(:many).parameters.filter_map { |type, arg| arg if type == :req }
+            def upcased = ["a", "b"].map { |piece| piece.upcase }
+            # `|k,|` takes the element apart, as several parameters would;
+            # `|k|` takes it whole.
+            def first_of_each = [["ab", "cde"]].map { |k,| k }
+            def whole = [["ab", "cde"]].map { |k| k }
+            def collected = ["a", "b"].collect(&:upcase)
+
+            # Each of these stays what the declaration says, for its own reason:
+            # a condition no element decides, a value no element fixes, and a
+            # body that can leave before it hands anything back.
+            def undecided(kind) = [[:req, :a]].filter_map { |type, arg| arg if type == kind }
+            def not_exact(suffix) = ["a"].map { |piece| piece + suffix }
+            def jumps = ["a", "b"].map { |piece| next "x" if piece == "a"; piece }
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("iterated.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "[:req, :opt]", actual.fetch("kinds")
+      assert_equal "true", actual.fetch("any_optional")
+      assert_equal "false", actual.fetch("none_optional")
+      assert_equal "[:a]", actual.fetch("required")
+      assert_equal '["A", "B"]', actual.fetch("upcased")
+      assert_equal '["A", "B"]', actual.fetch("collected")
+      assert_equal '["ab"]', actual.fetch("first_of_each")
+      assert_equal '[["ab", "cde"]]', actual.fetch("whole")
+
+      assert_equal "::Array[::Symbol]", actual.fetch("undecided")
+      assert_equal "::Array[::String]", actual.fetch("not_exact")
+      assert_equal "::Array[::String]", actual.fetch("jumps")
+    end
+  end
+
+  # `Delegation.generate`'s reflection branch, as locals: a local born from a
+  # collection the checker computed is followed like one born from `[]`, in an
+  # arm as well as at the top of the method. A local read only inside `#{}`
+  # keeps the literal its decided arm spells.
+  def test_a_local_born_from_a_built_value_carries_its_contents
+    run_type_check_test(
+      signatures: {
+        "built.rbs" => <<~RBS
+          class Built
+            def self.two: (String a, String b) -> String
+            def self.many: (String a, ?Integer b) -> String
+
+            def joined: () -> String
+            def in_an_arm: (bool) -> String?
+            def optional: () -> String
+            def pushed: () -> Array[String]
+            def interpolated: () -> String
+            def widened: () -> Array[String]
+
+            def read_after_last: () -> bool
+            def mapped_kept: () -> bool
+            def aliased: () -> String
+            def element_kept: () -> String
+
+            def reassigned_in_a_block: () -> String
+            def reassigned_in_a_loop: (Integer) -> String
+            def pushed_by_name: () -> Array[String]
+            def read_under_a_modifier: () -> bool?
+          end
+        RBS
+      },
+      code: {
+        "built.rb" => <<~'RUBY'
+          class Built
+            def self.two(a, b) = a
+            def self.many(a, b = 1) = a
+
+            def joined
+              parameters = Built.singleton_class.public_instance_method(:two).parameters
+              defn = parameters.filter_map { |type, arg| arg if type == :req }
+              defn << "&"
+              defn.join(", ")
+            end
+
+            def in_an_arm(go)
+              if go
+                parameters = Built.singleton_class.public_instance_method(:two).parameters
+                if parameters.map(&:first).intersect?([:opt, :rest])
+                  "..."
+                else
+                  defn = parameters.filter_map { |type, arg| arg if type == :req }
+                  defn << "&"
+                  defn.join(", ")
+                end
+              end
+            end
+
+            def optional
+              parameters = Built.singleton_class.public_instance_method(:many).parameters
+              definition = if parameters.map(&:first).intersect?([:opt, :rest])
+                "..."
+              else
+                "x"
+              end
+              "def many(#{definition})"
+            end
+
+            # Typed by what `map` declares, so the push is not held to the
+            # first element; the contents come out at the last push.
+            def pushed
+              upcased = ["a", "b"].map(&:upcase)
+              upcased << "C"
+              upcased
+            end
+
+            def interpolated
+              name = "email"
+              "def #{name}"
+            end
+
+            # Read as something other than an interpolation: stays `::String`,
+            # so the array is not an array of one literal.
+            def widened
+              name = "email"
+              [name]
+            end
+
+            # After the block read that was its last, a local is not read again.
+            def read_after_last
+              parameters = Built.singleton_class.public_instance_method(:many).parameters
+              parameters.filter_map { |type, arg| arg if type == :req }
+              parameters.map(&:first).intersect?([:opt])
+            end
+
+            # `map(&:first)` kept under a name shares the elements it picked.
+            def mapped_kept
+              parameters = Built.singleton_class.public_instance_method(:many).parameters
+              picked = parameters.map(&:first)
+              parameters.map(&:first).intersect?([:opt])
+            end
+
+            def aliased
+              parameters = Built.singleton_class.public_instance_method(:two).parameters
+              defn = parameters.filter_map { |type, arg| arg if type == :req }
+              other = defn
+              other.clear
+              defn.join(", ")
+            end
+
+            def element_kept
+              parts = ["a"]
+              first = parts.first
+              first << "b" if first
+              parts.join(",")
+            end
+
+            # Two assignments: which one reaches the read is a question of
+            # flow. "def b" at runtime.
+            def reassigned_in_a_block
+              name = "a"
+              [1].each { name = "b" }
+              "def #{name}"
+            end
+
+            def reassigned_in_a_loop(n)
+              name = "a"
+              while n > 0
+                name = "b"
+                n -= 1
+              end
+              "def #{name}"
+            end
+
+            # Not only `<<`: `push` is followed the same way.
+            def pushed_by_name
+              upcased = ["a", "b"].map(&:upcase)
+              upcased.push("C")
+              upcased
+            end
+
+            # The condition runs first, and its block changes the elements the
+            # body reads. `true` at runtime.
+            def read_under_a_modifier
+              parameters = Built.singleton_class.public_instance_method(:two).parameters
+              parameters.map(&:first).include?(:a) if parameters.filter_map { |pair| pair.reverse! && nil }.empty?
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("built.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal '"a, b, &"', actual.fetch("joined")
+      assert_equal '("a, b, &" | nil)', actual.fetch("in_an_arm")
+      assert_equal '"def many(...)"', actual.fetch("optional")
+      assert_equal '["A", "B", "C"]', actual.fetch("pushed")
+      assert_equal '"def email"', actual.fetch("interpolated")
+      assert_equal "::Array[::String]", actual.fetch("widened")
+
+      assert_equal "bool", actual.fetch("read_after_last")
+      assert_equal "bool", actual.fetch("mapped_kept")
+      assert_equal "::String", actual.fetch("aliased")
+      assert_equal "::String", actual.fetch("element_kept")
+
+      assert_equal "::String", actual.fetch("reassigned_in_a_block")
+      assert_equal "::String", actual.fetch("reassigned_in_a_loop")
+      assert_equal '["A", "B", "C"]', actual.fetch("pushed_by_name")
+      assert_equal "(bool | nil)", actual.fetch("read_under_a_modifier")
+
+      assert_empty typing.errors.reject { |error| error.is_a?(Diagnostic::Ruby::UnreachableBranch) }.map(&:header_line)
+    end
+  end
+
+  def def_body_types(typing)
+    typing.each_typing.each_with_object({}) do |(node, _type), actual|
+      next unless node.type == :def && node.children[2]
+
+      actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+    end
+  end
+
+  # `ActiveSupport::Delegation`'s `RESERVED_METHOD_NAMES`, at its real length.
+  # A set reassembled from an array is as wide as its elements; it was measured
+  # by its printed form, `Set{…}`, which is three bytes wider, and a long
+  # enough set came out over its own budget.
+  def test_a_long_set_written_out_answers_what_is_in_it
+    run_type_check_test(
+      signatures: {
+        "reserved.rbs" => <<~RBS
+          class Reserved
+            KEYWORDS: Array[String]
+            NAMES: Set[String]
+
+            def plain: (:user) -> bool
+            def reserved: (:class) -> bool
+          end
+        RBS
+      },
+      code: {
+        "reserved.rb" => <<~'RUBY'
+          class Reserved
+            KEYWORDS = %w(__ENCODING__ __LINE__ __FILE__ alias and BEGIN begin break
+            case class def defined? do else elsif END end ensure false for if in module next nil
+            not or redo rescue retry return self super then true undef unless until when while yield)
+            NAMES = (KEYWORDS + %w(_ arg args block)).to_set.freeze
+
+            def plain(to) = NAMES.include?(to.to_s)
+            def reserved(to) = NAMES.include?(to.to_s)
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("reserved.rb"))
+
+      assert_equal "false", actual.fetch("plain")
+      assert_equal "true", actual.fetch("reserved")
+    end
+  end
+
+  # Inflector rules, `[rule, replacement]` pairs, as `Inflections#singular`
+  # prepends them. An argument placed among the receiver's elements costs the
+  # separator the receiver's own elements were measured with, and a pair is
+  # one element of the list however many its own are.
+  def test_a_list_of_pairs_grows_by_the_pair_prepended
+    run_type_check_test(
+      signatures: {
+        "rules.rbs" => <<~RBS
+          class Rules
+            def six: () -> Array[Array[String]]
+            def forty: () -> Array[Array[String]]
+            def over_the_bound: () -> Array[Integer]
+          end
+        RBS
+      },
+      code: {
+        "rules.rb" => <<~'RUBY'
+          class Rules
+            def six = [["a", ""], ["b", ""], ["c", ""], ["d", ""], ["e", ""], ["f", ""]].prepend(["z", ""])
+            def forty = [["r0", ""], ["r1", ""], ["r2", ""], ["r3", ""], ["r4", ""], ["r5", ""], ["r6", ""], ["r7", ""], ["r8", ""], ["r9", ""], ["r10", ""], ["r11", ""], ["r12", ""], ["r13", ""], ["r14", ""], ["r15", ""], ["r16", ""], ["r17", ""], ["r18", ""], ["r19", ""], ["r20", ""], ["r21", ""], ["r22", ""], ["r23", ""], ["r24", ""], ["r25", ""], ["r26", ""], ["r27", ""], ["r28", ""], ["r29", ""], ["r30", ""], ["r31", ""], ["r32", ""], ["r33", ""], ["r34", ""], ["r35", ""], ["r36", ""], ["r37", ""], ["r38", ""], ["r39", ""]].prepend(["z", ""])
+            def over_the_bound = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64].prepend(0)
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rules.rb"))
+
+      assert_equal '[["z", ""], ["a", ""], ["b", ""], ["c", ""], ["d", ""], ["e", ""], ["f", ""]]', actual.fetch("six")
+      assert_equal '[["z", ""], ["r0", ""], ["r1", ""], ["r2", ""], ["r3", ""], ["r4", ""], ["r5", ""], ["r6", ""], ["r7", ""], ["r8", ""], ["r9", ""], ["r10", ""], ["r11", ""], ["r12", ""], ["r13", ""], ["r14", ""], ["r15", ""], ["r16", ""], ["r17", ""], ["r18", ""], ["r19", ""], ["r20", ""], ["r21", ""], ["r22", ""], ["r23", ""], ["r24", ""], ["r25", ""], ["r26", ""], ["r27", ""], ["r28", ""], ["r29", ""], ["r30", ""], ["r31", ""], ["r32", ""], ["r33", ""], ["r34", ""], ["r35", ""], ["r36", ""], ["r37", ""], ["r38", ""], ["r39", ""]]', actual.fetch("forty")
+      assert_equal "::Array[::Integer]", actual.fetch("over_the_bound")
+    end
+  end
+
+  # `nilable = false … if nilable == false`, from `Delegation.generate`: a
+  # local read only as a condition keeps the `true`/`false` it is assigned.
+  # Read as anything else, or written in a block, it stays `bool`.
+  def test_a_local_read_only_as_a_condition_keeps_its_boolean
+    run_type_check_test(
+      signatures: {
+        "decided.rbs" => <<~RBS
+          class Decided
+            def compared: (:class) -> Integer
+            def tested: () -> Integer
+            def two_writes: (bool) -> Integer
+            def written_in_a_block: () -> Integer
+            def read_as_a_value: () -> Array[bool]
+          end
+        RBS
+      },
+      code: {
+        "decided.rb" => <<~'RUBY'
+          class Decided
+            def compared(to)
+              nilable = true
+              nilable = false if to == :class
+              if nilable == false then 1 else 2 end
+            end
+
+            def tested
+              flag = false
+              flag ? 1 : 2
+            end
+
+            # Each write is in the straight line or an arm, which the
+            # checker's flow follows.
+            def two_writes(go)
+              explicit = false
+              explicit = true if go
+              explicit ? 1 : 2
+            end
+
+            def written_in_a_block
+              flag = true
+              [1].each { flag = false }
+              flag ? 1 : 2
+            end
+
+            def read_as_a_value
+              flag = true
+              [flag]
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("decided.rb")
+      actual = def_body_types(typing)
+
+      assert_equal "1", actual.fetch("compared")
+      assert_equal "2", actual.fetch("tested")
+      assert_equal "(1 | 2)", actual.fetch("two_writes")
+      assert_equal "(1 | 2)", actual.fetch("written_in_a_block")
+      assert_equal "::Array[bool]", actual.fetch("read_as_a_value")
+
+      assert_empty typing.errors.reject { |error| error.is_a?(Diagnostic::Ruby::UnreachableBranch) }.map(&:header_line)
+    end
+  end
+
+  # A reflection the checker resolved found its method, and a missing method
+  # is the one thing it raises for — so the `rescue NameError` around it in
+  # `Delegation.generate` does not run. One on a method nothing declares
+  # raises, so only the rescue does. An ordinary call keeps both.
+  def test_a_rescue_around_a_resolved_reflection_does_not_run
+    run_type_check_test(
+      signatures: {
+        "rescued.rbs" => <<~RBS
+          class Rescued
+            def self.two: (String a, String b) -> String
+
+            def reflected: () -> UnboundMethod?
+            def missing: () -> UnboundMethod?
+            def ordinary: () -> String?
+          end
+        RBS
+      },
+      code: {
+        "rescued.rb" => <<~'RUBY'
+          class Rescued
+            def self.two(a, b) = a
+
+            # ActiveSupport's shape: the receiver read from a local.
+            def reflected
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:two)
+              rescue NameError
+                nil
+              end
+            end
+
+            # Not declared: it raises, and the rescue is all that runs.
+            def missing
+              begin
+                Rescued.singleton_class.public_instance_method(:three)
+              rescue NameError
+                nil
+              end
+            end
+
+            def ordinary
+              begin
+                "a".upcase
+              rescue NameError
+                nil
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rescued.rb"))
+
+      assert_equal "unbound_method(::Rescued.two)", actual.fetch("reflected")
+      assert_equal "nil", actual.fetch("missing")
+      assert_equal '("A" | nil)', actual.fetch("ordinary")
+    end
+  end
+
+  # A receiver that is itself a call can raise — a `NoMethodError` is a
+  # `NameError` — so the rescue still runs for a resolved reflection on it.
+  def test_a_rescue_around_a_reflection_on_a_call_still_runs
+    run_type_check_test(
+      signatures: {
+        "rescued.rbs" => <<~RBS
+          class Rescued
+            def self.two: (String a, String b) -> String
+
+            def on_a_call: () -> UnboundMethod?
+          end
+        RBS
+      },
+      code: {
+        "rescued.rb" => <<~'RUBY'
+          class Rescued
+            def self.two(a, b) = a
+
+            def on_a_call
+              begin
+                Rescued.singleton_class.public_instance_method(:two)
+              rescue NameError
+                nil
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rescued.rb"))
+
+      assert_equal "(unbound_method(::Rescued.two) | nil)", actual.fetch("on_a_call")
+    end
+  end
+
+  # Which clause catches the `NameError` a missing method raises is asked of
+  # the classes the checker resolved, not of how they are spelled.
+  def test_a_rescue_catches_name_error_by_the_class_it_resolves_to
+    run_type_check_test(
+      signatures: {
+        "rescued.rbs" => <<~RBS
+          class Rescued
+            NAME_ERROR: singleton(NameError)
+            ERRORS: [singleton(NameError)]
+
+            def aliased: () -> UnboundMethod?
+            def splatted: () -> UnboundMethod?
+            def above: () -> UnboundMethod?
+            def unrelated: () -> UnboundMethod?
+            def own: () -> UnboundMethod?
+          end
+
+          module Mine
+            class NameError < StandardError
+            end
+
+            def bare: () -> UnboundMethod?
+          end
+        RBS
+      },
+      code: {
+        "rescued.rb" => <<~'RUBY'
+          class Rescued
+            NAME_ERROR = NameError
+            ERRORS = [NameError]
+
+            def aliased
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue NAME_ERROR
+                nil
+              end
+            end
+
+            def splatted
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue *ERRORS
+                nil
+              end
+            end
+
+            def above
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue Exception
+                nil
+              end
+            end
+
+            def unrelated
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue ScriptError
+                nil
+              end
+            end
+
+            def own
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue Mine::NameError
+                nil
+              end
+            end
+          end
+
+          module Mine
+            # `NameError` here is Mine's own, whatever its spelling.
+            def bare
+              klass = Rescued.singleton_class
+              begin
+                klass.public_instance_method(:three)
+              rescue NameError
+                nil
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rescued.rb"))
+
+      assert_equal "nil", actual.fetch("aliased"), "an alias of NameError"
+      assert_equal "nil", actual.fetch("splatted"), "a list holding NameError"
+      assert_equal "nil", actual.fetch("above"), "a class NameError descends from"
+      refute_equal "nil", actual.fetch("unrelated"), "ScriptError is not above NameError"
+      refute_equal "nil", actual.fetch("own"), "a NameError of another module"
+      refute_equal "nil", actual.fetch("bare"), "a bare NameError that resolves to another module's"
+    end
+  end
+
+  # `"::#{to.name}"`, for `delegate :fetch, to: Store`, and `"#{prefix}_"`
+  # after `method_name.to_s` under `prefix:`.
+  def test_a_module_knows_its_name_and_a_string_is_its_own_string
+    [nil, "class Store\n  def self.name = \"Elsewhere\"\nend\n"].each do |override|
+      code = {
+        "named.rb" => <<~'RUBY'
+          class Named
+            def store = Store.name
+            def nested = Store::Shelf.name
+            def string = "writer_email".to_s
+          end
+        RUBY
+      }
+      code["override.rb"] = override if override
+
+      run_type_check_test(
+        signatures: {
+          "named.rbs" => <<~RBS
+            class Store
+              class Shelf
+              end
+            end
+
+            class Named
+              def store: () -> String?
+              def nested: () -> String?
+              def string: () -> String
+            end
+          RBS
+        },
+        code: code
+      ) do |typings|
+        actual = def_body_types(typings.fetch("named.rb"))
+
+        if override
+          # `def self.name` on the receiver's own chain is what runs instead.
+          assert_equal "(::String | nil)", actual.fetch("store")
+        else
+          assert_equal '"Store"', actual.fetch("store")
+          assert_equal '"Store::Shelf"', actual.fetch("nested")
+          assert_equal '"writer_email"', actual.fetch("string")
+        end
+      end
+    end
+  end
+
+  # A project that replaces one of these methods runs its own, so the passes
+  # answer nothing for a call that reaches it — and only for those calls.
+  def test_a_block_over_known_elements_declines_a_method_the_project_replaces
+    overrides = {
+      "map" => "def map = []",
+      "each" => "def each = self",
+      "filter_map" => "def filter_map = []",
+      "included filter_map" => nil,
+      "to_proc" => nil
+    }
+
+    overrides.each do |replaced, body|
+      override = case replaced
+                 when "to_proc"
+                   "class Symbol\n  def to_proc = proc { nil }\nend\n"
+                 when "included filter_map"
+                   "module Filtering\n  def filter_map = []\nend\n\nArray.include Filtering\n"
+                 else
+                   "class Array\n  #{body}\nend\n"
+                 end
+
+      run_type_check_test(
+        signatures: {
+          "iterated.rbs" => <<~RBS
+            class ReplacedIteration
+              def mapped: () -> Array[String]
+              def by_symbol: () -> Array[String]
+              def filtered: () -> Array[String]
+              def looped: () -> String
+            end
+          RBS
+        },
+        code: {
+          "override.rb" => override,
+          "iterated.rb" => <<~'RUBY'
+            class ReplacedIteration
+              def mapped = ["a"].map { |piece| piece.upcase }
+              def by_symbol = ["a"].collect(&:upcase)
+              def filtered = ["a"].filter_map { |piece| piece.upcase }
+              def looped
+                parts = []
+                ["a"].each { |piece| parts << piece }
+                parts.join(";")
+              end
+            end
+          RUBY
+        }
+      ) do |typings|
+        typing = typings.fetch("iterated.rb")
+        actual = {}
+        typing.each_typing do |node, _type|
+          next unless node.type == :def && node.children[2]
+
+          actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+        end
+
+        expected =
+          case replaced
+          when "map"
+            { "mapped" => "::Array[::String]", "by_symbol" => '["A"]', "filtered" => '["A"]', "looped" => '"a"' }
+          when "each"
+            # `filter_map` walks the array by calling `each`; `map` does not.
+            { "mapped" => '["A"]', "by_symbol" => '["A"]', "filtered" => "::Array[::String]", "looped" => "::String" }
+          when "filter_map", "included filter_map"
+            # Found on Array before Enumerable's, which is the one the RBS names.
+            { "mapped" => '["A"]', "by_symbol" => '["A"]', "filtered" => "::Array[::String]", "looped" => '"a"' }
+          when "to_proc"
+            { "mapped" => '["A"]', "by_symbol" => "::Array[::String]", "filtered" => '["A"]', "looped" => '"a"' }
+          end
+
+        assert_equal expected, actual.slice(*expected.keys), "with #{replaced} replaced"
+      end
+    end
+  end
+
+  # Reflection answered out of the declaration the checker already has. The
+  # chain is `ActiveSupport::Delegation`'s, spelled exactly as it writes it —
+  # `owner.singleton_class.public_instance_method(method).parameters`.
+  def test_a_method_object_knows_which_method_it_is
+    run_type_check_test(
+      signatures: {
+        "reflected.rbs" => <<~RBS
+          class Reflected
+            def self.human_name: (String index) -> String
+            def self.overloaded: (String) -> String
+                               | (Integer) -> String
+
+            def email: (String address, ?Integer port, *String extra, key: bool, ?flag: bool) -> void
+            def unnamed: (String, ?Integer) -> void
+            private def secret: () -> String
+
+            def meta: () -> Class
+            def unbound: () -> UnboundMethod
+            def bound: () -> Method
+            def bound_instance: () -> Method
+            def instance_side: () -> UnboundMethod
+            def params: () -> Method::param_types
+            def instance_params: () -> Method::param_types
+            def unnamed_params: () -> Method::param_types
+
+            def no_such_method: () -> UnboundMethod
+            def private_method_publicly: () -> UnboundMethod
+            def private_method: () -> UnboundMethod
+            def name_from_a_variable: (Symbol name) -> UnboundMethod
+            def overloaded_params: () -> Method::param_types
+          end
+        RBS
+      },
+      code: {
+        "reflected.rb" => <<~'RUBY'
+          class Reflected
+            def self.human_name(index) = index
+            def self.overloaded(value) = value.to_s
+
+            def email(address, port = 1, *extra, key:, flag: false); end
+            def unnamed(one, two = 1); end
+            private def secret = "s"
+
+            # The step the whole chain used to break at.
+            def meta = Reflected.singleton_class
+
+            def unbound = Reflected.singleton_class.public_instance_method(:human_name)
+            def bound = Reflected.method(:human_name)
+            # An instance receiver does not fix the method: a subclass may
+            # override `email` with a parameter list of its own.
+            def bound_instance
+              other = Reflected.new
+              other.method(:email)
+            end
+            def instance_side = Reflected.instance_method(:email)
+
+            # What the macro actually asks for.
+            def params = Reflected.singleton_class.public_instance_method(:human_name).parameters
+            def instance_params = Reflected.instance_method(:email).parameters
+            def unnamed_params = Reflected.instance_method(:unnamed).parameters
+
+            # Everything below declines, and each for its own reason.
+            def no_such_method = Reflected.singleton_class.public_instance_method(:nope)
+            def private_method_publicly = Reflected.public_instance_method(:secret)
+            def private_method = Reflected.instance_method(:secret)
+            def name_from_a_variable(name) = Reflected.singleton_class.public_instance_method(name)
+            def overloaded_params = Reflected.singleton_class.public_instance_method(:overloaded).parameters
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("reflected.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "singleton_class(::Reflected)", actual.fetch("meta")
+      assert_equal "unbound_method(::Reflected.human_name)", actual.fetch("unbound")
+      assert_equal "method(::Reflected.human_name)", actual.fetch("bound")
+      assert_equal "::Method", actual.fetch("bound_instance")
+      assert_equal "unbound_method(::Reflected#email)", actual.fetch("instance_side")
+
+      assert_equal "[[:req, :index]]", actual.fetch("params")
+      assert_equal "[[:req, :address], [:opt, :port], [:rest, :extra], [:keyreq, :key], [:key, :flag]]",
+                   actual.fetch("instance_params")
+      # RBS declares these without a name, so one is invented — the one place
+      # this departs from reading what is written.
+      assert_equal "[[:req, :arg1], [:opt, :arg2]]", actual.fetch("unnamed_params")
+
+      # A name nothing declares is a `NameError` at runtime, not a type.
+      assert_equal "::UnboundMethod", actual.fetch("no_such_method")
+      assert_equal "::UnboundMethod", actual.fetch("private_method_publicly")
+      # `instance_method` asks regardless of visibility, so this one answers.
+      assert_equal "unbound_method(::Reflected#secret)", actual.fetch("private_method")
+      assert_equal "::UnboundMethod", actual.fetch("name_from_a_variable")
+      # Several method types, and nothing says which one the implementation is.
+      assert_equal "::Method::param_types", actual.fetch("overloaded_params")
+    end
+  end
+
+  # `singleton(::Sub)` is a `singleton(::Base)`, so the class object a
+  # reflection ran on may be a subclass's — and what a method's parameter list
+  # IS does not survive an override the way its signature does. Every subclass
+  # is read, and the answer stands only where they all agree.
+  def test_a_reflection_reads_the_subclasses_before_it_answers
+    run_type_check_test(
+      signatures: {
+        "inherited.rbs" => <<~RBS
+          class Widened
+            def self.human_name: (String index) -> String
+          end
+          class WidenedSub < Widened
+            def self.human_name: (String index, ?Integer extra) -> String
+          end
+
+          class Restated
+            def self.human_name: (String index) -> String
+          end
+          class RestatedSub < Restated
+            def self.human_name: (String index) -> String
+          end
+
+          class Visible
+            def secret: () -> String
+          end
+          class VisibleSub < Visible
+            private def secret: () -> String
+          end
+
+          class Reflector
+            def widened: () -> Method::param_types
+            def restated: () -> Method::param_types
+            def leaf: () -> Method::param_types
+            def hidden_in_a_subclass: () -> UnboundMethod
+            def asked_regardless: () -> UnboundMethod
+          end
+        RBS
+      },
+      code: {
+        "inherited.rb" => <<~'RUBY'
+          class Widened
+            def self.human_name(index) = index
+          end
+          class WidenedSub < Widened
+            def self.human_name(index, extra = 1) = index
+          end
+
+          class Restated
+            def self.human_name(index) = index
+          end
+          class RestatedSub < Restated
+            def self.human_name(index) = index
+          end
+
+          class Visible
+            def secret = "s"
+          end
+          class VisibleSub < Visible
+            private def secret = "s"
+          end
+
+          class Reflector
+            # `WidenedSub.human_name` takes a parameter its superclass does not,
+            # and `Widened` is the type a variable holding it would have.
+            def widened = Widened.singleton_class.public_instance_method(:human_name).parameters
+
+            # Redeclared, and the same: a reopen the generated signatures write
+            # is not an override, and answering it as one would decline
+            # everywhere.
+            def restated = Restated.singleton_class.public_instance_method(:human_name).parameters
+
+            # Nothing inherits from the subclass itself.
+            def leaf = RestatedSub.singleton_class.public_instance_method(:human_name).parameters
+
+            # `public_instance_method` RAISES on a private method, and the class
+            # this ran on may be the subclass that made it one.
+            def hidden_in_a_subclass = Visible.public_instance_method(:secret)
+
+            # `instance_method` asks whatever the visibility, so the subclass
+            # says nothing about this one.
+            def asked_regardless = Visible.instance_method(:secret)
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("inherited.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::Method::param_types", actual.fetch("widened")
+      assert_equal "[[:req, :index]]", actual.fetch("restated")
+      assert_equal "[[:req, :index]]", actual.fetch("leaf")
+
+      assert_equal "::UnboundMethod", actual.fetch("hidden_in_a_subclass")
+      assert_equal "unbound_method(::Visible#secret)", actual.fetch("asked_regardless")
+    end
+  end
+
+  # The class that shadows a reflection is the RECEIVER's, and a redefinition
+  # the project does not DECLARE is one dispatch never sees: `Shadowed.method`
+  # still resolves to `::Kernel#method`, and Ruby runs the one written here.
+  def test_a_reflection_declines_where_the_receiver_redefines_it
+    run_type_check_test(
+      signatures: {
+        "shadowed.rbs" => <<~RBS
+          class Shadowed
+            def self.human_name: (String index) -> String
+            def shadowed_reflection: () -> Method
+          end
+
+          class Unshadowed
+            def self.human_name: (String index) -> String
+            def plain_reflection: () -> Method
+          end
+        RBS
+      },
+      code: {
+        "shadowed.rb" => <<~'RUBY'
+          class Shadowed
+            def self.human_name(index) = index
+            # Written in Ruby and left out of the signature, which is the only
+            # way a redefinition reaches this: one that IS declared resolves to
+            # its own key, and no table holds that.
+            def self.method(name) = name
+
+            def shadowed_reflection = Shadowed.method(:human_name)
+          end
+
+          class Unshadowed
+            def self.human_name(index) = index
+
+            # The same call one class over, where nothing is shadowed. The check
+            # is the receiver's chain and not the name.
+            def plain_reflection = Unshadowed.method(:human_name)
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("shadowed.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "::Method", actual.fetch("shadowed_reflection")
+      assert_equal "method(::Unshadowed.human_name)", actual.fetch("plain_reflection")
+    end
+  end
+
+  def test_a_record_read_under_a_literal_key_it_does_not_hold_is_nil
+    run_type_check_test(
+      signatures: {
+        "records.rbs" => <<~RBS
+          class Records
+            def self.absent: ({ a: 1 } options) -> untyped
+            def self.empty: ({ } options) -> untyped
+            def self.present: ({ a: 1 } options) -> untyped
+            def self.optional: ({ ?a: 1 } options) -> untyped
+            def self.open_key: ({ a: 1 } options, Symbol key) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "records.rb" => <<~'RUBY'
+          class Records
+            def self.absent(options) = options[:b]
+            def self.empty(options) = options[:b]
+            def self.present(options) = options[:a]
+            def self.optional(options) = options[:a]
+            def self.open_key(options, key) = options[key]
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("records.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :defs && node.children[3]
+
+        actual[node.children[1].to_s] = typing.type_of(node: node.children[3]).to_s
+      end
+
+      assert_equal(
+        { "absent" => "nil", "empty" => "nil", "present" => "1", "optional" => "(1 | nil)", "open_key" => "(1 | nil)" },
+        actual
+      )
+    end
+  end
+
+  def test_const_get_of_a_literal_is_the_constant_it_names
+    run_type_check_test(
+      signatures: {
+        "lookup.rbs" => <<~RBS
+          class Post
+          end
+
+          class Lookup
+            class X
+            end
+
+            def self.by_const_get: () -> untyped
+            def self.by_symbol: () -> untyped
+            def self.by_path: () -> untyped
+            def self.by_variable: (String name) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "lookup.rb" => <<~'RUBY'
+          class Lookup
+            def self.by_const_get = Object.const_get("Post")
+            def self.by_symbol = Object.const_get(:Post)
+            def self.by_path = Object.const_get("Lookup::X")
+            def self.by_variable(name) = Object.const_get(name)
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("lookup.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :defs && node.children[3]
+
+        actual[node.children[1].to_s] = typing.type_of(node: node.children[3]).to_s
+      end
+
+      assert_equal "singleton(::Post)", actual.fetch("by_const_get")
+      assert_equal "singleton(::Post)", actual.fetch("by_symbol")
+      assert_equal "singleton(::Lookup::X)", actual.fetch("by_path")
+      assert_equal "untyped", actual.fetch("by_variable")
+    end
+  end
+
+  # A constant is the one name Ruby means to be written once, so the value at a
+  # read is the value at the assignment — provided this file is where the name
+  # is decided and nothing here changes the object behind it.
+  def test_a_constant_written_once_carries_its_value
+    run_type_check_test(
+      signatures: {
+        "constants.rbs" => <<~RBS
+          module OtherNamespace
+            RESERVED: Array[String]
+            def elsewhere: () -> bool
+          end
+
+          class WrittenConstants
+            RESERVED: Array[String]
+            FROZEN: Array[String]
+            TWICE: Array[String]
+            MUTATED: Array[String]
+            PASSED: Array[String]
+            EMPTY: Array[String]
+            MISDECLARED: Array[Integer]
+            CONDITIONAL: Array[String]
+            BLOCK_READ: Array[String]
+            ELEMENT_READ: Array[String]
+
+            def plain: () -> bool
+            def frozen: () -> String
+            def twice: () -> bool
+            def mutated: () -> bool
+            def passed: () -> bool
+            def empty: () -> bool
+            def misdeclared: () -> bool
+            def conditional: () -> bool
+            def through_a_block: () -> bool
+            def through_an_element: () -> bool
+            def guarded: (:user) -> String
+            def mutate: () -> void
+            def hand_over: () -> void
+            def sink: (Array[String]) -> void
+          end
+        RBS
+      },
+      code: {
+        "constants.rb" => <<~'RUBY'
+          module OtherNamespace
+            # A bare read of a name THIS file writes in another namespace. Both
+            # are declared `Array[String]`, so the relation check lets it
+            # through and only the resolved name tells them apart.
+            def elsewhere
+              RESERVED.include?("class")
+            end
+          end
+
+          class WrittenConstants
+            RESERVED = ["class", "def", "end"]
+            FROZEN = %w(class self).freeze
+            TWICE = ["a"]
+            TWICE = ["b"]
+            MUTATED = ["a"]
+            PASSED = ["a"]
+            EMPTY = []
+            MISDECLARED = ["a"]
+
+            # May not be assigned at all, in which case the read is a NameError
+            # or finds an inherited constant that is not this.
+            CONDITIONAL = ["a"] if ENV["FLAG"]
+
+            BLOCK_READ = ["a"]
+            ELEMENT_READ = ["a"]
+
+            def plain = RESERVED.include?("content")
+            def frozen = FROZEN.join(";")
+
+            # Written twice: which value a read means is a question about
+            # constant lookup, not about this walk.
+            def twice = TWICE.include?("a")
+
+            # Changed behind the read.
+            def mutated = MUTATED.include?("a")
+            def mutate
+              MUTATED << "b"
+            end
+
+            # Handed to something that can change it.
+            def passed = PASSED.include?("a")
+            def hand_over
+              sink(PASSED)
+            end
+
+            def empty = EMPTY.include?("a")
+
+            def conditional = CONDITIONAL.include?("a")
+
+            # `count` is a read, and with a block it hands every element to a
+            # body this walk does not follow.
+            def through_a_block
+              BLOCK_READ.count { |value| value << "b" }
+              BLOCK_READ.include?("a")
+            end
+
+            # `first` hands back an element, and the call after it changes that
+            # element in place.
+            def through_an_element
+              ELEMENT_READ.first << "b"
+              ELEMENT_READ.include?("a")
+            end
+
+            # The recovered value is held against the type the read RESOLVED to,
+            # so a name that turns out to be some other constant is refused.
+            def misdeclared = MISDECLARED.include?("a")
+
+            # What the whole thing is for: the guard decides, so the local keeps
+            # the value it had and the interpolation after it still folds.
+            def guarded(to)
+              receiver = to.to_s
+              receiver = "self.#{receiver}" if FROZEN.include?(receiver)
+              "  (#{receiver}).x(...)"
+            end
+
+            def sink(list)
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("constants.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def && node.children[2]
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "false", actual.fetch("plain")
+      assert_equal '"class;self"', actual.fetch("frozen")
+      assert_equal '"  (user).x(...)"', actual.fetch("guarded")
+
+      assert_equal "bool", actual.fetch("twice")
+      assert_equal "bool", actual.fetch("mutated")
+      assert_equal "bool", actual.fetch("passed")
+      assert_equal "bool", actual.fetch("empty")
+      assert_equal "bool", actual.fetch("misdeclared")
+      assert_equal "bool", actual.fetch("conditional")
+      assert_equal "bool", actual.fetch("through_a_block")
+      assert_equal "bool", actual.fetch("through_an_element")
+      # A different constant that happens to share a name and a type.
+      assert_equal "bool", actual.fetch("elsewhere")
+    end
+  end
+
+  # A fold that dispatches is only as trustworthy as the methods it dispatches
+  # TO. `==` is nobody's table entry, so nothing about `include?`'s own key says
+  # the answer has stopped being the program's — the entry has to name it.
+  def test_literal_intrinsics_decline_an_override_of_a_method_they_depend_on
+    run_type_check_test(
+      signatures: {
+        "depends.rbs" => <<~RBS
+          class LiteralIntrinsicDependency
+            def included: () -> bool
+            def intersected: () -> bool
+            def joined: () -> String
+          end
+
+          class ::String
+            def ==: (untyped) -> bool
+          end
+        RBS
+      },
+      code: {
+        "override.rb" => <<~RUBY,
+          class String
+            def ==(other) = true
+          end
+        RUBY
+        "call.rb" => <<~RUBY
+          class LiteralIntrinsicDependency
+            def included = ["class", "def"].include?("while")
+            def intersected = ["a"].intersect?(["b"])
+            # Unaffected: `join` over String elements with a separator does no
+            # dispatch at all, which is what its preflight is for.
+            def joined = ["def x", "end"].join(";")
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("call.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :def
+
+        actual[node.children[0].to_s] = typing.type_of(node: node.children[2]).to_s
+      end
+
+      assert_equal "bool", actual.fetch("included")
+      assert_equal "bool", actual.fetch("intersected")
+      assert_equal '"def x;end"', actual.fetch("joined")
     end
   end
 
@@ -1382,6 +4059,383 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_ivar_pure_call_narrowing
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarNarrowContainer
+            attr_reader value: Integer?
+          end
+
+          class IvarNarrowHost
+            attr_reader container: IvarNarrowContainer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarNarrowHost.new.instance_eval do
+            if @container.value
+              @container.value + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_ivar_pure_call_narrowing__invalidated_by_reassignment
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarReassignContainer
+            attr_reader value: Integer?
+          end
+
+          class IvarReassignHost
+            attr_accessor container: IvarReassignContainer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarReassignHost.new.instance_eval do
+            if @container.value
+              @container = IvarReassignContainer.new
+              @container.value + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 21
+              end:
+                line: 4
+                character: 22
+            severity: ERROR
+            message: Type `(::Integer | nil)` does not have method `+`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_ivar_pure_call_narrowing__non_pure_method_not_narrowed
+    # Negative control: a method annotated `%a{impure}` opts out of the
+    # optimistic-pure default (felixefelip/steep#12), so the pure_call
+    # cache stays empty and the second `@provider.maybe_value` doesn't
+    # carry the narrowing from the conditional.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarNonPureProvider
+            %a{impure}
+            def maybe_value: () -> Integer?
+          end
+
+          class IvarNonPureHost
+            attr_reader provider: IvarNonPureProvider
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarNonPureHost.new.instance_eval do
+            if @provider.maybe_value
+              @provider.maybe_value + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 26
+              end:
+                line: 3
+                character: 27
+            severity: ERROR
+            message: Type `(::Integer | nil)` does not have method `+`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_ivar_union_assignment_narrows_to_validated_branch
+    # Phase 1 of felixefelip/steep#16: in a Rails-like controller, the
+    # backing ivar is declared as a union of "validated" and "raw" forms
+    # of the model. Calling `Model.find` (whose RBS in the
+    # `rbs_rails`/`rbs_collection` fork returns `Model & Validated`)
+    # selects the validated branch, so a subsequent call to a method
+    # declared only on the validated marker type-checks without manual
+    # `is_a?` narrowing.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarUnionCompany
+            def self.find: (Integer) -> (IvarUnionCompany & IvarUnionCompany::Validated)
+            def self.new: () -> IvarUnionCompany
+          end
+
+          module IvarUnionCompany::Validated
+            def name_required: () -> String
+          end
+
+          class IvarUnionController
+            @company: (IvarUnionCompany & IvarUnionCompany::Validated) | IvarUnionCompany
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarUnionController.new.instance_eval do
+            @company = IvarUnionCompany.find(1)
+            @company.name_required
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_ivar_union_assignment_narrows_does_not_apply_to_non_validated_branch
+    # Negative control: assigning the raw form (`Model.new`) selects the
+    # non-validated branch, so the validated-only method must error.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarUnionCompanyB
+            def self.find: (Integer) -> (IvarUnionCompanyB & IvarUnionCompanyB::Validated)
+            def self.new: () -> IvarUnionCompanyB
+          end
+
+          module IvarUnionCompanyB::Validated
+            def name_required: () -> String
+          end
+
+          class IvarUnionControllerB
+            @company: (IvarUnionCompanyB & IvarUnionCompanyB::Validated) | IvarUnionCompanyB
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarUnionControllerB.new.instance_eval do
+            @company = IvarUnionCompanyB.new
+            @company.name_required
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 11
+              end:
+                line: 3
+                character: 24
+            severity: ERROR
+            message: Type `::IvarUnionCompanyB` does not have method `name_required`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_ivar_union_reassignment_resets_narrow_to_new_branch
+    # After narrowing the ivar to the validated branch via `find`, a
+    # reassignment with the non-validated form (`new`) must reset the
+    # env's view of the ivar so the validated-only method now errors.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarUnionCompanyC
+            def self.find: (Integer) -> (IvarUnionCompanyC & IvarUnionCompanyC::Validated)
+            def self.new: () -> IvarUnionCompanyC
+          end
+
+          module IvarUnionCompanyC::Validated
+            def name_required: () -> String
+          end
+
+          class IvarUnionControllerC
+            @company: (IvarUnionCompanyC & IvarUnionCompanyC::Validated) | IvarUnionCompanyC
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarUnionControllerC.new.instance_eval do
+            @company = IvarUnionCompanyC.find(1)
+            @company.name_required
+
+            @company = IvarUnionCompanyC.new
+            @company.name_required
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 6
+                character: 11
+              end:
+                line: 6
+                character: 24
+            severity: ERROR
+            message: Type `::IvarUnionCompanyC` does not have method `name_required`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_ivar_attr_accessor_narrows_to_validated_branch
+    # Phase 2 of felixefelip/steep#16: in a PORO that exposes the
+    # backing ivar via `attr_accessor`, writing through the setter with
+    # a value typed as the validated marker narrows the env's view of
+    # the ivar, so reading back through the getter (also via attr) sees
+    # the validated branch — no manual `is_a?` required.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarAttrCompany
+            def self.find: (Integer) -> (IvarAttrCompany & IvarAttrCompany::Validated)
+            def self.new: () -> IvarAttrCompany
+          end
+
+          module IvarAttrCompany::Validated
+            def name_required: () -> String
+          end
+
+          class IvarAttrForm
+            attr_accessor company: (IvarAttrCompany & IvarAttrCompany::Validated) | IvarAttrCompany
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarAttrForm.new.instance_eval do
+            self.company = IvarAttrCompany.find(1)
+            self.company.name_required
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_ivar_attr_accessor_narrow_does_not_apply_to_raw_branch
+    # Negative control: assigning the raw (non-validated) form via the
+    # setter narrows the ivar to that branch; reading the getter then
+    # returns a type without the validated marker, so the validated-only
+    # method must error.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarAttrCompanyB
+            def self.find: (Integer) -> (IvarAttrCompanyB & IvarAttrCompanyB::Validated)
+            def self.new: () -> IvarAttrCompanyB
+          end
+
+          module IvarAttrCompanyB::Validated
+            def name_required: () -> String
+          end
+
+          class IvarAttrFormB
+            attr_accessor company: (IvarAttrCompanyB & IvarAttrCompanyB::Validated) | IvarAttrCompanyB
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarAttrFormB.new.instance_eval do
+            self.company = IvarAttrCompanyB.new
+            self.company.name_required
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 15
+              end:
+                line: 3
+                character: 28
+            severity: ERROR
+            message: Type `::IvarAttrCompanyB` does not have method `name_required`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_ivar_attr_reader_consumes_direct_ivar_narrow
+    # The read side of the rule works even when the narrowing comes
+    # from a direct `@x = …` assignment (Phase 1) rather than from the
+    # setter. The attr_reader call returns the env's current ivar type,
+    # not the declared method return type.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IvarAttrCompanyC
+            def self.find: (Integer) -> (IvarAttrCompanyC & IvarAttrCompanyC::Validated)
+          end
+
+          module IvarAttrCompanyC::Validated
+            def name_required: () -> String
+          end
+
+          class IvarAttrReadOnlyForm
+            attr_reader company: (IvarAttrCompanyC & IvarAttrCompanyC::Validated) | IvarAttrCompanyC
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          IvarAttrReadOnlyForm.new.instance_eval do
+            @company = IvarAttrCompanyC.find(1)
+            self.company.name_required
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_case_when__bool_value
     run_type_check_test(
       signatures: {
@@ -1507,6 +4561,58 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  # `ActiveSupport::Delegation`'s `allow_nil: true` body. NilClass has no
+  # `full_name`, so the right operand is `false`, the `||` holds only where
+  # `!_.nil?` does, and `_` is narrowed in the body the way that guard alone
+  # narrows it — the side that cannot happen joins nothing back.
+  def test_type_narrowing__or_with_a_decided_respond_to
+    # `_` is an ordinary local in this fork's projects (felixefelip/steep#202).
+    run_type_check_test(
+      underscore_casts: false,
+      signatures: {
+        "a.rbs" => <<~RBS
+          class User
+            def full_name: () -> String
+          end
+
+          class Card
+            def owner: () -> User?
+            def author: () -> User
+            def owner_full_name: () -> String?
+            def author_full_name: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Card
+            def owner = (User.new if rand > 0.5)
+            def author = User.new
+
+            def owner_full_name
+              _ = owner
+              if !_.nil? || nil.respond_to?(:full_name)
+                _.full_name
+              end
+            end
+
+            def author_full_name
+              _ = author
+              if !_.nil? || nil.respond_to?(:full_name)
+                _.full_name
+              end
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_type_narrowing__union_send
     run_type_check_test(
       signatures: {
@@ -1566,56 +4672,6 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
-  # Regression test for `==` narrowing against a literal whose superclass is the
-  # receiver type. `Symbol`/`Integer`/`String` include the corresponding literal
-  # values, so the truthy branch is reachable.
-  def test_type_narrowing__literal_equality_with_supertype
-    run_type_check_test(
-      signatures: {
-        "a.rbs" => <<~RBS
-          class A
-            def foo_symbol: (Symbol symbol) -> void
-            def foo_integer: (Integer integer) -> void
-            def foo_string: (String string) -> void
-          end
-        RBS
-      },
-      code: {
-        "a.rb" => <<~RUBY
-          class A
-            def foo_symbol(symbol)
-              if symbol == :qux
-                puts "qux"
-              else
-                puts "other"
-              end
-            end
-
-            def foo_integer(integer)
-              if integer == 1
-                puts "one"
-              else
-                puts "other"
-              end
-            end
-
-            def foo_string(string)
-              if string == "x"
-                puts "x"
-              else
-                puts "other"
-              end
-            end
-          end
-        RUBY
-      },
-      expectations: <<~YAML
-        ---
-        - file: a.rb
-          diagnostics: []
-      YAML
-    )
-  end
 
   def test_argument_error__unexpected_unexpected_positional_argument
     run_type_check_test(
@@ -1971,7 +5027,7 @@ class TypeCheckTest < Minitest::Test
                 line: 3
                 character: 28
             severity: ERROR
-            message: Type `(::Integer | nil)` does not have method `foo`
+            message: Type `::Integer` does not have method `foo`
             code: Ruby::NoMethod
       YAML
     )
@@ -2023,33 +5079,6 @@ class TypeCheckTest < Minitest::Test
           end
 
           x + 1
-        RUBY
-      },
-      expectations: <<~YAML
-        ---
-        - file: a.rb
-          diagnostics: []
-      YAML
-    )
-  end
-
-  def test_ensure_annotation
-    run_type_check_test(
-      signatures: {
-        "a.rbs" => <<~RBS
-        RBS
-      },
-      code: {
-        "a.rb" => <<~RUBY
-          begin
-            x = "hello"
-            x + ""
-          ensure
-            # @type var x: String?
-            if x
-              x + ""
-            end
-          end
         RUBY
       },
       expectations: <<~YAML
@@ -2496,8 +5525,8 @@ class TypeCheckTest < Minitest::Test
                 character: 31
             severity: ERROR
             message: |-
-              Cannot assign a value of type `{ :id => ::Integer, ?:name => ::Integer }` to a variable of type `{ :id => ::Integer, ?:name => ::String }`
-                { :id => ::Integer, ?:name => ::Integer } <: { :id => ::Integer, ?:name => ::String }
+              Cannot assign a value of type `{ :id => 123, ?:name => ::Integer }` to a variable of type `{ :id => ::Integer, ?:name => ::String }`
+                { :id => 123, ?:name => ::Integer } <: { :id => ::Integer, ?:name => ::String }
                   ::Integer <: ::String
                     ::Numeric <: ::String
                       ::Object <: ::String
@@ -2873,6 +5902,18 @@ class TypeCheckTest < Minitest::Test
           - range:
               start:
                 line: 1
+                character: 6
+              end:
+                line: 1
+                character: 75
+            severity: ERROR
+            message: 'Assertion cannot hold: no relationship between inferred type (`{ ?:email
+              => ::String, :name => \"soutaro\" }`) and asserted type (`{ :name => ::String
+              }`)'
+            code: Ruby::FalseAssertion
+          - range:
+              start:
+                line: 1
                 character: 25
               end:
                 line: 1
@@ -3135,17 +6176,7 @@ class TypeCheckTest < Minitest::Test
       expectations: <<~YAML
         ---
         - file: a.rb
-          diagnostics:
-          - range:
-              start:
-                line: 9
-                character: 2
-              end:
-                line: 9
-                character: 3
-            severity: ERROR
-            message: Type `(::Integer | nil)` does not have method `+`
-            code: Ruby::NoMethod
+          diagnostics: []
       YAML
     )
   end
@@ -4516,24 +7547,4622 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
-  def test_tuple_type_with_if_branch
+  def test_erb_convention_imports_ivars_from_self_type
+    ENV["STEEP_ERB_CONVENTION"] = "1"
+    run_type_check_test(
+      signatures: {
+        "erb_class.rbs" => <<~RBS
+          class ERBPostsShow
+            @post: String
+            @count: Integer
+          end
+        RBS
+      },
+      code: {
+        "app/views/posts/show.html.erb" => <<~ERB
+          <%= @post %>
+          <%= @count %>
+        ERB
+      },
+      expectations: <<~YAML
+        ---
+        - file: app/views/posts/show.html.erb
+          diagnostics: []
+      YAML
+    )
+  ensure
+    ENV.delete("STEEP_ERB_CONVENTION")
+  end
+
+  def test_self_method_applies_method_entry_facts_to_toplevel
+    # `@type self_method: View#__rbs_infer__body` gives a top-level body (an ERB
+    # template compiled to a method at runtime) the identity of that method, so
+    # its recorded method-entry facts narrow reads in it. Here `Bar.user` is
+    # nilable by RBS; the fact proves it non-nil, so `.name` type-checks. Without
+    # the fact the read would be a NoMethod error, so `diagnostics: []` is proof
+    # the annotation applied the fact to the top-level body.
     run_type_check_test(
       signatures: {
         "a.rbs" => <<~RBS
-          module M
-            def test_if: (bool flag) -> (["yes", "ok"] | ["no", "error"])
+          class MERUser
+            def name: () -> String
+          end
+          class MERBar
+            def self.user: () -> MERUser?
+          end
+          class MERView
           end
         RBS
       },
       code: {
         "a.rb" => <<~RUBY
-          module M
-            def test_if(flag)
-              if flag
-                ['yes', 'ok']
-              else
-                ['no', 'error']
+          # @type self_method: MERView#__rbs_infer__body
+          MERBar.user.name
+        RUBY
+      },
+      postconditions: Steep::Postconditions::Store.from_hash(
+        {
+          "version" => 1,
+          "method_entry_facts" => [
+            {
+              "class" => "MERView",
+              "method" => "__rbs_infer__body",
+              "consts" => { "MERBar.user" => "::MERUser" }
+            }
+          ]
+        },
+        source: "<test>"
+      ),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_instance_annotation_imports_ivars_from_annotated_type
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            @name: String
+          end
+
+          module Concern
+            def do_thing: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module Concern
+            # @type instance: Foo
+            def do_thing
+              @name
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # felixefelip/steep#130. A module mixed into two classes has two possible
+  # selves — one at a time, which is a union. `for_new_method` raised
+  # `Unexpected self_type` on one, and the method came out untyped with no
+  # diagnostic to say why. An intersection cannot stand in: no object is both
+  # an `Admin` and a `Guest`.
+  def test_type_instance_annotation_accepts_a_union_of_hosts
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Admin
+            def label: () -> String
+          end
+
+          class Guest
+            def label: () -> String
+          end
+
+          module Greeting
+            def greet: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module Greeting
+            # @type instance: (Admin & Greeting) | (Guest & Greeting)
+            def greet
+              label
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_instance_annotation_imports_ivars_from_intersection_type
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class ApplicationController
+            @request_id: String
+          end
+
+          module FilterConfiguration
+            @filter_name: Symbol
+
+            def configure_filter: (untyped name) -> untyped
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module FilterConfiguration
+            # @type instance: FilterConfiguration & ApplicationController
+            def configure_filter(name)
+              @filter_name
+              @request_id
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # A concern's method declared `-> self` and returning a `-> self` call
+  # inherited from the host: the composite self type must not collapse to the
+  # host, or the body types as `::Card` and fails `::Card <: self` against its
+  # own declaration.
+  def test_type_instance_annotation_keeps_self_through_an_intersection
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Card
+            include Card::Eventable
+
+            def update!: (*untyped) -> self
+
+            module Eventable
+              def touch_last_active_at: () -> self
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Card
+            module Eventable
+              # @type instance: Card & Card::Eventable
+              def touch_last_active_at
+                update!(1)
               end
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_instance_annotation_keeps_self_through_a_union
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module Reloadable
+            def refresh: () -> self
+          end
+
+          class Admin
+            include Reloadable
+            def reload: () -> self
+          end
+
+          class Guest
+            include Reloadable
+            def reload: () -> self
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module Reloadable
+            # @type instance: (Admin & Reloadable) | (Guest & Reloadable)
+            def refresh
+              reload
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_instance_annotation_imports_inherited_ivars
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Base
+            @base_var: Integer
+          end
+
+          class Child < Base
+            @child_var: String
+          end
+
+          module Mixin
+            def check: () -> untyped
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module Mixin
+            # @type instance: Child
+            def check
+              @child_var
+              @base_var
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Conditional postconditions (felixefelip/steep#10)
+  #
+  # Sidecar declarations refine the receiver in the truthy/falsy branches of a
+  # boolean call. Hits Pattern A (predicate) and Pattern B (update/save/valid?).
+  # ---------------------------------------------------------------------------
+
+  def postconditions_store(entries)
+    Steep::Postconditions::Store.from_hash(
+      { "postconditions" => entries },
+      source: "test"
+    )
+  end
+
+  # Walks a parsed source's AST returning the first `:send` node
+  # whose method name matches. Used by delegation tests to grab the
+  # call site for direct `typing.call_of` assertions.
+  def find_send(node, method:)
+    return nil unless node.is_a?(::Parser::AST::Node)
+    if node.type == :send && node.children[1] == method
+      return node
+    end
+    node.children.each do |child|
+      found = find_send(child, method: method)
+      return found if found
+    end
+    nil
+  end
+
+  # Builds an in-memory DelegationRegistry from the test's `code` hash
+  # (path => Ruby source string), without going through the file
+  # system. Used by `run_type_check_test` so that chain-narrowing
+  # tests (felixefelip/steep#32) can exercise the registry-driven
+  # inlining without a real project on disk.
+  def build_test_delegation_registry(code)
+    registry = Steep::Project::DelegationRegistry.new
+    code.each do |_path, content|
+      next unless content
+      buffer = ::Parser::Source::Buffer.new("<test>")
+      buffer.source = content
+      parser = ::Parser::Ruby33.new
+      parser.diagnostics.all_errors_are_fatal = false
+      parser.diagnostics.ignore_warnings = true
+      node = parser.parse(buffer) rescue nil
+      next unless node
+      delegations = Steep::TypeInference::DelegationAnalyzer.analyze(node)
+      delegations.each do |class_name, methods|
+        bucket = registry.to_h[class_name] ||= {}
+        methods.each { |name, info| bucket[name] = info }
+      end
+    end
+    registry
+  end
+
+  def test_postconditions__predicate_refines_receiver
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCOrderImport
+            attr_reader logistics_operator: PCLogisticsOperator?
+            def shipment?: () -> bool
+
+            class ValidatedAsShipment
+              attr_reader logistics_operator: PCLogisticsOperator
+            end
+          end
+
+          class PCLogisticsOperator
+            attr_reader name: String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          order_import = PCOrderImport.new
+          if order_import.shipment?
+            order_import.logistics_operator.name
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCOrderImport",
+          "method" => "shipment?",
+          "when_true" => { "self" => "PCOrderImport & PCOrderImport::ValidatedAsShipment" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__predicate_refines_ivar_receiver
+    # Mirror of the lvar test: the receiver of the predicate is an
+    # instance variable. Before the `:ivar` case was added to
+    # `LogicTypeInterpreter#refine_node_type`, the env's
+    # `instance_variable_types[@order_import]` stayed at the declared
+    # type inside the truthy branch, so `@order_import.logistics_operator`
+    # remained `PCLogisticsOperator?` and the `.name` call errored.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIvarOrderImport
+            attr_reader logistics_operator: PCIvarLogisticsOperator?
+            def shipment?: () -> bool
+
+            class ValidatedAsShipment
+              attr_reader logistics_operator: PCIvarLogisticsOperator
+            end
+          end
+
+          class PCIvarLogisticsOperator
+            attr_reader name: String
+          end
+
+          class PCIvarHost
+            @order_import: PCIvarOrderImport
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          PCIvarHost.new.instance_eval do
+            if @order_import.shipment?
+              @order_import.logistics_operator.name
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIvarOrderImport",
+          "method" => "shipment?",
+          "when_true" => { "self" => "PCIvarOrderImport & PCIvarOrderImport::ValidatedAsShipment" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__update_refines_ivar_receiver
+    # Real-world Rails pattern: `if @company.save then @company.name`
+    # — `save` declared with a `when_true` postcondition that narrows the
+    # receiver to a `Validated` marker promoting `name` from `String?`
+    # to `String`. Inside the `if`, `@company.name.upcase` must type-check
+    # because the ivar is narrowed.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIvarUser
+            attr_reader name: String?
+            def save: () -> bool
+
+            class Validated
+              attr_reader name: String
+            end
+          end
+
+          class PCIvarSaveHost
+            @user: PCIvarUser
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          PCIvarSaveHost.new.instance_eval do
+            if @user.save
+              @user.name.upcase
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIvarUser",
+          "method" => "save",
+          "when_true" => { "self" => "PCIvarUser & PCIvarUser::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__may_write_invalidates_stale_narrowing
+    # felixefelip/steep#68 (item 1). `guard` writes `@halted` only through the
+    # callee `redirect_to` (the `effects.may_write` entry is the call-graph
+    # closure). Without the effect, the first `performed?` guard refines
+    # `@halted`/the cached `performed?` to falsy, and the SECOND `performed?`
+    # reuses that stale view — making `return if performed?` look unreachable.
+    # The effect drops that narrowing at the `guard` call, so the second guard
+    # is reachable again.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class MWGuardHost
+            @halted: bool
+
+            def redirect_to: () -> void
+            def performed?: () -> bool
+            def guard: () -> void
+            def run: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class MWGuardHost
+            def redirect_to
+              @halted = true
+            end
+
+            def performed?
+              @halted
+            end
+
+            def guard
+              redirect_to
+            end
+
+            def run
+              guard
+              return if performed?
+
+              guard
+              return if performed?
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "MWGuardHost",
+          "method" => "redirect_to",
+          "effects" => { "may_write" => ["@halted"] }
+        },
+        {
+          "class" => "MWGuardHost",
+          "method" => "guard",
+          "effects" => { "may_write" => ["@halted"] }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__conditional_return_narrows_past_halt_check
+    # felixefelip/steep#68 item 2. `authenticate_user` proves `current_user`
+    # non-nil on its unhalted exit (`conditional_returns`, gated by `@halted`);
+    # `performed?` is a transparent getter of `@halted` (`returns_ivar`). So
+    # after `authenticate_user; return if performed?`, the guard's continuing
+    # branch has `@halted` falsy, and the gated fact fires: `current_user` is
+    # `User`. Without the `return if performed?`, the fact stays gated and the
+    # deref must still error — that is the soundness boundary.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class CRHost
+            @halted: bool
+
+            def current_user: () -> User?
+            def redirect_to: () -> void
+            def performed?: () -> bool
+            def authenticate_user: () -> void
+            def guarded: () -> void
+            def unguarded: () -> void
+          end
+
+          class User
+            def full_name: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class CRHost
+            def current_user
+              User.new if @halted
+            end
+
+            def redirect_to
+              @halted = true
+            end
+
+            def performed?
+              @halted
+            end
+
+            def authenticate_user
+              unless current_user
+                redirect_to
+                return
+              end
+            end
+
+            def guarded
+              authenticate_user
+              return if performed?
+
+              current_user.full_name
+            end
+
+            def unguarded
+              authenticate_user
+              current_user.full_name
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "CRHost",
+          "method" => "performed?",
+          "effects" => { "returns_ivar" => "@halted" }
+        },
+        {
+          "class" => "CRHost",
+          "method" => "authenticate_user",
+          "conditional_returns" => {
+            "current_user" => { "gate_ivar" => "@halted", "type" => "::User" }
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 30
+                character: 17
+              end:
+                line: 30
+                character: 26
+            severity: ERROR
+            message: Type `(::User | nil)` does not have method `full_name`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__conditional_const_return_narrows_past_halt_check
+    # felixefelip/steep#68 item 3. `authenticate_user` writes `Current.user =`
+    # a non-nil value on its unhalted exit (`conditional_const_returns`, gated by
+    # `@halted`). After `authenticate_user; return if performed?`, a read of the
+    # constant attribute `Current.user` narrows to `User`; without the guard it
+    # stays nilable and errors.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class CCHost
+            @halted: bool
+
+            def current_user: () -> User?
+            def redirect_to: () -> void
+            def performed?: () -> bool
+            def authenticate_user: () -> void
+            def guarded: () -> void
+            def unguarded: () -> void
+          end
+
+          class Current
+            def self.user: () -> User?
+            def self.user=: (User?) -> User?
+          end
+
+          class User
+            def id: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class CCHost
+            def current_user
+              User.new if @halted
+            end
+
+            def redirect_to
+              @halted = true
+            end
+
+            def performed?
+              @halted
+            end
+
+            def authenticate_user
+              unless current_user
+                redirect_to
+                return
+              end
+              Current.user = current_user
+            end
+
+            def guarded
+              authenticate_user
+              return if performed?
+
+              Current.user.id
+            end
+
+            def unguarded
+              authenticate_user
+              Current.user.id
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "CCHost",
+          "method" => "performed?",
+          "effects" => { "returns_ivar" => "@halted" }
+        },
+        {
+          "class" => "CCHost",
+          "method" => "authenticate_user",
+          "conditional_const_returns" => {
+            "Current.user" => { "gate_ivar" => "@halted", "type" => "::User" }
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 31
+                character: 17
+              end:
+                line: 31
+                character: 19
+            severity: ERROR
+            message: Type `(::User | nil)` does not have method `id`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__method_entry_facts_narrow_inside_body
+    # felixefelip/steep#68 item 4. A `method_entry_facts` entry (inferred from a
+    # runner that shows `log_it` runs after the guard) narrows `Current.user`
+    # and `current_user` UNCONDITIONALLY at `log_it`'s entry, so reads inside its
+    # body typecheck. A method with no entry facts (`orphan`) still errors.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class MEHost
+            def current_user: () -> User?
+            def log_it: () -> void
+            def orphan: () -> void
+          end
+
+          class Current
+            def self.user: () -> User?
+          end
+
+          class User
+            def id: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class MEHost
+            def current_user
+              _ = nil
+            end
+
+            def log_it
+              current_user.id
+              Current.user.id
+            end
+
+            def orphan
+              Current.user.id
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([]).then { |_|
+        Steep::Postconditions::Store.from_hash(
+          {
+            "method_entry_facts" => [
+              {
+                "class" => "MEHost",
+                "method" => "log_it",
+                "self_methods" => { "current_user" => "::User" },
+                "consts" => { "Current.user" => "::User" }
+              }
+            ]
+          },
+          source: "test"
+        )
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 12
+                character: 17
+              end:
+                line: 12
+                character: 19
+            severity: ERROR
+            message: Type `(::User | nil)` does not have method `id`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__argument_entry_facts_narrow_inside_matching_branch
+    # Argument-sensitive entry facts (peça 3). `show` is a shared dispatcher: its
+    # whole-method entry facts are the MEET over all call sites, which proves nothing.
+    # But a `when :name` branch runs only for callers who passed `:name`, and those
+    # callers established `AEFoo.name` — so the partition narrows the read inside that
+    # branch only. `:age` gets its own partition; `:other`, with no partition, still
+    # errors (negative control), as does a read outside the `case`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class AEFoo
+            def self.name: () -> String?
+          end
+
+          class AEAge
+            def self.value: () -> Integer?
+          end
+
+          class AEDispatcher
+            def show: (Symbol) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class AEDispatcher
+            def show(which)
+              AEFoo.name.upcase
+
+              case which
+              when :name then AEFoo.name.upcase
+              when :age then AEAge.value.abs
+              when :other then AEFoo.name.upcase
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: Steep::Postconditions::Store.from_hash(
+        {
+          "argument_entry_facts" => [
+            {
+              "class" => "AEDispatcher",
+              "method" => "show",
+              "param" => "which",
+              "pattern" => ":name",
+              "consts" => { "AEFoo.name" => "::String" }
+            },
+            {
+              "class" => "AEDispatcher",
+              "method" => "show",
+              "param" => "which",
+              "pattern" => ":age",
+              "consts" => { "AEAge.value" => "::Integer" }
+            }
+          ]
+        },
+        source: "test"
+      ),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 15
+              end:
+                line: 3
+                character: 21
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+          - range:
+              start:
+                line: 8
+                character: 32
+              end:
+                line: 8
+                character: 38
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__argument_entry_facts_narrow_in_if_equality_branch
+    # The `if` analogue of a `when` clause: `if which == :name` reaches its truthy branch
+    # only for callers who passed `:name`, so the same partition applies. `elsif` is a
+    # nested `if` and rides the same path. Negative controls: the `else` branch pins the
+    # argument to nothing, and a read before the `if` gets no partition at all.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IFFoo
+            def self.name: () -> String?
+          end
+
+          class IFAge
+            def self.value: () -> Integer?
+          end
+
+          class IFDispatcher
+            def show: (Symbol) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class IFDispatcher
+            def show(which)
+              IFFoo.name.upcase
+
+              if which == :name
+                IFFoo.name.upcase
+              elsif which == :age
+                IFAge.value.abs
+              else
+                IFFoo.name.upcase
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: Steep::Postconditions::Store.from_hash(
+        {
+          "argument_entry_facts" => [
+            {
+              "class" => "IFDispatcher",
+              "method" => "show",
+              "param" => "which",
+              "pattern" => ":name",
+              "consts" => { "IFFoo.name" => "::String" }
+            },
+            {
+              "class" => "IFDispatcher",
+              "method" => "show",
+              "param" => "which",
+              "pattern" => ":age",
+              "consts" => { "IFAge.value" => "::Integer" }
+            }
+          ]
+        },
+        source: "test"
+      ),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 15
+              end:
+                line: 3
+                character: 21
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+          - range:
+              start:
+                line: 10
+                character: 17
+              end:
+                line: 10
+                character: 23
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__method_entry_facts_narrow_ivars_at_entry
+    # felixefelip/steep#92 item 4. `method_entry_facts` carried self-methods and consts
+    # only; an ivar established before the call did not reach the callee's entry. Now it
+    # refines the declared ivar type there — `orphan`, with no entry facts, still errors.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class MEIvarHost
+            @post: String?
+            def log_it: () -> void
+            def orphan: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class MEIvarHost
+            def log_it
+              @post.upcase
+            end
+
+            def orphan
+              @post.upcase
+            end
+          end
+        RUBY
+      },
+      postconditions: Steep::Postconditions::Store.from_hash(
+        {
+          "method_entry_facts" => [
+            {
+              "class" => "MEIvarHost",
+              "method" => "log_it",
+              "ivars" => { "@post" => "::String" }
+            }
+          ]
+        },
+        source: "test"
+      ),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 7
+                character: 10
+              end:
+                line: 7
+                character: 16
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__argument_entry_facts_narrow_ivars_in_branch
+    # Ivar partitions: the `when :name` branch refines `@name` to the type the `:name`
+    # callers established, and only there. Negative controls: the `:other` branch has no
+    # partition, and a read outside the `case` sees the declared nilable type.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class IVDispatcher
+            @name: String?
+            @value: Integer?
+            def show: (Symbol) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class IVDispatcher
+            def show(which)
+              @name.upcase
+
+              case which
+              when :name then @name.upcase
+              when :age then @value.abs
+              when :other then @name.upcase
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: Steep::Postconditions::Store.from_hash(
+        {
+          "argument_entry_facts" => [
+            {
+              "class" => "IVDispatcher",
+              "method" => "show",
+              "param" => "which",
+              "pattern" => ":name",
+              "ivars" => { "@name" => "::String" }
+            },
+            {
+              "class" => "IVDispatcher",
+              "method" => "show",
+              "param" => "which",
+              "pattern" => ":age",
+              "ivars" => { "@value" => "::Integer" }
+            }
+          ]
+        },
+        source: "test"
+      ),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 10
+              end:
+                line: 3
+                character: 16
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+          - range:
+              start:
+                line: 8
+                character: 27
+              end:
+                line: 8
+                character: 33
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__argument_entry_facts_skip_reassigned_parameter
+    # The correlation is between the CALLER's argument and the branch. Once the body
+    # reassigns the parameter, testing it proves nothing about what the caller passed, so
+    # the partition must not apply — in either the `case` or the `if` shape.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class RAFoo
+            def self.name: () -> String?
+          end
+
+          class RADispatcher
+            def show: (Symbol) -> void
+            def other: () -> Symbol
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class RADispatcher
+            def show(which)
+              which = other
+
+              case which
+              when :name then RAFoo.name.upcase
+              end
+
+              if which == :name
+                RAFoo.name.upcase
+              end
+            end
+
+            def other
+              :name
+            end
+          end
+        RUBY
+      },
+      postconditions: Steep::Postconditions::Store.from_hash(
+        {
+          "argument_entry_facts" => [
+            {
+              "class" => "RADispatcher",
+              "method" => "show",
+              "param" => "which",
+              "pattern" => ":name",
+              "consts" => { "RAFoo.name" => "::String" }
+            }
+          ]
+        },
+        source: "test"
+      ),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 6
+                character: 31
+              end:
+                line: 6
+                character: 37
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+          - range:
+              start:
+                line: 10
+                character: 17
+              end:
+                line: 10
+                character: 23
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__argument_entry_facts_ignore_non_parameter_subject
+    # The correlation only holds when the case subject is a bare read of the parameter the
+    # fact was partitioned on. A `case` on something else (here a self-call) must NOT pick
+    # up the partition — the caller proved nothing about it.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class AEFoo2
+            def self.name: () -> String?
+          end
+
+          class AEDispatcher2
+            def show: (Symbol) -> void
+            def other: () -> Symbol
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class AEDispatcher2
+            def show(which)
+              case other
+              when :name then AEFoo2.name.upcase
+              end
+            end
+
+            def other
+              :name
+            end
+          end
+        RUBY
+      },
+      postconditions: Steep::Postconditions::Store.from_hash(
+        {
+          "argument_entry_facts" => [
+            {
+              "class" => "AEDispatcher2",
+              "method" => "show",
+              "param" => "which",
+              "pattern" => ":name",
+              "consts" => { "AEFoo2.name" => "::String" }
+            }
+          ]
+        },
+        source: "test"
+      ),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 32
+              end:
+                line: 4
+                character: 38
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__update_refines_receiver
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCUser
+            attr_reader name: String?
+            def update: (untyped) -> bool
+
+            class Validated
+              attr_reader name: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          user = PCUser.new
+          if user.update({})
+            user.name.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCUser",
+          "method" => "update",
+          "when_true" => { "self" => "PCUser & PCUser::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__composition_via_and
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCMixUser
+            attr_reader email: String?
+            attr_reader phone: String?
+            def email_required?: () -> bool
+            def phone_required?: () -> bool
+
+            class ValidatedAsEmail
+              attr_reader email: String
+            end
+
+            class ValidatedAsPhone
+              attr_reader phone: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          user = PCMixUser.new
+          if user.email_required? && user.phone_required?
+            user.email.length
+            user.phone.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCMixUser",
+          "method" => "email_required?",
+          "when_true" => { "self" => "PCMixUser & PCMixUser::ValidatedAsEmail" }
+        },
+        {
+          "class" => "PCMixUser",
+          "method" => "phone_required?",
+          "when_true" => { "self" => "PCMixUser & PCMixUser::ValidatedAsPhone" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__falsy_branch_not_refined_without_when_false
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCFalsyHost
+            attr_reader value: String?
+            def ready?: () -> bool
+
+            class Validated
+              attr_reader value: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          host = PCFalsyHost.new
+          unless host.ready?
+            host.value.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCFalsyHost",
+          "method" => "ready?",
+          "when_true" => { "self" => "PCFalsyHost & PCFalsyHost::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 13
+              end:
+                line: 3
+                character: 19
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__return_unless_pattern
+    # `return X unless cond` narrows the continuation to cond's truthy env.
+    # Mirrors `app/models/company.rb#store_code` from order_factory: column
+    # readers live on an AR mixin (`GeneratedAttributeMethods`), the
+    # predicate is on the class, and the marker module overrides only the
+    # column reader.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module PCRetCompany::GeneratedAttributeMethods
+            def code: () -> ::String?
+          end
+
+          class PCRetCompany
+            include PCRetCompany::GeneratedAttributeMethods
+            def store?: () -> bool
+
+            class Validated
+            end
+
+            class ValidatedAsStore
+              def code: () -> ::String
+            end
+
+            def self.first!: () -> (PCRetCompany & PCRetCompany::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          # @type self: PCRetCompany
+          company = PCRetCompany.first!
+          return "N/A" unless company.store?
+
+          company.code.length
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCRetCompany",
+          "method" => "store?",
+          "when_true" => { "self" => "PCRetCompany & PCRetCompany::ValidatedAsStore" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # via_receiver — Phase 2 (felixefelip/steep#14)
+  #
+  # Refines the *receiver of the receiver* of a predicate call. Covers
+  # delegation patterns: POROs (`def x; y.x; end`) and `has_one through:`.
+  # ---------------------------------------------------------------------------
+
+  def test_postconditions__via_receiver_poro_delegation
+    # account.profile.display_ready? narrows account.profile (via `self`)
+    # AND narrows account itself (via via_receiver), so the delegated
+    # accessor `account.nickname` resolves through Account's marker class.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCProfile
+            attr_reader nickname: String?
+            def display_ready?: () -> bool
+
+            class DisplayReady
+              attr_reader nickname: String
+            end
+          end
+
+          class PCAccount
+            attr_reader profile: PCProfile
+            def nickname: () -> String?
+
+            class WithDisplayReadyProfile
+              def nickname: () -> String
+            end
+
+            def self.first: () -> PCAccount
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          account = PCAccount.first
+          if account.profile.display_ready?
+            account.nickname.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCProfile",
+          "method" => "display_ready?",
+          "when_true" => {
+            "self" => "PCProfile & PCProfile::DisplayReady",
+            "via_receiver" => [
+              { "through" => "PCAccount#profile",
+                "as" => "PCAccount & PCAccount::WithDisplayReadyProfile" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__via_receiver_does_not_match_other_method
+    # The via_receiver only fires when the through method matches.
+    # Calling .display_ready? on a *different* parent chain (.other.profile.display_ready?)
+    # must not narrow the irrelevant host.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCProfile2
+            def display_ready?: () -> bool
+          end
+
+          class PCOtherHost
+            attr_reader profile: PCProfile2
+            def nickname: () -> String?
+            def self.first: () -> PCOtherHost
+          end
+
+          class PCHost
+            attr_reader profile: PCProfile2
+            def nickname: () -> String?
+
+            class Refined
+              def nickname: () -> String
+            end
+
+            def self.first: () -> PCHost
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          host = PCOtherHost.first
+          if host.profile.display_ready?
+            host.nickname.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCProfile2",
+          "method" => "display_ready?",
+          "when_true" => {
+            "via_receiver" => [
+              { "through" => "PCHost#profile",
+                "as" => "PCHost & PCHost::Refined" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 16
+              end:
+                line: 3
+                character: 22
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `upcase`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__via_receiver_when_false_branch
+    # via_receiver under `when_false` narrows the host in the falsy branch.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCInner
+            def fail?: () -> bool
+          end
+
+          class PCOuter
+            attr_reader inner: PCInner
+            def message: () -> String?
+
+            class WhenNotFail
+              def message: () -> String
+            end
+
+            def self.first: () -> PCOuter
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          outer = PCOuter.first
+          unless outer.inner.fail?
+            outer.message.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCInner",
+          "method" => "fail?",
+          "when_false" => {
+            "via_receiver" => [
+              { "through" => "PCOuter#inner",
+                "as" => "PCOuter & PCOuter::WhenNotFail" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__phase1_send_receiver_narrowing
+    # Sanity check: Phase 1's `self:` refinement should already narrow a
+    # pure-send receiver (account.profile). This isolates whether the
+    # bug in compose_with_self is in Phase 2 or pre-existing.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCSendProfile
+            attr_reader nickname: String?
+            def display_ready?: () -> bool
+
+            class Ready
+              attr_reader nickname: String
+            end
+          end
+
+          class PCSendAccount
+            attr_reader profile: PCSendProfile
+            def self.first: () -> PCSendAccount
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          account = PCSendAccount.first
+          if account.profile.display_ready?
+            account.profile.nickname.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCSendProfile",
+          "method" => "display_ready?",
+          "when_true" => { "self" => "PCSendProfile & PCSendProfile::Ready" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__via_receiver_composes_with_self
+    # Both `self:` and `via_receiver` apply at once: account.profile
+    # (the inner receiver) gets the Profile marker AND account gets the
+    # Account marker. Accessor on both should narrow.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCComProfile
+            attr_reader nickname: String?
+            def display_ready?: () -> bool
+
+            class Ready
+              attr_reader nickname: String
+            end
+          end
+
+          class PCComAccount
+            attr_reader profile: PCComProfile
+            def nickname: () -> String?
+
+            class WithReady
+              def nickname: () -> String
+            end
+
+            def self.first: () -> PCComAccount
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          account = PCComAccount.first
+          if account.profile.display_ready?
+            account.profile.nickname.upcase
+            account.nickname.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCComProfile",
+          "method" => "display_ready?",
+          "when_true" => {
+            "self" => "PCComProfile & PCComProfile::Ready",
+            "via_receiver" => [
+              { "through" => "PCComAccount#profile",
+                "as" => "PCComAccount & PCComAccount::WithReady" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Ivar postconditions (felixefelip/steep#23)
+  #
+  # `when_true.ivars` refines the caller's `instance_variable_types`
+  # after a self-receiver call. Models Rails `set_company` / form-object
+  # `load!(id)` patterns where the method body assigns an ivar to a
+  # narrower type than the ivar's declaration.
+  # ---------------------------------------------------------------------------
+
+  def test_postconditions__ivars_refined_after_self_call
+    # Explicit `set_company` call narrows `@company` from the declared
+    # union to the validated branch.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIvarPostCompany
+            def self.find: (Integer) -> (PCIvarPostCompany & PCIvarPostCompany::Validated)
+          end
+
+          module PCIvarPostCompany::Validated
+            def name_required: () -> String
+          end
+
+          class PCIvarPostController
+            @company: (PCIvarPostCompany & PCIvarPostCompany::Validated) | PCIvarPostCompany
+
+            def set_company: () -> (PCIvarPostCompany & PCIvarPostCompany::Validated)
+            def edit: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCIvarPostController
+            # @dynamic set_company, edit
+
+            def edit
+              set_company
+              @company.name_required
+            end
+
+            def set_company
+              @company = PCIvarPostCompany.find(1)
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIvarPostController",
+          "method" => "set_company",
+          "unconditional" => {
+            "ivars" => { "@company" => "PCIvarPostCompany & PCIvarPostCompany::Validated" }
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__ivars_not_applied_for_non_self_receiver
+    # Same shape, but the call is `other.set_company` rather than
+    # `set_company`. Refining our `@company` from someone else's call
+    # is unsound, so the rule must skip and the validated-only method
+    # errors.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIvarPostCompanyB
+            def self.find: (Integer) -> (PCIvarPostCompanyB & PCIvarPostCompanyB::Validated)
+          end
+
+          module PCIvarPostCompanyB::Validated
+            def name_required: () -> String
+          end
+
+          class PCIvarPostControllerB
+            @company: (PCIvarPostCompanyB & PCIvarPostCompanyB::Validated) | PCIvarPostCompanyB
+
+            def set_company: () -> (PCIvarPostCompanyB & PCIvarPostCompanyB::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          # @type var other: PCIvarPostControllerB
+          other = (_ = nil)
+          PCIvarPostControllerB.new.instance_eval do
+            other.set_company
+            @company.name_required
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIvarPostControllerB",
+          "method" => "set_company",
+          "unconditional" => {
+            "ivars" => { "@company" => "PCIvarPostCompanyB & PCIvarPostCompanyB::Validated" }
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 11
+              end:
+                line: 5
+                character: 24
+            severity: ERROR
+            message: Type `((::PCIvarPostCompanyB & ::PCIvarPostCompanyB::Validated) | ::PCIvarPostCompanyB)`
+              does not have method `name_required`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__ivars_unconditional_fires_before_conditional_use
+    # When a method that narrows an ivar via `unconditional.ivars` is
+    # called as the guard of an `if`, the narrowing applies *before*
+    # the conditional split — the ivar is already refined in both
+    # branches. Validates that `unconditional:` doesn't depend on
+    # entering through `apply_postconditions` (which only fires in
+    # conditional contexts).
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIvarPostCompanyC
+            def self.find: (Integer) -> (PCIvarPostCompanyC & PCIvarPostCompanyC::Validated)
+          end
+
+          module PCIvarPostCompanyC::Validated
+            def name_required: () -> String
+          end
+
+          class PCIvarPostControllerC
+            @company: (PCIvarPostCompanyC & PCIvarPostCompanyC::Validated) | PCIvarPostCompanyC
+
+            def setup_then_decide: () -> void
+            private def setup: () -> (PCIvarPostCompanyC & PCIvarPostCompanyC::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCIvarPostControllerC
+            # @dynamic setup_then_decide
+
+            def setup_then_decide
+              setup
+              @company.name_required
+            end
+
+            def setup
+              @company = PCIvarPostCompanyC.find(1)
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIvarPostControllerC",
+          "method" => "setup",
+          "unconditional" => {
+            "ivars" => { "@company" => "PCIvarPostCompanyC & PCIvarPostCompanyC::Validated" }
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__predicate_from_included_module_matches_by_receiver_type
+    # Predicate `verified?` is defined in module `PCVerifiable`, which
+    # `PCDocument` includes. The sidecar is keyed on `PCDocument` (the
+    # receiver's concrete type), not on the module. Lookup must walk the
+    # receiver type to find the entry. Hits the same shape as Rails AR
+    # column predicates that live in `Model::GeneratedAttributeMethods`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module PCVerifiable
+            def verified?: () -> bool
+          end
+
+          class PCDocument
+            include PCVerifiable
+            attr_reader content: String?
+
+            class Verified
+              attr_reader content: String
+            end
+
+            def self.first!: () -> PCDocument
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          doc = PCDocument.first!
+          if doc.verified?
+            doc.content.upcase
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDocument",
+          "method" => "verified?",
+          "when_true" => { "self" => "PCDocument & PCDocument::Verified" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__via_receiver_matches_intersected_inner_type
+    # The inner receiver may already be narrowed (e.g. another marker
+    # applied earlier). The `through:` check walks intersections.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIntInner
+            def ready?: () -> bool
+          end
+
+          class PCIntHost
+            attr_reader inner: PCIntInner
+            def value: () -> String?
+
+            class Marker
+            end
+
+            class Refined
+              def value: () -> String
+            end
+
+            def self.first: () -> (PCIntHost & PCIntHost::Marker)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          host = PCIntHost.first
+          if host.inner.ready?
+            host.value.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIntInner",
+          "method" => "ready?",
+          "when_true" => {
+            "via_receiver" => [
+              { "through" => "PCIntHost#inner",
+                "as" => "PCIntHost & PCIntHost::Refined" }
+            ]
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__dropout_on_attribute_write
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCDropOrderImport
+            attr_accessor logistics_operator: PCDropLogisticsOperator?
+            def shipment?: () -> bool
+
+            class ValidatedAsShipment
+              attr_reader logistics_operator: PCDropLogisticsOperator
+            end
+          end
+
+          class PCDropLogisticsOperator
+            attr_reader name: String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          order_import = PCDropOrderImport.new
+          if order_import.shipment?
+            order_import.logistics_operator = nil
+            order_import.logistics_operator.name
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDropOrderImport",
+          "method" => "shipment?",
+          "when_true" => { "self" => "PCDropOrderImport & PCDropOrderImport::ValidatedAsShipment" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 34
+              end:
+                line: 4
+                character: 38
+            severity: ERROR
+            message: Type `(::PCDropLogisticsOperator | nil)` does not have method `name`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_attribute_write_narrows_pure_reader
+    # `receiver.attr = value` narrows `receiver.attr` to the assigned value's
+    # type for a plain (non-self, non-intersection) receiver, so the later
+    # read sees the non-nil type. (felixefelip/steep, external-setter
+    # preconditions.)
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class AWBoard
+            def user_name: () -> String
+          end
+          class AWColumn
+            attr_accessor board: AWBoard?
+            def initialize: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          column = AWColumn.new
+          column.board = AWBoard.new
+          column.board.user_name
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__negative_control_no_entry_no_refinement
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCNoEntry
+            attr_reader value: String?
+            def ready?: () -> bool
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          host = PCNoEntry.new
+          if host.ready?
+            host.value.length
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 13
+              end:
+                line: 3
+                character: 19
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # Edge cases — felixefelip/steep#14 issue comment
+  #
+  # Each test below corresponds to a numbered scenario in the issue thread.
+  # Scenarios that depend on undecided semantics (#9 safe-nav) or that fall
+  # outside Phase 1/2 scope (#10 arg-dependent, #11 recursive marker) are not
+  # covered here. Some tests document *current* behavior of edge cases that
+  # may not yet be supported (generics with free vars, union receivers,
+  # missing marker classes) — when the behavior changes, the assertion shifts.
+  # ---------------------------------------------------------------------------
+
+  # #1 — Predicate inherited from a superclass.
+  # Sidecar is keyed on `Base#authenticated?`. The call site uses an `Admin`
+  # receiver, which inherits `authenticated?`. Lookup must fall back through
+  # `call.method_decls.type_name` (Base) to find the entry.
+  def test_postconditions__edge_01_inherited_predicate
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeBase
+            attr_reader token: String?
+            def authenticated?: () -> bool
+
+            class Authenticated
+              attr_reader token: String
+            end
+          end
+
+          class PCEdgeAdmin < PCEdgeBase
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          admin = PCEdgeAdmin.new
+          if admin.authenticated?
+            admin.token.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeBase",
+          "method" => "authenticated?",
+          "when_true" => { "self" => "PCEdgeBase & PCEdgeBase::Authenticated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # #3 — Marker references a generic parameter. The sidecar declares
+  # `Container[T] & Container::WithValue[T]`. The free type variable `T` in
+  # the parsed RBS is not substituted by the factory; `build_instance` raises
+  # `Unknown name for build_instance: ::T` from RBS's definition builder.
+  # This is a real bug — generic markers are not supported and crash the type
+  # check. Skipped until fixed; remove the skip when the factory grows a
+  # substitution step for the receiver's generic args.
+  def test_postconditions__edge_03_generic_marker
+    skip "TODO: generic free var T in postcondition marker crashes RBS::DefinitionBuilder#build_instance"
+  end
+
+  # #4 — Union receiver. `pet : (Cat | Dog)` calls `.hungry?`, sidecars on
+  # both Cat and Dog. Steep dispatches the call separately for each union
+  # member, so narrowing applies independently to each side and both
+  # accessors resolve through their respective markers. This passes — locks
+  # in the (surprisingly good) current behavior.
+  def test_postconditions__edge_04_union_receiver
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeCat
+            attr_reader meal_at: String?
+            def hungry?: () -> bool
+
+            class Hungry
+              attr_reader meal_at: String
+            end
+          end
+
+          class PCEdgeDog
+            attr_reader meal_at: String?
+            def hungry?: () -> bool
+
+            class Hungry
+              attr_reader meal_at: String
+            end
+          end
+
+          class PCEdgePetFactory
+            def self.pet: () -> (PCEdgeCat | PCEdgeDog)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          pet = PCEdgePetFactory.pet
+          if pet.hungry?
+            pet.meal_at.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeCat",
+          "method" => "hungry?",
+          "when_true" => { "self" => "PCEdgeCat & PCEdgeCat::Hungry" }
+        },
+        {
+          "class" => "PCEdgeDog",
+          "method" => "hungry?",
+          "when_true" => { "self" => "PCEdgeDog & PCEdgeDog::Hungry" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # #6 — Nested control flow. Two predicates on the same receiver compose
+  # into `Door & Locked & Open` inside the inner branch.
+  def test_postconditions__edge_06_nested_control_flow
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeDoor
+            attr_reader key: String?
+            attr_reader log: String?
+            def locked?: () -> bool
+            def open?: () -> bool
+
+            class Locked
+              attr_reader key: String
+            end
+
+            class Open
+              attr_reader log: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          door = PCEdgeDoor.new
+          if door.locked?
+            if door.open?
+              door.key.length
+              door.log.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeDoor",
+          "method" => "locked?",
+          "when_true" => { "self" => "PCEdgeDoor & PCEdgeDoor::Locked" }
+        },
+        {
+          "class" => "PCEdgeDoor",
+          "method" => "open?",
+          "when_true" => { "self" => "PCEdgeDoor & PCEdgeDoor::Open" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # #7 — Rebinding the local variable inside the truthy branch drops the
+  # narrowing. After `user = PCEdgeUser.new`, the previous refinement no
+  # longer applies, so `user.name` is back to `String?`.
+  def test_postconditions__edge_07_rebind_invalidates
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeUser
+            attr_reader name: String?
+            def valid?: () -> bool
+
+            class Validated
+              attr_reader name: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          user = PCEdgeUser.new
+          if user.valid?
+            user = PCEdgeUser.new
+            user.name.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeUser",
+          "method" => "valid?",
+          "when_true" => { "self" => "PCEdgeUser & PCEdgeUser::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 12
+              end:
+                line: 4
+                character: 18
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  # #8 — `case` with predicate-based when clauses. Each branch narrows the
+  # receiver independently to that branch's marker.
+  def test_postconditions__edge_08_case_when_predicates
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeOrder
+            attr_reader draft_log: String?
+            attr_reader published_log: String?
+            def draft?: () -> bool
+            def published?: () -> bool
+
+            class DraftOrder
+              attr_reader draft_log: String
+            end
+
+            class PublishedOrder
+              attr_reader published_log: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          order = PCEdgeOrder.new
+          case
+          when order.draft?     then order.draft_log.length
+          when order.published? then order.published_log.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeOrder",
+          "method" => "draft?",
+          "when_true" => { "self" => "PCEdgeOrder & PCEdgeOrder::DraftOrder" }
+        },
+        {
+          "class" => "PCEdgeOrder",
+          "method" => "published?",
+          "when_true" => { "self" => "PCEdgeOrder & PCEdgeOrder::PublishedOrder" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # #12 — Sidecar marker references a class that does not exist in RBS.
+  # `Postconditions::Branch#rbs_type` parses the marker string optimistically
+  # and `factory.type` builds an `AST::Types::Name::Instance` pointing at the
+  # non-existent class. Later, when the type checker tries to resolve methods
+  # on the intersection, `RBS::DefinitionBuilder#build_instance` raises
+  # `Unknown name for build_instance: ::Host::DoesNotExist`. Same root cause
+  # as edge_03 — the failure surfaces as `Ruby::UnexpectedError`, not as a
+  # graceful "marker missing" diagnostic.
+  #
+  # Skipped until there is a fail-safe: either validate marker names at
+  # sidecar load (preferred — same fix as `rbs_definition_resolver`), or
+  # rescue the build error and degrade to no narrowing for this entry.
+  def test_postconditions__edge_12_missing_marker_class
+    skip "TODO: postcondition marker referencing a missing RBS class crashes RBS::DefinitionBuilder#build_instance; add fail-safe at sidecar load"
+  end
+
+  # #13 — `return unless` chain where the second guard contradicts the first
+  # narrowing. Both branches narrow the receiver to different markers; the
+  # code after both guards is unreachable in practice. Documents the
+  # composed-narrowing behavior past two guards (no false diagnostics on the
+  # third statement just because the intersection becomes unsatisfiable).
+  def test_postconditions__edge_13_contradiction_guards
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeContradiction
+            attr_reader status: String?
+            def draft?: () -> bool
+            def published?: () -> bool
+
+            class DraftOrder
+              attr_reader status: String
+            end
+
+            class PublishedOrder
+              attr_reader status: String
+            end
+
+            def self.new!: () -> PCEdgeContradiction
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          order = PCEdgeContradiction.new!
+          return unless order.draft?
+          return unless order.published?
+          order.status.length
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeContradiction",
+          "method" => "draft?",
+          "when_true" => { "self" => "PCEdgeContradiction & PCEdgeContradiction::DraftOrder" }
+        },
+        {
+          "class" => "PCEdgeContradiction",
+          "method" => "published?",
+          "when_true" => { "self" => "PCEdgeContradiction & PCEdgeContradiction::PublishedOrder" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # #14 — Bang vs question mark. Conventionally `loaded!` is impure (mutates
+  # state) and `loaded?` is pure. The user's intent was that postconditions
+  # should *only* fire on pure calls, so `loaded!` would not narrow.
+  # Current behavior: `pure?` for an RBS-declared method is determined by
+  # the call site (no Ruby def body to inspect), and the `!` suffix is not
+  # treated as an impurity marker. Both calls narrow.
+  #
+  # This test locks in current behavior. If/when bang methods are classified
+  # impure-by-convention for postcondition lookup, flip the expectation:
+  # the `cache_a.data.size` line should then raise a NoMethod on (Hash | nil).
+  def test_postconditions__edge_14_bang_predicate_currently_narrows
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeCache
+            attr_reader data: Hash[String, untyped]?
+            def loaded!: () -> Hash[String, untyped]
+            def loaded?: () -> bool
+
+            class Loaded
+              attr_reader data: Hash[String, untyped]
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          cache_a = PCEdgeCache.new
+          if cache_a.loaded!
+            cache_a.data.size
+          end
+
+          cache_b = PCEdgeCache.new
+          if cache_b.loaded?
+            cache_b.data.size
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeCache",
+          "method" => "loaded!",
+          "when_true" => { "self" => "PCEdgeCache & PCEdgeCache::Loaded" }
+        },
+        {
+          "class" => "PCEdgeCache",
+          "method" => "loaded?",
+          "when_true" => { "self" => "PCEdgeCache & PCEdgeCache::Loaded" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # #15 — Narrowing inside a block. `item.valid?` narrows `item` within the
+  # truthy branch of the if, but does not leak past the if (still inside the
+  # `each` block) nor across iterations.
+  def test_postconditions__edge_15_loop_block
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeItem
+            attr_reader payload: String?
+            def valid?: () -> bool
+
+            class Validated
+              attr_reader payload: String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          items = [PCEdgeItem.new] #: Array[PCEdgeItem]
+          items.each do |item|
+            if item.valid?
+              item.payload.length
+            end
+            item.payload.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeItem",
+          "method" => "valid?",
+          "when_true" => { "self" => "PCEdgeItem & PCEdgeItem::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 6
+                character: 15
+              end:
+                line: 6
+                character: 21
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  # #16 — Marker ordering in an intersection. When two predicates narrow
+  # overlapping accessors with different return types, `intersection_shape`
+  # follows last-wins: the last marker in the intersection determines which
+  # method definition wins for an overlapping name. This locks the current
+  # behavior so reordering the markers in the sidecar can't regress silently.
+  def test_postconditions__edge_16_marker_last_wins
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEdgeFoo
+            def code: () -> String?
+            def m1?: () -> bool
+            def m2?: () -> bool
+
+            class Marker1
+              def code: () -> String
+            end
+
+            class Marker2
+              def code: () -> Integer
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          foo = PCEdgeFoo.new
+          if foo.m1? && foo.m2?
+            x = foo.code #: Integer
+            x + 1
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCEdgeFoo",
+          "method" => "m1?",
+          "when_true" => { "self" => "PCEdgeFoo & PCEdgeFoo::Marker1" }
+        },
+        {
+          "class" => "PCEdgeFoo",
+          "method" => "m2?",
+          "when_true" => { "self" => "PCEdgeFoo & PCEdgeFoo::Marker2" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # felixefelip/steep#25: postcondition narrowing of `self`
+  #
+  # Before the fix, `refine_node_type` had no `:self` case, so a postcondition
+  # whose receiver is `self` (implicit `if save` or explicit `if self.save`
+  # inside a method body) fell through to `[env, env]` and never narrowed.
+  # The fix routes those refinements to `TypeEnv#refined_self_type`, which
+  # overlays `Context::ModuleContext#self_type` for the narrowed branch.
+  # ---------------------------------------------------------------------------
+
+  def test_postconditions__self_refines_implicit_self_call
+    # `if save` is dispatched with `receiver = nil` (implicit self).
+    # Inside the truthy branch, `name.camelize` is also implicit-self;
+    # both reads should see `self` as `PCSelfModel & PCSelfModel::Validated`
+    # so `name` returns `String` (non-nil) and `.camelize` resolves.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCSelfModel
+            def name: () -> String?
+            def save: () -> bool
+            def teste2: () -> String?
+
+            class Validated
+              def name: () -> String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCSelfModel
+            # @dynamic name, save
+            def teste2
+              if save
+                name
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCSelfModel",
+          "method" => "save",
+          "when_true" => { "self" => "PCSelfModel & PCSelfModel::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__self_refines_explicit_self_call
+    # Same shape but the receiver is `:self` (an AST node) instead of
+    # nil. The `:self` case in `refine_node_type` should still write to
+    # `env.refined_self_type` and the inner read of `name` (implicit
+    # self) should pick that up.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCSelfExplicit
+            def name: () -> String?
+            def save: () -> bool
+            def teste2: () -> String?
+
+            class Validated
+              def name: () -> String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCSelfExplicit
+            # @dynamic name, save
+            def teste2
+              if self.save
+                name
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCSelfExplicit",
+          "method" => "save",
+          "when_true" => { "self" => "PCSelfExplicit & PCSelfExplicit::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__self_does_not_leak_to_falsy_branch
+    # In the `else` branch — where `save` returned a falsy value and
+    # no `when_false` postcondition was declared — `self` must remain
+    # at its declared (widest) shape. Reading `name` from there is
+    # still `String?`, so the truthy-branch `String`-only `.length`
+    # call inside the else MUST flag an error.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCSelfLeak
+            def name: () -> String?
+            def save: () -> bool
+            def teste2: () -> Integer?
+
+            class Validated
+              def name: () -> String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCSelfLeak
+            # @dynamic name, save
+            def teste2
+              if save
+                nil
+              else
+                name.length
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCSelfLeak",
+          "method" => "save",
+          "when_true" => { "self" => "PCSelfLeak & PCSelfLeak::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 7
+                character: 11
+              end:
+                line: 7
+                character: 17
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__refined_self_composes_with_and
+    # Both predicates refine self. Inside the truthy branch of
+    # `save && valid?`, self must be `Model & Validated & Active` so
+    # both `name` (from Validated) and `tag` (from Active) resolve to
+    # non-nil readers. This verifies that `refined_self_type` composes
+    # via intersection across `&&`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCSelfAnd
+            def name: () -> String?
+            def tag: () -> String?
+            def save: () -> bool
+            def valid?: () -> bool
+            def teste2: () -> String?
+
+            class Validated
+              def name: () -> String
+            end
+
+            class Active
+              def tag: () -> String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCSelfAnd
+            # @dynamic name, tag, save, valid?
+            def teste2
+              if save && valid?
+                name
+                tag
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCSelfAnd",
+          "method" => "save",
+          "when_true" => { "self" => "PCSelfAnd & PCSelfAnd::Validated" }
+        },
+        {
+          "class" => "PCSelfAnd",
+          "method" => "valid?",
+          "when_true" => { "self" => "PCSelfAnd & PCSelfAnd::Active" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__refined_self_cleared_on_method_entry
+    # A refinement applied in `method_a` (inside its `if save` branch)
+    # must NOT survive into `method_b`'s body. The env is rebuilt on
+    # method entry, so `refined_self_type` starts as `nil` again and
+    # `name.length` in `method_b` flags a NoMethod against `String?`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCSelfReset
+            def name: () -> String?
+            def save: () -> bool
+            def method_a: () -> String?
+            def method_b: () -> Integer
+
+            class Validated
+              def name: () -> String
+            end
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCSelfReset
+            # @dynamic name, save
+            def method_a
+              if save
+                name
+              end
+            end
+
+            def method_b
+              name.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCSelfReset",
+          "method" => "save",
+          "when_true" => { "self" => "PCSelfReset & PCSelfReset::Validated" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 10
+                character: 9
+              end:
+                line: 10
+                character: 15
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # felixefelip/steep#27: generic callback sidecar.
+  #
+  # When `.steep_callbacks.yml` declares that handler H runs before
+  # method M of class C, Steep applies H's `unconditional` postcondition
+  # to M's initial env. This lets `before_action :set_post`-style hooks
+  # (translated by the generator into the sidecar) refine ivars at the
+  # entry of every action they cover, without H being called explicitly
+  # in M's body.
+  # ---------------------------------------------------------------------------
+
+  def callbacks_store(entries)
+    Steep::Callbacks::Store.from_hash(
+      { "callbacks" => entries },
+      source: "test"
+    )
+  end
+
+  def test_callbacks__refines_ivar_at_method_entry
+    # `set_post` writes `@post: PCBaCompany & Validated`. The callback
+    # declares it runs before `show`. Inside `show`'s body, `@post.title`
+    # must typecheck because the env starts with the refinement already
+    # applied. Without the callback hook, `@post` stays at the declared
+    # nilable union and `@post.title` flags NoMethod.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCBaCompany
+            def self.find: (Integer) -> (PCBaCompany & PCBaCompany::Validated)
+          end
+
+          module PCBaCompany::Validated
+            def title: () -> String
+          end
+
+          class PCBaController
+            @company: (PCBaCompany & PCBaCompany::Validated) | PCBaCompany | nil
+
+            def show: () -> String
+            def set_company: () -> (PCBaCompany & PCBaCompany::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCBaController
+            # @dynamic show, set_company
+            def show
+              @company.title
+            end
+
+            def set_company
+              @company = PCBaCompany.find(1)
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCBaController",
+          "method" => "set_company",
+          "unconditional" => {
+            "ivars" => { "@company" => "PCBaCompany & PCBaCompany::Validated" }
+          }
+        }
+      ]),
+      callbacks: callbacks_store([
+        {
+          "class" => "PCBaController",
+          "apply_postcondition_of" => "set_company",
+          "runs_before" => ["show"]
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_callbacks__applies_self_refines_self_at_method_entry
+    # ActiveRecord after-validation callback: `atualizar_calendario` runs in
+    # `after_save`, so the record satisfies its presence validations and
+    # `self` is `Dose & Dose::Validated`, where `caderneta` is non-nil. The
+    # callback's `applies_self` refines `self` at method entry, so
+    # `caderneta.atualizar` typechecks. Without it, `caderneta` stays
+    # `Caderneta?` and the call flags NoMethod on nil.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Caderneta
+            def atualizar: () -> void
+          end
+
+          class Dose
+            def caderneta: () -> Caderneta?
+            def atualizar_calendario: () -> void
+          end
+
+          module Dose::Validated
+            def caderneta: () -> Caderneta
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Dose
+            # @dynamic caderneta, atualizar_calendario
+            def atualizar_calendario
+              caderneta.atualizar
+            end
+          end
+        RUBY
+      },
+      callbacks: callbacks_store([
+        {
+          "class" => "Dose",
+          "applies_self" => "Dose & Dose::Validated",
+          "runs_before" => ["atualizar_calendario"]
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_callbacks__applies_self_not_in_runs_before_keeps_nilable
+    # Negative: `outra` is NOT in runs_before, so `self` is not refined and
+    # `caderneta` stays nilable — the call must flag NoMethod.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Caderneta
+            def atualizar: () -> void
+          end
+
+          class Dose
+            def caderneta: () -> Caderneta?
+            def outra: () -> void
+          end
+
+          module Dose::Validated
+            def caderneta: () -> Caderneta
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Dose
+            # @dynamic caderneta, outra
+            def outra
+              caderneta.atualizar
+            end
+          end
+        RUBY
+      },
+      callbacks: callbacks_store([
+        {
+          "class" => "Dose",
+          "applies_self" => "Dose & Dose::Validated",
+          "runs_before" => ["atualizar_calendario"]
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 14
+              end:
+                line: 4
+                character: 23
+            severity: ERROR
+            message: Type `(::Caderneta | nil)` does not have method `atualizar`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_callbacks__applies_constants_refines_constant_reads
+    # Constant style (steep#27 follow-up): a guarded before_action populated
+    # CurrentAttributes-style global state, so inside the listed methods
+    # reads of the constant are narrowed with a marker whose `user` is
+    # non-nil. Covers both `PCCnCurrent` and `::PCCnCurrent` read forms
+    # (relative and absolute TypeName keys).
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCCnUser
+            def name: () -> String
+          end
+
+          class PCCnCurrent
+            def self.user: () -> PCCnUser?
+
+            module UserPopulated
+              def user: () -> PCCnUser
+            end
+          end
+
+          class PCCnController
+            def show: () -> String
+            def show_absolute: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCCnController
+            # @dynamic show, show_absolute
+            def show
+              PCCnCurrent.user.name
+            end
+
+            def show_absolute
+              ::PCCnCurrent.user.name
+            end
+          end
+        RUBY
+      },
+      callbacks: callbacks_store([
+        {
+          "class" => "PCCnController",
+          "applies_constants" => { "PCCnCurrent" => "singleton(PCCnCurrent) & PCCnCurrent::UserPopulated" },
+          "runs_before" => ["show", "show_absolute"]
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_callbacks__applies_constants_not_in_runs_before_keeps_declared
+    # Negative: `index` is NOT in runs_before, so the constant keeps its
+    # declared typing and `user` stays nilable — the call must flag
+    # NoMethod on nil.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCCnNegUser
+            def name: () -> String
+          end
+
+          class PCCnNegCurrent
+            def self.user: () -> PCCnNegUser?
+
+            module UserPopulated
+              def user: () -> PCCnNegUser
+            end
+          end
+
+          class PCCnNegController
+            def index: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCCnNegController
+            # @dynamic index
+            def index
+              PCCnNegCurrent.user.name
+            end
+          end
+        RUBY
+      },
+      callbacks: callbacks_store([
+        {
+          "class" => "PCCnNegController",
+          "applies_constants" => { "PCCnNegCurrent" => "singleton(PCCnNegCurrent) & PCCnNegCurrent::UserPopulated" },
+          "runs_before" => ["show"]
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 24
+              end:
+                line: 4
+                character: 28
+            severity: ERROR
+            message: Type `(::PCCnNegUser | nil)` does not have method `name`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_callbacks__applies_constants_at_erb_toplevel
+    # ERB views are checked as top-level code with `# @type self: <class>`
+    # — there's no method to hang `applies_constants` on. A `toplevel: true`
+    # entry applies the constant narrowing to that top-level body, so a
+    # guarded view's `Current.caderneta` dispatches on the marker.
+    # felixefelip/rbs_infer#25.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCErbCaderneta
+            def vacinas: () -> String
+          end
+
+          class PCErbCurrent
+            def self.caderneta: () -> PCErbCaderneta?
+
+            module CadernetaPopulated
+              def caderneta: () -> PCErbCaderneta
+            end
+          end
+
+          class ERBPcErbShow
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          PCErbCurrent.caderneta.vacinas
+          # @type self: ERBPcErbShow
+        RUBY
+      },
+      callbacks: callbacks_store([
+        {
+          "class" => "ERBPcErbShow",
+          "applies_constants" => { "PCErbCurrent" => "singleton(PCErbCurrent) & PCErbCurrent::CadernetaPopulated" },
+          "toplevel" => true
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_callbacks__toplevel_flag_required_for_erb_narrowing
+    # Negative: a method-style entry (runs_before, no `toplevel`) does NOT
+    # apply to the top-level body — the constant keeps its declared nilable
+    # type and the read flags NoMethod.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCErbNegCaderneta
+            def vacinas: () -> String
+          end
+
+          class PCErbNegCurrent
+            def self.caderneta: () -> PCErbNegCaderneta?
+
+            module CadernetaPopulated
+              def caderneta: () -> PCErbNegCaderneta
+            end
+          end
+
+          class ERBPcErbNegShow
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          PCErbNegCurrent.caderneta.vacinas
+          # @type self: ERBPcErbNegShow
+        RUBY
+      },
+      callbacks: callbacks_store([
+        {
+          "class" => "ERBPcErbNegShow",
+          "applies_constants" => { "PCErbNegCurrent" => "singleton(PCErbNegCurrent) & PCErbNegCurrent::CadernetaPopulated" },
+          "runs_before" => ["render"]
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 26
+              end:
+                line: 1
+                character: 33
+            severity: ERROR
+            message: Type `(::PCErbNegCaderneta | nil)` does not have method `vacinas`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_callbacks__methods_not_in_runs_before_stay_at_declared_type
+    # `set_company runs_before [show]` — but `index` is NOT covered. In
+    # `index`, `@company` must remain at the declared nilable union, so
+    # `@company.title` reports NoMethod on `nil`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCNotCoveredCompany
+            def self.find: (Integer) -> (PCNotCoveredCompany & PCNotCoveredCompany::Validated)
+          end
+
+          module PCNotCoveredCompany::Validated
+            def title: () -> String
+          end
+
+          class PCNotCoveredController
+            @company: (PCNotCoveredCompany & PCNotCoveredCompany::Validated) | PCNotCoveredCompany | nil
+
+            def show: () -> String
+            def index: () -> String?
+            def set_company: () -> (PCNotCoveredCompany & PCNotCoveredCompany::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCNotCoveredController
+            # @dynamic show, index, set_company
+            def index
+              @company.title
+            end
+
+            def show
+              @company.title
+            end
+
+            def set_company
+              @company = PCNotCoveredCompany.find(1)
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCNotCoveredController",
+          "method" => "set_company",
+          "unconditional" => {
+            "ivars" => { "@company" => "PCNotCoveredCompany & PCNotCoveredCompany::Validated" }
+          }
+        }
+      ]),
+      callbacks: callbacks_store([
+        {
+          "class" => "PCNotCoveredController",
+          "apply_postcondition_of" => "set_company",
+          "runs_before" => ["show"]
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 13
+              end:
+                line: 4
+                character: 18
+            severity: ERROR
+            message: Type `((::PCNotCoveredCompany & ::PCNotCoveredCompany::Validated) | ::PCNotCoveredCompany
+              | nil)` does not have method `title`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_callbacks__handler_without_unconditional_postcondition_is_ignored
+    # Callback references `set_company`, but `set_company` has only a
+    # `when_true` postcondition (or none at all). The callback hook
+    # silently no-ops — body sees `@company` at the declared widest
+    # type, errors out as if no callback was declared.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCNoUncondCompany
+            def self.find: (Integer) -> PCNoUncondCompany
+            def specific_method: () -> Integer
+          end
+
+          class PCNoUncondController
+            @company: PCNoUncondCompany | nil
+
+            def show: () -> Integer
+            def set_company: () -> PCNoUncondCompany
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCNoUncondController
+            # @dynamic show, set_company
+            def show
+              @company.specific_method
+            end
+
+            def set_company
+              @company = PCNoUncondCompany.find(1)
+            end
+          end
+        RUBY
+      },
+      # No postconditions store entry → callback hook finds nothing to apply.
+      callbacks: callbacks_store([
+        {
+          "class" => "PCNoUncondController",
+          "apply_postcondition_of" => "set_company",
+          "runs_before" => ["show"]
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 13
+              end:
+                line: 4
+                character: 28
+            severity: ERROR
+            message: Type `(::PCNoUncondCompany | nil)` does not have method `specific_method`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_callbacks__multiple_handlers_compose_via_last_wins
+    # Two callbacks for `show`: `set_company` and `set_extra`. Each
+    # writes a distinct ivar. Both refinements must compose so the body
+    # sees BOTH ivars narrowed at entry.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCMultiCompany
+            def self.find: (Integer) -> (PCMultiCompany & PCMultiCompany::Validated)
+          end
+
+          module PCMultiCompany::Validated
+            def title: () -> String
+          end
+
+          class PCMultiExtra
+            def label: () -> String
+          end
+
+          class PCMultiController
+            @company: (PCMultiCompany & PCMultiCompany::Validated) | PCMultiCompany | nil
+            @extra: PCMultiExtra | nil
+
+            def show: () -> Integer
+            def set_company: () -> (PCMultiCompany & PCMultiCompany::Validated)
+            def set_extra: () -> PCMultiExtra
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCMultiController
+            # @dynamic show, set_company, set_extra
+            def show
+              @company.title.length + @extra.label.length
+            end
+
+            def set_company
+              @company = PCMultiCompany.find(1)
+            end
+
+            def set_extra
+              @extra = PCMultiExtra.new
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCMultiController",
+          "method" => "set_company",
+          "unconditional" => {
+            "ivars" => { "@company" => "PCMultiCompany & PCMultiCompany::Validated" }
+          }
+        },
+        {
+          "class" => "PCMultiController",
+          "method" => "set_extra",
+          "unconditional" => {
+            "ivars" => { "@extra" => "PCMultiExtra" }
+          }
+        }
+      ]),
+      callbacks: callbacks_store([
+        { "class" => "PCMultiController", "apply_postcondition_of" => "set_company", "runs_before" => ["show"] },
+        { "class" => "PCMultiController", "apply_postcondition_of" => "set_extra",   "runs_before" => ["show"] }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_callbacks__empty_store_no_op
+    # Regression guard: passing the default empty store must NOT change
+    # behavior. Body sees the declared nilable ivar and errors as
+    # before.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCEmptyCompany
+            def specific_method: () -> Integer
+          end
+
+          class PCEmptyController
+            @company: PCEmptyCompany | nil
+
+            def show: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCEmptyController
+            # @dynamic show
+            def show
+              @company.specific_method
+            end
+          end
+        RUBY
+      },
+      # No callbacks passed → default empty store.
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 13
+              end:
+                line: 4
+                character: 28
+            severity: ERROR
+            message: Type `(::PCEmptyCompany | nil)` does not have method `specific_method`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # felixefelip/steep#29: `drops:` slot subtracts markers from the
+  # receiver type.
+  #
+  # Intersection (`self:`) can only narrow — it cannot remove a marker.
+  # `update`/`save` on a `(T & Validated)` receiver that returned
+  # `false` lost its validation invariant, so the falsy branch type
+  # should be `T` alone. `drops: [Validated]` expresses exactly that
+  # subtraction; intersection alone can't.
+  # ---------------------------------------------------------------------------
+
+  def test_postconditions__drops_subtracts_marker_in_when_false
+    # `update` keeps `Validated` on truthy (intersection); `drops:`
+    # on falsy removes it. A `Validated`-only method works in the if
+    # block, errors in the else block.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCDropsCompany
+            def update: (untyped) -> bool
+            attr_reader name: String?
+
+            class Validated
+              attr_reader name: String
+              attr_reader strict_field: String
+            end
+
+            def self.first: () -> (PCDropsCompany & PCDropsCompany::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          company = PCDropsCompany.first
+          if company.update({})
+            company.strict_field.length
+          else
+            company.strict_field.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDropsCompany",
+          "method" => "update",
+          "when_true" => { "self" => "PCDropsCompany & PCDropsCompany::Validated" },
+          "when_false" => { "drops" => ["PCDropsCompany::Validated"] }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 10
+              end:
+                line: 5
+                character: 22
+            severity: ERROR
+            message: Type `::PCDropsCompany` does not have method `strict_field`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__drops_with_ivar_receiver
+    # Same as above but the receiver is an ivar. `refine_node_type`'s
+    # `:ivar` case routes the post-drop type into the env's
+    # `instance_variable_types`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCDropsIvarCompany
+            def update: (untyped) -> bool
+            attr_reader name: String?
+
+            class Validated
+              attr_reader name: String
+              attr_reader strict_field: String
+            end
+
+            def self.first: () -> (PCDropsIvarCompany & PCDropsIvarCompany::Validated)
+          end
+
+          class PCDropsIvarHost
+            @company: (PCDropsIvarCompany & PCDropsIvarCompany::Validated)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          PCDropsIvarHost.new.instance_eval do
+            if @company.update({})
+              @company.strict_field
+            else
+              @company.strict_field
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDropsIvarCompany",
+          "method" => "update",
+          "when_true" => { "self" => "PCDropsIvarCompany & PCDropsIvarCompany::Validated" },
+          "when_false" => { "drops" => ["PCDropsIvarCompany::Validated"] }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 13
+              end:
+                line: 5
+                character: 25
+            severity: ERROR
+            message: Type `::PCDropsIvarCompany` does not have method `strict_field`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__drops_keeps_other_markers_in_intersection
+    # Receiver is `T & A & B`. `drops: [A]` should leave `T & B`,
+    # NOT just `T`. The remaining markers are preserved.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCMultiMarker
+            def ok?: () -> bool
+            attr_reader base: String
+
+            class Validated
+              attr_reader strict: String
+            end
+
+            class Tagged
+              attr_reader tag: String
+            end
+
+            def self.first: () -> (PCMultiMarker & PCMultiMarker::Validated & PCMultiMarker::Tagged)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          obj = PCMultiMarker.first
+          unless obj.ok?
+            # Validated dropped; Tagged kept. `tag` works, `strict` does not.
+            obj.tag.length
+            obj.strict.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCMultiMarker",
+          "method" => "ok?",
+          "when_false" => { "drops" => ["PCMultiMarker::Validated"] }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 6
+              end:
+                line: 5
+                character: 12
+            severity: ERROR
+            message: Type `(::PCMultiMarker & ::PCMultiMarker::Tagged)` does not have method
+              `strict`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__drops_without_self_still_refines
+    # Only `drops:` declared on `when_false` — no `self:`. The drop
+    # alone should drive the env refinement on the falsy branch.
+    # `when_true` keeps the receiver as-is (no slots declared).
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCDropOnly
+            def predicate?: () -> bool
+            attr_reader base: String
+
+            class Marker
+              attr_reader marked_field: String
+            end
+
+            def self.first: () -> (PCDropOnly & PCDropOnly::Marker)
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          obj = PCDropOnly.first
+          unless obj.predicate?
+            obj.marked_field.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDropOnly",
+          "method" => "predicate?",
+          "when_false" => { "drops" => ["PCDropOnly::Marker"] }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 6
+              end:
+                line: 3
+                character: 18
+            severity: ERROR
+            message: Type `::PCDropOnly` does not have method `marked_field`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__drops_no_op_when_marker_not_present
+    # Drops listed but the receiver doesn't have the marker in its
+    # intersection. Should be a no-op — type stays as-is. Sanity
+    # against accidentally widening unrelated types.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCDropMiss
+            def predicate?: () -> bool
+            attr_reader value: String
+
+            class Other
+            end
+
+            def self.first: () -> PCDropMiss
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          obj = PCDropMiss.first
+          unless obj.predicate?
+            obj.value.length
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDropMiss",
+          "method" => "predicate?",
+          "when_false" => { "drops" => ["PCDropMiss::Other"] }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # felixefelip/steep#31: `unconditional.self` / `unconditional.drops` apply
+  # to non-self receivers.
+  #
+  # Pre-#31, `apply_unconditional_postconditions` had an early return when
+  # the receiver wasn't `self` (or `:self`). That made the `set_company`
+  # pattern work (controller calling its own setter) but blocked the
+  # symmetric case where a wrapper calls a setter on its inner object
+  # (`venue.set_default_name` returning a venue with `@name` confirmed).
+  # This change drops the self-only guard and adds REPLACE semantics for
+  # `unconditional.self` and subtraction for `unconditional.drops`.
+  # ---------------------------------------------------------------------------
+
+  def test_postconditions__unconditional_self_refines_non_self_receiver
+    # `venue.set_default_name` declares `unconditional.self:
+    # "PCUncondVenue & Confirmed"`. The next read of `venue.name` should
+    # resolve via the marker (which narrows `name` to non-nil).
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCUncondVenue
+            attr_reader name: String?
+            def set_default_name: () -> String
+          end
+
+          module PCUncondVenue::Confirmed
+            def name: () -> String
+          end
+
+          class PCUncondMounter
+            def mount: (PCUncondVenue venue) -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCUncondMounter
+            # @dynamic mount
+            def mount(venue)
+              venue.set_default_name
+              venue.name.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCUncondVenue",
+          "method" => "set_default_name",
+          "unconditional" => { "self" => "PCUncondVenue & PCUncondVenue::Confirmed" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__unconditional_drops_subtracts_markers_from_non_self_receiver
+    # `venue.clear_name` drops the `Confirmed` marker. Calling
+    # `fancy_only` (only on Confirmed) after that should fail.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCDropVenue
+            attr_reader name: String?
+            def set_default_name: () -> String
+            def clear_name: () -> nil
+
+            def self.first: () -> (PCDropVenue & PCDropVenue::Confirmed)
+          end
+
+          module PCDropVenue::Confirmed
+            def fancy_only: () -> String
+          end
+
+          class PCDropMounter
+            def cancel: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCDropMounter
+            # @dynamic cancel
+            def cancel
+              venue = PCDropVenue.first
+              venue.clear_name
+              venue.fancy_only.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCDropVenue",
+          "method" => "clear_name",
+          "unconditional" => { "drops" => ["PCDropVenue::Confirmed"] }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 6
+                character: 10
+              end:
+                line: 6
+                character: 20
+            severity: ERROR
+            message: Type `::PCDropVenue` does not have method `fancy_only`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_postconditions__unconditional_self_refines_ivar_receiver
+    # Receiver is an ivar (`@venue.set_default_name`) — refines the
+    # caller's `@venue` ivar type. Steep#31 routes through
+    # `instance_variable_types` slot.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIvarUncondVenue
+            attr_reader name: String?
+            def set_default_name: () -> String
+          end
+
+          module PCIvarUncondVenue::Confirmed
+            def name: () -> String
+          end
+
+          class PCIvarUncondHost
+            @venue: PCIvarUncondVenue
+
+            def edit: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCIvarUncondHost
+            # @dynamic edit
+            def edit
+              @venue.set_default_name
+              @venue.name.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIvarUncondVenue",
+          "method" => "set_default_name",
+          "unconditional" => { "self" => "PCIvarUncondVenue & PCIvarUncondVenue::Confirmed" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__unconditional_self_refines_self_receiver_via_refined_self
+    # When receiver is self (implicit), `unconditional.self` routes
+    # through `env.refined_self_type` (steep#25 mechanism). Reading a
+    # method only on the marker subsequently resolves cleanly.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCSelfUncondVenue
+            attr_reader name: String?
+            def set_default_name: () -> String
+            def announce: () -> Integer
+          end
+
+          module PCSelfUncondVenue::Confirmed
+            def fancy_only: () -> String
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCSelfUncondVenue
+            # @dynamic name, set_default_name, announce
+            def announce
+              set_default_name
+              fancy_only.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCSelfUncondVenue",
+          "method" => "set_default_name",
+          "unconditional" => { "self" => "PCSelfUncondVenue & PCSelfUncondVenue::Confirmed" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__unconditional_self_skips_when_marker_missing_in_rbs
+    # Sidecar emitters (rbs_infer side) can race ahead of the
+    # marker-class generators (rbs_rails today doesn't emit any). When
+    # the sidecar's `unconditional.self` references a class that
+    # doesn't exist in RBS, applying the refinement would later crash
+    # `build_instance` whenever Steep computes a shape on the
+    # intersection. Guard verifies the marker resolves; if not, the
+    # refinement is silently skipped so the rest of the project
+    # still type-checks.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCMissingMarkerVenue
+            def set_default_name: () -> String
+          end
+
+          class PCMissingMarkerHost
+            @venue: PCMissingMarkerVenue
+
+            def edit: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCMissingMarkerHost
+            # @dynamic edit
+            def edit
+              @venue.set_default_name
+              @venue.set_default_name.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCMissingMarkerVenue",
+          "method" => "set_default_name",
+          "unconditional" => {
+            "self" => "PCMissingMarkerVenue & PCMissingMarkerVenue::DoesNotExist"
+          }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_postconditions__unconditional_ivars_still_only_fires_for_self_receiver
+    # Regression guard: `unconditional.ivars` only applies when the
+    # call's receiver is self (or implicit). For non-self receivers,
+    # `ivars` refers to the RECEIVER's ivars, which aren't visible in
+    # the caller's env — silently skip (no crash, no false refinement).
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class PCIvarsSelfOnlyVenue
+            def set_default_name: () -> String
+          end
+
+          class PCIvarsSelfOnlyHost
+            @venue: PCIvarsSelfOnlyVenue
+            @name: String?
+
+            def edit: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class PCIvarsSelfOnlyHost
+            # @dynamic edit
+            def edit
+              @venue.set_default_name
+              @name.length
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "PCIvarsSelfOnlyVenue",
+          "method" => "set_default_name",
+          "unconditional" => { "ivars" => { "@name" => "String" } }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 10
+              end:
+                line: 5
+                character: 16
+            severity: ERROR
+            message: Type `(::String | nil)` does not have method `length`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  # --------------------------------------------------------------------
+  # felixefelip/steep#32: delegation chain narrowing via inlining.
+  # `def m; receiver.delegate_method; end` is detected by the
+  # DelegationAnalyzer / Registry, and `TypeConstruction#type_send`
+  # inlines the call site at type-check time. Refinements on the
+  # equivalent expanded receiver expression propagate through.
+  # --------------------------------------------------------------------
+
+  def test_delegation__inline_propagates_when_true_self_refinement
+    # `if foo.bar.confirmed?` narrows `foo.bar` to `Bar & BarConfirmed`
+    # via the predicate's `when_true.self` postcondition. The
+    # delegation inlining then resolves `foo.proxy_x` as if it were
+    # `foo.bar.x`, picking up the marker's `x: Integer` override
+    # instead of the parent class's `x: Integer?`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class DelFoo
+            attr_reader bar: DelBar
+            def proxy_x: () -> Integer?
+          end
+
+          class DelBar
+            attr_reader x: Integer?
+            def confirmed?: () -> bool
+          end
+
+          class DelBarConfirmed
+            attr_reader x: Integer
+          end
+
+          class DelHost
+            @foo: DelFoo
+
+            def exercise: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class DelFoo
+            # @dynamic bar, proxy_x
+            def proxy_x
+              bar.x
+            end
+          end
+
+          class DelHost
+            # @dynamic exercise
+            def exercise
+              if @foo.bar.confirmed?
+                @foo.proxy_x + 1
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "DelBar",
+          "method" => "confirmed?",
+          "when_true" => { "self" => "DelBar & DelBarConfirmed" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_delegation__inline_records_method_call_on_original_node
+    # Regression for the LSP-hover divergence: after inlining,
+    # `typing.call_of(node:)` must return a `MethodCall::Typed`
+    # mirroring the inlined call. Without this, `steep check` sees
+    # the refined return type (via `typing.type_of`) but hover
+    # consults `method_calls` and renders the call as untyped —
+    # the two paths disagreed.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class DelMcFoo
+            attr_reader bar: DelMcBar
+            def proxy_x: () -> Integer?
+          end
+
+          class DelMcBar
+            attr_reader x: Integer?
+            def confirmed?: () -> bool
+          end
+
+          class DelMcBarConfirmed
+            attr_reader x: Integer
+          end
+
+          class DelMcHost
+            @foo: DelMcFoo
+
+            def exercise: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class DelMcFoo
+            # @dynamic bar, proxy_x
+            def proxy_x
+              bar.x
+            end
+          end
+
+          class DelMcHost
+            # @dynamic exercise
+            def exercise
+              if @foo.bar.confirmed?
+                @foo.proxy_x
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "DelMcBar",
+          "method" => "confirmed?",
+          "when_true" => { "self" => "DelMcBar & DelMcBarConfirmed" }
+        }
+      ])
+    ) do |typings|
+      typing = typings.fetch("a.rb")
+      proxy_send = find_send(typing.source.node, method: :proxy_x) or flunk("expected to find @foo.proxy_x send in source")
+
+      call = typing.call_of(node: proxy_send)
+      assert_kind_of Steep::TypeInference::MethodCall::Typed, call,
+                     "expected typing.call_of to return a Typed call for the inlined node (got #{call.class})"
+      assert_equal :proxy_x, call.method_name
+      assert_equal "::Integer", call.return_type.to_s,
+                   "expected the mirrored call to carry the narrowed return type"
+    end
+  end
+
+  def test_delegation__multi_hop_chain_inlines_recursively
+    # `Ticket#venue_name` → `event.venue_name` → `venue.name`. Two
+    # hops. After `event.venue.confirmed?` narrows the chain, both
+    # `ticket.venue_name` (recursively inlined through two delegate
+    # methods) and `ticket.event.venue_name` (inlined through one)
+    # should resolve to the marker's narrowed `name`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Del2Ticket
+            attr_reader event: Del2Event
+            def venue_name: () -> String?
+          end
+
+          class Del2Event
+            attr_reader venue: Del2Venue
+            def venue_name: () -> String?
+          end
+
+          class Del2Venue
+            attr_reader name: String?
+            def confirmed?: () -> bool
+          end
+
+          class Del2VenueConfirmed
+            attr_reader name: String
+          end
+
+          class Del2Host
+            @ticket: Del2Ticket
+
+            def exercise: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Del2Ticket
+            # @dynamic event, venue_name
+            def venue_name
+              event.venue_name
+            end
+          end
+
+          class Del2Event
+            # @dynamic venue, venue_name
+            def venue_name
+              venue.name
+            end
+          end
+
+          class Del2Host
+            # @dynamic exercise
+            def exercise
+              if @ticket.event.venue.confirmed?
+                @ticket.venue_name.upcase
+              end
+            end
+          end
+        RUBY
+      },
+      postconditions: postconditions_store([
+        {
+          "class" => "Del2Venue",
+          "method" => "confirmed?",
+          "when_true" => { "self" => "Del2Venue & Del2VenueConfirmed" }
+        }
+      ]),
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_delegation__polymorphism_uses_receiver_type
+    # `Wrapper#name` is a delegation; `Concrete#name` is a regular
+    # method that doesn't delegate (just returns a literal). The
+    # registry sees both as Ruby-source methods. Inlining must use
+    # `recv_type` to decide — when the receiver is `Concrete`, no
+    # inlining; when it's `Wrapper`, inline through `inner.name`.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class DelPolyWrapper
+            attr_reader inner: DelPolyInner
+            def name: () -> String
+          end
+
+          class DelPolyInner
+            attr_reader name: String
+          end
+
+          class DelPolyConcrete
+            def name: () -> String
+          end
+
+          class DelPolyHost
+            @wrapper: DelPolyWrapper
+            @concrete: DelPolyConcrete
+
+            def exercise: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class DelPolyWrapper
+            # @dynamic inner, name
+            def name
+              inner.name
+            end
+          end
+
+          class DelPolyConcrete
+            # @dynamic name
+            def name
+              "literal"
+            end
+          end
+
+          class DelPolyHost
+            # @dynamic exercise
+            def exercise
+              @wrapper.name.length + @concrete.name.length
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_delegation__without_narrowing_resolves_as_normal
+    # Sanity: when no narrowing is in scope, delegation inlining
+    # should give the same result as the regular type_send path —
+    # the declared `proxy_x: Integer?` return. This pins that
+    # inlining doesn't accidentally widen or narrow types in the
+    # null-refinement case.
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class DelNoNarrowFoo
+            attr_reader bar: DelNoNarrowBar
+            def proxy_x: () -> Integer?
+          end
+
+          class DelNoNarrowBar
+            attr_reader x: Integer?
+          end
+
+          class DelNoNarrowHost
+            @foo: DelNoNarrowFoo
+
+            def exercise: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class DelNoNarrowFoo
+            # @dynamic bar, proxy_x
+            def proxy_x
+              bar.x
+            end
+          end
+
+          class DelNoNarrowHost
+            # @dynamic exercise
+            def exercise
+              @foo.proxy_x + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 11
+                character: 17
+              end:
+                line: 11
+                character: 18
+            severity: ERROR
+            message: Type `(::Integer | nil)` does not have method `+`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_delegation__inline_miss_falls_back_without_crash_or_spurious_error
+    # When a forward-delegate's target method does not resolve, the inline
+    # attempt must fail gracefully: the synthetic node carries the call's
+    # location and the exploratory synthesize runs in a throwaway typing, so
+    # there is no crash (NoMethod#initialize used to hit a nil loc) and no
+    # spurious diagnostic leaks at the call site. The caller falls back to the
+    # receiver's declared signature (`proxy: () -> Integer`); the only error is
+    # the genuine one inside the delegate method's own body (`inner.gone`).
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class DelMissFoo
+            attr_reader inner: DelMissInner
+            def proxy: () -> Integer
+          end
+
+          class DelMissInner
+          end
+
+          class DelMissHost
+            @foo: DelMissFoo
+
+            def exercise: () -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class DelMissFoo
+            # @dynamic inner, proxy
+            def proxy
+              inner.gone
+            end
+          end
+
+          class DelMissHost
+            # @dynamic exercise
+            def exercise
+              @foo.proxy
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 10
+              end:
+                line: 4
+                character: 14
+            severity: ERROR
+            message: Type `::DelMissInner` does not have method `gone`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_ensure_annotation
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          begin
+            x = "hello"
+            x + ""
+          ensure
+            # @type var x: String?
+            if x
+              x + ""
             end
           end
         RUBY
@@ -4580,4 +12209,400 @@ class TypeCheckTest < Minitest::Test
       YAML
     )
   end
+
+  def test_tuple_type_with_if_branch
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module M
+            def test_if: (bool flag) -> (["yes", "ok"] | ["no", "error"])
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module M
+            def test_if(flag)
+              if flag
+                ['yes', 'ok']
+              else
+                ['no', 'error']
+              end
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_narrowing__literal_equality_with_supertype
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class A
+            def foo_symbol: (Symbol symbol) -> void
+            def foo_integer: (Integer integer) -> void
+            def foo_string: (String string) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class A
+            def foo_symbol(symbol)
+              if symbol == :qux
+                puts "qux"
+              else
+                puts "other"
+              end
+            end
+
+            def foo_integer(integer)
+              if integer == 1
+                puts "one"
+              else
+                puts "other"
+              end
+            end
+
+            def foo_string(string)
+              if string == "x"
+                puts "x"
+              else
+                puts "other"
+              end
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_block_pass_optional_block
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Object
+            def stringify: (Integer value) -> String
+          end
+
+          class OptionalBlockTest
+            def sum: (?untyped init) ?{ (Integer e) -> untyped } -> untyped
+
+            def map: () ?{ (Integer element) -> String } -> Array[String]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          def stringify(value)
+            value.to_s
+          end
+
+          test = OptionalBlockTest.new
+
+          test.sum(&:to_r)
+          test.sum(0, &:to_r)
+          test.map(&:to_s)
+          test.map(&method(:stringify))
+
+          test.map
+          test.map {|element| element.to_s }
+          test.map(&(-> (element) { element.to_s }))
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_block_pass_optional_block_mismatch
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class OptionalBlockTest
+            def map: () ?{ (Integer element) -> Integer } -> Array[Integer]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          OptionalBlockTest.new.map(&:to_s)
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 26
+              end:
+                line: 1
+                character: 32
+            severity: ERROR
+            message: |-
+              Cannot pass a value of type `^(::Integer) -> ::String` as a block-pass-argument of type `(^(::Integer) -> ::Integer | nil)`
+                ^(::Integer) -> ::String <: (^(::Integer) -> ::Integer | nil)
+                  ^(::Integer) -> ::String <: ^(::Integer) -> ::Integer
+                    ::String <: ::Integer
+                      ::Object <: ::Integer
+                        ::BasicObject <: ::Integer
+            code: Ruby::BlockTypeMismatch
+      YAML
+    )
+  end
+
+  def test_lambda_block_param_type_alias
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          type callback = ^(Integer) -> void
+
+          type optional_callback = ^(Integer) -> void | nil
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          required = -> (&blk) {
+            # @type var blk: callback
+            blk.call(1)
+          }
+
+          optional = -> (&blk) {
+            # @type var blk: callback?
+            blk&.call(1)
+          }
+
+          expanded = -> (&blk) {
+            # @type var blk: optional_callback
+            blk&.call(1)
+          }
+
+          inline = -> (&blk) {
+            # @type var blk: ^(Integer) -> void
+            blk.call(1)
+          }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_lambda_block_param_type_alias_not_proc
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          type not_proc = Integer
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          lambda = -> (&blk) {
+            # @type var blk: not_proc
+            blk
+          }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 13
+              end:
+                line: 1
+                character: 17
+            severity: ERROR
+            message: Proc type is expected but `::not_proc` is specified
+            code: Ruby::ProcTypeExpected
+      YAML
+    )
+  end
+
+  def test_array_literal_with_pair_interface_hint
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          interface _KeyValue[K, V]
+            def to_ary: () -> [K, V]
+          end
+
+          class PairMaker
+            def make: [K, V] () { (String) -> _KeyValue[K, V] } -> Hash[K, V]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          maker = PairMaker.new
+          hash = maker.make {|string| [string, string.size] }
+          hash.each_key {|key| key.upcase }
+          hash.each_value {|value| value + 1 }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_array_literal_with_pair_interface_intersection_hint
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          interface _KeyValue[K, V]
+            def to_ary: () -> [K, V]
+          end
+
+          class PairMaker
+            def make_pair: () { (String) -> ([Symbol, Integer] & _KeyValue[Symbol, Integer]) } -> Hash[Symbol, Integer]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          maker = PairMaker.new
+          maker.make_pair {|string| [string.to_sym, string.size] }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_array_literal_with_pair_interface_hint_two_params_block
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          interface _KeyValue[K, V]
+            def to_ary: () -> [K, V]
+          end
+
+          class PairMaker
+            def make_from_pairs: [K, V] () { (Symbol, Integer) -> _KeyValue[K, V] } -> Hash[K, V]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          maker = PairMaker.new
+          hash = maker.make_from_pairs {|key, value| [key.to_s, value.to_f] }
+          hash.each_key {|key| key.upcase }
+          hash.each_value {|value| value.floor }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_array_literal_with_pair_interface_hint_mismatch
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          interface _KeyValue[K, V]
+            def to_ary: () -> [K, V]
+          end
+
+          class PairMaker
+            def make_exact: () { (String) -> _KeyValue[Symbol, Integer] } -> Hash[Symbol, Integer]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          maker = PairMaker.new
+          maker.make_exact {|string| [string, 1] }
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 2
+                character: 17
+              end:
+                line: 2
+                character: 40
+            severity: ERROR
+            message: |-
+              Cannot allow block body have type `[::String, 1]` because declared as type `::_KeyValue[::Symbol, ::Integer]`
+                [::String, 1] <: ::_KeyValue[::Symbol, ::Integer]
+                  () -> [::String, 1] <: () -> [::Symbol, ::Integer]
+                    [::String, 1] <: [::Symbol, ::Integer]
+                      ::String <: ::Symbol
+                        ::Object <: ::Symbol
+                          ::BasicObject <: ::Symbol
+            code: Ruby::BlockBodyTypeMismatch
+      YAML
+    )
+  end
+
+  def test_defs_on_untyped_receiver
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class DefsOnUntypedReceiver
+            def foo: (untyped) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class DefsOnUntypedReceiver
+            def foo(object)
+              def object.bar = 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 15
+              end:
+                line: 3
+                character: 18
+            severity: ERROR
+            message: Method `bar` is defined in undeclared module
+            code: Ruby::MethodDefinitionInUndeclaredModule
+      YAML
+    )
+  end
+
 end

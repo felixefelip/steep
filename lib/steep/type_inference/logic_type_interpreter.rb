@@ -15,16 +15,33 @@ module Steep
           self.unreachable = true
           self
         end
+
+        # The value of an operand narrowing has decided. `word == "x"` stays a
+        # logic type, which `evaluate_node` reads as either truthy or falsy.
+        def self.decided_type(type, truthy, falsy)
+          return falsy.type if truthy.unreachable && !falsy.unreachable
+          return truthy.type if falsy.unreachable && !truthy.unreachable
+
+          type
+        end
       end
 
       attr_reader :subtyping
       attr_reader :typing
       attr_reader :config
+      attr_reader :postconditions
+      attr_reader :self_type
 
-      def initialize(subtyping:, typing:, config:)
+      def initialize(subtyping:, typing:, config:, postconditions: Steep::Postconditions::Store.empty, self_type: nil)
         @subtyping = subtyping
         @typing = typing
         @config = config
+        @postconditions = postconditions
+        @self_type = self_type
+      end
+
+      def cast_lvar?(name)
+        TypeConstruction.cast_lvar?(name, underscore_casts: subtyping.builder.underscore_casts)
       end
 
       def factory
@@ -102,9 +119,52 @@ module Steep
 
           return [truthy_result, falsy_result]
 
+        when :ivar
+          # `if @x` narrows `@x`, exactly as `if x` narrows a local.
+          #
+          # `refine_node_type` has had an `:ivar` branch for a while, so the
+          # environment could always hold a refined ivar — but that method
+          # answers "given these truthy/falsy TYPES, refine this node", which is
+          # the path a predicate's receiver takes. The condition of an `if` comes
+          # through HERE, and here `:ivar` fell to the `else`, which returns the
+          # environment untouched. So the one test that mentions the ivar by name
+          # was the one that taught the checker nothing about it:
+          #
+          #     base.class_eval(&@included_block) if @included_block
+          #
+          # still read `@included_block` at its declared `T?` and failed on the
+          # `nil` member — while hoisting it into a local first type-checked.
+          # That is the hand-rolled `ActiveSupport::Concern`, and the same shape
+          # reaches every `@x.foo if @x` (felixefelip/steep#146).
+          #
+          # An ivar is not a local: any call in between can write it, so a
+          # refinement can go stale where a local's cannot. That is the tradeoff
+          # `refine_node_type`'s `:ivar` branch and the postcondition ivar
+          # narrowing already make; this makes the same one for the plainest
+          # spelling of the same question, rather than leaving it the only one
+          # that does not narrow.
+          name = node.children[0]
+          truthy_type, falsy_type = factory.partition_union(type)
+
+          truthy_result =
+            if truthy_type
+              Result.new(type: truthy_type, env: env.refine_types(instance_variable_types: { name => truthy_type }), unreachable: false)
+            else
+              Result.new(type: type, env: env, unreachable: true)
+            end
+
+          falsy_result =
+            if falsy_type
+              Result.new(type: falsy_type, env: env.refine_types(instance_variable_types: { name => falsy_type }), unreachable: false)
+            else
+              Result.new(type: type, env: env, unreachable: true)
+            end
+
+          return [truthy_result, falsy_result]
+
         when :lvasgn
           name, rhs = node.children
-          if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          if cast_lvar?(name)
             return [
               Result.new(type: type, env: env, unreachable: false),
               Result.new(type: type, env: env, unreachable: false)
@@ -164,9 +224,15 @@ module Steep
 
           case type
           when AST::Types::Logic::Base
-            receiver, _, *arguments = node.children
+            receiver, method_name, *arguments = node.children
             if (truthy_result, falsy_result = evaluate_method_call(env: env, type: type, receiver: receiver, arguments: arguments))
               return [truthy_result, falsy_result]
+            end
+            if (equality_env = equality_narrowed_env(env: env, node: node))
+              return [
+                Result.new(type: BOOL, env: equality_env, unreachable: false),
+                Result.new(type: BOOL, env: env, unreachable: false)
+              ]
             end
           else
             receiver, *_ = node.children
@@ -207,6 +273,40 @@ module Steep
               end
             end
 
+            # felixefelip/steep#68 item 2: a transparent halt-check getter
+            # (`def performed?; @halted; end`) narrows its backing ivar, so
+            # `return if performed?` leaves `@halted` falsy on the continuing
+            # branch — the gate a conditional-return postcondition tests.
+            if (ivar = returns_ivar_of(node))
+              # The ivar's own truthy/falsy split, not the predicate's return
+              # (`bool` doesn't partition; and the backing ivar may be `true?`,
+              # whose falsy value is `nil`, not `false`).
+              ivar_truthy, ivar_falsy = partition_ivar(falsy_result.env.declared_instance_variable_type(ivar))
+              if ivar_truthy
+                truthy_result = Result.new(type: truthy_result.type, env: truthy_result.env.refine_types(instance_variable_types: { ivar => ivar_truthy }), unreachable: truthy_result.unreachable)
+              end
+              if ivar_falsy
+                falsy_result = Result.new(type: falsy_result.type, env: falsy_result.env.refine_types(instance_variable_types: { ivar => ivar_falsy }), unreachable: falsy_result.unreachable)
+              end
+            end
+
+            # An `==` whose own type is `untyped` never reaches the branch above:
+            # `guess_type_from_method` knows `is_a?`, `nil?`, `!` and `===`, not
+            # `==`, so there is no logic type to dispatch on. That is not an edge
+            # case in Rails — one unresolved link anywhere in the chain makes the
+            # whole comparison `untyped` — and it is exactly fizzy's
+            # `last_event&.action&.to_s == "card_#{action}"`.
+            if (equality_env = equality_narrowed_env(env: truthy_result.env, node: node))
+              truthy_result = Result.new(type: truthy_result.type, env: equality_env, unreachable: truthy_result.unreachable)
+            end
+
+            truthy_result, falsy_result = apply_postconditions(
+              node: node,
+              receiver: receiver,
+              truthy_result: truthy_result,
+              falsy_result: falsy_result
+            )
+
             return [truthy_result, falsy_result]
           end
         end
@@ -222,7 +322,7 @@ module Steep
         case assignment_node.type
         when :lvasgn
           name, _ = assignment_node.children
-          if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          if cast_lvar?(name)
             env
           else
             env.refine_types(local_variable_types: { name => rhs_type })
@@ -259,7 +359,7 @@ module Steep
         when :lvar
           name = node.children[0]
 
-          if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          if cast_lvar?(name)
             [env, env]
           else
             [
@@ -273,7 +373,7 @@ module Steep
 
           truthy_env, falsy_env = refine_node_type(env: env, node: rhs, truthy_type: truthy_type, falsy_type: falsy_type)
 
-          if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+          if cast_lvar?(name)
             [truthy_env, falsy_env]
           else
             [
@@ -282,21 +382,186 @@ module Steep
             ]
           end
 
+        when :ivar
+          # Mirror the `:lvar` branch for instance variables. Without this,
+          # postcondition narrowing (#10/#13) and built-in predicate
+          # narrowing route through the `else` fall-through and silently
+          # leave `@x` at its declared type — even though the same
+          # predicate on a local variable or a cached attr_reader send
+          # would narrow correctly.
+          name = node.children[0]
+          [
+            env.refine_types(instance_variable_types: { name => truthy_type }),
+            env.refine_types(instance_variable_types: { name => falsy_type })
+          ]
+
+        when :ivasgn
+          # Symmetric with `:lvasgn`. Refines both the RHS (recursively)
+          # and the ivar itself in each branch.
+          name, rhs = node.children
+
+          truthy_env, falsy_env = refine_node_type(env: env, node: rhs, truthy_type: truthy_type, falsy_type: falsy_type)
+
+          [
+            truthy_env.refine_types(instance_variable_types: { name => truthy_type }),
+            falsy_env.refine_types(instance_variable_types: { name => falsy_type })
+          ]
+
         when :send
-          if env[node]
-            [
-              env.refine_types(pure_call_types: { node => truthy_type }),
-              env.refine_types(pure_call_types: { node => falsy_type })
-            ]
-          else
-            [env, env]
+          truthy_env, falsy_env =
+            if env[node]
+              [
+                env.refine_types(pure_call_types: { node => truthy_type }),
+                env.refine_types(pure_call_types: { node => falsy_type })
+              ]
+            else
+              [env, env]
+            end
+
+          # felixefelip/steep#68 item 2: a transparent halt-check getter
+          # (`def performed?; @halted; end`, `returns_ivar: @halted`) narrows
+          # its backing ivar too, so `return if performed?` leaves `@halted`
+          # falsy on the continuing branch — the gate other conditional-return
+          # postconditions test.
+          if (ivar = returns_ivar_of(node))
+            truthy_env = truthy_env.refine_types(instance_variable_types: { ivar => truthy_type })
+            falsy_env = falsy_env.refine_types(instance_variable_types: { ivar => falsy_type })
           end
+
+          [truthy_env, falsy_env]
+        when :csend
+          # `x&.m` answers nil whenever `x` does — that is the whole of `&.` — so
+          # a truthy type that cannot be nil proves the receiver was not nil.
+          # Recursion falls out: the receiver of a `&.` is often another `&.`, and
+          # each link hands the next one a non-nil type, so
+          # `latest&.label&.to_s == "opened"` reaches `latest`
+          # (felixefelip/rbs_infer#338).
+          #
+          # Only the truthy side. `x&.m` is nil both when `x` is nil and when `m`
+          # answered nil, so the falsy branch separates nothing and the env is
+          # returned untouched.
+          receiver = node.children[0]
+          if !receiver.is_a?(::Parser::AST::Node) || nilable_type?(truthy_type)
+            [env, env]
+          else
+            receiver_type = env[receiver] || (typing.type_of(node: receiver) rescue nil)
+            non_nil, _ = receiver_type ? factory.partition_union(receiver_type) : nil
+            if receiver_type && non_nil && nilable_type?(receiver_type)
+              truthy_env, _ = refine_node_type(
+                env: env,
+                node: receiver,
+                truthy_type: non_nil,
+                falsy_type: receiver_type
+              )
+              [truthy_env, env]
+            else
+              [env, env]
+            end
+          end
+
+        when :self
+          # Mirror the `:lvar`/`:ivar` branches for `self`. Without this,
+          # postcondition narrowing (#10) on a receiver of `self` (implicit
+          # `if save` inside a method body, or explicit `self.save`)
+          # falls through to `[env, env]` and leaves the receiver at its
+          # declared/widest type — even though the same predicate on a
+          # local variable or instance variable would narrow correctly
+          # (felixefelip/steep#25).
+          [
+            env.with_refined_self(truthy_type),
+            env.with_refined_self(falsy_type)
+          ]
         when :begin
           last_node = node.children.last or raise
           refine_node_type(env: env, node: last_node, truthy_type: truthy_type, falsy_type: falsy_type)
         else
           [env, env]
         end
+      end
+
+      # `==` and `eql?`. Not `equal?` (identity, and never typed `ReceiverIsArg`
+      # anyway), and emphatically not the other methods that share this logic
+      # type: `nil.is_a?(NilClass)` is TRUE, so `x.is_a?(y)` says nothing about
+      # `x` being non-nil. The name has to gate this, not the logic type.
+      EQUALITY_METHODS = Set[:==, :eql?] #: Set[Symbol]
+
+      # What a truthy `a == b` says about `a` when `b` is not a literal.
+      #
+      #   last_event&.action&.to_s == "card_#{action}"
+      #
+      # `evaluate_method_call`'s `ReceiverIsArg` branch handles two shapes: an
+      # argument that is a class (`is_a?`) and one that is a literal, where
+      # `literal_var_type_case_select` partitions the receiver's union against the
+      # literal's value and drops `nil` on the way. That reading switches on the
+      # argument NODE's type and knows `:nil`, `:true`, `:false`, `:int`, `:str`
+      # and `:sym` — a `:dstr` is none of them, so an interpolated string answered
+      # nothing and the comparison narrowed nothing at all.
+      #
+      # But nil-ness needs no literal. `a == b` dispatches on `a`, the nil member
+      # of `a`'s union resolves `==` to identity (`NilClass` inherits it from
+      # `BasicObject`), and `b`'s type says it is never nil — so a truthy answer
+      # means `a` was not nil, whatever `b` computes. Only the left side gets
+      # this: `b == a` dispatches on `b`, and a `==` someone wrote could answer
+      # true for nil.
+      #
+      # `b` must have something to say. `untyped` admits nil among everything
+      # else, and a nilable `b` is exactly the case where a truthy answer can mean
+      # BOTH were nil.
+      #
+      # What the comparison establishes is about `a`'s VALUE, not about its type,
+      # and that distinction is why this walks the chain itself instead of handing
+      # a type to `refine_node_type`. An `&.` link whose own type is `untyped`
+      # still answers nil exactly when its receiver is nil — `&.` says so — and
+      # `untyped == "x"` is false for a nil receiver just as `String? == "x"` is.
+      # So a link that says nothing is walked THROUGH rather than stopped at, and
+      # only the links whose type is actually nilable are refined. Rails puts such
+      # a link in the middle routinely: fizzy's `Event#action` is
+      # `def action; super.inquiry; end`, inferred `untyped`, and it sits between
+      # `last_event` and the comparison.
+      def equality_narrowed_env(env:, node:)
+        receiver, method_name, *arguments = node.children
+        return nil unless EQUALITY_METHODS.include?(method_name)
+        return nil unless receiver.is_a?(::Parser::AST::Node)
+        return nil unless arguments.size == 1
+
+        argument_type = typing.type_of(node: arguments[0]) rescue nil
+        return nil unless argument_type
+        return nil if argument_type.is_a?(AST::Types::Any)
+        return nil if nilable_type?(argument_type)
+
+        # Only the truthy side has anything: `a != b` is as true of a nil `a` as of
+        # any other value it could hold, so the callers leave the falsy env alone.
+        truthy_env = refine_chain_to_non_nil(env, receiver)
+        truthy_env unless truthy_env.equal?(env)
+      end
+
+      # `node` is known non-nil. Refine it if its type is nilable, then follow one
+      # `&.` at a time: a `csend` answers nil whenever its receiver does, so the
+      # receiver is non-nil too. Stops at the first node that is not a `&.`, whose
+      # non-nilness says nothing about ITS receiver.
+      def refine_chain_to_non_nil(env, node)
+        env = refine_node_to_non_nil(env, node)
+        return env unless node.type == :csend
+
+        inner = node.children[0]
+        return env unless inner.is_a?(::Parser::AST::Node)
+
+        refine_chain_to_non_nil(env, inner)
+      end
+
+      # Subtract nil from one node's type, or leave the env alone when there is
+      # nothing to subtract — an `untyped` link, a type that was never nilable, or
+      # a shape `refine_node_type` does not narrow.
+      def refine_node_to_non_nil(env, node)
+        current = env[node] || (typing.type_of(node: node) rescue nil)
+        return env unless current
+        return env unless nilable_type?(current)
+
+        truthy_type, _falsy_type = factory.partition_union(current)
+        return env unless truthy_type
+
+        truthy_env, _ = refine_node_type(env: env, node: node, truthy_type: truthy_type, falsy_type: current)
+        truthy_env
       end
 
       def evaluate_method_call(env:, type:, receiver:, arguments:)
@@ -427,7 +692,7 @@ module Steep
               truthy_result.unreachable! unless truthy_type
 
               falsy_result = Result.new(type: FALSE, env: falsy_env, unreachable: false)
-              falsy_result.unreachable! unless falsy_type
+              falsy_result.unreachable! unless falsy_type && !factory.descends?(receiver_type.is_a?(AST::Types::Self) ? self_type : receiver_type, arg_type)
 
               [truthy_result, falsy_result]
             end
@@ -578,7 +843,7 @@ module Steep
       end
 
       def type_case_select(type, klass)
-        truth_types, false_types = type_case_select0(type, klass)
+        truth_types, false_types = type_case_select0(type, factory.instance_type(klass))
 
         [
           truth_types.empty? ? nil : AST::Types::Union.build(types: truth_types),
@@ -586,16 +851,14 @@ module Steep
         ]
       end
 
-      def type_case_select0(type, klass)
-        instance_type = factory.instance_type(klass)
-
+      def type_case_select0(type, instance_type)
         case type
         when AST::Types::Union
           truthy_types = [] # :Array[AST::Types::t]
           falsy_types = [] #: Array[AST::Types::t]
 
           type.types.each do |ty|
-            truths, falses = type_case_select0(ty, klass)
+            truths, falses = type_case_select0(ty, instance_type)
 
             if truths.empty?
               falsy_types.push(ty)
@@ -612,16 +875,10 @@ module Steep
           if ty == type
             [[type], [type]]
           else
-            type_case_select0(ty, klass)
+            type_case_select0(ty, instance_type)
           end
 
-        when AST::Types::Any, AST::Types::Top, AST::Types::Var
-          [
-            [instance_type],
-            [type]
-          ]
-
-        when AST::Types::Name::Interface
+        when AST::Types::Any, AST::Types::Top, AST::Types::Var, AST::Types::Name::Interface
           [
             [instance_type],
             [type]
@@ -641,6 +898,9 @@ module Steep
           # 2. T <: K           (example: T = Integer, K = Numeric)
           # 3. K <: T           (example: T = Numeric, K = Integer)
           # 4. none of the above (example: T = String, K = Integer)
+          #
+          # In 4, where one of them is a module, a class including it may be
+          # both (example: T = Comparable, K = Pathname).
 
           if subtyping?(sub_type: type, super_type: instance_type)
             # 1 or 2. Satisfies the condition, no narrowing because `type` is already more specific than/equals to `instance_type`
@@ -655,6 +915,11 @@ module Steep
                 [instance_type],
                 [type]
               ]
+            elsif includable?(type, instance_type)
+              [
+                [AST::Types::Intersection.build(types: [type, instance_type])],
+                [type]
+              ]
             else
               # 4
               [
@@ -665,6 +930,8 @@ module Steep
           end
         end
       end
+
+      def includable?(*types) = types.all?(AST::Types::Name::Instance) && types.any? { |type| factory.module_name?(type.name) }
 
       def no_subtyping?(sub_type:, super_type:)
         relation = Subtyping::Relation.new(sub_type: sub_type, super_type: super_type)
@@ -689,6 +956,370 @@ module Steep
 
             method_type.type.return_type if method_type
           end
+        end
+      end
+
+      def nilable_type?(type)
+        case type
+        when AST::Types::Nil
+          true
+        when AST::Types::Union
+          type.types.any? { |t| t.is_a?(AST::Types::Nil) }
+        else
+          false
+        end
+      end
+
+      # Applies a `.steep_postconditions.yml` entry to refine the receiver's
+      # type in the truthy/falsy branches of a boolean call (issue
+      # felixefelip/steep#10). When a method-decl on the call matches an
+      # entry, the receiver type is intersected with the entry's declared
+      # `self` type; this intersects (not substitutes) so multiple
+      # predicates compose via `&&` without losing prior narrowings.
+      #
+      # When `receiver` is nil (implicit-self call) or a `:self` AST node,
+      # uses the interpreter's `self_type` as the base for the intersection
+      # and refines `env.refined_self_type` instead of a per-node slot
+      # (felixefelip/steep#25). Without this, postcondition narrowing only
+      # worked for explicit receivers — methods called on `self` directly
+      # from within their own class body could not be narrowed.
+      def apply_postconditions(node:, receiver:, truthy_result:, falsy_result:)
+        return [truthy_result, falsy_result] if postconditions.empty?
+
+        call = typing.call_of(node: node) rescue nil
+        return [truthy_result, falsy_result] unless call.is_a?(MethodCall::Typed)
+
+        receiver_is_self = receiver.nil? || receiver.type == :self
+
+        receiver_type =
+          if receiver_is_self
+            # Implicit OR explicit `self` receiver. The AST type of a `:self`
+            # node is `AST::Types::Self.instance` (a marker), so we can't
+            # intersect against it usefully; fall back to the env's
+            # narrowing (if any) and then the interpreter's bound self_type.
+            truthy_result.env.refined_self_type || self_type
+          else
+            typing.type_of(node: receiver) rescue nil
+          end
+        return [truthy_result, falsy_result] unless receiver_type
+
+        entry = lookup_postcondition_entry(call: call, receiver_type: receiver_type)
+        return [truthy_result, falsy_result] unless entry
+
+        # When the receiver is implicit or explicit `:self`, hand
+        # `refine_node_type` a synthetic `:self` node so it routes to the
+        # `with_refined_self` slot.
+        node_for_refine = receiver || ::Parser::AST::Node.new(:self)
+
+        # Order matters: apply `via_receiver` (which narrows local vars / ivars)
+        # *before* `self` (which narrows a pure_call entry). Refining a local
+        # variable invalidates pure_call_types derived from it
+        # (`TypeEnv#refine_types` invalidation rule), so doing self first
+        # would have its narrowing wiped out by a subsequent via_receiver.
+        if entry.when_true
+          truthy_result = apply_via_receivers(
+            branch: entry.when_true,
+            receiver: receiver,
+            result: truthy_result,
+            truthy_branch: true
+          )
+
+          # When `receiver_type` was sourced from `env.refined_self_type`,
+          # we want to refine using the env *after* via_receivers ran (it
+          # might have updated refined_self_type via an inner-receiver
+          # path). Re-fetch from truthy_result.env to keep composition
+          # correct.
+          base_for_intersect =
+            if receiver_is_self
+              truthy_result.env.refined_self_type || self_type
+            else
+              receiver_type
+            end
+
+          new_truthy, refined = compose_refinement(base_for_intersect, entry.when_true)
+          if refined
+            truthy_env, _ = refine_node_type(
+              env: truthy_result.env,
+              node: node_for_refine,
+              truthy_type: new_truthy,
+              falsy_type: base_for_intersect
+            )
+            truthy_result = Result.new(type: truthy_result.type, env: truthy_env, unreachable: truthy_result.unreachable)
+          end
+        end
+
+        if entry.when_false
+          falsy_result = apply_via_receivers(
+            branch: entry.when_false,
+            receiver: receiver,
+            result: falsy_result,
+            truthy_branch: false
+          )
+
+          base_for_intersect =
+            if receiver_is_self
+              falsy_result.env.refined_self_type || self_type
+            else
+              receiver_type
+            end
+
+          new_falsy, refined = compose_refinement(base_for_intersect, entry.when_false)
+          if refined
+            _, falsy_env = refine_node_type(
+              env: falsy_result.env,
+              node: node_for_refine,
+              truthy_type: base_for_intersect,
+              falsy_type: new_falsy
+            )
+            falsy_result = Result.new(type: falsy_result.type, env: falsy_env, unreachable: falsy_result.unreachable)
+          end
+        end
+
+        [truthy_result, falsy_result]
+      end
+
+      # Combines `self:` (intersection) and `drops:` (subtraction) into
+      # a single refined type for the branch. Returns `[refined_type,
+      # changed]` — `changed` is `true` if either step did something.
+      # When neither slot is declared, returns `[base, false]` and the
+      # caller skips the env update.
+      def compose_refinement(base, branch)
+        intersected = postcondition_intersect(base, branch)
+        refined = intersected || base
+
+        dropped = postcondition_drop(refined, branch)
+        applied_drops = !dropped.equal?(refined)
+        refined = dropped if applied_drops
+
+        [refined, !intersected.nil? || applied_drops]
+      end
+
+      # When the postcondition declares `via_receiver`, also narrow the
+      # *receiver of the receiver* of the predicate call. Handles
+      # `host.<through_method>.<predicate>` patterns — delegation in POROs
+      # and `has_one through:` in Rails (felixefelip/steep#14).
+      def apply_via_receivers(branch:, receiver:, result:, truthy_branch:)
+        return result if branch.via_receivers.empty?
+        return result unless receiver.is_a?(::Parser::AST::Node)
+        return result unless receiver.type == :send
+
+        inner_receiver, method_name_sym, *_ = receiver.children
+        return result unless inner_receiver
+        return result unless method_name_sym.is_a?(::Symbol)
+
+        inner_receiver_type = typing.type_of(node: inner_receiver) rescue nil
+        return result unless inner_receiver_type
+
+        branch.via_receivers.each do |via|
+          next unless via.through_method_name == method_name_sym
+
+          through_name = via.through_type_name or next
+          next unless inner_receiver_type_matches_through?(inner_receiver_type, through_name)
+
+          marker = via_receiver_marker(via) or next
+          new_type = AST::Types::Intersection.build(types: [inner_receiver_type, marker])
+
+          truthy_t, falsy_t =
+            if truthy_branch
+              [new_type, inner_receiver_type]
+            else
+              [inner_receiver_type, new_type]
+            end
+
+          truthy_env, falsy_env = refine_node_type(
+            env: result.env,
+            node: inner_receiver,
+            truthy_type: truthy_t,
+            falsy_type: falsy_t
+          )
+
+          chosen_env = truthy_branch ? truthy_env : falsy_env
+          result = Result.new(type: result.type, env: chosen_env, unreachable: result.unreachable)
+        end
+
+        result
+      end
+
+      # Returns true when `inner_type` is a subtype of the `through:` type
+      # declared in the via_receiver entry. Walks intersections so a
+      # narrowed receiver (`Order & Order::Validated`) still matches a
+      # declaration whose through target is `Order`.
+      def inner_receiver_type_matches_through?(inner_type, through_name)
+        candidates =
+          case inner_type
+          when AST::Types::Intersection
+            inner_type.types
+          else
+            [inner_type]
+          end
+
+        candidates.any? do |t|
+          t.is_a?(AST::Types::Name::Instance) && t.name == through_name
+        end
+      end
+
+      def via_receiver_marker(via)
+        rbs_type = via.as_rbs_type or return nil
+        factory.type(absolutize_rbs_type(rbs_type))
+      rescue StandardError => e
+        Steep.logger.warn { "[postconditions] failed to materialize via_receiver marker for #{via.through_string.inspect} → #{via.as_type_string.inspect}: #{e.class}: #{e.message}" }
+        nil
+      end
+
+      # Looks up a postcondition entry for a method call. Tries the method
+      # name first against the receiver's concrete type (handles methods
+      # inherited from modules / superclasses — e.g. an AR predicate that
+      # lives in `Model::GeneratedAttributeMethods`), then falls back to
+      # the type where the method is actually defined.
+      # An ivar's [truthy, falsy] split for `returns_ivar` narrowing. `bool`
+      # (an atomic `Boolean`) doesn't partition, so hand back the literals;
+      # otherwise defer to `partition_union` (`true?` → `[true, nil]`).
+      def partition_ivar(declared)
+        return [nil, nil] unless declared
+        return [TRUE, FALSE] if declared.is_a?(AST::Types::Boolean)
+
+        factory.partition_union(declared)
+      end
+
+      # The ivar a `:send` node transparently reads (`returns_ivar`), or nil.
+      # Only for self/implicit-self sends — `other.performed?` reads OTHER's
+      # ivar, not ours.
+      def returns_ivar_of(node)
+        return nil if postconditions.empty?
+        return nil unless node.type == :send
+        receiver = node.children[0]
+        return nil unless receiver.nil? || receiver.type == :self
+
+        call = typing.call_of(node: node) rescue (return nil)
+        return nil unless call.is_a?(TypeInference::MethodCall::Typed)
+
+        entry = lookup_postcondition_entry(call: call, receiver_type: self_type)
+        entry&.returns_ivar
+      end
+
+      def lookup_postcondition_entry(call:, receiver_type:)
+        # The name the SOURCE called, not the name it resolved to. Those agree
+        # for an ordinary call, and part ways under delegation inlining
+        # (felixefelip/steep#32): `def windowed?; window.present?; end` is a
+        # forwarder, so `source.windowed?` is retyped as `source.window.present?`
+        # and `mirror_inlined_method_call` copies the inlined call's decls onto
+        # the original node — leaving `method_decls` naming `present?` while
+        # `method_name` still says `windowed?`. Reading the decls looked up
+        # `Example67Source#present?`, which is nobody's postcondition, and the
+        # entry for the method actually written was never found.
+        method_sym = call.method_name ||
+          call.method_decls.map { |d| d.method_name.method_name }.compact.first
+        return nil unless method_sym
+
+        receiver_type_names(receiver_type).each do |type_name|
+          entry = postconditions.lookup_instance(type_name.to_s, method_sym)
+          return entry if entry
+        end
+
+        call.method_decls.each do |decl|
+          name = decl.method_name
+          next unless name.is_a?(InstanceMethodName)
+          entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
+          return entry if entry
+        end
+
+        nil
+      end
+
+      # Names that count as the receiver's type for postcondition lookup.
+      # Walks intersections so a previously narrowed receiver (e.g.
+      # `OrderImport & OrderImport::Validated`) still matches a
+      # postcondition keyed by `OrderImport`.
+      def receiver_type_names(receiver_type)
+        case receiver_type
+        when AST::Types::Intersection
+          receiver_type.types.flat_map { |t| receiver_type_names(t) }
+        when AST::Types::Name::Instance
+          [receiver_type.name]
+        else
+          []
+        end
+      end
+
+      def postcondition_intersect(receiver_type, branch)
+        rbs_type = branch.rbs_type or return nil
+        marker = factory.type(absolutize_rbs_type(rbs_type))
+        AST::Types::Intersection.build(types: [receiver_type, marker])
+      end
+
+      # Subtracts the marker types listed in `branch.drops` from the
+      # receiver type (felixefelip/steep#29). Only handles type-name
+      # markers (`ClassInstance`/`Interface`); complex drop entries
+      # are silently skipped at apply time. For intersection
+      # receivers, the components matching a drop marker are filtered
+      # out — letting predicates like `update`/`save` declare
+      # `drops: [Validated]` to express "the falsy branch loses this
+      # marker", which pure `self:` intersection can't capture.
+      def postcondition_drop(receiver_type, branch)
+        return receiver_type if branch.drops_type_strings.empty?
+
+        drop_names = branch.drops_rbs_types.filter_map do |rbs_type|
+          absolutized = absolutize_rbs_type(rbs_type)
+          case absolutized
+          when RBS::Types::ClassInstance, RBS::Types::Interface
+            absolutized.name
+          end
+        end
+        return receiver_type if drop_names.empty?
+
+        apply_drops_to_type(receiver_type, drop_names)
+      end
+
+      # Recursive walk that removes matching markers from intersection
+      # components and distributes through unions. Non-aggregate types
+      # are preserved as-is — subtracting a single type from itself
+      # would yield an empty type, which is rarely the user's intent.
+      def apply_drops_to_type(type, drop_names)
+        case type
+        when AST::Types::Intersection
+          remaining = type.types.reject { |t| drop_matches?(t, drop_names) }
+          return type if remaining.size == type.types.size
+
+          if remaining.empty?
+            # Degenerate: the receiver was exactly the dropped marker
+            # set. Fall back to `untyped` so the caller still sees
+            # *some* type rather than a malformed intersection.
+            AST::Builtin.any_type
+          elsif remaining.size == 1
+            remaining.first
+          else
+            AST::Types::Intersection.build(types: remaining)
+          end
+        when AST::Types::Union
+          new_branches = type.types.map { |t| apply_drops_to_type(t, drop_names) }
+          return type if new_branches == type.types
+          AST::Types::Union.build(types: new_branches)
+        else
+          type
+        end
+      end
+
+      def drop_matches?(type, drop_names)
+        case type
+        when AST::Types::Name::Instance, AST::Types::Name::Interface
+          drop_names.include?(type.name)
+        else
+          false
+        end
+      end
+
+      def absolutize_rbs_type(rbs_type)
+        case rbs_type
+        when RBS::Types::ClassInstance, RBS::Types::ClassSingleton, RBS::Types::Interface, RBS::Types::Alias
+          rbs_type.class.new(name: rbs_type.name.absolute!, args: rbs_type.respond_to?(:args) ? rbs_type.args.map { |a| absolutize_rbs_type(a) } : [], location: rbs_type.location)
+        when RBS::Types::Intersection
+          rbs_type.class.new(types: rbs_type.types.map { |t| absolutize_rbs_type(t) }, location: rbs_type.location)
+        when RBS::Types::Union
+          rbs_type.class.new(types: rbs_type.types.map { |t| absolutize_rbs_type(t) }, location: rbs_type.location)
+        when RBS::Types::Optional
+          rbs_type.class.new(type: absolutize_rbs_type(rbs_type.type), location: rbs_type.location)
+        else
+          rbs_type
         end
       end
     end

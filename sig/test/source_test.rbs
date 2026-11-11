@@ -13,6 +13,13 @@ class SourceTest < Minitest::Test
 
   include FactoryHelper
 
+  # One analysis for the file, not one per method. A `TypeConstruction` is
+  # built anew for every method body, so memoising it there charged the whole
+  # file's AST once per method.
+  def test_accumulators_are_analyzed_once_per_source: () -> untyped
+
+  def test_constants_are_analyzed_once_per_source: () -> untyped
+
   def test_foo: () -> untyped
 
   def test_if: () -> untyped
@@ -88,4 +95,13 @@ class SourceTest < Minitest::Test
   def test_find_comment: () -> untyped
 
   def test_annotation_attached_to_block: () -> untyped
+
+  # The injected annotation is `@type self_method:`, not a plain `@type self:` (#86): a
+  # template compiles to a METHOD at runtime, so the body is given that method's identity
+  # rather than only its receiver's type — which is what lets method-entry facts narrow
+  # reads in it. `SelfMethod` binds `self` exactly as `SelfType` does, and names the
+  # method on top; asserting the method name is the half a `SelfType` could never carry.
+  def test_erb_convention_injects_self_method_annotation: () -> untyped
+
+  def test_erb_convention_not_injected_without_env_var: () -> untyped
 end

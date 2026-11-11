@@ -1,0 +1,28 @@
+# Generated from test/unknown_self_type_annotation_test.rb with RBS::Inline
+
+# felixefelip/steep#101. A body annotated `@type self:` / `@type self_method:` naming a
+# type the environment does not declare used to reach `RBS::DefinitionBuilder#build_instance`,
+# which answers an unknown name with a bare RuntimeError — killing the whole run rather
+# than the one file, and naming a class the user typically never wrote (the ERB convention
+# annotates a template with `ERBFoo`, generated code whose RBS may not exist yet).
+class UnknownSelfTypeAnnotationTest < Minitest::Test
+  include Steep
+
+  include TestHelper
+
+  include ShellHelper
+
+  def dirs: () -> untyped
+
+  STEEPFILE: ::String
+
+  RBS: ::String
+
+  def type_check_source: (untyped ruby) -> untyped
+
+  def test_reports_instead_of_raising: () -> untyped
+
+  def test_checks_the_body_with_object_self: () -> untyped
+
+  def test_a_declared_self_type_is_untouched: () -> untyped
+end

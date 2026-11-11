@@ -131,4 +131,54 @@ class TypingTest < Minitest::Test
       child2.save!
     end
   end
+
+  # Calls in `a.foo(b.bar)`: the outer send is recorded on the parent, the inner
+  # one on a child. A child reads the parent's, and a saved child hands its own
+  # back, the same way `call_of` does.
+  def test_self_type_of_call_follows_the_parent_and_is_saved_with_the_child
+    source = parse_ruby("a.foo(b.bar)")
+    outer = source.node
+    inner = outer.children[2]
+
+    typing = Steep::Typing.new(source: source, root_context: context, cursor: nil)
+    call_context = Steep::TypeInference::MethodCall::TopLevelContext.new
+
+    outer_self = parse_type("singleton(::Object)")
+    inner_self = parse_type("::Object")
+
+    typing.add_call(outer, Steep::TypeInference::MethodCall::Untyped.new(node: outer, context: call_context, method_name: :foo), self_type: outer_self, exact_self: nil, keyed_self: nil, self_ivars: {}, class_states: {})
+
+    typing.new_child do |child|
+      assert_equal outer_self, child.self_type_of_call(node: outer)
+      assert_nil child.self_type_of_call(node: inner)
+
+      child.add_call(inner, Steep::TypeInference::MethodCall::Untyped.new(node: inner, context: call_context, method_name: :bar), self_type: inner_self, exact_self: nil, keyed_self: nil, self_ivars: {}, class_states: {})
+      assert_nil typing.self_type_of_call(node: inner)
+
+      child.save!
+    end
+
+    assert_equal inner_self, typing.self_type_of_call(node: inner)
+  end
+
+  def test_join_branches_types_a_call_by_every_branch_and_keeps_only_the_facts_they_share
+    source = parse_ruby("a.foo")
+    node = source.node
+    typing = Steep::Typing.new(source: source, root_context: context, cursor: nil)
+    call = Steep::TypeInference::MethodCall::Untyped.new(node: node, context: Steep::TypeInference::MethodCall::TopLevelContext.new, method_name: :foo)
+    shared = parse_type("singleton(::Object)")
+
+    first, last = [parse_type("singleton(::String)"), parse_type("singleton(::Integer)")].map do |self_type|
+      typing.new_child.tap do |child|
+        child.add_typing(node, self_type, nil)
+        child.add_call(node, call, self_type: self_type, exact_self: self_type, keyed_self: shared, self_ivars: {}, class_states: {})
+      end
+    end
+    last.join_branches!([first])
+
+    assert_equal "(singleton(::String) | singleton(::Integer))", last.type_of(node: node).to_s
+    assert_equal "(singleton(::String) | singleton(::Integer))", last.self_type_of_call(node: node).to_s
+    assert_nil last.exact_self_of_call(node: node)
+    assert_equal shared, last.keyed_self_of_call(node: node)
+  end
 end

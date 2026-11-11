@@ -21,6 +21,109 @@ module Steep
       end
     end
 
+    def contracts
+      @contracts ||= Contracts.load(base_dir)
+    end
+
+    def postconditions
+      @postconditions ||= Postconditions.load(base_dir)
+    end
+
+    # Drops the memoized postcondition store so the next access reloads
+    # from disk. `steep check` infers postconditions and writes the
+    # sidecar *before* running contract enforcement — which must see the
+    # freshly-written establishments (`returns.establishes`, etc.) to
+    # decide whether a `build → save` caller satisfies its precondition
+    # (felixefelip/steep#56). Without a reload, enforcement would read
+    # the stale (pre-inference) store.
+    def reload_postconditions!
+      @postconditions = nil
+    end
+
+    # Generic callback sidecar (felixefelip/steep#27). Loaded lazily from
+    # `sig/**/.steep_callbacks.yml`. External generators emit these to
+    # declare that a handler method runs before a target — Steep applies
+    # the handler's unconditional postcondition at the target's method
+    # entry, framework-agnostic.
+    def callbacks
+      @callbacks ||= Callbacks.load(base_dir)
+    end
+
+    # Per-argument-tuple return types (felixefelip/rbs_infer#345, stage S4).
+    # Loaded lazily from `sig/generated/.steep_specializations.yml`, which
+    # `Specializations::Runner` writes before the check.
+    def specializations
+      @specializations ||= Specializations.load(base_dir)
+    end
+
+    def reload_specializations!
+      @specializations = nil
+    end
+
+    # Project-wide registry of forward-delegate methods, used by
+    # `TypeConstruction` to inline delegation calls during narrowing
+    # (felixefelip/steep#32). Built eagerly on first access via
+    # `DelegationRegistry.build`. Invalidated wholesale whenever
+    # `update_sources` runs (LSP edit, file change) — coarse but
+    # simple; re-parsing the project is cheap relative to type-check
+    # itself.
+    def delegation_registry
+      @delegation_registry ||= DelegationRegistry.build(self)
+    end
+
+    def invalidate_delegation_registry!
+      @delegation_registry = nil
+    end
+
+    # Project-wide registry of constructor reader→parameter bindings, used by
+    # `TypeConstruction` to translate an `initialize` precondition on
+    # `self.<reader>...` into an obligation on the matching `.new` argument
+    # (felixefelip/steep#60). Built and invalidated exactly like
+    # `delegation_registry`.
+    def constructor_binding_registry
+      @constructor_binding_registry ||= ConstructorBindingRegistry.build(self)
+    end
+
+    def invalidate_constructor_binding_registry!
+      @constructor_binding_registry = nil
+    end
+
+    # Project-wide registry of return-forwarding methods (a getter returning
+    # `Proxy.new(..., self)` forwards the proxy's `owner` reader to the
+    # receiver), used by `TypeConstruction` to collapse `recv.getter.owner` to
+    # `recv` when discharging a precondition (felixefelip/steep#62). Built on
+    # top of `constructor_binding_registry`; invalidated the same way.
+    def return_forwarding_registry
+      @return_forwarding_registry ||= ReturnForwardingRegistry.build(self, constructor_binding_registry)
+    end
+
+    def invalidate_return_forwarding_registry!
+      @return_forwarding_registry = nil
+    end
+
+    # Project-wide index of methods that return-alias a reader of their result
+    # to a self path (`Proxy#build` returns a record whose `post` is
+    # `self.owner`), used to root a caller's `x = build; x.post.user` at
+    # `self.owner.user` (felixefelip/steep#62). Invalidated like the others.
+    def return_alias_registry
+      @return_alias_registry ||= ReturnAliasRegistry.build(self)
+    end
+
+    def invalidate_return_alias_registry!
+      @return_alias_registry = nil
+    end
+
+    # Ruby-source implementations that shadow a closed-table literal
+    # intrinsic. RBS names the selected owner, but cannot distinguish the core
+    # body from a project reopen of that same owner.
+    def literal_method_registry
+      @literal_method_registry ||= LiteralMethodRegistry.build(self)
+    end
+
+    def invalidate_literal_method_registry!
+      @literal_method_registry = nil
+    end
+
     def relative_path(path)
       path.relative_path_from(base_dir)
     rescue ArgumentError

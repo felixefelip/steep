@@ -29,10 +29,25 @@ module Steep
         subtyping.factory.env
       end
 
-      def initialize(source:, subtyping:)
+      attr_reader :contracts
+      attr_reader :postconditions
+      attr_reader :callbacks
+      attr_reader :specializations
+      attr_reader :literal_method_registry
+      attr_reader :delegation_registry
+      attr_reader :return_alias
+
+      def initialize(source:, subtyping:, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, specializations: Steep::Specializations::Store.empty, literal_method_registry:, delegation_registry:, return_alias: Steep::Project::ReturnAliasRegistry.new)
         @source = source
         @subtyping = subtyping
         @buffer = source.buffer
+        @contracts = contracts
+        @postconditions = postconditions
+        @callbacks = callbacks
+        @specializations = specializations
+        @literal_method_registry = literal_method_registry
+        @delegation_registry = delegation_registry
+        @return_alias = return_alias
       end
 
       def run(line:, column:)
@@ -59,7 +74,7 @@ module Steep
               if begin_loc.end_pos <= pos && pos <= end_loc.begin_pos
                 # Given position is between open/close parens of args of send node
 
-                if parent && (parent.type == :block || parent.type == :numblock) && node.equal?(parent.children[0])
+                if parent && (parent.type == :block || parent.type == :numblock || parent.type == :itblock) && node.equal?(parent.children[0])
                   send_node = parent
                 else
                   send_node = node
@@ -77,7 +92,22 @@ module Steep
         source = self.source.without_unrelated_defs(line: line, column: column)
         resolver = RBS::Resolver::ConstantResolver.new(builder: subtyping.factory.definition_builder)
         pos = self.source.buffer.loc_to_pos([line, column])
-        TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: pos)
+
+        TypeCheckService.type_check(
+          source: source,
+          subtyping: subtyping,
+          constant_resolver: resolver,
+          cursor: pos,
+          contracts: contracts,
+          postconditions: postconditions,
+          callbacks: callbacks,
+          specializations: specializations,
+          literal_method_registry: literal_method_registry,
+          delegation_registry: delegation_registry,
+          constructor_bindings: Project::ConstructorBindingRegistry.new,
+          return_forwarding: Project::ReturnForwardingRegistry.new,
+          return_alias: return_alias
+        )
       end
 
       def last_argument_nodes_for(argument_nodes:, line:, column:)

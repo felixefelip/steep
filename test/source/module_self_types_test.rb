@@ -1,0 +1,911 @@
+require_relative "../test_helper"
+require "tmpdir"
+
+class Steep::Source::ModuleSelfTypesTest < Minitest::Test
+  include TestHelper
+  include FactoryHelper
+
+  M = Steep::Source::ModuleSelfTypes
+
+  def with_module_convention
+    previous = ENV["STEEP_MODULE_CONVENTION"]
+    ENV["STEEP_MODULE_CONVENTION"] = "1"
+    yield
+  ensure
+    ENV["STEEP_MODULE_CONVENTION"] = previous
+    M.reset!
+  end
+
+  def parse_source(code, path:)
+    result = nil
+    with_factory({}) { |factory| result = Steep::Source.parse(code, path: path, factory: factory) }
+    result
+  end
+
+  CONCERN = ["# @type self: singleton(Post) & singleton(Post::Notifiable)",
+             "# @type instance: Post & Post::Notifiable"].freeze
+
+  # --- attachment: what Steep's own check uses ---
+
+  # The bug this closes lived behind a test that looked like it covered it:
+  # `test_inject_preserves_the_line_numbers_of_the_body` asserts the lines
+  # BEFORE the insertion are untouched, which they always were. Everything after
+  # shifted, and every position Steep reported for it — diagnostics included —
+  # was one line off per annotation (felixefelip/steep#176).
+  def test_scope_annotations_reach_the_node_without_moving_a_line
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        sidecar = Pathname(dir) + M::DEFAULT_SIDECAR_PATH
+        sidecar.parent.mkpath
+        sidecar.write(<<~YAML)
+          a.rb:
+            modules:
+            - anchor: Notifiable
+              annotations:
+              - "# @type self: singleton(Post) & singleton(Post::Notifiable)"
+              - "# @type instance: Post & Post::Notifiable"
+        YAML
+        M.reset!
+
+        code = <<~RUBY
+          module Post::Notifiable
+            def notify
+            end
+          end
+
+          class After
+            def where_am_i
+            end
+          end
+        RUBY
+
+        source = with_module_convention { parse_source(code, path: Pathname("a.rb")) }
+
+        module_node = source.node.children.first
+        attached = source.mapping[module_node] || []
+        assert_equal 2, attached.size, "both annotations belong to the module the anchor names"
+        assert attached.any? { |a| a.is_a?(Steep::AST::Annotation::SelfType) }
+        assert attached.any? { |a| a.is_a?(Steep::AST::Annotation::InstanceType) }
+
+        # The point of the whole change: the file Steep parsed is the file on
+        # disk, so a node after the annotated module keeps its own line.
+        after = source.node.children.last
+        assert_equal 6, after.loc.line
+        assert_equal code, source.buffer.content
+      end
+    end
+  end
+
+  def test_scope_annotations_reach_every_opening_of_the_module
+    code = <<~RUBY
+      class Example::Post
+        module GeneratedMethods
+        end
+        include ::Example::Post::GeneratedMethods
+      end
+
+      module Example::Post::GeneratedMethods
+        def comments
+        end
+      end
+
+      module Other::GeneratedMethods
+      end
+    RUBY
+    table = { "a.rb" => { "modules" => [{ "anchor" => "GeneratedMethods", "annotations" => ["# @type instance: Example::Post & Example::Post::GeneratedMethods"] }] } }
+
+    with_sidecar(table) do
+      source = with_module_convention { parse_source(code, path: Pathname("a.rb")) }
+      nested, reopen, other = source.node.children[0].children[2].children[0], source.node.children[1], source.node.children[2]
+
+      assert [nested, reopen].all? { |node| (source.mapping[node] || []).any?(Steep::AST::Annotation::InstanceType) }
+      assert_empty(source.mapping[other] || [])
+    end
+  end
+
+  def test_an_annotation_written_by_hand_wins_over_the_sidecar
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        sidecar = Pathname(dir) + M::DEFAULT_SIDECAR_PATH
+        sidecar.parent.mkpath
+        sidecar.write(<<~YAML)
+          a.rb:
+            modules:
+            - anchor: Notifiable
+              annotations:
+              - "# @type instance: Post & Post::Notifiable"
+        YAML
+        M.reset!
+
+        code = <<~RUBY
+          module Post::Notifiable
+            # @type instance: String
+            def notify
+            end
+          end
+        RUBY
+
+        source = with_module_convention { parse_source(code, path: Pathname("a.rb")) }
+
+        module_node = source.node
+        instances = (source.mapping[module_node] || []).select { |a| a.is_a?(Steep::AST::Annotation::InstanceType) }
+        assert_equal 1, instances.size, "the sidecar is derived; a hand-written annotation is not argued with"
+        assert_equal "String", instances.first.type.to_s
+      end
+    end
+  end
+
+  # --- inject: placement (the genuinely-Steep behavior) ---
+
+  def test_inject_into_top_level_module_goes_inside_body
+    source = <<~RUBY
+      module Post::Notifiable
+        extend ActiveSupport::Concern
+
+        included do
+        end
+      end
+    RUBY
+
+    result = M.inject(source, annotations: CONCERN, anchor: "Notifiable")
+    lines = result.lines
+
+    module_close_idx = lines.rindex { |l| l.strip == "end" }
+    self_idx         = lines.index { |l| l.include?("@type self:") }
+    instance_idx     = lines.index { |l| l.include?("@type instance:") }
+
+    assert self_idx < module_close_idx, "annotation must be inside the body, not after the module's end"
+    assert instance_idx < module_close_idx
+  end
+
+  # End-of-file placement bound to the file's SOLE node, which for a one-module
+  # file is the module itself — and stopped being it the moment the file wrote
+  # anything else at the top level, with no error and no annotation in effect
+  # (felixefelip/steep#155).
+  def test_inject_reaches_a_module_a_second_top_level_module_follows
+    source = <<~RUBY
+      module Post::Notifiable
+        def notify
+        end
+      end
+
+      module Post::Notifiable::ClassMethods
+        def default_notifier
+        end
+      end
+    RUBY
+
+    result = M.inject(source, annotations: CONCERN, anchor: "Notifiable")
+    lines = result.lines
+
+    notifiable_open = lines.index { |l| l.include?("module Post::Notifiable\n") }
+    class_methods_open = lines.index { |l| l.include?("module Post::Notifiable::ClassMethods") }
+    self_idx = lines.index { |l| l.include?("@type self:") }
+
+    assert self_idx > notifiable_open
+    assert self_idx < class_methods_open, "annotation must be inside Notifiable, not at end of file"
+  end
+
+  # The annotation is spliced in just above the module's own `end`, so every
+  # line of the body — everything a diagnostic can point at — keeps its number.
+  # A reopen of the same module is the same module: its instance `self` is the
+  # host's as much as the first declaration's. `StringEvalMacroExpander` places
+  # what a `class_eval` string writes in a reopen like this one, and the method
+  # it places — `delegate`'s, here — calls the host's class methods.
+  def test_inject_reaches_every_reopen_of_the_same_module
+    source = <<~RUBY
+      module Example60::Labels
+        extend ActiveSupport::Concern
+      end
+
+      module Other::Labels
+      end
+
+      module Example60::Labels
+        def human_name(...);  (self.class).human_name(...);end
+      end
+    RUBY
+
+    result = M.inject(source, annotations: ["# @type instance: Example60 & Example60::Labels"], anchor: "Labels")
+    declarations = result.split(/^(?=module )/)
+
+    assert_includes declarations[0], "@type instance:"
+    refute_includes declarations[1], "@type instance:", "another module that shares the last segment is not this one"
+    assert_includes declarations[2], "@type instance:"
+  end
+
+  def test_inject_preserves_the_line_numbers_of_the_body
+    source = <<~RUBY
+      module Post::Notifiable
+        extend ActiveSupport::Concern
+
+        def notify
+          "hello"
+        end
+      end
+    RUBY
+
+    result = M.inject(source, annotations: CONCERN, anchor: "Notifiable")
+
+    source.lines[0..-2].each_with_index do |line, i|
+      assert_equal line, result.lines[i], "Line #{i + 1} shifted after annotation"
+    end
+  end
+
+  def test_inject_into_nested_module_goes_inside_body
+    source = <<~RUBY
+      module Search
+        class Record
+          module SQLite
+            extend ActiveSupport::Concern
+          end
+        end
+      end
+    RUBY
+    annotations = ["# @type self: singleton(Search::Record) & singleton(Search::Record::SQLite)",
+                   "# @type instance: Search::Record & Search::Record::SQLite"]
+
+    result = M.inject(source, annotations: annotations, anchor: "SQLite")
+    lines = result.lines
+
+    sqlite_open = lines.index { |l| l.include?("module SQLite") }
+    annotation  = lines.index { |l| l.include?("@type self:") }
+    closing_ends = lines.each_index.select { |i| lines[i].strip == "end" }
+
+    assert annotation > sqlite_open
+    assert annotation < closing_ends.last, "annotation must be inside the body, not after the closing ends"
+  end
+
+  def test_inject_is_idempotent
+    source = <<~RUBY
+      module Post::Notifiable
+        extend ActiveSupport::Concern
+
+        # @type self: singleton(Post) & singleton(Post::Notifiable)
+        # @type instance: Post & Post::Notifiable
+
+        included do
+        end
+      end
+    RUBY
+
+    assert_equal source, M.inject(source, annotations: CONCERN, anchor: "Notifiable")
+  end
+
+  def test_inject_single_instance_annotation
+    source = <<~RUBY
+      module Post::Taggable
+        def tag_names
+        end
+      end
+    RUBY
+    annotations = ["# @type instance: Post & Post::Taggable"]
+
+    result = M.inject(source, annotations: annotations, anchor: "Taggable")
+
+    assert_includes result, "# @type instance: Post & Post::Taggable"
+    refute_includes result, "@type self:"
+  end
+
+  def test_inject_falls_back_to_append_on_unparseable_source
+    source = "module Broken\n  def x(\n"
+    annotations = ["# @type instance: Foo & Broken"]
+
+    result = M.inject(source, annotations: annotations, anchor: "Broken")
+
+    assert_includes result, "# @type instance: Foo & Broken"
+  end
+
+  # --- inject_blocks: @implements into a DSL block body ---
+
+  TAGGABLE = <<~RUBY
+    module Post
+      module Taggable
+        class_methods do
+          def default_tag_names
+            ["news"]
+          end
+        end
+      end
+    end
+  RUBY
+
+  BLOCKS = [{ "call" => "class_methods", "implements" => "::Post::Taggable::ClassMethods" }].freeze
+
+  BLOCKS_WITH_SELF = [{
+    "call" => "class_methods",
+    "implements" => "::Post::Taggable::ClassMethods",
+    "self" => "singleton(::Post) & singleton(::Post::Taggable)"
+  }].freeze
+
+  # A block replayed onto two classes needs both names, and there is one line to
+  # put them on — a second `# @implements` would land inside the first one's
+  # text. So the entry may carry a LIST, joined into one comment
+  # (felixefelip/steep#149).
+  def test_inject_blocks_joins_a_list_of_implements_into_one_comment
+    blocks = [{ "call" => "class_methods", "implements" => ["::Wrap::Bar", "::Wrap::BarOther"] }]
+
+    result = M.inject_blocks(TAGGABLE, blocks: blocks)
+
+    assert_includes result, "class_methods do # @implements ::Wrap::Bar, ::Wrap::BarOther"
+    # Still no line added, which is what keeps every reported line number aligned.
+    assert_equal TAGGABLE.lines.size, result.lines.size
+  end
+
+  # The string form is what every sidecar written before the list said, and it
+  # keeps meaning exactly what it meant.
+  def test_inject_blocks_still_takes_a_single_implements_string
+    result = M.inject_blocks(TAGGABLE, blocks: BLOCKS)
+
+    assert_includes result, "class_methods do # @implements ::Post::Taggable::ClassMethods"
+  end
+
+  def test_inject_blocks_appends_self_on_each_def_line_without_shifting
+    source = <<~RUBY
+      module Post
+        module Taggable
+          class_methods do
+            def default_tag_names
+              ["news"]
+            end
+
+            def known_tag?(name)
+              default_tag_names.include?(name)
+            end
+          end
+        end
+      end
+    RUBY
+
+    result = M.inject_blocks(source, blocks: BLOCKS_WITH_SELF)
+    lines = result.lines
+
+    # No line added.
+    assert_equal source.lines.size, lines.size
+
+    # @implements on the opener, @type self on each def line, every other line intact.
+    self_ann = "# @type self: singleton(::Post) & singleton(::Post::Taggable)"
+    source.lines.each_with_index do |orig, i|
+      case
+      when orig.include?("class_methods do")
+        assert_includes lines[i], "@implements ::Post::Taggable::ClassMethods"
+        assert lines[i].start_with?(orig.chomp)
+      when orig.include?("def default_tag_names"), orig.include?("def known_tag?")
+        assert_includes lines[i], self_ann, "def line #{i + 1} must carry @type self"
+        assert lines[i].start_with?(orig.chomp)
+      else
+        assert_equal orig, lines[i], "line #{i + 1} must not move or change"
+      end
+    end
+
+    assert_equal 2, lines.count { |l| l.include?(self_ann) }
+  end
+
+  def test_inject_blocks_with_self_is_idempotent
+    once  = M.inject_blocks(TAGGABLE, blocks: BLOCKS_WITH_SELF)
+    twice = M.inject_blocks(once, blocks: BLOCKS_WITH_SELF)
+    assert_equal once, twice
+    assert_equal 1, twice.lines.count { |l| l.include?("@type self:") }
+    assert_equal 1, twice.lines.count { |l| l.include?("@implements") }
+  end
+
+  # --- inject_blocks: the `in` discriminator ---
+
+  # Two blocks of the SAME call name in one file, each replayed onto a different
+  # class. Without a discriminator both entries land on both blocks, so the
+  # generator has to decline and neither block gets checked against its real
+  # definee.
+  TWO_BAZINGADO = <<~RUBY
+    class Example29
+      module Baz
+        bazingado do
+          def greet
+            "hi"
+          end
+        end
+      end
+
+      module BazOther
+        bazingado do
+          def name_upcase
+            name.upcase
+          end
+        end
+      end
+    end
+  RUBY
+
+  TWO_BLOCKS = [
+    { "call" => "bazingado", "in" => "::Example29::Baz",      "implements" => "::Example29::Bar" },
+    { "call" => "bazingado", "in" => "::Example29::BazOther", "implements" => "::Example29::BarOther" }
+  ].freeze
+
+  def test_inject_blocks_in_picks_the_block_written_in_that_scope
+    lines = M.inject_blocks(TWO_BAZINGADO, blocks: TWO_BLOCKS).lines
+
+    assert_includes lines[2], "@implements ::Example29::Bar"
+    refute_includes lines[2], "BarOther"
+    assert_includes lines[10], "@implements ::Example29::BarOther"
+    assert_equal TWO_BAZINGADO.lines.size, lines.size
+  end
+
+  # The whole point of a scope over a line: `inject` may have added lines to
+  # this source before `inject_blocks` runs, and the discriminator still holds.
+  def test_inject_blocks_in_survives_lines_added_above_the_call
+    shifted = TWO_BAZINGADO.sub("  module Baz\n", "  module Baz\n    # @type instance: Example29::Baz\n")
+    lines = M.inject_blocks(shifted, blocks: TWO_BLOCKS).lines
+
+    assert_includes lines[3], "@implements ::Example29::Bar"
+    assert_includes lines[11], "@implements ::Example29::BarOther"
+  end
+
+  def test_inject_blocks_in_that_matches_no_scope_annotates_nothing
+    result = M.inject_blocks(TWO_BAZINGADO, blocks: [
+      { "call" => "bazingado", "in" => "::Example29::Nowhere", "implements" => "::Example29::Bar" }
+    ])
+
+    assert_equal TWO_BAZINGADO, result
+  end
+
+  # `::A::B` from the sidecar and `A::B` read off the declarations are one scope.
+  def test_inject_blocks_in_matches_regardless_of_the_leading_colons
+    lines = M.inject_blocks(TWO_BAZINGADO, blocks: [
+      { "call" => "bazingado", "in" => "Example29::Baz", "implements" => "::Example29::Bar" }
+    ]).lines
+
+    assert_includes lines[2], "@implements ::Example29::Bar"
+  end
+
+  # Every sidecar written before `in` existed omits it, and a single-block DSL
+  # never needs it: no scope still means every call of that name.
+  def test_inject_blocks_without_in_still_matches_every_call
+    lines = M.inject_blocks(TWO_BAZINGADO, blocks: [
+      { "call" => "bazingado", "implements" => "::Example29::Bar" }
+    ]).lines
+
+    assert_includes lines[2], "@implements ::Example29::Bar"
+    assert_includes lines[10], "@implements ::Example29::Bar"
+  end
+
+  def test_inject_blocks_without_self_adds_no_type_self
+    result = M.inject_blocks(TAGGABLE, blocks: BLOCKS)
+    refute_includes result, "@type self:"
+  end
+
+  def test_inject_blocks_appends_implements_on_the_opener_line
+    result = M.inject_blocks(TAGGABLE, blocks: BLOCKS)
+    lines = result.lines
+
+    do_line = lines.find { |l| l.include?("class_methods do") }
+    assert_includes do_line, "@implements ::Post::Taggable::ClassMethods",
+                    "annotation must ride on the `do` line itself"
+    assert_match(/class_methods do # @implements ::Post::Taggable::ClassMethods/, do_line)
+  end
+
+  def test_inject_blocks_adds_no_line_and_keeps_every_other_line
+    result = M.inject_blocks(TAGGABLE, blocks: BLOCKS)
+    lines = result.lines
+    original = TAGGABLE.lines
+
+    # No line added → line numbers Steep reports stay aligned with the source.
+    assert_equal original.size, lines.size
+
+    original.each_with_index do |orig, i|
+      if orig.include?("class_methods do")
+        # The opener line only gains a trailing comment.
+        assert lines[i].start_with?(orig.chomp), "opener line #{i + 1} must keep its prefix"
+        assert_includes lines[i], "@implements"
+      else
+        assert_equal orig, lines[i], "line #{i + 1} must not move or change"
+      end
+    end
+  end
+
+  def test_inject_blocks_skips_inline_block_rather_than_corrupting_it
+    # An inline `{ … }` body shares the opener line; appending a `#` comment
+    # there would swallow the body, so the block is left untouched.
+    source = "module M\n  class_methods { def x; end }\nend\n"
+    assert_equal source, M.inject_blocks(source, blocks: BLOCKS)
+  end
+
+  def test_inject_blocks_preserves_lines_before_the_block
+    result = M.inject_blocks(TAGGABLE, blocks: BLOCKS)
+
+    # Everything up to and including `class_methods do` is byte-for-byte intact
+    # (we insert *after* the `do`).
+    prefix = TAGGABLE[0..TAGGABLE.index("class_methods do") + "class_methods do".length - 1]
+    assert result.start_with?(prefix)
+  end
+
+  def test_inject_blocks_is_idempotent
+    once  = M.inject_blocks(TAGGABLE, blocks: BLOCKS)
+    twice = M.inject_blocks(once, blocks: BLOCKS)
+    assert_equal once, twice
+    assert_equal 1, twice.lines.count { |l| l.include?("@implements ::Post::Taggable::ClassMethods") }
+  end
+
+  def test_inject_blocks_ignores_unmatched_call_name
+    result = M.inject_blocks(TAGGABLE, blocks: [{ "call" => "included", "implements" => "X" }])
+    assert_equal TAGGABLE, result
+  end
+
+  def test_inject_blocks_skips_call_with_receiver
+    source = <<~RUBY
+      module Post
+        module Taggable
+          helper.class_methods do
+            def x; end
+          end
+        end
+      end
+    RUBY
+
+    assert_equal source, M.inject_blocks(source, blocks: BLOCKS)
+  end
+
+  def test_inject_blocks_noop_for_empty_blocks
+    assert_equal TAGGABLE, M.inject_blocks(TAGGABLE, blocks: [])
+  end
+
+  def test_inject_blocks_falls_back_on_unparseable_source
+    source = "module Broken\n  class_methods do\n"
+    assert_equal source, M.inject_blocks(source, blocks: BLOCKS)
+  end
+
+  # --- entry_for: sidecar loading ---
+
+  def test_entry_for_reads_sidecar_keyed_by_path
+    with_sidecar(
+      "app/models/search/record/sqlite.rb" => {
+        "anchor" => "SQLite",
+        "annotations" => ["# @type instance: Search::Record & Search::Record::SQLite"]
+      }
+    ) do
+      entry = M.entry_for("app/models/search/record/sqlite.rb")
+      assert_equal "SQLite", entry["anchor"]
+      assert_includes entry["annotations"].first, "Search::Record::SQLite"
+    end
+  end
+
+  def test_entry_for_matches_absolute_path_by_tail
+    with_sidecar("app/models/post/taggable.rb" => { "anchor" => "Taggable", "annotations" => [] }) do |dir|
+      entry = M.entry_for("#{dir}/app/models/post/taggable.rb")
+      assert_equal "Taggable", entry["anchor"]
+    end
+  end
+
+  # Prism counts offsets in BYTES. Slicing the String by that number is a
+  # CHARACTER index, so one multi-byte character above the anchor slid the
+  # insertion past the module's own `end` and into its parent's body — where
+  # the annotation binds to the wrong scope and quietly does nothing.
+  def test_inject_places_the_annotation_inside_the_module_with_multibyte_text_above
+    source = <<~RUBY
+      # A comment with an em dash — and another —
+      module Outer
+        module Inner
+          def x
+          end
+        end
+      end
+    RUBY
+
+    result = M.inject(source, annotations: ["# @type instance: A & B"], anchor: "Inner")
+    lines = result.lines
+
+    annotation = lines.index { |l| l.include?("@type instance") }
+    inner_end = lines.index { |l| l.rstrip == "  end" }
+
+    assert annotation < inner_end,
+           "annotation must sit inside Inner's body, before its `end`:\n#{result}"
+  end
+
+  # --- self_types_of: one file can declare several modules ---
+
+  def test_self_types_of_reads_every_module_of_an_entry
+    entry = {
+      "modules" => [
+        { "anchor" => "ControllerMethods", "annotations" => ["# @type instance: A & B"] },
+        { "anchor" => "Token", "annotations" => ["# @type instance: C & D"] }
+      ]
+    }
+
+    assert_equal %w[ControllerMethods Token], M.self_types_of(entry).map { |m| m["anchor"] }
+  end
+
+  # A sidecar written before `modules` existed still applies.
+  def test_self_types_of_reads_a_top_level_anchor_as_one_module
+    entry = { "anchor" => "SQLite", "annotations" => ["# @type instance: A & B"] }
+
+    assert_equal [entry], M.self_types_of(entry)
+  end
+
+  def test_self_types_of_is_empty_for_a_blocks_only_entry
+    assert_empty M.self_types_of({ "blocks" => [{ "call" => "class_methods" }] })
+  end
+
+  def test_entry_for_nil_without_sidecar
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        M.reset!
+        assert_nil M.entry_for("app/models/post/taggable.rb")
+      end
+    end
+  ensure
+    M.reset!
+  end
+
+  def test_entry_for_reloads_after_sidecar_mtime_changes
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        M.reset!
+        dump_sidecar({ "a.rb" => { "anchor" => "A", "annotations" => [] } }, mtime: Time.at(1_000_000))
+        assert M.entry_for("a.rb")
+        assert_nil M.entry_for("b.rb")
+
+        dump_sidecar(
+          { "a.rb" => { "anchor" => "A", "annotations" => [] },
+            "b.rb" => { "anchor" => "B", "annotations" => [] } },
+          mtime: Time.at(2_000_000)
+        )
+        assert M.entry_for("b.rb"), "regenerated sidecar must be picked up"
+      end
+    end
+  ensure
+    M.reset!
+  end
+
+  NARROWED = <<~RUBY
+    class Example23
+      module Foo
+        def bazinga(module_included)
+          module_included.bazingado(self)
+        end
+
+        def bazingado(base_foo)
+          base_foo
+        end
+      end
+    end
+  RUBY
+
+  def test_inject_defs_annotates_only_the_named_method
+    result = M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+    lines = result.lines
+
+    # Rides the signature line, so nothing shifts.
+    assert_equal NARROWED.lines.size, lines.size
+
+    NARROWED.lines.each_with_index do |orig, i|
+      if orig.include?("def bazinga(")
+        assert_includes lines[i], "# @type self: singleton(::Example23::Bar)"
+        assert lines[i].start_with?(orig.chomp)
+      else
+        assert_equal orig, lines[i]
+      end
+    end
+  end
+
+  def test_inject_defs_is_idempotent
+    once  = M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+    twice = M.inject_defs(once, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+    assert_equal once, twice
+    assert_equal 1, twice.lines.count { |l| l.include?("@type self:") }
+  end
+
+  # The sidecar is the only untrusted input here, so a wrong shape is checked
+  # for by name instead of caught by a blanket rescue — and it is logged, not
+  # swallowed.
+  def test_inject_defs_leaves_the_source_alone_for_a_malformed_sidecar
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: ["bazinga"], anchor: "Foo")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "bazinga" => 42 }, anchor: "Foo")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "bazinga" => "  " }, anchor: "Foo")
+  end
+
+  # A bug in this file has to surface, which a blanket rescue would have turned
+  # into "the annotation silently stopped being placed".
+  def test_inject_defs_does_not_swallow_an_unexpected_error
+    M.stub(:find_target_scope, ->(*) { raise "boom" }) do
+      assert_raises(RuntimeError) do
+        M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+      end
+    end
+  end
+
+  def test_inject_defs_ignores_an_unknown_anchor_or_method
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "bazinga" => "singleton(::X)" }, anchor: "Nope")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: { "nope" => "singleton(::X)" }, anchor: "Foo")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: {}, anchor: "Foo")
+    assert_equal NARROWED, M.inject_defs(NARROWED, defs: nil, anchor: "Foo")
+  end
+
+  # A `def self.x`'s self is the module object, which no invoker narrows and
+  # which the module-wide annotation already covers.
+  def test_inject_defs_leaves_a_singleton_method_alone
+    source = <<~RUBY
+      class Example23
+        module Foo
+          def self.bazinga(x)
+            x
+          end
+        end
+      end
+    RUBY
+
+    assert_equal source, M.inject_defs(source, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+  end
+
+  # A def whose body shares the signature line has nowhere to put the comment
+  # without swallowing the body, so it is skipped rather than shifted.
+  def test_inject_defs_skips_a_def_with_an_inline_body
+    source = <<~RUBY
+      class Example23
+        module Foo
+          def bazinga(x) = x
+        end
+      end
+    RUBY
+
+    assert_equal source, M.inject_defs(source, defs: { "bazinga" => "singleton(::Example23::Bar)" }, anchor: "Foo")
+  end
+
+  # felixefelip/steep#143. Not an annotation: there is no comment that says "when
+  # this parameter is that, `self` is this", which is why it needs a channel of
+  # its own and is read at check time instead of injected.
+  PATHS_ENTRY = {
+    "modules" => [
+      {
+        "anchor" => "Foo",
+        "annotations" => ["# @type instance: singleton(::Bar)"],
+        "paths" => {
+          "bazinga" => [
+            { "when" => { "module_included" => "singleton(Baz)" }, "self" => "singleton(Bar)" },
+            { "when" => { "module_included" => "singleton(BazOther)" }, "self" => "singleton(BarOther)" }
+          ]
+        }
+      }
+    ]
+  }
+
+  def test_paths_of_reads_the_entries_for_one_method
+    paths = M.paths_of(PATHS_ENTRY, "Foo", :bazinga)
+
+    assert_equal 2, paths.size
+    assert_equal({ "module_included" => "singleton(Baz)" }, paths[0]["when"])
+    assert_equal "singleton(BarOther)", paths[1]["self"]
+  end
+
+  def test_paths_of_is_nil_for_another_anchor_or_method
+    assert_nil M.paths_of(PATHS_ENTRY, "Other", :bazinga)
+    assert_nil M.paths_of(PATHS_ENTRY, "Foo", :bazingado)
+  end
+
+  def test_paths_of_is_nil_without_a_paths_key
+    entry = { "modules" => [{ "anchor" => "Foo", "annotations" => [] }] }
+    assert_nil M.paths_of(entry, "Foo", :bazinga)
+  end
+
+  # The sidecar is the only untrusted input here, and a shape that is wrong is
+  # answered with nil rather than carried into the checker.
+  def test_paths_of_is_nil_for_a_malformed_entry
+    [
+      { "paths" => ["bazinga"] },
+      { "paths" => { "bazinga" => [] } },
+      { "paths" => { "bazinga" => [{ "self" => "singleton(Bar)" }] } },
+      { "paths" => { "bazinga" => [{ "when" => { "x" => "A" } }] } },
+      { "paths" => { "bazinga" => [{ "when" => "x", "self" => "singleton(Bar)" }] } }
+    ].each do |paths|
+      entry = { "modules" => [{ "anchor" => "Foo" }.merge(paths)] }
+      assert_nil M.paths_of(entry, "Foo", :bazinga), paths.inspect
+    end
+  end
+
+  # A sidecar written before `modules` existed still applies.
+  def test_paths_of_reads_a_top_level_anchor
+    entry = {
+      "anchor" => "Foo",
+      "paths" => { "bazinga" => [{ "when" => { "x" => "A" }, "self" => "singleton(Bar)" }] }
+    }
+
+    assert_equal 1, M.paths_of(entry, "Foo", :bazinga)&.size
+  end
+
+  # --- inject_blocks: the `method` discriminator ---
+
+  # Ruby's own `included` hook: the block is written inside the hook's body and
+  # `class_eval`ed on the parameter, so the call has a receiver and the module
+  # body has no DSL call at all.
+  HOOK = <<~RUBY
+    class Host
+      module Hookable
+        def self.included(base)
+          base.class_eval do
+            def from_hook
+              "hook"
+            end
+          end
+        end
+
+        def self.excluded(base)
+          base.class_eval do
+            def from_excluded
+              "no"
+            end
+          end
+        end
+      end
+    end
+  RUBY
+
+  HOOK_BLOCKS = [{
+    "call" => "class_eval",
+    "in" => "::Host::Hookable",
+    "method" => "included",
+    "implements" => "::Host"
+  }].freeze
+
+  def test_inject_blocks_reads_a_block_inside_a_def
+    result = M.inject_blocks(HOOK, blocks: HOOK_BLOCKS)
+
+    assert_equal HOOK.lines.size, result.lines.size
+    opener = result.lines.find { |l| l.include?("from_hook") ? false : l.include?("class_eval do") && l.include?("@implements") }
+    refute_nil opener, "the hook's class_eval opener must carry @implements"
+    assert_equal 1, result.lines.count { |l| l.include?("@implements") }
+  end
+
+  # `class_eval` names no block. Two of them in one module would both match on
+  # call name and scope alone, and the second one here is replayed nowhere.
+  def test_inject_blocks_annotates_only_the_named_def
+    result = M.inject_blocks(HOOK, blocks: HOOK_BLOCKS)
+
+    annotated = result.lines.each_with_index.select { |l, _| l.include?("@implements") }.map(&:last)
+    excluded_at = result.lines.index { |l| l.include?("def self.excluded") }
+
+    assert_equal 1, annotated.size
+    assert annotated.first < excluded_at, "the annotation must land before `excluded`, not inside it"
+  end
+
+  # Without `method`, a receiver still disqualifies the call — every sidecar
+  # written before this one keeps meaning exactly what it meant.
+  def test_inject_blocks_still_requires_no_receiver_without_method
+    blocks = [HOOK_BLOCKS.first.reject { |key, _| key == "method" }]
+
+    assert_equal HOOK, M.inject_blocks(HOOK, blocks: blocks)
+  end
+
+  def test_inject_blocks_inside_a_def_is_idempotent
+    once  = M.inject_blocks(HOOK, blocks: HOOK_BLOCKS)
+    twice = M.inject_blocks(once, blocks: HOOK_BLOCKS)
+
+    assert_equal once, twice
+    assert_equal 1, twice.lines.count { |l| l.include?("@implements") }
+  end
+
+  # The scope still discriminates: same call, same def name, another module.
+  def test_inject_blocks_inside_a_def_honours_the_scope
+    blocks = [HOOK_BLOCKS.first.merge("in" => "::Host::Other")]
+
+    assert_equal HOOK, M.inject_blocks(HOOK, blocks: blocks)
+  end
+
+  private
+
+  def with_sidecar(table)
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        M.reset!
+        dump_sidecar(table)
+        yield dir
+      end
+    end
+  ensure
+    M.reset!
+  end
+
+  def dump_sidecar(table, mtime: nil)
+    path = Steep::Source::ModuleSelfTypes::DEFAULT_SIDECAR_PATH
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, YAML.dump(table))
+    File.utime(File.atime(path), mtime, path) if mtime
+    M.reset!
+  end
+end

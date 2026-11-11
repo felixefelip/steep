@@ -36,7 +36,8 @@ class GotoServiceTest < Minitest::Test
     type_check = Services::TypeCheckService.new(project: project)
     type_check.update(changes: changes)
     changes.each_key do |path|
-      if target = project.target_for_source_path(path)
+      # `TypeCheckWorker` type checks inline sources too, via `TypeCheckInlineCodeJob`.
+      if target = project.target_for_source_path(path) || project.target_for_inline_source_path(path)
         type_check.typecheck_source(path: path, target: target)
       end
     end
@@ -283,7 +284,7 @@ Customer.new.foo()
 Customer.bar()
 
 Customer.no_method_error()
-(_ = Customer).bar()
+(__any__ = Customer).bar()
 RUBY
     end
 
@@ -309,7 +310,7 @@ RUBY
       assert_empty qs
     end
 
-    service.query_at(path: dir + "lib/main.rb", line: 5, column: 18).tap do |qs|
+    service.query_at(path: dir + "lib/main.rb", line: 5, column: 24).tap do |qs|
       assert_empty qs
     end
   end
@@ -1185,6 +1186,53 @@ x = nil #: MyString?
       refute_empty locs
       assert locs.any? {|loc| loc.is_a?(RBS::Location) && loc.buffer.name.to_s.end_with?("customer.rbs") }
       assert locs.any? {|loc| !loc.is_a?(RBS::Location) && loc.source_buffer.name.to_s.end_with?("customer.rb") }
+    end
+  end
+
+  def test_query_definition_method__inline
+    type_check = type_check_service do |changes|
+      changes[Pathname("inline/a.rb")] = [ContentChange.string(<<~RUBY)]
+        class Customer
+          # @rbs () -> String
+          def greet
+            "hi"
+          end
+        end
+      RUBY
+    end
+
+    service = Services::GotoService.new(type_check: type_check, assignment: assignment)
+
+    name = Services::GotoService.parse_name("Customer#greet") or raise
+    service.query_definition(name).tap do |locs|
+      assert_any!(locs) do |loc|
+        assert_instance_of RBS::Location, loc
+        assert_equal "greet", loc.source
+        assert_equal Pathname("inline/a.rb"), loc.buffer.name
+      end
+    end
+  end
+
+  def test_query_definition_constant__inline
+    type_check = type_check_service do |changes|
+      changes[Pathname("inline/a.rb")] = [ContentChange.string(<<~RUBY)]
+        class Customer
+          # @rbs!
+          #   VERSION: String
+          VERSION = "0.1.0"
+        end
+      RUBY
+    end
+
+    service = Services::GotoService.new(type_check: type_check, assignment: assignment)
+
+    name = Services::GotoService.parse_name("Customer::VERSION") or raise
+    service.query_definition(name).tap do |locs|
+      assert_any!(locs) do |loc|
+        assert_instance_of RBS::Location, loc
+        assert_equal "VERSION", loc.source
+        assert_equal Pathname("inline/a.rb"), loc.buffer.name
+      end
     end
   end
 end

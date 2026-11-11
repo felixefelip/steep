@@ -182,6 +182,115 @@ module Steep
         end
       end
 
+      # Drops the members of a union that another member already covers: `A | B` where
+      # `B <: A` denotes the same set of values as `A`, so keeping both says one thing
+      # twice.
+      #
+      # Syntactic dedup (`Union.build`) cannot see this — absorption needs the subtyping
+      # relation, which is what this class holds. It matters because a union's method
+      # types are built by FOLDING the members' overloads pairwise: two members whose
+      # overloads differ only in a `self` return type produce a fresh, syntactically
+      # distinct union at every step, so the fold's dedup by method type never fires and
+      # the overload count doubles per member. #148 collapsed the pairs that agree
+      # outright; this collapses the ones that only denote the same type
+      # (felixefelip/steep#150).
+      #
+      # Only a STRICT relation absorbs: `A` covering `B` while `B` also covers `A` (both
+      # `untyped`, or two spellings of one type) would make the result depend on the
+      # order the members happen to arrive in, and Union.build already handles the
+      # equal case.
+      def simplify_union(type)
+        return type unless type.is_a?(AST::Types::Union)
+        return type unless type.types.size > 1
+        # `self`, `instance`, `class` and type variables stand for a type this union does
+        # not know yet — they are substituted per receiver, later. Whether one covers
+        # another is not decidable here, and dropping one would drop the substitution
+        # along with it.
+        return type unless type.free_variables.empty?
+
+        kept = [] #: Array[AST::Types::t]
+
+        type.types.each do |candidate|
+          next if kept.any? {|kept_type| covers_strictly?(kept_type, candidate) }
+          kept.reject! {|kept_type| covers_strictly?(candidate, kept_type) }
+          kept << candidate
+        end
+
+        return type if kept.size == type.types.size
+
+        AST::Types::Union.build(types: kept)
+      end
+
+      # An intersection is inhabited by a value that satisfies EVERY member, so a member
+      # another member already implies says nothing: `A & A?` is just `A`. The dual of
+      # `simplify_union` — there the wider member absorbs, here the narrower one does.
+      def simplify_intersection(type)
+        return type unless type.is_a?(AST::Types::Intersection)
+        return type unless type.types.size > 1
+        # Same reason as `simplify_union`: `self`, `instance`, `class` and type variables
+        # stand for a type this intersection does not know yet.
+        return type unless type.free_variables.empty?
+
+        kept = [] #: Array[AST::Types::t]
+
+        type.types.each do |candidate|
+          next if kept.any? {|kept_type| covers_strictly?(candidate, kept_type) }
+          kept.reject! {|kept_type| covers_strictly?(kept_type, candidate) }
+          kept << candidate
+        end
+
+        return type if kept.size == type.types.size
+
+        AST::Types::Intersection.build(types: kept)
+      end
+
+      # Collapse whichever composite `type` is, if any.
+      def simplify(type)
+        case type
+        when AST::Types::Union
+          simplify_union(type)
+        when AST::Types::Intersection
+          simplify_intersection(type)
+        else
+          type
+        end
+      end
+
+      # `sub` is a subtype of `sup` and `sup` is not a subtype of `sub`.
+      #
+      # Runs in a NESTED context: shapes are built lazily, from inside a check that is
+      # already running, so `with_context` alone would hand the outer check a cleared
+      # context on the way out (its `ensure` nils the fields rather than restoring them).
+      def covers_strictly?(sup, sub)
+        return false if sup == sub
+
+        subtype?(sub, sup) && !subtype?(sup, sub)
+      end
+
+      def subtype?(sub_type, super_type)
+        saved_self_type = @self_type
+        saved_instance_type = @instance_type
+        saved_class_type = @class_type
+        saved_constraints = @constraints
+        saved_assumptions = @assumptions
+
+        begin
+          check(
+            Relation.new(sub_type: sub_type, super_type: super_type),
+            self_type: AST::Builtin.any_type,
+            instance_type: AST::Builtin.any_type,
+            class_type: AST::Builtin.any_type,
+            constraints: Constraints.empty
+          ).success?
+        ensure
+          @self_type = saved_self_type
+          @instance_type = saved_instance_type
+          @class_type = saved_class_type
+          @constraints = saved_constraints
+          @assumptions = saved_assumptions
+        end
+      end
+
       def check_type(relation)
         if assumptions.size > ABORT_LIMIT
           return Failure(relation, Result::Failure::LoopAbort.new)
@@ -189,24 +298,78 @@ module Steep
 
         relation.type!
 
-        Steep.logger.tagged "#{relation.sub_type} <: #{relation.super_type}" do
-          bounds = cache_bounds(relation)
-          fvs = relation.sub_type.free_variables + relation.super_type.free_variables
-          cached = cache[relation, @self_type, @instance_type, @class_type, bounds]
-          if cached && fvs.none? {|var| var.is_a?(Symbol) && constraints.unknown?(var) }
-            cached
-          else
-            if assumptions.member?(relation)
+        stats = Stats.active
+
+        case
+        when relation.sub_type == relation.super_type,
+             relation.sub_type.is_a?(AST::Types::Any) || relation.super_type.is_a?(AST::Types::Any),
+             relation.super_type.is_a?(AST::Types::Void),
+             relation.super_type.is_a?(AST::Types::Top),
+             relation.sub_type.is_a?(AST::Types::Bot)
+          # Trivially holds, by the first branches of `check_type0`; not worth caching.
+          stats&.shortcut(relation)
+          return success(relation)
+        end
+
+        Steep.logger.tagged(-> { "#{relation.sub_type} <: #{relation.super_type}" }) do
+          if cacheable?(relation)
+            # The relation has no free variables -- including the `self`, `instance`, and
+            # `class` types --, so its result doesn't depend on the context of the check.
+            if cached = cache.ground(relation)
+              stats&.hit(relation, toplevel: assumptions.empty?)
+              cached
+            elsif assumptions.member?(relation)
+              stats&.assumption(relation)
               success(relation)
             else
+              toplevel = assumptions.empty?
+              stats&.compute(relation, cached: false, toplevel: toplevel, ground: true)
+              started = stats && toplevel ? Process.clock_gettime(Process::CLOCK_MONOTONIC) : nil
               push_assumption(relation) do
                 check_type0(relation).tap do |result|
-                  Steep.logger.debug "result=#{result.class}"
-                  cache[relation, @self_type, @instance_type, @class_type, bounds] = result
+                  Steep.logger.debug { "result=#{result.class}" }
+                  cache.store_ground(relation, cache_value(relation, result))
+                  if stats && started
+                    stats.compute_time(relation, Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
+                  end
+                end
+              end
+            end
+          else
+            bounds = cache_bounds(relation)
+            fvs = relation.sub_type.free_variables + relation.super_type.free_variables
+            cached = cache[relation, @self_type, @instance_type, @class_type, bounds]
+            if cached && fvs.none? {|var| var.is_a?(Symbol) && constraints.unknown?(var) }
+              stats&.hit(relation, toplevel: assumptions.empty?)
+              cached
+            else
+              if assumptions.member?(relation)
+                stats&.assumption(relation)
+                success(relation)
+              else
+                toplevel = assumptions.empty?
+                stats&.compute(relation, cached: cached ? true : false, toplevel: toplevel, ground: false)
+                started = stats && toplevel ? Process.clock_gettime(Process::CLOCK_MONOTONIC) : nil
+                push_assumption(relation) do
+                  check_type0(relation).tap do |result|
+                    Steep.logger.debug { "result=#{result.class}" }
+                    cache[relation, @self_type, @instance_type, @class_type, bounds] = cache_value(relation, result)
+                    if stats && started
+                      stats.compute_time(relation, Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
+                    end
+                  end
                 end
               end
             end
           end
+        end
+      end
+
+      def cache_value(relation, result)
+        if result.success? && !result.is_a?(Result::Success)
+          Success(relation)
+        else
+          result
         end
       end
 
@@ -405,11 +568,39 @@ module Steep
           end
 
         when relation.super_type.is_a?(AST::Types::Union)
-          Any(relation) do |result|
-            relation.super_type.types.sort_by {|ty| (path = hole_path(ty)) ? -path.size : -Float::INFINITY }.each do |super_type|
-              rel = Relation.new(sub_type: relation.sub_type, super_type: super_type)
-              result.add(rel) do
-                check_type(rel)
+          sub_type = relation.sub_type
+          if sub_type.is_a?(AST::Types::Literal) &&
+              relation.super_type.free_variables.empty? &&
+              relation.super_type.types.any? {|ty| ty.is_a?(AST::Types::Literal) && ty == sub_type }
+            # A literal type is a member of a union of literals: no need to test the
+            # branches one by one. Only for unions without free variables, so that no
+            # constraint recording can be skipped.
+            success(relation)
+          else
+            Any(relation) do |result|
+              relation.super_type.types.sort_by {|ty| (path = hole_path(ty)) ? -path.size : -Float::INFINITY }.each do |super_type|
+                rel = Relation.new(sub_type: relation.sub_type, super_type: super_type)
+                result.add(rel) do
+                  check_type(rel)
+                end
+              end
+
+              # Expand a `self` sub_type if no branch took it, the same shape the
+              # sub_type union above uses ("expand if it fails") and for the same
+              # reason: a branch may hold only once the subject is spelled out.
+              #
+              # It has to be LAST, not a clause of its own further down. Branch
+              # first and `self <: (self | nil)` matches `self` literally, which
+              # is the only way that relation holds — expanding first turns it
+              # into `::Foo <: self`, and nothing expands the super side. Expand
+              # first and `self <: (A | B)` where `self` IS `(A | B)` fails every
+              # branch, a type not being a subtype of itself. Both hold in this
+              # order (felixefelip/rbs_infer#221).
+              if relation.sub_type.is_a?(AST::Types::Self) && !self_type.is_a?(AST::Types::Self)
+                rel = Relation.new(sub_type: self_type, super_type: relation.super_type)
+                result.add(rel) do
+                  check_type(rel)
+                end
               end
             end
           end
@@ -507,6 +698,7 @@ module Steep
           else
             Failure(relation, Result::Failure::UnknownPairError.new(relation: relation))
           end
+
 
         when relation.sub_type.is_a?(AST::Types::Tuple) && (super_type = AST::Builtin::Array.instance_type?(relation.super_type))
           Expand(relation) do
@@ -608,6 +800,16 @@ module Steep
           Expand(relation) do
             check_type(Relation.new(sub_type: relation.sub_type.back_type, super_type: relation.super_type))
           end
+
+        when relation.sub_type.is_a?(AST::Types::NotInRBS)
+          # Exactly the set, singleton class or method it names satisfies
+          # whatever the type it is written as would. Nothing is claimed in the
+          # other direction, and nothing between two different ones: `Set{"a"}`
+          # and `Set{"a", "b"}` are two values, not a value and a wider one, and
+          # `==` already answers when they are the same.
+          Expand(relation) do
+            check_type(Relation.new(sub_type: relation.sub_type.back_type, super_type: relation.super_type))
+          end
         else
           Failure(relation, Result::Failure::UnknownPairError.new(relation: relation))
         end
@@ -644,6 +846,9 @@ module Steep
 
         All(relation) do |result|
           sub_args.zip(sup_args, sup_params.each).each do |sub_arg, sup_arg, sup_param|
+            sup_arg or raise
+            sup_param or raise
+
             case sup_param.variance
             when :covariant
               result.add(Relation.new(sub_type: sub_arg, super_type: sup_arg)) do |rel|
@@ -854,7 +1059,7 @@ module Steep
       end
 
       def check_method_type(name, relation)
-        Steep.logger.tagged "#{name} : #{relation.sub_type} <: #{relation.super_type}" do
+        Steep.logger.tagged(-> { "#{name} : #{relation.sub_type} <: #{relation.super_type}" }) do
           relation.method!
 
           sub_type, super_type = relation

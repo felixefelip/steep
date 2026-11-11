@@ -55,12 +55,12 @@ module Foo[A]
 end
   EOS
 
-  def with_checker(*files, no_default: false, &block)
+  def with_checker(*files, no_default: false, underscore_casts: true, &block)
     unless no_default
       files << DEFAULT_SIGS
     end
 
-    super(*files, &block)
+    super(*files, underscore_casts: underscore_casts, &block)
   end
 
   def test_lvar_with_annotation
@@ -114,7 +114,7 @@ z = x
       EOF
 
       with_standard_construction(checker, source, cursor: [1, 0]) do |construction, typing|
-        pair = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_equal parse_type("::Integer"), typing.type_of(node: source.node)
 
@@ -903,6 +903,77 @@ Hello.new.foo([])
     end
   end
 
+  def test_overload_untyped_arg_does_not_select_value_keyed_overload
+    with_checker <<-EOF do |checker|
+class Hello
+  def foo: (nil) -> []
+         | [T] (Array[T]) -> Array[T]
+         | [T] (T) -> [T]
+end
+    EOF
+      source = parse_ruby(<<-EOF)
+# @type var x: untyped
+x = (_ = nil)
+Hello.new.foo(x)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # `(nil) -> []` accepts `x` only because `untyped` is compatible with
+        # everything; the next overload matches on more than that, and its
+        # answer is the useful one — `[]` would make every element `bot`.
+        assert_equal parse_type("::Array[untyped]"), typing.type_of(node: source.node)
+        assert_empty typing.errors
+      end
+    end
+  end
+
+  def test_overload_nil_arg_selects_value_keyed_overload
+    with_checker <<-EOF do |checker|
+class Hello
+  def foo: (nil) -> []
+         | [T] (Array[T]) -> Array[T]
+         | [T] (T) -> [T]
+end
+    EOF
+      source = parse_ruby(<<-EOF)
+Hello.new.foo(nil)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("[ ]"), typing.type_of(node: source.node)
+        assert_empty typing.errors
+      end
+    end
+  end
+
+  def test_overload_untyped_arg_keeps_first_when_every_overload_is_value_keyed
+    with_checker <<-EOF do |checker|
+class Hello
+  def foo: (:foo) -> Integer
+         | (:bar) -> String
+end
+    EOF
+      source = parse_ruby(<<-EOF)
+# @type var x: untyped
+x = (_ = nil)
+Hello.new.foo(x)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # Nothing to prefer: both overloads are keyed on a value the argument is
+        # not known to have, so declaration order still decides.
+        assert_equal parse_type("::Integer"), typing.type_of(node: source.node)
+        assert_empty typing.errors
+      end
+    end
+  end
+
   def test_ivar_types
     with_checker do |checker|
       source = parse_ruby(<<-EOF)
@@ -1089,7 +1160,13 @@ end
                                           source: source,
                                           annotations: annotations,
                                           context: context,
-                                          typing: typing)
+                                          typing: typing,
+                                          specializations: Steep::Specializations::Store.empty,
+                                          literal_method_registry: Steep::Project::LiteralMethodRegistry.new,
+                                          delegation_registry: Steep::Project::DelegationRegistry.new,
+                                          constructor_bindings: Steep::Project::ConstructorBindingRegistry.new,
+                                          return_forwarding: Steep::Project::ReturnForwardingRegistry.new,
+                                          return_alias: Steep::Project::ReturnAliasRegistry.new)
 
       for_module = construction.for_class(module_name_class_node, RBS::TypeName.parse("::Steep::Names::Module"), nil)
 
@@ -1180,7 +1257,13 @@ class Steep end
                                           source: source,
                                           annotations: annotations,
                                           context: context,
-                                          typing: typing)
+                                          typing: typing,
+                                          specializations: Steep::Specializations::Store.empty,
+                                          literal_method_registry: Steep::Project::LiteralMethodRegistry.new,
+                                          delegation_registry: Steep::Project::DelegationRegistry.new,
+                                          constructor_bindings: Steep::Project::ConstructorBindingRegistry.new,
+                                          return_forwarding: Steep::Project::ReturnForwardingRegistry.new,
+                                          return_alias: Steep::Project::ReturnAliasRegistry.new)
 
       for_module = construction.for_module(module_node, RBS::TypeName.parse("::Steep::Printable"))
 
@@ -1760,7 +1843,7 @@ a, @b = _ = nil
       EOF
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, constr, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_all!(typing.errors) do |error|
           assert_instance_of Diagnostic::Ruby::UnknownInstanceVariable, error
@@ -1822,6 +1905,673 @@ y = x.itself
 
         assert_no_error typing
         assert_equal parse_type("::String | ::Integer"), pair.constr.context.type_env[:y]
+      end
+    end
+  end
+
+  def test_intersection_attr_write_drops_invariant_component
+    with_checker <<-EOF do |checker|
+class Box
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+
+class BoxNonNil
+  def value: () -> Integer
+  def value=: (Integer) -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type var box: BoxNonNil & Box
+box = (_ = nil)
+box.value = nil
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Box"), pair.context.type_env[:box]
+      end
+    end
+  end
+
+  def test_intersection_attr_write_keeps_all_components_when_all_accept
+    with_checker <<-EOF do |checker|
+class Box
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+
+class Tagged
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type var box: Box & Tagged
+box = (_ = nil)
+box.value = nil
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Box & ::Tagged"), pair.context.type_env[:box]
+      end
+    end
+  end
+
+  def test_intersection_attr_write_drops_valid_marker_via_narrowed_getter
+    with_checker <<-EOF do |checker|
+class Process
+  def order_import: () -> Integer?
+  def order_import=: (Integer?) -> Integer?
+end
+
+class ProcessValid < Process
+  def order_import: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type var foo: Process & ProcessValid
+foo = (_ = nil)
+foo.order_import = nil
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Process"), pair.context.type_env[:foo]
+      end
+    end
+  end
+
+  def test_intersection_attr_write_narrows_pure_send_receiver
+    # Mirrors the order_factory `CompanyExperiments` case: the receiver of the
+    # setter is a pure attr_reader (a `:send`, not a `:lvar`) whose declared
+    # return type is an intersection. After the write, the cached pure_call
+    # type of the receiver must be narrowed too — otherwise a subsequent read
+    # keeps the stale `Validated` marker and the next access sees a non-nil
+    # value that has just been set to nil.
+    with_checker <<-EOF do |checker|
+class Holder
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+
+class HolderValid < Holder
+  def value: () -> Integer
+end
+
+class Host
+  attr_reader thing: HolderValid & Holder
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type self: Host
+self.thing.value = nil
+narrowed = self.thing.value
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer?"), pair.context.type_env[:narrowed]
+      end
+    end
+  end
+
+  def test_intersection_attr_write_narrows_ivar_receiver
+    # Same shape as the pure-send case, but the receiver is an instance
+    # variable (`:ivar`). The refinement lives in `instance_variable_types`
+    # rather than `pure_call_types`, but the user-visible effect is the same:
+    # after the write, the next read of `@thing` sees the narrowed
+    # intersection.
+    with_checker <<-EOF do |checker|
+class Holder
+  def value: () -> Integer?
+  def value=: (Integer?) -> Integer?
+end
+
+class HolderValid < Holder
+  def value: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @thing: HolderValid & Holder
+@thing.value = nil
+narrowed = @thing.value
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer?"), pair.context.type_env[:narrowed]
+      end
+    end
+  end
+
+  def test_ivar_union_assign_narrows_to_branch
+    # Phase 1 of felixefelip/steep#16: assigning a value whose type is a
+    # subtype of one branch of a declared union narrows the ivar to the
+    # RHS type for the rest of the scope.
+    with_checker <<-EOF do |checker|
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Integer | String
+# @type var src: IntProducer
+src = (_ = nil)
+@x = src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_union_assign_keeps_declared_when_rhs_matches_full_union
+    # When the RHS type equals the declared union, no narrowing — env retains
+    # the declared shape.
+    with_checker <<-EOF do |checker|
+class Provider
+  def fetch: () -> (Integer | String)
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Integer | String
+# @type var src: Provider
+src = (_ = nil)
+@x = src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer | ::String"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_union_assign_errors_on_incompatible_rhs
+    # Regression: assigning a value whose type is not a subtype of any
+    # branch still raises `IncompatibleAssignment`. The narrowing rule
+    # never widens the accepted set.
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Integer | String
+@x = :sym
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_any typing.errors do |error|
+          error.is_a?(Diagnostic::Ruby::IncompatibleAssignment)
+        end
+      end
+    end
+  end
+
+  def test_ivar_nullable_narrows_on_non_nil_assign
+    # `T?` is sugar for `Union[T, nil]`, so assigning a non-nil value
+    # narrows the ivar to `T`.
+    with_checker <<-EOF do |checker|
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Integer?
+# @type var src: IntProducer
+src = (_ = nil)
+@x = src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_or_asgn_types_the_value_by_the_declared_type
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Hash[:a, Integer]?
+@x ||= {}
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Hash[:a, ::Integer]"), typing.type_of(node: source.node.children[1])
+      end
+    end
+  end
+
+  def test_ivar_non_union_declared_keeps_declared_type_on_assign
+    # Control: declared type is not a union, so the env keeps the declared
+    # type after assignment. Existing intersection-attr-write narrowing
+    # (felixefelip/steep#1) is the path for refining intersections; this
+    # rule never fires when the declared shape is a single type.
+    with_checker <<-EOF do |checker|
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Integer
+# @type var src: IntProducer
+src = (_ = nil)
+@x = src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_union_reassignment_updates_narrow
+    # Reassigning with a value from a different branch resets the
+    # narrowing — the subtype check runs against the declared union, not
+    # the previously narrowed type.
+    with_checker <<-EOF do |checker|
+class IntProducer
+  def fetch: () -> Integer
+end
+
+class StringProducer
+  def fetch: () -> String
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Integer | String
+# @type var int_src: IntProducer
+# @type var str_src: StringProducer
+int_src = (_ = nil)
+str_src = (_ = nil)
+@x = int_src.fetch
+@x = str_src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::String"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_union_branch_join_unions_narrows
+    # When each branch of an if/else narrows the ivar to a different
+    # member of the declared union, the joined env reflects the union
+    # of the two narrowed types — equivalent to the declared union when
+    # both members are covered.
+    with_checker <<-EOF do |checker|
+class IntProducer
+  def fetch: () -> Integer
+end
+
+class StringProducer
+  def fetch: () -> String
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Integer | String
+# @type var int_src: IntProducer
+# @type var str_src: StringProducer
+int_src = (_ = nil)
+str_src = (_ = nil)
+if (_ = true)
+  @x = int_src.fetch
+else
+  @x = str_src.fetch
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer | ::String"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_attr_accessor_write_narrows_backing_ivar
+    # Phase 2 of felixefelip/steep#16: a `self.x = expr` call resolved to
+    # an attr_accessor whose backing ivar is declared as a union narrows
+    # the env's view of that ivar to the RHS type, exactly as a direct
+    # `@x = expr` does in Phase 1.
+    with_checker <<-EOF do |checker|
+class AttrUnionHost
+  attr_accessor x: Integer | String
+end
+
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type self: AttrUnionHost
+# @type var src: IntProducer
+src = (_ = nil)
+self.x = src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_attr_writer_separate_from_reader_narrows
+    # Even when reader and writer are declared independently (not as
+    # `attr_accessor`), they share the conventional backing ivar `@x`,
+    # so a write through the setter narrows what the direct ivar read
+    # sees afterwards.
+    with_checker <<-EOF do |checker|
+class AttrSplitHost
+  attr_reader x: Integer | String
+  attr_writer x: Integer | String
+end
+
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type self: AttrSplitHost
+# @type var src: IntProducer
+src = (_ = nil)
+self.x = src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_attr_accessor_non_union_declared_no_narrow
+    # Control: declared backing-ivar type is a single type, so the rule
+    # does not fire and the env keeps the declared shape.
+    with_checker <<-EOF do |checker|
+class AttrPlainHost
+  attr_accessor x: Integer
+end
+
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type self: AttrPlainHost
+# @type var src: IntProducer
+src = (_ = nil)
+self.x = src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_attr_accessor_non_self_receiver_no_narrow
+    # Receiver is another instance, not `self`. The backing ivar of the
+    # *other* object is not in our env, so the rule must not fire —
+    # touching `instance_variable_types[@x]` would be unsound.
+    with_checker <<-EOF do |checker|
+class AttrOtherHost
+  attr_accessor x: Integer | String
+end
+
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type ivar @x: Integer | String
+# @type var other: AttrOtherHost
+# @type var src: IntProducer
+other = (_ = nil)
+src = (_ = nil)
+other.x = src.fetch
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        # Our own `@x` is untouched (the call was on `other`, not self).
+        assert_equal parse_type("::Integer | ::String"), pair.context.type_env[:"@x"]
+      end
+    end
+  end
+
+  def test_ivar_attr_accessor_reader_returns_narrowed_after_setter
+    # The companion to the writer test: after `self.x = a_value` narrows
+    # `@x` to `Integer`, a subsequent `self.x` call must return `Integer`
+    # — not the declared `Integer | String`. Captured by typing `narrowed`
+    # via the call expression and inspecting its type.
+    with_checker <<-EOF do |checker|
+class AttrReaderHost
+  attr_accessor x: Integer | String
+end
+
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type self: AttrReaderHost
+# @type var src: IntProducer
+src = (_ = nil)
+self.x = src.fetch
+narrowed = self.x
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:narrowed]
+      end
+    end
+  end
+
+  def test_ivar_attr_reader_returns_narrowed_after_direct_ivar_write
+    # Read transparency works even when the narrowing came from a direct
+    # `@x = …` (Phase 1) rather than from the setter. The attr_reader
+    # call surfaces the env's current view of the backing ivar.
+    with_checker <<-EOF do |checker|
+class AttrReadOnlyHost
+  attr_reader x: Integer | String
+end
+
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type self: AttrReadOnlyHost
+# @type var src: IntProducer
+src = (_ = nil)
+@x = src.fetch
+narrowed = self.x
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:narrowed]
+      end
+    end
+  end
+
+  def test_ivar_attr_reader_non_union_no_transparency
+    # Control: declared ivar type is a single type, so the read returns
+    # the declared method return type via the normal dispatch path. No
+    # behavior change from before Phase 2.
+    with_checker <<-EOF do |checker|
+class AttrPlainReadHost
+  attr_reader x: Integer
+end
+    EOF
+      source = parse_ruby(<<-RUBY)
+# @type self: AttrPlainReadHost
+narrowed = self.x
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer"), pair.context.type_env[:narrowed]
+      end
+    end
+  end
+
+  def test_ivar_attr_accessor_with_implicit_self_receiver
+    # Implicit-self call (no explicit `self.`) reaches the same
+    # transparency path. The receiver node is `nil` in this case rather
+    # than a `:self` node, so `self_receiver_for_attr?` accepts both.
+    with_checker <<-EOF do |checker|
+class AttrImplicitHost
+  attr_accessor x: Integer | String
+
+  def assign_int: () -> void
+end
+
+class IntProducer
+  def fetch: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-'RUBY')
+class AttrImplicitHost
+  # @dynamic x, x=
+
+  def assign_int
+    # @type var src: IntProducer
+    src = (_ = nil)
+    self.x = src.fetch
+    narrowed = x
+    narrowed
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_optimistic_pure_caches_plain_def_calls
+    # Regression: `MethodCall::Typed#pure?` used to require `%a{pure}` on
+    # any `def` declaration. Now plain `def` are treated as pure by
+    # default, so a `self.name` call inside a method body gets cached as
+    # a pure_call and conditional narrowing refines subsequent reads —
+    # without forcing rbs_rails (or the user) to spread `%a{pure}`
+    # everywhere.
+    with_checker <<-EOF do |checker|
+class Host
+  def name: () -> String?
+  def run: () -> Integer
+end
+    EOF
+      source = parse_ruby(<<-'RUBY')
+class Host
+  # @dynamic name
+
+  def run
+    if name
+      name.size
+    else
+      0
+    end
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # Inside the truthy branch, `name` is refined to non-nil via
+        # the existing pure_call narrowing — even though `def name:` has
+        # no `%a{pure}` annotation. If the optimistic-pure change didn't
+        # take effect, `name.size` would raise NoMethod on `nil`.
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_optimistic_pure_explicit_impure_annotation_opts_out
+    with_checker <<-EOF do |checker|
+class Host
+  %a{impure}
+  def name: () -> String?
+  def run: () -> void
+end
+    EOF
+      source = parse_ruby(<<-'RUBY')
+class Host
+  # @dynamic name
+
+  def run
+    if name
+      name.size
+    end
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # `%a{impure}` on the def forces the legacy non-pure behavior:
+        # no cache, no narrowing — `name.size` errors because the read
+        # is still typed as `String?`.
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) do |error|
+            assert_instance_of Diagnostic::Ruby::NoMethod, error
+            assert_equal :size, error.method
+          end
+        end
       end
     end
   end
@@ -2049,7 +2799,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -2065,7 +2815,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_equal 1, typing.errors.size
 
@@ -2359,7 +3109,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_all!(typing.errors) do |error|
           assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, error
@@ -3044,7 +3794,7 @@ EOF
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("::String | ::Integer"), pair.context.type_env[:x]
+        assert_equal parse_type("::Integer"), pair.context.type_env[:x]
         assert_equal parse_type("::Integer"), pair.context.type_env[:y]
       end
     end
@@ -3118,7 +3868,7 @@ EOF
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("::Integer | ::String | ::Symbol"), pair.type
+        assert_equal parse_type("3 | ::Integer | ::String | ::Symbol"), pair.type
         assert_equal parse_type("::String | ::Integer | ::Symbol | nil"), pair.context.type_env[:x]
       end
     end
@@ -3211,9 +3961,189 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_masgn_keeps_an_empty_array_an_array
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+a, b = [], [:x]
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
+        assert_equal parse_type("::Array[untyped]"), pair.context.type_env[:a]
+        assert_equal parse_type("::Array[::Symbol]"), pair.context.type_env[:b]
+      end
+    end
+  end
+
+  def test_dstr_folds_when_every_part_is_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: "admin"
+kind = (_ = nil)
+x = "role_#{kind}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"role_admin"'), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_dstr_folds_each_literal_a_part_admits
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: :admin | :guest
+kind = (_ = nil)
+# @type var level: 1 | 2
+level = (_ = nil)
+x = "role_#{kind}_#{level}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"role_admin_1" | "role_admin_2" | "role_guest_1" | "role_guest_2"'), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_dstr_stays_a_string_when_a_member_is_not_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: :admin | String
+kind = (_ = nil)
+x = "role_#{kind}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::String"), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_dstr_stays_a_string_when_a_part_is_not_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var name: String
+name = (_ = nil)
+x = "def #{name}; end"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::String"), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_dsym_folds_each_literal_a_part_admits
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var kind: :admin | :guest
+kind = (_ = nil)
+x = :"role_#{kind}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type(":role_admin | :role_guest"), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_dsym_stays_a_symbol_when_a_part_is_not_literal
+    with_checker do |checker|
+      source = parse_ruby(<<'EOF')
+# @type var name: String
+name = (_ = nil)
+x = :"__class_attr_#{name}"
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Symbol"), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_literal_bool_argument_keeps_its_literal
+    with_checker(<<~RBS) do |checker|
+      class Slots
+        def slot: (?flag: bool) -> void
+      end
+    RBS
+
+      source = parse_ruby(<<~EOF)
+        Slots.new.slot(flag: true)
+        Slots.new.slot(flag: false)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        args = source.node.children.map { |send| send.children.last.children.last.children.last }
+        assert_equal [parse_type("true"), parse_type("false")], args.map { |n| typing.type_of(node: n) }
+      end
+    end
+  end
+
+  def test_bool_without_a_hint_stays_bool
+    with_checker do |checker|
+      source = parse_ruby(<<~EOF)
+        x = true
+        x = false
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("bool"), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_str_argument_keeps_its_literal
+    with_checker(<<~RBS) do |checker|
+      class Slots
+        def slot: (String name, Symbol kind, Integer size) -> void
+      end
+    RBS
+
+      source = parse_ruby(<<~EOF)
+        Slots.new.slot("content", :fast, 80)
+      EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        args = source.node.children.drop(2)
+        assert_equal [parse_type('"content"'), parse_type(":fast"), parse_type("80")],
+                     args.map {|node| typing.type_of(node: node) }
       end
     end
   end
@@ -3569,6 +4499,37 @@ EOF
     end
   end
 
+  # The `:csend` env join exists because the CALL may not have happened. The
+  # RECEIVER always ran, so its pure-call registration holds on both paths —
+  # dropping it is what left `holder.latest&.label && holder.latest.stamp` unable
+  # to narrow while the same guard through a local narrowed fine
+  # (felixefelip/rbs_infer#338).
+  def test_csend_keeps_the_receivers_pure_call_across_the_join
+    with_checker(<<~RBS) do |checker|
+      class CJEntry
+        attr_reader label: String?
+        attr_reader stamp: Integer
+      end
+
+      class CJHolder
+        attr_reader latest: CJEntry?
+      end
+    RBS
+      source = parse_ruby(<<~RUBY)
+        # @type var holder: CJHolder
+        holder = _ = nil
+
+        holder.latest&.label && holder.latest.stamp
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_while
     with_checker do |checker|
       source = parse_ruby(<<EOF)
@@ -3654,7 +4615,7 @@ EOF
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("::Integer?"), pair.type
+        assert_equal parse_type("::Integer"), pair.type
       end
     end
   end
@@ -3691,7 +4652,7 @@ y = case x
       source = parse_ruby(<<EOF)
 # @type var x: String | Integer
 
-y = case (x = "")
+y = case (x = (_ = nil))
 when String
   3
 else
@@ -4151,6 +5112,299 @@ EOF
     end
   end
 
+  # A mixin's own ancestors end at the mixin, so a method it defines has no super
+  # there — but at runtime it runs on an instance of the host and `super` walks the
+  # HOST's chain from the mixin's position. The self type names that host, and it
+  # is what `super` has to read: an ordinary send in the same body already resolves
+  # against `Host & Mod`, while `super` resolved against `Mod` alone and fell back
+  # to `untyped` (`def creator_id; super || false; end` over a typed column
+  # accessor). Not specific to ActiveSupport::Concern — any mixin overriding a
+  # method the host gets elsewhere.
+  def test_super_in_module_resolves_through_self_type
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperStore
+  include TestSuperMod
+end
+
+module TestSuperStore
+  def foo: () -> Integer
+end
+
+module TestSuperMod
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  # @type instance: TestSuperHost & TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("::Integer"), typing.type_of(node: dig(source.node, 1, 2))
+        assert_empty typing.errors
+      end
+    end
+  end
+
+  # Taking `build_instance(host).methods[name].super_method` directly is off by one
+  # when the host overrides the method too: the top entry is then the host's and its
+  # super is this module's own, so `super` would be typed as the method being checked.
+  def test_super_in_module_skips_the_host_own_override
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperStore
+  include TestSuperMod
+
+  def foo: () -> String
+end
+
+module TestSuperStore
+  def foo: () -> Integer
+end
+
+module TestSuperMod
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  # @type instance: TestSuperHost & TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("::Integer"), typing.type_of(node: dig(source.node, 1, 2))
+      end
+    end
+  end
+
+  # The host chain is a FALLBACK. What sits behind a module in the host's ancestors
+  # is whatever that module itself includes, and nothing the host mixes in can be
+  # inserted between them — so the module's own answer stays, and stays first.
+  def test_super_in_module_prefers_its_own_ancestors
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperHostSide
+  include TestSuperMod
+end
+
+module TestSuperHostSide
+  def foo: () -> String
+end
+
+module TestSuperInner
+  def foo: () -> Integer
+end
+
+module TestSuperMod
+  include TestSuperInner
+
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  # @type instance: TestSuperHost & TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("::Integer"), typing.type_of(node: dig(source.node, 1, 2))
+      end
+    end
+  end
+
+  # Two hosts mean two chains, and one `RBS::Definition::Method` cannot say
+  # "whichever of these self is". Answering with one host's super would type the
+  # other host's `super` as a method it does not have, so a disagreement keeps the
+  # pre-existing behaviour.
+  def test_super_in_module_declines_when_hosts_disagree
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperStore
+  include TestSuperMod
+end
+
+class TestSuperOther
+  include TestSuperOtherStore
+  include TestSuperMod
+end
+
+module TestSuperStore
+  def foo: () -> Integer
+end
+
+module TestSuperOtherStore
+  def foo: () -> Symbol
+end
+
+module TestSuperMod
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  # @type instance: TestSuperHost & TestSuperMod | TestSuperOther & TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("untyped"), typing.type_of(node: dig(source.node, 1, 2))
+      end
+    end
+  end
+
+  # Without a self type there is no host to read, so the diagnostic stays.
+  def test_super_in_module_without_a_self_type
+    with_checker <<-EOF do |checker|
+class TestSuperHost
+  include TestSuperStore
+  include TestSuperMod
+end
+
+module TestSuperStore
+  def foo: () -> Integer
+end
+
+module TestSuperMod
+  def foo: () -> untyped
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module TestSuperMod
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("untyped"), typing.type_of(node: dig(source.node, 1, 2))
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::UnexpectedSuper, errors.first
+        end
+      end
+    end
+  end
+
+  def test_defined_finds_a_constant_named_through_its_namespace
+    with_checker <<-EOF do |checker|
+module Outer
+  module Inner
+    class Leaf
+    end
+  end
+
+  class Host
+  end
+end
+    EOF
+      source = parse_ruby(<<EOF)
+module Outer
+  class Host
+    defined?(Inner::Leaf)
+    defined?(::Outer::Inner::Leaf)
+    defined?(Inner::Missing)
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        found, absolute, missing = dig(source.node, 1, 2).children
+        assert_equal parse_type('"constant"'), typing.type_of(node: found)
+        assert_equal parse_type('"constant"'), typing.type_of(node: absolute)
+        assert_equal parse_type("::String?"), typing.type_of(node: missing)
+      end
+    end
+  end
+
+  def test_bare_super_is_typed_as_the_explicit_super_it_stands_for
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer, ?String, *Symbol, key: Integer) { () -> void } -> Integer
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer, ?String, *Symbol, key: Integer) { () -> void } -> Integer
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(a, b = "", *c, key:, &d)
+    a = "x"
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        zsuper = dig(source.node, 2, 2, 1)
+        assert_equal [:lvar, :lvar, :splat, :kwargs, :block_pass], typing.explicit_super_of(node: zsuper).children.map(&:type)
+        assert_equal parse_type("::Integer"), typing.type_of(node: zsuper)
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::ArgumentTypeMismatch, errors.first
+        end
+      end
+    end
+  end
+
+  def test_bare_super_with_an_anonymous_parameter_is_typed_by_the_super_method_s_return
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (*untyped) -> Integer
+end
+
+class TestSuperChild < TestSuper
+  def foo: (*untyped) -> Integer
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(*)
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        zsuper = dig(source.node, 2, 2)
+        assert_nil typing.explicit_super_of(node: zsuper)
+        assert_equal parse_type("::Integer"), typing.type_of(node: zsuper)
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_super_missing_required_block
     with_checker <<-EOF do |checker|
 class TestSuper
@@ -4173,12 +5427,149 @@ EOF
       with_standard_construction(checker, source) do |construction, typing|
         construction.synthesize(source.node)
 
-        assert_typing_error(typing, size: 1) do |errors|
+        assert_typing_error(typing, size: 2) do |errors|
           assert_all!(errors) do |error|
             assert_instance_of Diagnostic::Ruby::RequiredBlockMissing, error
             assert_equal "super", error.location.source
           end
         end
+      end
+    end
+  end
+
+  def test_super_passes_the_method_block_on
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(key)
+    super
+    super(key)
+    [1].each { super }
+    nil
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_super_passes_an_optional_method_block_as_possibly_missing
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: () { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: () ?{ () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::BlockTypeMismatch, errors.first
+        end
+      end
+    end
+  end
+
+  def test_super_drops_the_method_block_on_a_method_taking_none
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: () -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: () { () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_super_drops_the_method_block_on_an_overload_taking_none
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer) -> nil
+         | () { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(key)
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_super_in_an_overloading_method_reaches_the_parent_s
+    with_checker <<-EOF do |checker|
+class TestSuper
+  def foo: (Integer) { () -> nil } -> nil
+end
+
+class TestSuperChild < TestSuper
+  def foo: (Integer) -> nil | ...
+end
+    EOF
+      source = parse_ruby(<<EOF)
+class TestSuperChild
+  def foo(key)
+    super
+  end
+end
+EOF
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        call = typing.call_of(node: typing.explicit_super_of(node: dig(source.node, 2, 2)))
+        assert_equal ["(::Integer) { () -> nil } -> nil"], call.method_decls.map { |decl| decl.method_type.to_s }
       end
     end
   end
@@ -4304,7 +5695,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -4427,7 +5818,11 @@ EOF
         pair = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("::String"), pair.context.type_env[:a]
+        # In `a` the literal is hinted by `x`'s non-nil type and keeps it; the
+        # union holding both denotes exactly `::String`, and carrying the extra
+        # member costs nothing. In `b` the literal leads and has no hint, so it
+        # is `::String` as it always was.
+        assert_equal parse_type('(::String | "foo")'), pair.context.type_env[:a]
         assert_equal parse_type("::String"), pair.context.type_env[:b]
         assert_equal parse_type("untyped"), pair.context.type_env[:c]
       end
@@ -4552,7 +5947,7 @@ EOF
         type, _ = construction.synthesize(source.node)
 
         assert_no_error typing
-        assert_equal parse_type("^(::String, ::Integer) -> ::Symbol"), type
+        assert_equal parse_type("^(::String, ::Integer) -> :foo"), type
       end
     end
   end
@@ -4573,7 +5968,7 @@ EOF
         type, _ = construction.synthesize(source.node)
 
         assert_typing_error typing, size: 1
-        assert_equal parse_type("^(untyped, ::Integer) -> ::Symbol"), type
+        assert_equal parse_type("^(untyped, ::Integer) -> :foo"), type
       end
     end
   end
@@ -5470,7 +6865,7 @@ q
 EOF
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -5508,7 +6903,7 @@ x = A::B::C
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -5772,6 +7167,47 @@ end
     end
   end
 
+  def test_class_variable_narrows_as_an_assignment_or_memo_leaves_it
+    with_checker <<-'RBS' do |checker|
+class Box
+  @@count: Integer?
+  @@size: Integer?
+
+  def self.count: () -> Integer
+  def self.size: () -> Integer
+  def self.unset: () -> Integer
+end
+    RBS
+      source = parse_ruby(<<-'RUBY')
+class Box
+  def self.count
+    @@count = 1
+    @@count + 1
+  end
+
+  def self.size
+    @@size ||= 1
+    @@size + 1
+  end
+
+  def self.unset
+    @@count + 1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal 1, typing.errors.size
+        assert_any!(typing.errors) do |error|
+          assert_instance_of Diagnostic::Ruby::NoMethod, error
+          assert_equal 13, error.node.loc.line
+        end
+      end
+    end
+  end
+
   def test_flow_sensitive_untyped
     with_checker do |checker|
       source = parse_ruby(<<-RUBY)
@@ -5903,6 +7339,13 @@ y = x
         construction.synthesize(source.node)
 
         assert_no_error typing
+
+        # Regression: the `||=` node itself must be recorded in the typing
+        # table, not just the inner lvasgn. Consumers that read a node's type
+        # directly (e.g. a method body that is a bare `x ||= ...`) would
+        # otherwise hit UnknownNodeError.
+        or_asgn = source.node.children[1]
+        assert_equal parse_type("::String"), typing.type_of(node: or_asgn)
       end
     end
   end
@@ -5927,6 +7370,13 @@ end
         construction.synthesize(source.node)
 
         assert_no_error typing
+
+        # Regression: when a method body is a bare `@ivar ||= ...`, the body
+        # node is the `or_asgn`. Reading its type directly (as rbs_rails/
+        # rbs_infer-style consumers do) must not raise UnknownNodeError.
+        def_node = source.node.children[2]
+        or_asgn = def_node.children[2]
+        assert_equal parse_type('"foo"'), typing.type_of(node: or_asgn)
       end
     end
   end
@@ -5944,6 +7394,15 @@ a[1] &&= 4
         construction.synthesize(source.node)
 
         assert_no_error typing
+
+        # Regression: send-LHS op-assign nodes must also be recorded in the
+        # typing table for the original node, not only the rewritten or/and node.
+        or_asgn = source.node.children[1]
+        and_asgn = source.node.children[2]
+        # `a[0] ||= 3` is `::Integer | 3`, which the union absorbs back to
+        # `::Integer`; `a[1] &&= 4` evaluates to the `4` it assigns.
+        assert_equal parse_type("::Integer"), typing.type_of(node: or_asgn)
+        assert_equal parse_type("4"), typing.type_of(node: and_asgn)
       end
     end
   end
@@ -6307,6 +7766,38 @@ a + 1
       with_standard_construction(checker, source) do |construction, typing|
         construction.synthesize(source.node)
         assert_no_error typing
+      end
+    end
+  end
+
+  def test_logic_or_whose_left_always_holds_narrows_by_the_left_alone
+    with_checker(<<-RBS) do |checker|
+    RBS
+      source = parse_ruby(<<-RUBY)
+a = 1
+return unless a.is_a?(Integer) || a.is_a?(String)
+a
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, _typing|
+        type, _ = construction.synthesize(source.node)
+        assert_equal parse_type("::Integer"), type
+      end
+    end
+  end
+
+  def test_logic_and_whose_left_never_holds_narrows_by_the_left_alone
+    with_checker(<<-RBS) do |checker|
+    RBS
+      source = parse_ruby(<<-RUBY)
+a = 1
+return if !a.is_a?(Integer) && !a.is_a?(String)
+a
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, _typing|
+        type, _ = construction.synthesize(source.node)
+        assert_equal parse_type("::Integer"), type
       end
     end
   end
@@ -6808,7 +8299,7 @@ y = test.bar("foo")      # With a constraint: String <: A
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, constr = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_equal 2, typing.errors.size
 
@@ -6856,7 +8347,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, constr = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error typing, size: 3 do |errors|
           assert_any!(errors) do |error|
@@ -6893,7 +8384,7 @@ test.foo(&->(x) { "" })
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, constr = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_equal 1, typing.errors.size
 
@@ -6928,7 +8419,7 @@ test.foo(&p)
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, constr = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_equal 1, typing.errors.size
 
@@ -7189,6 +8680,49 @@ end
     end
   end
 
+  # A hint that says nothing about the method's type variable must not pin it.
+  # `untyped` (and any supertype of the return, like `Object`) makes the
+  # return/hint relation succeed without constraining the variable, and solving
+  # an unconstrained variable answers `untyped` — so the block's own return type
+  # is what has to determine it.
+  def test_block_generic_with_uninformative_hint
+    with_checker(<<-RBS) do |checker|
+class UninformativeHintBlock
+  def untyped_hint: (Array[Integer]) -> untyped
+  def object_hint: (Array[Integer]) -> Object
+  def array_hint: (Array[Integer]) -> Array[Integer?]
+end
+    RBS
+
+      {
+        untyped_hint: "::Array[::String]",
+        object_hint: "::Array[::String]",
+        # A hint that *does* constrain the variable still wins: `Integer?`, not
+        # the block body's narrower `::Integer`.
+        array_hint: "::Array[(::Integer | nil)]"
+      }.each do |method_name, expected|
+        body = method_name == :array_hint ? "1" : '"a"'
+
+        # A parameter, not `[1]`: over a collection the checker knows, `map` is
+        # answered per element, and this is about what the generic solves to.
+        source = parse_ruby(<<-RUBY)
+class UninformativeHintBlock
+  def #{method_name}(numbers)
+    numbers.map { #{body} }
+  end
+end
+        RUBY
+
+        with_standard_construction(checker, source) do |construction, typing|
+          construction.synthesize(source.node)
+
+          block = dig(source.node, 2, 2)
+          assert_equal parse_type(expected), typing.type_of(node: block), method_name.to_s
+        end
+      end
+    end
+  end
+
   def test_bool_typing
     with_checker() do |checker|
       source = parse_ruby(<<-RUBY)
@@ -7249,7 +8783,7 @@ x = "foo"
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -7267,7 +8801,7 @@ x = "foo"
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -7301,7 +8835,7 @@ x = { }
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -7391,7 +8925,7 @@ x = 30.is_a?(String) || false
 EOF
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -7439,7 +8973,7 @@ x.is_a?(String) && y && x + y
 EOF
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -7461,7 +8995,7 @@ x.is_a?(Float) || y || (z = x; z = y)
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -7771,7 +9305,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error typing, size: 2 do |errors|
           assert_all!(errors) do |error|
@@ -7807,7 +9341,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_no_error typing
       end
     end
@@ -7832,7 +9366,7 @@ a = case x
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_no_error typing
       end
     end
@@ -7859,7 +9393,7 @@ a = case x
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_no_error typing
       end
     end
@@ -7878,7 +9412,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_no_error typing
       end
     end
@@ -7901,6 +9435,123 @@ RUBY
             error.instance_of? Diagnostic::Ruby::UnknownConstant
           end
         end
+      end
+    end
+  end
+
+  def test_def_is_the_literal_of_its_name
+    with_checker(<<~RBS) do |checker|
+      class DefLiteral
+        def define_inner: () -> :inner
+        def inner: () -> Integer
+        def self.define_singleton: () -> :singleton
+        def self.singleton: () -> Integer
+        def define_wrong: () -> :nope
+        def other: () -> Integer
+      end
+    RBS
+      source = parse_ruby(<<~RUBY)
+        class DefLiteral
+          def define_inner
+            def inner = 1
+          end
+
+          def self.define_singleton
+            def self.singleton = 1
+          end
+
+          def define_wrong
+            def other = 1
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) do |error|
+            assert_instance_of Diagnostic::Ruby::MethodBodyTypeMismatch, error
+            assert_equal :define_wrong, error.node.children[0]
+          end
+        end
+      end
+    end
+  end
+
+  def test_def_without_a_literal_hint_is_a_symbol
+    with_checker(<<~RBS) do |checker|
+      class DefSymbol
+        def foo: () -> Integer
+      end
+    RBS
+      source = parse_ruby(<<~RUBY)
+        class DefSymbol
+          def foo = 1
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        def_node = source.node.children[2]
+
+        assert_no_error typing
+        assert_equal parse_type("::Symbol"), typing.type_of(node: def_node)
+      end
+    end
+  end
+
+  def test_string_class_eval_is_its_last_statement
+    with_checker(<<~RBS) do |checker|
+      class Module
+        def module_eval: (String code) -> untyped
+        alias class_eval module_eval
+      end
+
+      class EvalTarget
+        def first: () -> Integer
+        def second: () -> Integer
+      end
+
+      module EvalModule
+        def in_module: () -> Integer
+      end
+
+      class EvalBody
+      end
+    RBS
+      source = parse_ruby(<<~'RUBY')
+        a = EvalTarget.class_eval "def first; 1; end"
+        b = EvalTarget.module_eval "def first = 1; def second = 2"
+        c = EvalModule.module_eval "def in_module = 1"
+        d = EvalTarget.class_eval "42"
+        e = EvalTarget.class_eval ""
+        f = EvalTarget.class_eval "def ("
+        # @type var name: String
+        name = (_ = nil)
+        g = EvalTarget.class_eval "def #{name}; end"
+        # @type var which: :first | :second
+        which = (_ = nil)
+        h = EvalTarget.class_eval "def #{which} = 1"
+
+        class EvalBody
+          class_eval "def undeclared = 2"
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type(":first"), pair.context.type_env[:a]
+        assert_equal parse_type(":second"), pair.context.type_env[:b]
+        assert_equal parse_type(":in_module"), pair.context.type_env[:c]
+        assert_equal parse_type("42"), pair.context.type_env[:d]
+        assert_equal parse_type("nil"), pair.context.type_env[:e]
+        assert_equal parse_type("untyped"), pair.context.type_env[:f]
+        assert_equal parse_type("untyped"), pair.context.type_env[:g]
+        assert_equal parse_type(":first | :second"), pair.context.type_env[:h]
+        assert_equal parse_type(":undeclared"), typing.type_of(node: source.node.children.last.children[2])
       end
     end
   end
@@ -8018,7 +9669,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8042,7 +9693,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do | error|
@@ -8078,7 +9729,445 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # `X.class_eval do ... end` reopens `X`: the block's default definee is the
+  # receiver, so a `def` inside defines `X`'s instance method. Both halves already
+  # existed and were only ever connected by hand — the block's `self` is bound to the
+  # receiver by `class_eval`'s own signature, and `for_block` already enters a module
+  # context when `@implements` says to. Without deriving it the defs landed in
+  # whatever context the block was written in (at top level, `::Object`), and `super`
+  # inside one had nothing to resolve against.
+  def test_block_implicit_implements_from_class_eval
+    with_checker <<-EOF do |checker|
+module TestCevalSlots
+  def slot: () -> String?
+end
+
+class TestCeval
+  include TestCevalSlots
+
+  def self.class_eval: () { () -> void } -> void
+
+  def by_class_eval: () -> Integer
+  def slot: () -> String
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestCeval.class_eval do
+  def by_class_eval
+    2
+  end
+
+  def slot
+    super || "default"
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # The `super` reaching the included module is the load-bearing half: it only
+        # resolves if the def belongs to `TestCeval`, whose ancestors have the module.
+        assert_equal parse_type("(::String | nil)"),
+                     typing.type_of(node: dig(source.node, 2, 1, 2, 0))
+        assert_no_error typing
+      end
+    end
+  end
+
+  # A block kept in one place and replayed onto two classes defines its methods
+  # on BOTH, so `@implements` names both and the body is checked once per
+  # definee — which is what running it twice means (felixefelip/steep#149).
+  def test_block_implements_several_modules
+    with_checker <<-EOF do |checker|
+class TestMultiKeeper
+  def self.keep: () { () -> void } -> void
+end
+
+class TestMultiFirst
+  def age: () -> Integer
+end
+
+class TestMultiSecond
+  def age: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestMultiKeeper.keep do # @implements ::TestMultiFirst, ::TestMultiSecond
+  def age
+    31
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # The second definee is genuinely CHECKED, not merely tolerated: a body valid
+  # for the first and not the second is reported, and names the one it fails on.
+  def test_block_implements_several_modules_reports_the_second
+    with_checker <<-EOF do |checker|
+class TestMultiKeeper2
+  def self.keep: () { () -> void } -> void
+end
+
+class TestMultiFirst2
+  def age: () -> Integer
+  def base: () -> Integer
+end
+
+class TestMultiSecond2
+  def age: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestMultiKeeper2.keep do # @implements ::TestMultiFirst2, ::TestMultiSecond2
+  def age
+    base
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal 1, typing.errors.size
+        assert_any!(typing.errors) do |error|
+          assert_instance_of Diagnostic::Ruby::NoMethod, error
+          assert_equal :base, error.method
+        end
+      end
+    end
+  end
+
+  # One diagnostic per definee, not the same one twice: a `def` declared by
+  # neither class is two complaints because there are two classes, while
+  # anything the body says wrong regardless of definee is said once.
+  def test_block_implements_several_modules_reports_each_definee_once
+    with_checker <<-EOF do |checker|
+class TestMultiKeeper3
+  def self.keep: () { () -> void } -> void
+end
+
+class TestMultiFirst3
+end
+
+class TestMultiSecond3
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestMultiKeeper3.keep do # @implements ::TestMultiFirst3, ::TestMultiSecond3
+  def age
+    31
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        undeclared = typing.errors.select {|error| error.is_a?(Diagnostic::Ruby::UndeclaredMethodDefinition) }
+        assert_equal ["::TestMultiFirst3", "::TestMultiSecond3"],
+                     undeclared.map {|error| error.type_name.to_s }.sort
+      end
+    end
+  end
+
+  # A block replayed with `Target.singleton_class.class_eval` defines
+  # `Target.age`, so the definee is the singleton and the annotation says which
+  # of the two tables it means (felixefelip/steep#152).
+  def test_block_implements_singleton
+    with_checker <<-EOF do |checker|
+class TestSingletonKeeper
+  def self.keep: () { () -> void } -> void
+end
+
+class TestSingletonHost
+  def self.age: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestSingletonKeeper.keep do # @implements singleton(::TestSingletonHost)
+  def age
+    31
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # The same block, the same class, the other table: `age` is declared on the
+  # class object and not on its instances, so naming the instance side is what
+  # the flag has to keep apart from naming the singleton.
+  def test_block_implements_instance_does_not_take_the_singleton
+    with_checker <<-EOF do |checker|
+class TestSingletonKeeper2
+  def self.keep: () { () -> void } -> void
+end
+
+class TestSingletonHost2
+  def self.age: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestSingletonKeeper2.keep do # @implements ::TestSingletonHost2
+  def age
+    31
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_any!(typing.errors) do |error|
+          assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, error
+          assert_equal "::TestSingletonHost2", error.type_name.to_s
+        end
+      end
+    end
+  end
+
+  # `self` inside the block is the singleton class OBJECT — what
+  # `Target.singleton_class` evaluates to — so a class method of the host is
+  # reached with an implicit receiver from a def in there, exactly as it is
+  # inside `class << self`.
+  def test_block_implements_singleton_resolves_sibling_class_methods
+    with_checker <<-EOF do |checker|
+class TestSingletonKeeper3
+  def self.keep: () { () -> void } -> void
+end
+
+class TestSingletonHost3
+  def self.age: () -> Integer
+  def self.doubled: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestSingletonKeeper3.keep do # @implements singleton(::TestSingletonHost3)
+  def doubled
+    age
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # `module_eval` is an alias, so a fix that keyed on one name would miss it.
+  def test_block_implicit_implements_from_module_eval
+    with_checker <<-EOF do |checker|
+class TestMeval
+  def self.module_eval: () { () -> void } -> void
+
+  def by_module_eval: () -> Symbol
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestMeval.module_eval do
+  def by_module_eval
+    :three
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # `instance_eval` binds the block's self the same way but its default definee is the
+  # receiver's SINGLETON class, so the same treatment would attribute the def to the
+  # instance side — the wrong half. It keeps the pre-existing behaviour.
+  def test_block_no_implicit_implements_from_instance_eval
+    with_checker <<-EOF do |checker|
+class TestIeval
+  def self.instance_eval: () { () -> void } -> void
+
+  def self.by_instance_eval: () -> Float
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestIeval.instance_eval do
+  def by_instance_eval
+    4.0
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, errors.first
+        end
+      end
+    end
+  end
+
+  # The class can arrive as a VALUE rather than as a spelling, which is exactly how
+  # Ruby's own `included` hook hands it over. `base` is typed `singleton(Includer)` as
+  # soon as anything calls the hook, so the TYPE says what the constant node cannot.
+  def test_block_implicit_implements_from_a_singleton_typed_receiver
+    with_checker <<-EOF do |checker|
+module TestBaseSlots
+  def slot: () -> String?
+end
+
+module TestBaseHookable
+  def self.included: (singleton(TestBaseHost) base) -> void
+end
+
+class TestBaseHost
+  include TestBaseSlots
+  include TestBaseHookable
+
+  def self.class_eval: () { () -> void } -> void
+
+  def slot: () -> String
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+module TestBaseHookable
+  def self.included(base)
+    base.class_eval do
+      def slot
+        super || "default"
+      end
+    end
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_equal parse_type("(::String | nil)"),
+                     typing.type_of(node: dig(source.node, 1, 3, 2, 2, 0))
+        assert_no_error typing
+      end
+    end
+  end
+
+  # `obj.class_eval` reopens whatever class `obj` happens to be — not decidable from
+  # the shape, so it is left alone.
+  def test_block_no_implicit_implements_from_value_receiver
+    with_checker <<-EOF do |checker|
+class TestValueEval
+  def class_eval: () { () -> void } -> void
+  def by_value_receiver: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestValueEval.new.class_eval do
+  def by_value_receiver
+    1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, errors.first
+        end
+      end
+    end
+  end
+
+  # Entering a generic class needs its type parameters bound, which `for_class` sets
+  # up and a block does not: `TestGenericEval` where `TestGenericEval[Elem]` is
+  # required. Declining leaves the ordinary call typing.
+  def test_block_no_implicit_implements_for_a_generic_class
+    with_checker <<-EOF do |checker|
+class TestGenericEval[Elem]
+  def self.class_eval: () { () -> void } -> void
+
+  def by_generic_eval: () -> Integer
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestGenericEval.class_eval do
+  def by_generic_eval
+    1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, errors.first
+        end
+      end
+    end
+  end
+
+  # An explicit annotation is the author overriding what the call shape says, which is
+  # the point of writing it, so it wins.
+  def test_block_explicit_implements_wins_over_the_call_shape
+    with_checker <<-EOF do |checker|
+class TestOverridden
+  def elsewhere: () -> Integer
+end
+
+class TestReceiver
+  def self.class_eval: () { () -> void } -> void
+end
+    EOF
+
+      source = parse_ruby(<<-'RUBY')
+TestReceiver.class_eval do
+  # @implements TestOverridden
+
+  def elsewhere
+    1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8116,7 +10205,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8128,16 +10217,18 @@ end
 class TestNilBlock
   def foo: () { () -> void } -> void
   def bar: () -> void
+  def baz: () ?{ () -> void } -> void
 end
     EOF
 
       source = parse_ruby(<<-'RUBY')
 TestNilBlock.new.foo(&nil)
 TestNilBlock.new.bar(&nil)
+TestNilBlock.new.baz(&nil)
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error typing, size: 1 do |errors|
           assert_any!(errors) do |error|
@@ -8173,7 +10264,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -8207,7 +10298,7 @@ Issue328::Foo.new.to_h { [1, ""] }
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8225,7 +10316,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8252,7 +10343,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8277,7 +10368,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8317,7 +10408,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8341,7 +10432,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8365,7 +10456,57 @@ Ruby3::Foo.new().bar { _1 }
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 2) do |errors|
+          assert_any!(errors) do |error|
+            assert_instance_of Diagnostic::Ruby::InsufficientPositionalArguments, error
+            assert_equal "foo", error.location.source
+          end
+
+          assert_any!(errors) do |error|
+            assert_instance_of Diagnostic::Ruby::InsufficientKeywordArguments, error
+            assert_equal "bar", error.location.source
+          end
+        end
+      end
+    end
+  end
+
+  def test_ruby3_it_parameter1
+    with_checker do |checker|
+      source = parse_ruby(<<RUBY)
+[1].map { it.to_s }
+RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
         type, _ = construction.synthesize(source.node)
+
+        assert_equal parse_type("::Array[::String]"), type
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_ruby3_it_parameter2
+    with_checker(<<RBS) do |checker|
+module Ruby3
+  class Foo
+    def foo: (Integer) { (Integer) -> void } -> void
+
+    def bar: (foo: Integer) { (Integer) -> void } -> void
+  end
+end
+RBS
+
+      source = parse_ruby(<<RUBY)
+Ruby3::Foo.new().foo { it }
+Ruby3::Foo.new().bar { it }
+RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 2) do |errors|
           assert_any!(errors) do |error|
@@ -8399,7 +10540,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_typing_error(typing, size: 1) do |errors|
           assert_all!(errors) do |error|
             assert_instance_of Diagnostic::Ruby::UndeclaredMethodDefinition, error
@@ -8500,7 +10641,7 @@ MissingArgs::Foo.new&.csendkw
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 2) do |errors|
           assert_any!(errors) do |error|
@@ -8530,7 +10671,7 @@ EachNoParam.new.each(*a)
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -8553,7 +10694,7 @@ ints = ["1", ["2", nil]]
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do
           assert_any!(typing.errors) do |error|
@@ -8680,7 +10821,7 @@ cdr = A.new.cdr(a)
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_no_error(typing)
 
@@ -8707,7 +10848,7 @@ end
       RUBY
 
       with_standard_construction(checker, source, cursor: [4, 5]) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_equal parse_type("[X, untyped]", variables: [:X]), typing.cursor_context.context.type_env[:z]
       end
@@ -8734,7 +10875,7 @@ end
       RUBY
 
       with_standard_construction(checker, source, cursor: [7, 5]) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_equal parse_type("[X, untyped]", variables: [:X]), typing.cursor_context.context.type_env[:z]
       end
@@ -8758,7 +10899,7 @@ end
       RUBY
 
       with_standard_construction(checker, source, cursor: [4, 5]) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_equal parse_type("[X, untyped]", variables: [:X]), typing.cursor_context.context.type_env[:z]
       end
@@ -8929,7 +11070,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8956,7 +11097,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -8982,7 +11123,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9000,7 +11141,7 @@ foo = -> (&block) { block[80]; 123 }
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9019,7 +11160,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 2) do |errors|
           assert_any!(errors) do |error|
@@ -9148,7 +11289,7 @@ result = b.compact
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9178,7 +11319,7 @@ result = b.compact
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9252,7 +11393,7 @@ c = _ = nil
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        _, constr = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9411,7 +11552,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           errors[0].tap do |error|
@@ -9437,7 +11578,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error(typing)
       end
@@ -9458,7 +11599,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 2) do |errors|
           assert_any!(errors) do |error|
@@ -9494,7 +11635,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error(typing)
       end
@@ -9528,7 +11669,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9550,7 +11691,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error(typing)
       end
@@ -9573,7 +11714,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           errors[0].tap do |error|
@@ -9600,7 +11741,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9622,7 +11763,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9645,7 +11786,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9668,7 +11809,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9690,7 +11831,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9709,7 +11850,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9728,7 +11869,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9751,7 +11892,7 @@ ref.value + ""
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9775,7 +11916,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9794,7 +11935,7 @@ reader.read("123", -> () { 123 })
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        type, _, _ = construction.synthesize(source.node)
 
         assert_no_error typing
         assert_equal parse_type("::Integer | ::String"), type
@@ -9817,7 +11958,7 @@ ng = Issue610::Foo.new.ng(123) do -> (x) { x + 1 } end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_equal parse_type("::Integer"), context.type_env[:ok]
         assert_equal parse_type("::Integer"), context.type_env[:ng]
@@ -9838,7 +11979,7 @@ ng = Issue610::Foo.new.ng(123) do -> (x) { x + 1 } end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_no_error typing
 
@@ -9870,7 +12011,7 @@ end
 -> (_) { 123 }
 RUBY
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -9893,7 +12034,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        type, _, _ = construction.synthesize(source.node)
 
         assert_no_error typing
 
@@ -9914,7 +12055,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        type, _, _ = construction.synthesize(source.node)
 
         assert_no_error typing
 
@@ -9936,7 +12077,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        type, _, _ = construction.synthesize(source.node)
 
         assert_no_error typing
 
@@ -10003,7 +12144,7 @@ x = x.itself
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_no_error typing
       end
     end
@@ -10024,7 +12165,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_typing_error(typing, size: 1) do |errors|
           errors[0].tap do |error|
             assert_instance_of Diagnostic::Ruby::InsufficientPositionalArguments, error
@@ -10111,6 +12252,31 @@ RUBY
     end
   end
 
+  def test_self_type_binding_block_untyped_self
+    with_checker(<<-RBS) do |checker|
+class TestUntypedSelf
+  def run: () { () [self: untyped] -> void } -> void
+end
+      RBS
+      source = parse_ruby(<<RUBY)
+TestUntypedSelf.new.run do
+  anything_at_all
+  anything_at_all.chained_call
+end
+RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        # A block declared `[self: untyped]` binds an untyped self, so an
+        # implicit-self send (`anything_at_all`) — whose receiver resolves to
+        # `Self` — must type as untyped instead of reporting "self does not
+        # have method", mirroring how an untyped receiver behaves everywhere.
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_self_type_binding_type_parameter
     with_checker(<<-RBS) do |checker|
 class TestSelfBinding
@@ -10175,7 +12341,7 @@ end
 RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _ = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10203,7 +12369,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -10226,7 +12392,7 @@ end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_no_error typing
         assert_equal parse_type("::Integer | nil"), context.type_env[:bar]
@@ -10244,7 +12410,7 @@ hash = array #: Hash[Symbol, String]
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10269,7 +12435,7 @@ name = 3 #: String?
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10298,12 +12464,13 @@ z = [1].map { _1.to_s } #$ Object
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_no_error typing
 
         assert_equal parse_type("::Array[::Integer | ::Numeric]"), context.type_env[:x]
-        assert_equal parse_type("::Array[::Integer | ::Object]?"), context.type_env[:y]
+        # `[1]` is never nil, so `&.` never skips the call.
+        assert_equal parse_type("::Array[::Integer | ::Object]"), context.type_env[:y]
         assert_equal parse_type("::Array[::Object]"), context.type_env[:z]
       end
     end
@@ -10324,7 +12491,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 3) do |errors|
           assert_any!(errors) do |error|
@@ -10379,7 +12546,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_any!(typing.errors) do |error|
           assert_instance_of Diagnostic::Ruby::UnknownConstant, error
@@ -10431,7 +12598,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10466,7 +12633,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10500,7 +12667,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error(typing)
       end
@@ -10524,7 +12691,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error(typing)
       end
@@ -10542,7 +12709,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error(typing)
       end
@@ -10558,7 +12725,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        type, _, _ = construction.synthesize(source.node)
 
         assert_no_error(typing)
         assert_equal parse_type("::String"), type
@@ -10576,10 +12743,16 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        type, _, _ = construction.synthesize(source.node)
 
         assert_no_error(typing)
         assert_equal parse_type("::String"), type
+
+        # Regression: gvar op-assign nodes must be recorded in the typing table.
+        or_asgn = source.node.children[0]
+        and_asgn = source.node.children[1]
+        assert_equal parse_type("::String"), typing.type_of(node: or_asgn)
+        assert_equal parse_type("::String"), typing.type_of(node: and_asgn)
       end
     end
   end
@@ -10594,7 +12767,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_all!(typing.errors) do |error|
           assert_operator error, :is_a?, Diagnostic::Ruby::NoMethod
@@ -10619,7 +12792,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_no_error(typing)
       end
     end
@@ -10636,7 +12809,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
         assert_no_error(typing)
         assert_equal parse_type("::Integer"), context.type_env[:a]
         assert_equal parse_type("::String"), context.type_env[:b]
@@ -10653,7 +12826,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
         assert_no_error(typing)
         assert_equal parse_type("::Integer"), context.type_env[:a]
         assert_equal parse_type("nil"), context.type_env[:b]
@@ -10672,7 +12845,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        _, _, context = construction.synthesize(source.node)
         assert_no_error(typing)
         assert_equal parse_type("::Integer?"), context.type_env[:a]
         assert_equal parse_type("::Integer?"), context.type_env[:b]
@@ -10699,7 +12872,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_no_error(typing)
       end
     end
@@ -10723,7 +12896,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10755,7 +12928,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        type, _, _ = construction.synthesize(source.node)
 
         assert_no_error typing
 
@@ -10779,7 +12952,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -10797,7 +12970,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -10819,7 +12992,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_no_error typing
       end
@@ -10841,7 +13014,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10866,7 +13039,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10888,7 +13061,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10911,7 +13084,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
 
         assert_typing_error(typing, size: 1) do |errors|
           assert_any!(errors) do |error|
@@ -10934,7 +13107,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
-        type, _, context = construction.synthesize(source.node)
+        construction.synthesize(source.node)
         assert_no_error typing
       end
     end
@@ -10957,6 +13130,228 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
         assert_equal parse_type("::Complex"), pair.context.type_env[:c]
         assert_equal parse_type("::Complex"), pair.context.type_env[:rc]
         assert_no_error typing
+      end
+    end
+  end
+
+  # `_` is an ordinary local in this fork unless the target asks for
+  # upstream's cast (`underscore_casts!`).
+
+  def test_underscore_is_an_ordinary_local
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        _ = "foo"
+        a = _.size
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::String"), context.type_env[:_]
+        assert_equal parse_type("::Integer"), context.type_env[:a]
+      end
+    end
+  end
+
+  def test_underscore_is_not_a_cast
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var x: String
+        x = (_ = 3)
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) { assert_instance_of Diagnostic::Ruby::IncompatibleAssignment, _1 }
+        end
+      end
+    end
+  end
+
+  def test_underscore_cast_on_request
+    with_checker(underscore_casts: true) do |checker|
+      source = parse_ruby(<<~RUBY)
+        _ = "foo"
+        a = _.size
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("untyped"), context.type_env[:a]
+      end
+    end
+  end
+
+  def test_underscore_narrows
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var s: String?
+        s = nil
+        _ = s
+        if !_.nil?
+          a = _.size
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("::Integer?"), context.type_env[:a]
+      end
+    end
+  end
+
+  # A block parameter `_` is untyped, as before — and BOUND, so the `_`
+  # outside does not show through it.
+  def test_underscore_block_parameter_shadows
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        _ = 1
+        [:x].each do |_|
+          a = _
+        end
+        b = _
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        block = source.node.children[1]
+        lvasgn = block.children[2]
+        assert_equal parse_type("untyped"), typing.type_of(node: lvasgn)
+        assert_equal parse_type("::Integer"), context.type_env[:b]
+      end
+    end
+  end
+
+  def test_underscore_method_parameter_stays_untyped
+    with_checker(<<~RBS, underscore_casts: false) do |checker|
+      class UnderscoreParam
+        def foo: (Integer) -> untyped
+      end
+    RBS
+      source = parse_ruby(<<~RUBY)
+        class UnderscoreParam
+          def foo(_)
+            _.anything
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  def test_any_is_still_a_cast
+    with_checker(underscore_casts: false) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var x: String
+        x = (__any__ = 3)
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+      end
+    end
+  end
+
+  # `&.` skips the call only when the receiver is nil, so the result is
+  # nilable exactly when the receiver may be nil.
+  CSEND_RBS = <<~RBS
+    class CsendPerson
+      def name: () -> "Ana"
+      def names: () -> Array[String]
+    end
+
+    class CsendHost
+      def person: () -> CsendPerson
+      def maybe: () -> CsendPerson?
+      def object: () -> Object
+      def aliased: () -> csend_maybe
+    end
+
+    type csend_maybe = CsendPerson?
+
+    class CsendGeneric
+      def generic: [T < Object] (T) -> T
+    end
+  RBS
+
+  def test_csend_on_a_receiver_that_cannot_be_nil
+    with_checker(CSEND_RBS) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var host: CsendHost
+        host = _ = nil
+        a = host.person&.name
+        b = host.person&.names&.map { |n| n.size }
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"Ana"'), context.type_env[:a]
+        assert_equal parse_type("::Array[::Integer]"), context.type_env[:b]
+      end
+    end
+  end
+
+  def test_csend_on_a_receiver_that_may_be_nil
+    with_checker(CSEND_RBS) do |checker|
+      source = parse_ruby(<<~RUBY)
+        # @type var host: CsendHost
+        host = _ = nil
+        a = host.maybe&.name
+        b = host.maybe&.names&.map { |n| n.size }
+        c = host.aliased&.name
+        d = (_ = 1)&.anything
+        e = host.object&.itself
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, _, context = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type('"Ana"?'), context.type_env[:a]
+        assert_equal parse_type("::Array[::Integer]?"), context.type_env[:b]
+        assert_equal parse_type('"Ana"?'), context.type_env[:c], "an alias holds the nil its expansion writes"
+        assert_equal parse_type("untyped"), context.type_env[:d]
+        assert_equal parse_type("::Object"), context.type_env[:e], "an `Object` is never nil to this checker"
+      end
+    end
+  end
+
+  # A type variable may be instantiated with nil: `x&.itself` stays `T?`,
+  # which a declared `-> T` does not accept.
+  def test_csend_on_a_type_variable_receiver
+    with_checker(CSEND_RBS) do |checker|
+      source = parse_ruby(<<~RUBY)
+        class CsendGeneric
+          def generic(x)
+            x&.itself
+          end
+        end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_typing_error(typing, size: 1) do |errors|
+          assert_any!(errors) { assert_instance_of Diagnostic::Ruby::MethodBodyTypeMismatch, _1 }
+        end
       end
     end
   end

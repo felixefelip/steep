@@ -1,0 +1,272 @@
+module Steep
+  module Specializations
+    # What one source file contributes to a specialization pass: the methods it
+    # defines, and the argument tuples its call sites supply to methods the
+    # project defines elsewhere.
+    class Collector
+      # `{ "Foo#bar" => def node }` for every method defined in `source`.
+      # A class's `initialize` is also keyed as its `.new`, which runs it: what
+      # the object holds once built is that body's to say
+      # (`ObjectStates::Constructed`).
+      def self.definitions(source)
+        result = {} #: Hash[String, Parser::AST::Node]
+        each_definition(source) { |key, def_node| result[key] = def_node }
+        result.to_a.each { |key, def_node| result[constructor_key(key)] ||= def_node if key.end_with?("#initialize") }
+        result
+      end
+
+      # Every `def` in `source`, keyed as a call site resolving to it keys
+      # itself, a key once for each definition.
+      def self.each_definition(source, &block)
+        walk_defs(source.node, [], source, &block) if source.node
+      end
+
+      # `[key, def_node]` for the innermost of `definitions` (`[key, def_node]`
+      # pairs of one file) whose range holds `node`.
+      def self.enclosing(definitions, node)
+        range = node.loc.expression or return nil
+        enclosing = definitions.select do |_, def_node|
+          def_range = def_node.loc.expression
+          def_range.begin_pos <= range.begin_pos && range.end_pos <= def_range.end_pos
+        end
+        enclosing.min_by { |_, def_node| def_node.loc.expression.size }
+      end
+
+      def self.constructor_key(initializer_key)
+        "#{initializer_key.delete_suffix("#initialize")}.new"
+      end
+
+      # The tuples a call site specializes `key` under. A constructor called
+      # with no arguments fixes nothing, but its body alone decides the object
+      # it answers (`ObjectStates::Constructed`).
+      def self.tuples(key, arguments)
+        key.end_with?(".new") && arguments.empty? && arguments.block.nil? ? [arguments] : arguments.tuples
+      end
+
+      def self.constructor?(key, def_node)
+        def_node.type == :def && def_node.children[0] == :initialize && key.end_with?(".new")
+      end
+
+      # `{ "Foo#bar" => Set[Arguments] }` for the call sites in `typing` that
+      # resolve to one method and fix at least one argument to a literal, under
+      # each body the call may run.
+      def self.call_sites(typing, overrides:)
+        result = {} #: Hash[String, Set[Arguments]]
+
+        each_call_site(typing, overrides: overrides) do |key, arguments, _node|
+          # A tuple fixing no value specializes nothing: the body would be
+          # re-checked under the declaration it already has.
+          (result[key] ||= Set.new).merge(tuples(key, arguments))
+        end
+
+        result
+      end
+
+      # The same call sites, with the node each one is, and without the literal
+      # filter `call_sites` applies. `call_sites` answers what to specialize; a
+      # consumer that has to point back at the source needs to know which call it
+      # was, and one that reads a body's control flow needs the calls that fix
+      # nothing too.
+      #
+      # `every_call`: also yield, with nil arguments, each project method a call
+      # reaches that no tuple describes — through a receiver resolving to
+      # several methods, one that may run a body the source does not name
+      # (`Overrides#runs`), with an error, or in a shape `Arguments` declines.
+      def self.each_call_site(typing, overrides:, every_call: false, &block)
+        typing.pass_typings.each_value { |passes| passes.each { |pass| each_call_site(pass, overrides: overrides, every_call: every_call, &block) } }
+
+        each_call(typing, every_call) do |node, call|
+          runs = overrides.runs(call, node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node))
+          arguments = runs && call_node?(node) && Arguments.recorded(node, typing)
+          node = written_super(typing, node)
+          next runs.each_key { |key| yield key, arguments, node } if arguments
+          next unless every_call && call.respond_to?(:method_decls)
+
+          call.method_decls.map { |decl| decl.method_name.to_s.delete_prefix("::") }.uniq.each { |called| yield called, nil, node }
+        end
+      end
+
+      def self.each_call(typing, every_call)
+        return typing.method_calls.each { |node, call| yield node, call } if every_call
+
+        typing.each_typing do |node, _type|
+          next unless call_node?(node)
+
+          call = begin
+                   typing.call_of(node: node)
+                 rescue Typing::UnknownNodeError
+                   next
+                 end
+          yield node, call
+        end
+      end
+
+      # A bare `super` is checked as the explicit one it stands for
+      # (`TypeConstruction#explicit_super`), built anew by each check: the
+      # `zsuper` the source writes is what names the call from one check to the
+      # next.
+      def self.written_super(typing, node)
+        node.type == :super && typing.explicit_supers.key(node) || node
+      end
+
+      def self.call_node?(node)
+        %i[send super].include?(node.type) || Accumulators::LAMBDA_BODIES.include?(node.type)
+      end
+
+      # A default that reads a parameter written before it: what that parameter
+      # holds at the call, by position or by name.
+      ParameterRead = Data.define(:index, :keyword)
+
+      # The values a definition gives the parameters a call may leave out, by
+      # position and by name, for the ones written as a literal or as a read of
+      # an earlier parameter. Anything else — a call, a constant, an expression —
+      # is left to the declaration, since a default this cannot read is not one
+      # it may guess at.
+      def self.defaults(def_node)
+        args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
+        positionals = {} #: Hash[Integer, AST::Types::t | ParameterRead]
+        keywords = {} #: Hash[Symbol, AST::Types::t | ParameterRead]
+        return [positionals, keywords] unless args
+
+        each_parameter_read(args) do |arg, read, earlier|
+          next unless %i[optarg kwoptarg].include?(arg.type)
+
+          default = default_type(arg.children[1], earlier) or next
+          read.keyword ? keywords[read.keyword] = default : positionals[read.index] = default
+        end
+
+        [positionals, keywords]
+      end
+
+      # A position past a rest parameter no longer names one argument, so a
+      # default cannot read that parameter by position.
+      def self.each_parameter_read(args)
+        index = 0
+        past_rest = false
+        earlier = {} #: Hash[Symbol, ParameterRead]
+        args.children.each do |arg|
+          name = arg.children[0]
+          case arg.type
+          when :arg, :procarg0, :optarg
+            read = ParameterRead.new(index: index, keyword: nil)
+            index += 1
+          when :kwarg, :kwoptarg
+            read = ParameterRead.new(index: nil, keyword: name)
+          when :restarg
+            past_rest = true
+          end
+          next unless read
+
+          yield arg, read, earlier
+          earlier[name] = read unless past_rest && !read.keyword
+        end
+      end
+
+      def self.default_type(node, earlier)
+        case node&.type
+        when :true then AST::Types::Literal.new(value: true)
+        when :false then AST::Types::Literal.new(value: false)
+        when :nil then AST::Builtin.nil_type
+        when :sym, :str, :int then AST::Types::Literal.new(value: node.children[0])
+        when :lvar then earlier[node.children[0]]
+        when :array then array_default(node)
+        end
+      end
+
+      # An array written out of literals, which a call that leaves the
+      # parameter out builds anew: `exclude = []`.
+      def self.array_default(node)
+        elements = node.children.map { |child| default_type(child, {}) }
+        AST::Types::Tuple.new(types: elements) if elements.all?
+      end
+
+      # Every project method the call sites in `typing` resolve to, literal
+      # argument or not. `call_sites` answers a subset — the calls that fix a
+      # value today — and a call that fixes none now may fix one once an inner
+      # call specializes, so what file to re-read is decided from this.
+      def self.callees(typing, overrides:)
+        result = Set[] #: Set[String]
+        each_call_site(typing, overrides: overrides, every_call: true) { |key, _arguments, _node| result << key }
+        result
+      end
+
+      def self.walk_defs(node, nesting, source, &block)
+        return unless node.is_a?(Parser::AST::Node)
+
+        case node.type
+        when :class, :module
+          name = const_name(node.children[0])
+          inner = name ? nesting + [name] : nesting
+          body = node.type == :class ? node.children[2] : node.children[1]
+          walk_defs(body, inner, source, &block)
+        when :block
+          name, singleton = DefinedMethods.literal(node) unless nesting.empty?
+          name ? yield("#{nesting.join("::")}#{singleton ? "." : "#"}#{name}", node) : walk_block_defs(node, nesting, source, &block)
+        when :def
+          yield "#{nesting.join("::")}##{node.children[0]}", node unless nesting.empty?
+        when :defs
+          yield "#{nesting.join("::")}.#{node.children[1]}", node unless nesting.empty?
+        when :sclass
+          walk_sclass_defs(node, nesting, source, &block)
+        else
+          node.children.each { |child| walk_defs(child, nesting, source, &block) }
+        end
+      end
+
+      # A DSL block whose body has a definee of its own — `class_methods do … end`
+      # is the one that matters here, and `class_eval` on a stored block is the
+      # other. Where the methods land is not where the call is WRITTEN, and
+      # `@implements` is what says so; the annotation is injected from the module
+      # self-type sidecar, the same fact that gives the body its `self`.
+      #
+      # Without this a `def` inside `class_methods do` is keyed by the concern
+      # that wrote the block, while every call site resolves to the
+      # `ClassMethods` the method actually lives on — two names that never meet,
+      # so the body is never specialized.
+      def self.walk_block_defs(node, nesting, source, &block)
+        modules = implemented_modules(source, node)
+        if modules.empty?
+          node.children.each { |child| walk_defs(child, nesting, source, &block) }
+          return
+        end
+
+        modules.each do |mod|
+          name = mod.name.to_s.delete_prefix("::")
+
+          walk_defs(node.children[2], [name], source) do |key, def_node|
+            yield mod.singleton? ? key.sub("#", ".") : key, def_node
+          end
+        end
+      end
+
+      def self.implemented_modules(source, node)
+        (source.mapping[node] || []).flat_map do |annotation|
+          annotation.is_a?(AST::Annotation::Implements) ? annotation.names : []
+        end
+      end
+
+      # `class << self` holds singleton methods of the enclosing class, written
+      # as plain `def`s. `class << obj` holds singleton methods of that object,
+      # which no class name keys.
+      def self.walk_sclass_defs(node, nesting, source, &block)
+        return unless node.children[0].type == :self
+
+        walk_defs(node.children[1], nesting, source) do |key, def_node|
+          yield key.sub("#", "."), def_node unless key.include?(".")
+        end
+      end
+
+      def self.const_name(node)
+        return nil unless node.is_a?(Parser::AST::Node) && node.type == :const
+
+        parent = node.children[0]
+        return node.children[1].to_s if parent.nil? || parent.type == :cbase
+
+        prefix = const_name(parent) or return nil
+        "#{prefix}::#{node.children[1]}"
+      end
+
+      private_class_method :each_call, :call_node?, :walk_defs, :walk_block_defs, :implemented_modules, :walk_sclass_defs, :const_name
+    end
+  end
+end

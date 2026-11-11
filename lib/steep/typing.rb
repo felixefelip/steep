@@ -106,7 +106,7 @@ module Steep
             set(body_begin_pos..body_end_pos, context)
           end
 
-        when :block, :numblock
+        when :block, :numblock, :itblock
           range = block_range(node)
           set(range, context)
 
@@ -132,7 +132,7 @@ module Steep
                         node.loc.begin.end_pos # steep:ignore NoMethod
                       end
           end_pos = node.loc.end.begin_pos # steep:ignore NoMethod
-        when :numblock
+        when :numblock, :itblock
           send_node, _ = node.children
           begin_pos = node.loc.begin.end_pos # steep:ignore NoMethod
           end_pos = node.loc.end.begin_pos # steep:ignore NoMethod
@@ -154,6 +154,33 @@ module Steep
 
     attr_reader :source
     attr_reader :errors
+    # Observations of precondition contract call sites recorded during type
+    # checking: each entry is { key: "Class#method", satisfied: bool }. Used by
+    # Contracts::Enforcement to decide whether a contract is enforced.
+    attr_reader :contract_call_sites
+    # Transitive precondition obligations: when a method's body calls a
+    # contracted method via `self` and does NOT establish the required
+    # `self.x`, the enclosing method inherits that requirement. Each entry is
+    # { key: "Class#method" (the enclosing method), expr: Contracts::Expr }.
+    # Consumed by Contracts::Runner to close preconditions over the self-call
+    # graph.
+    attr_reader :precondition_obligations
+    # The RECEIVER TYPE observed at each contracted method's call sites, as an
+    # RBS type string: `{ key: "Class#method", type: "(::Card & ::Card::Validated)" }`.
+    # Contracts::Enforcement folds these into the one type every call site
+    # agrees on, which becomes the method's `self_type` predicate
+    # (felixefelip/steep#158). Recorded next to `contract_call_sites` and by the
+    # same walk, so a site can never be counted for enforcement and missed here.
+    attr_reader :contract_receiver_types
+    # The type envs around each `if` node: `{ entry:, truthy:, falsy: }` keyed by
+    # the `:if` node itself. The three are already computed while checking the
+    # branches (`LogicTypeInterpreter#eval` runs on every condition); this keeps
+    # the references instead of dropping them, so a later pass can READ what the
+    # checker concluded about a condition rather than re-deriving it from the AST.
+    #
+    # Empty unless `record_branch_envs` — the normal check and the LSP pay
+    # nothing, and the retained envs live only as long as one file's `Typing`.
+    attr_reader :branch_envs
     attr_reader :typing
     attr_reader :parent
     attr_reader :parent_last_update
@@ -162,10 +189,74 @@ module Steep
     attr_reader :contexts
     attr_reader :root_context
     attr_reader :method_calls
+    # The `self` each call was made from, by the send node. A receiverless call
+    # and a `self` argument are both written `self`, and which object that is
+    # belongs to the frame the call sits in, not to the call — the one fact a
+    # reader of the typing cannot get back from the node.
+    attr_reader :call_self_types
+    # The ivars of that `self` whose object's state the env knew at the call
+    # (`ObjectStates.self_ivars`), only where there were any.
+    attr_reader :call_self_ivars
+    attr_reader :call_keyed_selves
+    attr_reader :call_exact_selves
+    # The states of class objects the env knew at the call that the callee may
+    # read (`ObjectStates::ClassStates.of_call`), only where there were any.
+    attr_reader :call_class_states
+    attr_reader :exit_ivars
+    # The hash memos each class body left holding, by class name
+    # (`ObjectStates::ClassStates.left`).
+    attr_reader :class_exits
+    # The classes and modules whose bodies the file opens, and the class
+    # states its top level entered with and left (`TypeCheckService.type_check`).
+    attr_reader :defined_classes
+    attr_accessor :top_level_states
+    # The classes whose state a call asked the env for, found or not
+    # (`ObjectStates::ClassStates.of_call`), and all those the check may have
+    # read it of (`ObjectStates::ClassStates.observed`).
+    attr_reader :asked_classes
+    attr_accessor :observed_classes
+    # What one `each` pushes on each pass: `{ block node => [{ value node =>
+    # type }, …] }`, one hash per element of the collection, or nil for a loop
+    # that could not be expanded. Each pass is checked in a typing of its own
+    # and thrown away — the node has ONE type in the program, and these are the
+    # types it has on a given pass — so this is where they are kept.
+    attr_reader :iterations
+    # Which arm of an `if` a push sits under the check left reachable: `{ if
+    # node => :then | :else | nil }`, nil where it left both. Recorded only for
+    # the conditionals `Accumulators` asks about, and per pass of a loop, since
+    # each pass is checked in a typing of its own.
+    attr_reader :arms
+    # Collections whose contents someone vouched for, by the node that holds
+    # them: a local where it was handed to a call as an argument (`{ lvar node
+    # => tuple }`, for the locals `Accumulators` vouches for there), and a call
+    # whose value the checker computed rather than read off its declaration
+    # (`TypeConstruction#record_built_value`). What a call site keys its
+    # specialization on, and what the fold takes as an operand, in place of a
+    # declared type, which says nothing about what the array holds now.
+    attr_reader :vouched
+    # What each of those calls DECLARES it returns, for a local that holds the
+    # computed tuple but goes on to be pushed onto (`Accumulators` keeps its
+    # contents; a tuple type would make the push demand the first element).
+    attr_reader :nominals
+    # The types the locals a block body may change in place had before
+    # `StringMutation` widened them, by the body; and the env each `break` was
+    # reached with. What `UnrolledEach` runs an `each` from and stops it with.
+    attr_reader :unwidened, :jump_envs
+    # The env each block body ends with, by the block (`ObjectStates::Tap`).
+    attr_reader :block_exits
+    # The `case` clauses the check left unreachable. `UnreachableValueBranch`
+    # is not reported for one whose body never finishes.
+    attr_reader :dead_clauses
+    # The `super(...)` each bare `super` was typed as.
+    attr_reader :explicit_supers
+    # The checks of a block run once per known element, by the block node
+    # (`TypeConstruction#iterated_value`, `#record_iterations`): its calls are
+    # call sites too, and what it writes is written once per element.
+    attr_reader :pass_typings
     attr_reader :source_index
     attr_reader :cursor_context
 
-    def initialize(source:, root_context:, parent: nil, parent_last_update: parent&.last_update, source_index: nil, cursor:)
+    def initialize(source:, root_context:, parent: nil, parent_last_update: parent&.last_update, source_index: nil, cursor:, record_branch_envs: parent&.record_branch_envs? || false)
       @source = source
 
       @parent = parent
@@ -174,9 +265,33 @@ module Steep
       @should_update = false
 
       @errors = []
+      @contract_call_sites = []
+      @precondition_obligations = []
+      @contract_receiver_types = []
+      @record_branch_envs = record_branch_envs
+      (@branch_envs = {}).compare_by_identity
       (@typing = {}).compare_by_identity
       @root_context = root_context
       (@method_calls = {}).compare_by_identity
+      (@call_self_types = {}).compare_by_identity
+      (@call_self_ivars = {}).compare_by_identity
+      (@call_keyed_selves = {}).compare_by_identity
+      (@call_exact_selves = {}).compare_by_identity
+      (@call_class_states = {}).compare_by_identity
+      (@exit_ivars = {}).compare_by_identity
+      @class_exits = {}
+      @defined_classes = Set[]
+      @asked_classes = Set[]
+      (@iterations = {}).compare_by_identity
+      (@arms = {}).compare_by_identity
+      (@vouched = {}).compare_by_identity
+      (@nominals = {}).compare_by_identity
+      (@unwidened = {}).compare_by_identity
+      (@jump_envs = {}).compare_by_identity
+      (@block_exits = {}).compare_by_identity
+      (@dead_clauses = {}).compare_by_identity
+      (@explicit_supers = {}).compare_by_identity
+      (@pass_typings = {}).compare_by_identity
 
       @cursor_context = CursorContext.new(cursor)
       if root_context
@@ -190,6 +305,31 @@ module Steep
       errors << error
     end
 
+    def observe_contract_call_site(key:, satisfied:)
+      contract_call_sites << { key: key, satisfied: satisfied }
+    end
+
+    def observe_precondition_obligation(key:, expr:)
+      precondition_obligations << { key: key, expr: expr }
+    end
+
+    def observe_contract_receiver_type(key:, type:)
+      contract_receiver_types << { key: key, type: type }
+    end
+
+    # `entry` is the env AFTER the condition is synthesized (so a pure call in the
+    # condition is already registered) and BEFORE either branch narrows it — the
+    # baseline a consumer diffs the surviving branch against.
+    def record_branch_envs(node, entry:, truthy:, falsy:)
+      return unless record_branch_envs?
+
+      branch_envs[node] = { entry: entry, truthy: truthy, falsy: falsy }
+    end
+
+    def record_branch_envs?
+      @record_branch_envs
+    end
+
     def add_typing(node, type, _context)
       typing[node] = type
       @last_update += 1
@@ -197,14 +337,136 @@ module Steep
       type
     end
 
-    def add_call(node, call)
+    def add_call(node, call, self_type:, exact_self:, keyed_self:, self_ivars:, class_states:)
       method_calls[node] = call
+      call_self_types[node] = self_type
+      call_keyed_selves[node] = keyed_self if keyed_self
+      call_exact_selves[node] = exact_self if exact_self
+      call_self_ivars[node] = self_ivars unless self_ivars.empty?
+      call_class_states[node] = class_states unless class_states.empty?
 
       call
     end
 
+    def self_ivars_of_call(node:)
+      call_self_ivars.fetch(node) { parent&.self_ivars_of_call(node: node) || {} }
+    end
+
+    # `Specializations.keyed_self` at the call.
+    def keyed_self_of_call(node:)
+      call_keyed_selves.fetch(node) { parent&.keyed_self_of_call(node: node) }
+    end
+
+    # `Specializations.exact_self` where the call is made.
+    def exact_self_of_call(node:)
+      call_exact_selves.fetch(node) { parent&.exact_self_of_call(node: node) }
+    end
+
+    def class_states_of_call(node:)
+      call_class_states.fetch(node) { parent&.class_states_of_call(node: node) || {} }
+    end
+
+    # The ivars a body checked under its receiver's contents
+    # (`Specializations::Arguments#self_ivars`) leaves that receiver holding.
+    def add_exit_ivars(node, ivars)
+      exit_ivars[node] = ivars
+    end
+
+    def exit_ivars_of(node:)
+      exit_ivars.fetch(node) { parent&.exit_ivars_of(node: node) }
+    end
+
+    def add_class_exit(name, ivars)
+      class_exits[name] = ivars
+    end
+
+    def add_iterations(node, passes)
+      iterations[node] = passes
+    end
+
+    def iterations_of(node:)
+      iterations.fetch(node) { parent&.iterations_of(node: node) }
+    end
+
+    def add_arm(node, arm)
+      arms[node] = arm
+    end
+
+    def add_dead_clause(node)
+      dead_clauses[node] = true
+    end
+
+    def add_pass_typing(node, typing)
+      expand(node) << typing
+    end
+
+    def expand(node)
+      pass_typings[node] ||= []
+    end
+
+    def pass_typings_of(node:)
+      pass_typings.fetch(node) { parent&.pass_typings_of(node: node) }
+    end
+
+    def add_explicit_super(zsuper, super_node)
+      explicit_supers[zsuper] = super_node
+    end
+
+    def explicit_super_of(node:)
+      explicit_supers.fetch(node) { parent&.explicit_super_of(node: node) }
+    end
+
+    def arm_of(node:)
+      arms.fetch(node) { parent&.arm_of(node: node) }
+    end
+
+    def add_unwidened(node, types)
+      unwidened[node] = types.merge(unwidened.fetch(node, {}))
+    end
+
+    def unwidened_of(node:)
+      unwidened.fetch(node) { parent&.unwidened_of(node: node) }
+    end
+
+    def add_block_exit(node, env)
+      block_exits[node] = env
+    end
+
+    def block_exit_of(node:)
+      block_exits.fetch(node) { parent&.block_exit_of(node: node) }
+    end
+
+    def add_jump_env(node, env)
+      jump_envs[node] = env
+    end
+
+    def jump_env_of(node:)
+      jump_envs.fetch(node) { parent&.jump_env_of(node: node) }
+    end
+
+    def add_vouched(node, type)
+      vouched[node] = type
+    end
+
+    def vouched_of(node:)
+      vouched.fetch(node) { parent&.vouched_of(node: node) }
+    end
+
+    def add_nominal(node, type)
+      nominals[node] = type
+    end
+
+    def nominal_of(node:)
+      nominals.fetch(node) { parent&.nominal_of(node: node) }
+    end
+
     def has_type?(node)
       typing.key?(node)
+    end
+
+    # The type this typing or one it nests in recorded for `node`, nil for none.
+    def recorded_type_of(node:)
+      typing.fetch(node) { parent&.recorded_type_of(node: node) }
     end
 
     def type_of(node:)
@@ -235,6 +497,12 @@ module Steep
       end
     end
 
+    # The type `self` had where `node` was called, or nil for a node this typing
+    # recorded no call for.
+    def self_type_of_call(node:)
+      call_self_types.fetch(node) { parent&.self_type_of_call(node: node) }
+    end
+
     def block_range(node)
       case node.type
       when :block
@@ -245,7 +513,7 @@ module Steep
                       node.loc.begin.end_pos # steep:ignore NoMethod
                     end
         end_pos = node.loc.end.begin_pos # steep:ignore NoMethod
-      when :numblock
+      when :numblock, :itblock
         send_node, _ = node.children
         begin_pos = node.loc.begin.end_pos # steep:ignore NoMethod
         end_pos = node.loc.end.begin_pos # steep:ignore NoMethod
@@ -282,7 +550,8 @@ module Steep
         parent: self,
         root_context: root_context,
         source_index: source_index.new_child,
-        cursor: cursor_context.index
+        cursor: cursor_context.index,
+        record_branch_envs: record_branch_envs?
       )
       @should_update = true
 
@@ -297,6 +566,19 @@ module Steep
       typing.each(&block)
     end
 
+    # `others` checked the same nodes as this typing, each under its own
+    # branch: a node or call `self` is typed by every branch, and a fact about
+    # a call is kept only where each branch recorded the same one.
+    def join_branches!(others)
+      others.reverse_each do |other|
+        other.each_typing { |node, type| typing[node] = AST::Types::Union.build(types: [type, typing[node]].compact) }
+        other.call_self_types.each { |node, type| call_self_types[node] = AST::Types::Union.build(types: [type, call_self_types[node]].compact) }
+        [[call_exact_selves, other.call_exact_selves], [call_keyed_selves, other.call_keyed_selves], [call_self_ivars, other.call_self_ivars], [call_class_states, other.call_class_states]].each do |mine, theirs|
+          mine.delete_if { |node, fact| theirs[node] != fact }
+        end
+      end
+    end
+
     def save!
       raise "Unexpected save!" unless parent
       raise "Parent modified since #new_child: parent.last_update=#{parent.last_update}, parent_last_update=#{parent_last_update}" unless parent.last_update == parent_last_update
@@ -306,9 +588,40 @@ module Steep
       end
 
       parent.method_calls.merge!(method_calls)
+      parent.call_self_types.merge!(call_self_types)
+      parent.call_keyed_selves.merge!(call_keyed_selves)
+      parent.call_exact_selves.merge!(call_exact_selves)
+      parent.call_self_ivars.merge!(call_self_ivars)
+      parent.call_class_states.merge!(call_class_states)
+      parent.exit_ivars.merge!(exit_ivars)
+      parent.class_exits.merge!(class_exits)
+      parent.defined_classes.merge(defined_classes)
+      parent.asked_classes.merge(asked_classes)
+      parent.iterations.merge!(iterations)
+      parent.arms.merge!(arms)
+      parent.vouched.merge!(vouched)
+      parent.nominals.merge!(nominals)
+      parent.branch_envs.merge!(branch_envs)
+      parent.block_exits.merge!(block_exits)
+      parent.jump_envs.merge!(jump_envs)
+      parent.dead_clauses.merge!(dead_clauses)
+      parent.explicit_supers.merge!(explicit_supers)
+      parent.pass_typings.merge!(pass_typings)
 
       errors.each do |error|
         parent.add_error error
+      end
+
+      contract_call_sites.each do |observation|
+        parent.observe_contract_call_site(**observation)
+      end
+
+      precondition_obligations.each do |obligation|
+        parent.observe_precondition_obligation(**obligation)
+      end
+
+      contract_receiver_types.each do |observation|
+        parent.observe_contract_receiver_type(**observation)
       end
 
       parent.cursor_context.set(cursor_context)

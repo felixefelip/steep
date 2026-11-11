@@ -1,0 +1,190 @@
+module Steep
+  # Which calls leave an array a held object keeps as it was, and what the
+  # pushes onto it leave there (felixefelip/steep#205, stage 3).
+  #
+  # Only for an ivar whose contents the body was entered with — the state of
+  # the receiver a specialization checks it under (`Specializations::Arguments#self_ivars`).
+  # A tuple any other variable is typed by is a declaration, which says what the
+  # array may hold and never what it holds now.
+  #
+  # Keyed like `StringMutation`, by the method the call resolved to, and watched
+  # by the same registry.
+  module ArrayMutation
+    ENTRIES = (
+      # Only reads that answer no element: one handed out is a name a call may
+      # change it through. And only what `Array` defines itself, as the
+      # registry keys it.
+      %w[<=> == all? any? count empty? eql? hash include? inspect intersect? join length none? size to_s + - & | flatten]
+        .map { |name| "::Array##{name}" } + CollectionMutation::OBJECT_READS
+    ).to_h { |key| [key, true] }.freeze
+
+    IN_PLACE = Set["::Array#prepend", "::Array#unshift", "::Array#push", "::Array#<<"].freeze
+
+    # The ones that read or change an array's elements, written in C, and reach
+    # no ivar of the object they run on: what an `Array` subclass calls on
+    # itself (`Inflections::Uncountables#add` runs `concat(words)`).
+    DELETE = "::Array#delete"
+
+    ELEMENT_METHODS = (ENTRIES.keys + IN_PLACE.to_a + ["::Array#concat", DELETE]).to_set.freeze
+
+    class << self
+      def elements_only?(call, constr)
+        return false unless CollectionMutation.resolved?(call)
+
+        CollectionMutation.only?(constr, call.method_decls.map { |decl| MethodIdentity.normalize(decl.method_name.to_s) }.uniq, ELEMENT_METHODS)
+      end
+
+      # Before a call on `receiver`: the type to dispatch it against, and the
+      # ivar it reads holding an array whose contents are not known, where the
+      # call may change them and is no push this can follow.
+      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
+        return [receiver_type, constr] unless receiver_type.is_a?(AST::Types::Tuple) && CollectionMutation.entered_with?(constr, receiver)
+
+        keys = array_method_keys(constr, method_name, private: private)
+        if block_params || block_body
+          return [receiver_type, constr] if reading_iteration?(constr, keys, block_params, block_body)
+        elsif preserves?(constr, keys) || foldable?(constr, keys)
+          return [receiver_type, constr]
+        end
+
+        widened = AST::Builtin::Array.instance_type(element_type(receiver_type))
+        [widened, refine(constr, receiver, widened)]
+      end
+
+      # After a push onto `receiver`, with no block: the ivar holding what the
+      # push leaves, where every operand is known; holding an array whose
+      # contents are not known otherwise.
+      def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
+        return [type, constr] unless receiver_type.is_a?(AST::Types::Tuple) && CollectionMutation.entered_with?(constr, receiver)
+
+        keys = array_method_keys(constr, method_name, private: private)
+        return deleted(constr, node, receiver, receiver_type, arguments, type: type) if deletes?(constr, keys)
+        return [type, constr] unless foldable?(constr, keys)
+
+        folded = fold(constr, keys.first, receiver_type, arguments)
+        constr = refine(constr, receiver, folded || AST::Builtin::Array.instance_type(element_type(receiver_type)))
+        folded ? [folded, constr.add_typing(node, type: folded).constr] : [type, constr]
+      end
+
+      # The tuple an object held under any name keeps in `ivar`, where no
+      # method but those that build it assigns the ivar or hands its array on,
+      # and every use of it, or of a reader that answers it, only reads it:
+      # the counterpart of `HashMutation.held`.
+      def held(constr, instance, ivar, tuple)
+        return unless tuple.is_a?(AST::Types::Tuple) && LiteralIntrinsics.fold_value?(tuple)
+
+        tuple if read_everywhere?(constr, instance, ivar)
+      end
+
+      def watched_keys
+        @watched_keys ||= Set.new(ENTRIES.keys) | ELEMENT_METHODS
+      end
+
+      def method_keys_for(class_name)
+        prefix = "::#{class_name}#"
+        watched_keys.select { |key| key.start_with?(prefix) }
+      end
+
+      private
+
+      def read_everywhere?(constr, instance, ivar)
+        constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.all? do |ancestor|
+          constr.constructor_bindings.possible_bodies(ancestor.name.to_s).all? do |name, bodies|
+            HashMutation.built_only?(constr, instance, name) || bodies.all? { |body| body_reads?(constr, instance, ivar, name, body) }
+          end
+        end
+      rescue RBS::BaseError
+        false
+      end
+
+      def body_reads?(constr, instance, ivar, name, body)
+        return false unless body
+        return indexed_reads?(constr, instance, name) if body.returns == ivar
+        return false if body.handed.include?(ivar) || body.writes.include?(ivar)
+
+        body.ivar_uses.fetch(ivar, []).all? { |use| reading_use?(constr, use) }
+      end
+
+      # Every use of the reader `name` reads only. One whose uses were never
+      # indexed has none to show, which says nothing.
+      def indexed_reads?(constr, instance, name)
+        constr.constructor_bindings.used_names.include?(name) &&
+          Specializations::Receivers.uses_on(constr, name, instance).all? { |use| reading_use?(constr, use) }
+      end
+
+      def reading_use?(constr, use)
+        return false if %i[escape yielded].include?(use.kind) || !use.element_calls.empty?
+        return true if use.called == :*
+
+        keys = ENTRIES.keys.select { |key| key.end_with?("##{use.called}") }
+        !keys.empty? && keys.none? { |key| constr.literal_method_registry.blocked?(key) }
+      end
+
+      # An iteration of the core's whose block only reads the elements it is
+      # handed, as a use of a class's memo must (`ClassMemoAnalyzer::Use`).
+      def reading_iteration?(constr, keys, block_params, block_body)
+        registry = constr.literal_method_registry
+        return false if keys.empty? || !keys.all? { |key| IterationIntrinsics.reading_entry(key, override_registry: registry) }
+
+        calls = TypeInference::ClassMemoAnalyzer.element_calls_in(block_params, block_body) or return false
+        ObjectStates::ClassMemos.reads_elements?(constr, calls)
+      end
+
+      def preserves?(constr, keys)
+        CollectionMutation.only?(constr, keys, ENTRIES)
+      end
+
+      def foldable?(constr, keys)
+        keys.size == 1 && IN_PLACE.include?(keys.first) && !constr.literal_method_registry.blocked?(keys.first)
+      end
+
+      def deletes?(constr, keys)
+        keys == [DELETE] && !constr.literal_method_registry.blocked?(DELETE)
+      end
+
+      # `delete` of a value on a tuple of values: the tuple without the
+      # elements `==` to it, and the call answering it, or `nil` where none
+      # was. Only where equal types are exactly the values that are `==`, or
+      # on an empty tuple, which compares nothing.
+      def deleted(constr, node, receiver, receiver_type, arguments, type:)
+        argument, = CollectionMutation.operand_types(constr, arguments)
+        unless arguments.size == 1 && (receiver_type.types.empty? || (argument && compared_by_type?(argument) && compared_by_type?(receiver_type)))
+          return [type, refine(constr, receiver, AST::Builtin::Array.instance_type(element_type(receiver_type)))]
+        end
+
+        kept = receiver_type.types.reject { |element| element == argument }
+        answer = kept.size < receiver_type.types.size ? argument : AST::Builtin.nil_type
+        [answer, refine(constr, receiver, AST::Types::Tuple.new(types: kept)).add_typing(node, type: answer).constr]
+      end
+
+      def compared_by_type?(type)
+        case type
+        when AST::Types::Literal, AST::Types::Nil, AST::Types::RegexpLiteral then true
+        when AST::Types::Tuple then type.types.all? { |element| compared_by_type?(element) }
+        else false
+        end
+      end
+
+      def fold(constr, key, receiver_type, arguments)
+        argument_types = CollectionMutation.operand_types(constr, arguments) or return nil
+        LiteralIntrinsics.fold_key(
+          key: key, receiver_type: receiver_type, argument_types: argument_types,
+          override_registry: constr.literal_method_registry
+        )
+      end
+
+      def element_type(tuple)
+        tuple.types.empty? ? AST::Builtin.any_type : AST::Types::Union.build(types: tuple.types)
+      end
+
+      def refine(constr, receiver, type)
+        name = receiver.children[0] #: Symbol
+        constr.update_type_env { |env| env.refine_types(instance_variable_types: { name => type }) }
+      end
+
+      def array_method_keys(constr, method_name, private:)
+        MethodIdentity.keys(constr, AST::Builtin::Array.instance_type(AST::Builtin.any_type), method_name, private: private)
+      end
+    end
+  end
+end

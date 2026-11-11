@@ -1,0 +1,2527 @@
+require_relative "test_helper"
+
+class StringEvalsTest < Minitest::Test
+  include TestHelper
+  include ShellHelper
+
+  Specializations = Steep::Specializations
+  Project = Steep::Project
+
+  def dirs
+    @dirs ||= []
+  end
+
+  def write(relative, content)
+    path = current_dir + relative
+    path.parent.mkpath
+    path.write(content)
+    path
+  end
+
+  def setup_project(steepfile: STEEPFILE)
+    write("Steepfile", steepfile)
+    project = Project.new(steepfile_path: current_dir + "Steepfile")
+    Project::DSL.parse(project, steepfile, filename: (current_dir + "Steepfile").to_s)
+    project
+  end
+
+  STEEPFILE = <<~STEEPFILE
+    target :app do
+      signature "sig"
+      check "app"
+    end
+  STEEPFILE
+
+  MACRO_RBS = <<~RBS
+    class Base
+      def self.has_rich_text: (Symbol name, ?store_if_blank: bool) -> untyped
+    end
+
+    class Article < Base
+    end
+
+    class Photo < Base
+    end
+  RBS
+
+  DELEGATION_RBS = <<~RBS
+    module Writer
+      def self.generate: (untyped owner, Symbol name) -> void
+    end
+
+    class Base
+      def self.has_rich_text: (Symbol name) -> untyped
+    end
+
+    class Article < Base
+    end
+  RBS
+
+  # The SOURCES each call site writes. Most of this file is about what the
+  # checker can read, not about where it lands, so the target stays out of the
+  # way unless a test asks for it with `chunks_of`.
+  def evals_of(project)
+    chunks_of(project).transform_values { |chunks| chunks.map { |chunk| chunk&.source } }
+  end
+
+  # The round before: `steep check` writes the postconditions sidecar the
+  # next one reads.
+  def write_postconditions(project)
+    runner = Steep::Postconditions::Runner.new(project)
+    runner.write(runner.run)
+  end
+
+  def chunks_of(project)
+    runner = Specializations::Runner.new(project)
+    runner.run
+    runner.evals
+  end
+
+  def test_records_the_source_one_call_site_writes
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}; rich_text_\#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:8:2" => ["def content; rich_text_content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_each_call_site_gets_its_own_source
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+
+        class Photo < Base
+          has_rich_text :caption
+        end
+      RUBY
+
+      evals = evals_of(setup_project)
+
+      assert_equal ["def content; end"], evals.fetch("app/base.rb:8:2")
+      assert_equal ["def caption; end"], evals.fetch("app/base.rb:12:2")
+    end
+  end
+
+  # The heredoc is what the idiom is actually written with, and it is one `dstr`
+  # like any other once the parameter carries the call site's literal.
+  def test_records_a_heredoc_with_several_interpolations
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval <<-CODE
+              def \#{name}
+                rich_text_\#{name} || build_rich_text_\#{name}
+              end
+            CODE
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        [<<~CODE.gsub(/^/, "      ")],
+          def content
+            rich_text_content || build_rich_text_content
+          end
+        CODE
+        evals_of(setup_project).fetch("app/base.rb:12:2")
+      )
+    end
+  end
+
+  def test_an_interpolated_symbol_held_in_a_local_is_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            namespaced_name = :"__rich_text_\#{name}"
+            class_eval "def \#{name}; \#{namespaced_name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content; __rich_text_content; end"], evals_of(setup_project).fetch("app/base.rb:9:2")
+    end
+  end
+
+  # The branch the call site does not take defines nothing there, and a checker
+  # that narrows the condition is what says which one that is.
+  def test_a_branch_the_call_site_does_not_take_is_not_recorded
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name, store_if_blank: true)
+            if store_if_blank
+              class_eval "def \#{name}=(v); end"
+            else
+              class_eval "def \#{name}_maybe=(v); end"
+            end
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content, store_if_blank: false
+        end
+      RUBY
+
+      assert_equal ["def content_maybe=(v); end"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  # A call that omits an optional keyword still fixes it: the body runs with the
+  # default, so the branch the default selects is the one this call site defines.
+  def test_an_omitted_keyword_is_fixed_to_its_default
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name, store_if_blank: true)
+            if store_if_blank
+              class_eval "def \#{name}=(v); end"
+            else
+              class_eval "def \#{name}_maybe=(v); end"
+            end
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content=(v); end"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  def test_a_case_is_decided_the_same_way
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            case name
+            when :content then class_eval "def content_only; end"
+            else class_eval "def other_only; end"
+            end
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content_only; end"], evals_of(setup_project).fetch("app/base.rb:11:2")
+    end
+  end
+
+  # A value the call site does not fix is reported as a hole rather than left
+  # out: a consumer rendering these has to know it was handed part of a macro.
+  def test_an_eval_whose_value_is_not_fixed_is_recorded_as_nil
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+          def self.suffix: () -> String
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}; end"
+            class_eval "def \#{name}_\#{suffix}; end"
+          end
+
+          def self.suffix
+            "ro"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content; end", nil], evals_of(setup_project).fetch("app/base.rb:13:2")
+    end
+  end
+
+  # A computed argument is as much an eval as an interpolation is. `class_eval`
+  # handed an argument at all is the string form — the block form takes none —
+  # so a `join` that does not fold has written code this call site does not
+  # decide: a hole, not nothing. `ActiveSupport::Delegation` hands
+  # `module_eval` a `join`.
+  def test_a_computed_argument_that_does_not_fold_records_a_hole
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+          def self.suffix: () -> String
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval ["def \#{name}", "end"].join(";")
+            class_eval ["def \#{name}_\#{suffix}", "end"].join(";")
+          end
+
+          def self.suffix
+            "ro"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content;end", nil], evals_of(setup_project).fetch("app/base.rb:13:2")
+    end
+  end
+
+  # The block form, forwarded: `&block` and `*args` say nothing about which
+  # form runs, and the block one writes no string at all.
+  def test_a_forwarded_block_or_splat_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.with_block: () { () -> void } -> untyped
+          def self.forward: (*untyped) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.with_block(&block)
+            class_eval(&block)
+          end
+
+          def self.forward(*args)
+            class_eval(*args)
+          end
+        end
+
+        class Article < Base
+          with_block { }
+          forward "def content; end"
+        end
+      RUBY
+
+      assert_equal({}, evals_of(setup_project))
+    end
+  end
+
+  def test_a_call_passing_a_block_is_not_read_as_one_without
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.macro: () ?{ () -> void } -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.macro
+            class_eval(block_given? ? "def with_block; end" : "def without_block; end")
+          end
+        end
+
+        class Article < Base
+          handler = -> { }
+          macro(&handler)
+          macro
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:9:2" => ["def with_block; end"], "app/base.rb:10:2" => ["def without_block; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_module_eval_is_read_the_same_way
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            module_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content; end"], evals_of(setup_project).fetch("app/base.rb:8:2")
+    end
+  end
+
+  # `X.class_eval` and `class_eval do … end` are plain Ruby a reader already
+  # sees; only the string form has nothing to read until a call site supplies it.
+  def test_an_explicit_self_receiver_is_the_same_call
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            self.class_eval "def \#{name}; rich_text_\#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:8:2" => ["def content; rich_text_content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_a_block_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval do
+              def other; end
+            end
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_empty evals_of(setup_project)
+    end
+  end
+
+  # A receiver that NAMES a class says where its methods go, which is something
+  # the consumer cannot work out on its own: it places what it is handed in the
+  # class whose body holds the macro call, and this eval lands somewhere else
+  # entirely (felixefelip/steep#175).
+  def test_a_receiver_that_names_a_class_carries_it
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            Photo.class_eval "def \#{name}_elsewhere; end"
+            class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      chunks = chunks_of(setup_project).fetch("app/base.rb:9:2")
+
+      assert_equal ["def content_elsewhere; end", "def content; end"], chunks.map(&:source)
+      # The second has none: an eval on the caller's own self lands on the class
+      # holding the call, and only the call site knows which that is.
+      assert_equal ["::Photo", nil], chunks.map(&:target)
+    end
+  end
+
+  GENERATED_MODULE_RUBY = <<~RUBY
+    class Base
+      def self.generated_methods
+        @generated_methods ||= begin
+          mod = const_set(:GeneratedMethods, Module.new)
+          include mod
+          mod
+        end
+      end
+
+      def self.define_reader(name)
+        generated_methods.class_eval "def \#{name}; 1; end"
+      end
+    end
+
+    class Widget < Base
+      define_reader :size
+    end
+  RUBY
+
+  GENERATED_MODULE_RBS = <<~RBS
+    class Base
+      self.@generated_methods: Module?
+      def self.generated_methods: () -> Module
+      def self.define_reader: (Symbol name) -> untyped
+    end
+
+    class Widget < Base
+    end
+  RBS
+
+  def generated_module_chunks(signatures)
+    in_tmpdir do
+      write("sig/base.rbs", signatures)
+      write("app/base.rb", GENERATED_MODULE_RUBY)
+
+      chunks_of(setup_project).fetch("app/base.rb:16:2").map { |chunk| chunk && [chunk.source, chunk.target, chunk.kind] }
+    end
+  end
+
+  def test_a_module_a_method_on_self_builds_is_declared_first
+    assert_equal [["module GeneratedMethods\nend", nil, nil], nil], generated_module_chunks(GENERATED_MODULE_RBS)
+  end
+
+  def test_a_second_call_finds_the_module_built_and_writes_only_its_method
+    in_tmpdir do
+      write("sig/base.rbs", GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n")
+      write("app/base.rb", GENERATED_MODULE_RUBY.sub("  define_reader :size\n", "  define_reader :size\n  define_reader :weight\n"))
+
+      chunks = chunks_of(setup_project).fetch("app/base.rb:17:2").map { |chunk| chunk && [chunk.source, chunk.target] }
+
+      assert_equal [["def weight; 1; end", "::Widget::GeneratedMethods"]], chunks
+    end
+  end
+
+  def test_a_memo_a_module_extended_into_the_class_defines_is_followed_too
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Core
+          module ClassMethods
+            @generated_association_methods: Module?
+            def generated_association_methods: () -> Module
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+          def self.has_many: (Symbol name) -> untyped
+        end
+
+        class Post < Base
+        end
+
+        module Post::GeneratedAssociationMethods
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Core
+          module ClassMethods
+            def generated_association_methods
+              @generated_association_methods ||= begin
+                mod = const_set(:GeneratedAssociationMethods, Module.new)
+                include mod
+                mod
+              end
+            end
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+
+          def self.has_many(name)
+            generated_association_methods.class_eval "def \#{name}; 1; end"
+          end
+        end
+
+        class Post < Base
+          has_many :comments
+          has_many :tags
+        end
+      RUBY
+
+      chunks = chunks_of(setup_project).transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal(
+        [
+          ["module GeneratedAssociationMethods\nend", nil],
+          ["include ::Post::GeneratedAssociationMethods", nil],
+          ["def comments; 1; end", "::Post::GeneratedAssociationMethods"]
+        ],
+        chunks.fetch("app/base.rb:22:2")
+      )
+      assert_equal [["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:23:2")
+    end
+  end
+
+  def test_an_eval_on_a_module_a_method_on_self_builds_lands_in_it
+    signatures = GENERATED_MODULE_RBS + "module Widget::GeneratedMethods\nend\n"
+
+    assert_equal(
+      [
+        ["module GeneratedMethods\nend", nil, nil],
+        ["include ::Widget::GeneratedMethods", nil, nil],
+        ["def size; 1; end", "::Widget::GeneratedMethods", "module"]
+      ],
+      generated_module_chunks(signatures)
+    )
+  end
+
+  def test_a_module_and_an_include_written_on_a_parameter_land_on_the_class_that_handed_itself
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner) -> void
+        end
+
+        module Mixin
+        end
+
+        class Base
+          def self.setup: () -> void
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner)
+            owner.const_set(:Helpers, Module.new)
+            owner.include(Mixin)
+          end
+        end
+
+        class Base
+          def self.setup
+            Writer.generate(self)
+          end
+        end
+
+        class Article < Base
+          setup
+        end
+      RUBY
+
+      assert_equal({ "app/base.rb:15:2" => ["module Helpers\nend", "include ::Mixin"] }, evals_of(setup_project))
+    end
+  end
+
+  # A local holding the constant is the same question with an assignment in
+  # front of it — what decides is the receiver's TYPE, not the shape of the
+  # expression that produced it.
+  def test_a_local_that_holds_a_class_carries_it_too
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            target = Photo
+            target.class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["::Photo"], chunks_of(setup_project).fetch("app/base.rb:9:2").map(&:target)
+    end
+  end
+
+  # `singleton_class` is the shape that names NOTHING: the checker knows the
+  # object and RBS has no spelling for "the singleton class of Photo" as a
+  # value, so it infers `::Class`. An eval this cannot place is one it must not
+  # read (S2 of felixefelip/steep#171).
+  def test_a_receiver_whose_type_names_no_class_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            Photo.singleton_class.class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_empty evals_of(setup_project)
+    end
+  end
+
+  # The frame in between is what the answer belongs to: `generate` evals on an
+  # object it was handed, so its own call site is the wrong place to attribute
+  # anything to, while `has_rich_text`'s call sites are written in the classes
+  # that actually get the methods.
+  def test_a_receiver_handed_this_method_s_own_self_is_read
+    in_tmpdir do
+      write("sig/base.rbs", DELEGATION_RBS)
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Writer.generate(self, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:14:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  # felixefelip/steep#205, stage 1: the literal reaches the writer inside an
+  # object, as `has_many` hands `define_accessors` a reflection. `Reflection`'s
+  # `@name` is fixed by `initialize` and written nowhere else, so the object
+  # each call builds is known by what it holds, and the writer is read once per
+  # object.
+  def test_a_literal_stored_in_an_object_handed_to_the_writer_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Reflection
+          attr_reader name: Symbol
+          def initialize: (Symbol name) -> void
+        end
+        module Writer
+          def self.define_stored: (untyped model, Reflection reflection) -> void
+        end
+        class Base
+          def self.has_stored: (Symbol name) -> untyped
+        end
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Reflection
+          attr_reader :name
+
+          def initialize(name)
+            @name = name
+          end
+        end
+
+        module Writer
+          def self.define_stored(model, reflection)
+            model.module_eval "def \#{reflection.name}; end"
+          end
+        end
+
+        class Base
+          def self.has_stored(name)
+            Writer.define_stored(self, Reflection.new(name))
+          end
+        end
+
+        class Article < Base
+          has_stored :posts
+          has_stored :comments
+        end
+      RUBY
+
+      # Until a round has written what no method other than `initialize`
+      # writes, the object is only its class.
+      assert_equal({ "app/base.rb:22:2" => [nil], "app/base.rb:23:2" => [nil] }, evals_of(setup_project))
+
+      write_postconditions(setup_project)
+      assert_equal(
+        { "app/base.rb:22:2" => ["def posts; end"], "app/base.rb:23:2" => ["def comments; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  # The same object, with an ivar a method can change: what it holds at the
+  # writer is not what `new` was handed, so nothing is claimed.
+  def test_a_stored_literal_a_method_can_change_is_a_hole
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Reflection
+          attr_reader name: Symbol
+          def initialize: (Symbol name) -> void
+          def rename: (Symbol to) -> Symbol
+        end
+        module Writer
+          def self.define_stored: (untyped model, Reflection reflection) -> void
+        end
+        class Base
+          def self.has_stored: (Symbol name) -> untyped
+        end
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Reflection
+          attr_reader :name
+
+          def initialize(name)
+            @name = name
+          end
+
+          def rename(to) = @name = to
+        end
+
+        module Writer
+          def self.define_stored(model, reflection)
+            model.module_eval "def \#{reflection.name}; end"
+          end
+        end
+
+        class Base
+          def self.has_stored(name)
+            Writer.define_stored(self, Reflection.new(name))
+          end
+        end
+
+        class Article < Base
+          has_stored :posts
+          has_stored :comments
+        end
+      RUBY
+
+      write_postconditions(setup_project)
+      assert_equal(
+        { "app/base.rb:24:2" => [nil], "app/base.rb:25:2" => [nil] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  # felixefelip/steep#205, stage 2: the same ivar, changed after `new` through
+  # the one local that owns the object, per call site.
+  def test_a_stored_literal_changed_through_its_only_local_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Reflection
+          attr_reader name: Symbol
+          def initialize: (Symbol name) -> void
+          def rename: (Symbol to) -> Symbol
+        end
+        module Writer
+          def self.define_stored: (untyped model, Reflection reflection) -> void
+          def self.keep: (Reflection reflection) -> void
+        end
+        class Base
+          def self.has_renamed: (Symbol name, Symbol as) -> untyped
+          def self.has_kept: (Symbol name, Symbol as) -> untyped
+        end
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Reflection
+          attr_reader :name
+
+          def initialize(name)
+            @name = name
+          end
+
+          def rename(to) = @name = to
+        end
+
+        module Writer
+          def self.define_stored(model, reflection)
+            model.module_eval "def \#{reflection.name}; end"
+          end
+
+          def self.keep(reflection)
+            @kept = reflection
+          end
+        end
+
+        class Base
+          def self.has_renamed(name, as)
+            reflection = Reflection.new(name)
+            reflection.rename(as)
+            Writer.define_stored(self, reflection)
+          end
+
+          def self.has_kept(name, as)
+            reflection = Reflection.new(name)
+            reflection.rename(as)
+            Writer.keep(reflection)
+            Writer.define_stored(self, reflection)
+          end
+        end
+
+        class Article < Base
+          has_renamed :posts, :articles
+          has_renamed :comments, :replies
+          has_kept :tags, :labels
+        end
+      RUBY
+
+      write_postconditions(setup_project)
+      assert_equal(
+        { "app/base.rb:37:2" => ["def articles; end"], "app/base.rb:38:2" => ["def replies; end"], "app/base.rb:39:2" => [nil] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  # A gem namespaces its writer and calls it by the relative name, the way
+  # `Module#delegate` calls `ActiveSupport::Delegation.generate` from inside
+  # `class Module`. The constant is spelled `Writer` and names
+  # `Gem::Writer`; the callee is known by the second, so the spelling cannot
+  # be what finds it.
+  def test_a_writer_called_by_a_relative_constant_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Gem
+          module Writer
+            def self.generate: (untyped owner, Symbol name) -> void
+          end
+
+          class Base
+            def self.has_rich_text: (Symbol name) -> untyped
+          end
+        end
+
+        class Article < Gem::Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Gem
+          module Writer
+            def self.generate(owner, name)
+              owner.module_eval "def \#{name}; end"
+            end
+          end
+
+          class Base
+            def self.has_rich_text(name)
+              Writer.generate(self, name)
+            end
+          end
+        end
+
+        class Article < Gem::Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:16:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  # The same spelling naming ANOTHER method: inside `Gem`, `Writer` is
+  # `Gem::Writer`, which writes nothing, and the `::Writer` that does is never
+  # called. What a constant names is the checker's answer, not a suffix match.
+  def test_a_relative_constant_naming_another_class_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        module Gem
+          module Writer
+            def self.generate: (untyped owner, Symbol name) -> void
+          end
+
+          class Base
+            def self.has_rich_text: (Symbol name) -> untyped
+          end
+        end
+
+        class Article < Gem::Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        module Gem
+          module Writer
+            def self.generate(owner, name)
+            end
+          end
+
+          class Base
+            def self.has_rich_text(name)
+              Writer.generate(self, name)
+            end
+          end
+        end
+
+        class Article < Gem::Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal({}, evals_of(setup_project))
+    end
+  end
+
+  def test_a_writer_a_constant_inherits_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class HasMany < Writer
+        end
+
+        class Base
+          def self.has_many: (Symbol name) -> untyped
+        end
+
+        class Post < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class HasMany < Writer
+        end
+
+        class Base
+          def self.has_many(name)
+            HasMany.generate(self, name)
+          end
+        end
+
+        class Post < Base
+          has_many :comments
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:17:2" => ["def comments; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  HANDED_SELF_RBS = <<~RBS
+    module Writer
+      def self.generate: (untyped owner, Symbol method) -> untyped
+    end
+
+    class Peel
+      def self.human_name: (String index) -> String
+      def self.banana_delegate: (Symbol method) -> untyped
+    end
+
+    class Rind < Peel
+      def self.nick: (String name) -> String
+    end
+
+    class Other
+      def self.go: () -> void
+    end
+  RBS
+
+  HANDED_SELF_WRITER = <<~RUBY
+    module Writer
+      def self.generate(owner, method)
+        argument = owner.singleton_class.public_instance_method(method).parameters[0][1]
+
+        owner.class_eval "def \#{method}(\#{argument}); end"
+      end
+    end
+
+    class Peel
+      def self.banana_delegate(method)
+        Writer.generate(self, method)
+      end
+    end
+  RUBY
+
+  def handed_self_chunks(call_sites)
+    write("sig/base.rbs", HANDED_SELF_RBS)
+    write("app/base.rb", HANDED_SELF_WRITER + call_sites)
+
+    chunks_of(setup_project).transform_values { |list| list.flat_map { |chunk| [chunk&.source, chunk&.target] } }
+  end
+
+  # The handed `self` is the CALLER's: typed as written it is `self`, which the
+  # callee would bind to `Writer`. And which class the caller is depends on the
+  # call site, not on where the macro is defined — `Rind` runs the inherited
+  # macro with `self` being `Rind`, and only `Rind` has `nick`.
+  def test_a_handed_self_is_the_class_whose_call_site_ran_the_macro
+    in_tmpdir do
+      chunks = handed_self_chunks(<<~RUBY)
+        class Peel
+          banana_delegate :human_name
+        end
+
+        class Rind < Peel
+          banana_delegate :nick
+        end
+      RUBY
+
+      assert_equal(
+        {
+          "app/base.rb:15:2" => ["def human_name(index); end", "::Peel"],
+          "app/base.rb:19:2" => ["def nick(name); end", "::Rind"]
+        },
+        chunks
+      )
+    end
+  end
+
+  # A receiver names the class the body runs in, wherever the call is written:
+  # `Rind.banana_delegate` inside `Other` writes on `Rind`, not on `Other` and
+  # not on `Peel`, where the macro is defined.
+  def test_an_explicit_receiver_is_the_class_the_macro_runs_in
+    in_tmpdir do
+      chunks = handed_self_chunks(<<~RUBY)
+        class Other
+          def self.go
+            Rind.banana_delegate :nick
+          end
+        end
+      RUBY
+
+      assert_equal({ "app/base.rb:16:4" => ["def nick(name); end", "::Rind"] }, chunks)
+    end
+  end
+
+  # `Module#delegate`'s shape: the macro takes its names as a rest parameter and
+  # hands the array to a writer, which loops over it and evals one `join`. The
+  # writer's parameter arrives holding what the call site wrote, so each call
+  # site writes its own methods — one pass per name, the branch decided by its
+  # keyword.
+  def test_a_rest_parameter_handed_to_a_writer_is_looped_over
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Array[Symbol] methods, to: Symbol, ?allow_nil: bool?) -> void
+        end
+
+        class Base
+          def self.my_delegate: (*Symbol methods, to: Symbol, ?allow_nil: bool?) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~'RUBY')
+        module Writer
+          def self.generate(owner, methods, to:, allow_nil: nil)
+            receiver = to.to_s
+            method_def = []
+            methods.each do |method|
+              if allow_nil
+                method_def << "def #{method}" << "  _ = #{receiver}" << "  _&.#{method}" << "end"
+              else
+                method_def << "def #{method}" << "  #{receiver}.#{method}" << "end"
+              end
+            end
+            owner.module_eval(method_def.join(";"))
+            nil
+          end
+        end
+
+        class Base
+          def self.my_delegate(*methods, to:, allow_nil: nil)
+            Writer.generate(self, methods, to: to, allow_nil: allow_nil)
+          end
+        end
+
+        class Article < Base
+          my_delegate :email, :name, to: :user
+          my_delegate :title, to: :post, allow_nil: true
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal(
+        {
+          "app/base.rb:24:2" => [["def email;  user.email;end;def name;  user.name;end", "::Article"]],
+          "app/base.rb:25:2" => [["def title;  _ = post;  _&.title;end", "::Article"]]
+        },
+        chunks
+      )
+    end
+  end
+
+  # `Delegation.generate`'s reflection branch, for `to: :class`: the parameter
+  # list is read off the target's declaration, and built the way ActiveSupport
+  # builds it — a `filter_map` over `parameters`, a `<<`, a `join` — inside the
+  # loop and the arms it sits in.
+  def test_a_delegation_to_the_class_reads_the_parameter_list
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Array[Symbol] methods, to: Symbol) -> void
+        end
+
+        class Base
+          def self.my_delegate: (*Symbol methods, to: Symbol) -> untyped
+        end
+
+        class Article < Base
+          def self.human_name: (String index) -> String
+          def self.many: (String a, ?Integer b) -> String
+        end
+      RBS
+      write("app/base.rb", <<~'RUBY')
+        module Writer
+          def self.generate(owner, methods, to:)
+            receiver = to.to_s
+            receiver = "self.#{receiver}" if receiver == "class"
+            receiver_class = owner.singleton_class if receiver == "self.class"
+            method_def = []
+            methods.each do |method|
+              definition =
+                if /[^\]]=\z/.match?(method)
+                  "arg"
+                else
+                  method_object = (receiver_class.public_instance_method(method) if receiver_class)
+                  if method_object
+                    parameters = method_object.parameters
+                    if parameters.map(&:first).intersect?([:opt, :rest, :keyreq, :key, :keyrest])
+                      "..."
+                    else
+                      defn = parameters.filter_map { |type, arg| arg if type == :req }
+                      defn << "&"
+                      defn.join(", ")
+                    end
+                  else
+                    "..."
+                  end
+                end
+              method_def << "def #{method}(#{definition})" << "  (#{receiver}).#{method}(#{definition})" << "end"
+            end
+            owner.module_eval(method_def.join(";"))
+            nil
+          end
+        end
+
+        class Base
+          def self.my_delegate(*methods, to:)
+            Writer.generate(self, methods, to: to)
+          end
+        end
+
+        class Article < Base
+          def self.human_name(index) = index
+          def self.many(a, b = 1) = a
+
+          my_delegate :human_name, to: :class
+          my_delegate :many, to: :class
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal(
+        {
+          "app/base.rb:43:2" => [["def human_name(index, &);  (self.class).human_name(index, &);end", "::Article"]],
+          "app/base.rb:44:2" => [["def many(...);  (self.class).many(...);end", "::Article"]]
+        },
+        chunks
+      )
+    end
+  end
+
+  # `delegate` as ActiveSupport 8.0.4 writes it, transcribed verbatim, with the
+  # signatures rbs_infer infers for it. Each call site folds to the source the
+  # gem evals — compared byte for byte with what Ruby itself passes to
+  # `module_eval` for the same six lines.
+  def test_active_support_delegation_as_installed_writes_every_shape
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Module
+          def delegate: (*(:email | :human_name | :name | :fetch) methods, ?to: (:user | :class | :@owner | singleton(Store))?, ?prefix: true?, ?allow_nil: true?, ?private: untyped) -> Array[untyped]
+          def delegate_missing_to: (untyped target, ?allow_nil: untyped) -> untyped
+        end
+
+        module ActiveSupport
+          module Delegation
+            RUBY_RESERVED_KEYWORDS: Array[String]
+            RESERVED_METHOD_NAMES: Set[String]
+
+            def self.generate: (Module owner, Array[untyped] methods, ?location: untyped, ?to: untyped, ?prefix: untyped, ?allow_nil: untyped, ?nilable: untyped, ?private: untyped, ?as: untyped, ?signature: untyped) -> Array[untyped]
+            def self.generate_method_missing: (Module owner, untyped target, ?allow_nil: untyped) -> untyped
+          end
+        end
+
+        class User
+          def email: () -> String
+          def name: () -> String
+        end
+
+        module Store
+          def self.fetch: (String key) -> String
+        end
+
+        class Post
+          @owner: User
+          def user: () -> User
+          def self.human_name: (String index) -> String
+        end
+      RBS
+      write("app/delegation.rb", File.read(File.expand_path("string_evals/active_support_delegation.rb", __dir__)))
+      write("app/post.rb", <<~'RUBY')
+        class Post
+          def user = User.new
+          def self.human_name(index) = index
+
+          delegate :email, to: :user
+          delegate :human_name, to: :class
+          delegate :email, to: :user, prefix: true
+          delegate :name, to: :user, allow_nil: true
+          delegate :name, to: :@owner
+          delegate :fetch, to: Store
+          delegate :email, :name, to: :@owner
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      raises = ->(name, method, receiver) {
+        ";rescue NoMethodError => e;  if _.nil? && e.name == :#{method};    raise ::ActiveSupport::DelegationError.nil_target(:#{name}, :'#{receiver}');  else;    raise;  end;end"
+      }
+
+      assert_equal(
+        {
+          "app/post.rb:5:2" => [["def email(...);  _ = user;  _.email(...)" + raises.("email", "email", "user"), "::Post"]],
+          "app/post.rb:6:2" => [["def human_name(index, &);  (self.class).human_name(index, &);end", "::Post"]],
+          "app/post.rb:7:2" => [["def user_email(...);  _ = user;  _.email(...)" + raises.("user_email", "email", "user"), "::Post"]],
+          "app/post.rb:8:2" => [["def name(...);  _ = user;  if !_.nil? || nil.respond_to?(:name);    _.name(...);  end;end", "::Post"]],
+          "app/post.rb:9:2" => [["def name(...);  _ = @owner;  _.name(...)" + raises.("name", "name", "@owner"), "::Post"]],
+          "app/post.rb:10:2" => [["def fetch(key, &);  _ = ::Store;  _.fetch(key, &)" + raises.("fetch", "fetch", "::Store"), "::Post"]],
+          "app/post.rb:11:2" => [[
+            "def email(...);  _ = @owner;  _.email(...)" + raises.("email", "email", "@owner") + ";" \
+            "def name(...);  _ = @owner;  _.name(...)" + raises.("name", "name", "@owner"),
+            "::Post"
+          ]]
+        },
+        chunks
+      )
+    end
+  end
+
+  # A concern is annotated `singleton(Host) & singleton(Concern)` so its body
+  # types against the host — but a macro its body calls RUNS on the module, so
+  # the module is the `self` the writer is checked with, and what it evals lands
+  # there.
+  def test_a_macro_in_an_annotated_module_body_runs_on_the_module
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Module
+          def slot: (Symbol name) -> void
+        end
+
+        class Host
+        end
+
+        module Mixin
+        end
+      RBS
+      write("app/base.rb", <<~'RUBY')
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval("def #{name}; end")
+            nil
+          end
+        end
+
+        class Module
+          def slot(name) = Writer.generate(self, name)
+        end
+
+        class Host
+          include Mixin
+        end
+
+        module Mixin
+          # @type self: singleton(Host) & singleton(Mixin)
+          slot :content
+        end
+      RUBY
+
+      runner = Specializations::Runner.new(setup_project)
+      runner.run
+      chunks = runner.evals.transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal({ "app/base.rb:18:2" => [["def content; end", "::Mixin"]] }, chunks)
+    end
+  end
+
+  # The same arguments from two classes are two bodies: what the macro writes is
+  # written on the class it runs in, and reading both call sites under one check
+  # would write both on the same one.
+  def test_the_same_arguments_from_two_classes_run_the_macro_twice
+    in_tmpdir do
+      chunks = handed_self_chunks(<<~RUBY)
+        class Peel
+          banana_delegate :human_name
+        end
+
+        class Rind < Peel
+          banana_delegate :human_name
+        end
+      RUBY
+
+      assert_equal(
+        {
+          "app/base.rb:15:2" => ["def human_name(index); end", "::Peel"],
+          "app/base.rb:19:2" => ["def human_name(index); end", "::Rind"]
+        },
+        chunks
+      )
+    end
+  end
+
+  def test_a_class_a_frame_is_handed_by_name_gets_what_it_writes
+    in_tmpdir do
+      write("sig/base.rbs", DELEGATION_RBS)
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Writer.generate(Article, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      chunks = chunks_of(setup_project).fetch("app/base.rb:14:2")
+
+      assert_equal [["def content; end", "::Article"]], chunks.map { |chunk| [chunk.source, chunk.target] }
+    end
+  end
+
+  def test_a_class_handed_on_through_a_second_frame_is_followed
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        module Middle
+          def self.relay: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        module Middle
+          def self.relay(owner, name)
+            Writer.generate(owner, name)
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Middle.relay(self, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      chunks = chunks_of(setup_project).fetch("app/base.rb:20:2")
+
+      assert_equal [["def content; end", "::Article"]], chunks.map { |chunk| [chunk.source, chunk.target] }
+    end
+  end
+
+  HAS_MANY_RBS = <<~RBS
+    module Builder
+      class HasMany
+        def self.build: (untyped model, Symbol name) -> void
+        def self.define_accessors: (untyped model, Symbol name) -> void
+        def self.define_readers: (untyped mixin, Symbol name) -> void
+      end
+    end
+
+    class Base
+      self.@generated_association_methods: Module?
+      def self.generated_association_methods: () -> Module
+      def self.has_many: (Symbol name) -> untyped
+    end
+
+    class Post < Base
+    end
+
+    module Post::GeneratedAssociationMethods
+    end
+  RBS
+
+  HAS_MANY_RUBY = <<~RUBY
+    module Builder
+      class HasMany
+        def self.build(model, name)
+          define_accessors(model, name)
+        end
+
+        def self.define_accessors(model, name)
+          mixin = model.generated_association_methods
+          define_readers(mixin, name)
+        end
+
+        def self.define_readers(mixin, name)
+          mixin.class_eval "def \#{name}; 1; end"
+        end
+      end
+    end
+
+    class Base
+      def self.generated_association_methods
+        @generated_association_methods ||= begin
+          mod = const_set(:GeneratedAssociationMethods, Module.new)
+          include mod
+          mod
+        end
+      end
+
+      def self.has_many(name)
+        Builder::HasMany.build(self, name)
+      end
+    end
+
+    class Post < Base
+      has_many :comments
+      has_many :tags
+    end
+  RUBY
+
+  def test_a_class_handed_on_through_several_frames_is_followed_to_the_module_it_builds
+    in_tmpdir do
+      write("sig/base.rbs", HAS_MANY_RBS)
+      write("app/base.rb", HAS_MANY_RUBY)
+
+      chunks = chunks_of(setup_project).transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal(
+        [
+          ["module GeneratedAssociationMethods\nend", "::Post"],
+          ["include ::Post::GeneratedAssociationMethods", "::Post"],
+          ["def comments; 1; end", "::Post::GeneratedAssociationMethods"]
+        ],
+        chunks.fetch("app/base.rb:33:2")
+      )
+      assert_equal [["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:34:2")
+    end
+  end
+
+  # `has_many` returns what it was handed, so the loop runs a second generation
+  # and the class body is re-read with what the first call left the memo
+  # holding. The memo was written through `model`, not on `has_many`'s own
+  # `self`: what its body ends with says nothing about it.
+  def test_a_memo_written_through_a_handed_self_is_not_built_twice
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Builder
+          class HasMany
+            def self.build: (untyped model, Symbol name) -> void
+            def self.define_readers: (untyped mixin, Symbol name) -> void
+          end
+        end
+
+        module Core
+          module ClassMethods
+            def generated_association_methods: () -> untyped
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+          def self.has_many: (Symbol name) -> Symbol
+        end
+
+        class Post < Base
+        end
+
+        module Post::GeneratedAssociationMethods
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Builder
+          class HasMany
+            def self.build(model, name)
+              define_readers(model.generated_association_methods, name)
+            end
+
+            def self.define_readers(mixin, name)
+              mixin.class_eval "def \#{name}; 1; end"
+            end
+          end
+        end
+
+        module Core
+          module ClassMethods
+            def generated_association_methods
+              @generated_association_methods ||= begin
+                mod = const_set(:GeneratedAssociationMethods, Module.new)
+                include mod
+                mod
+              end
+            end
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+
+          def self.has_many(name)
+            Builder::HasMany.build(self, name)
+            name
+          end
+        end
+
+        class Post < Base
+          has_many :comments
+          has_many :tags
+        end
+      RUBY
+
+      project = setup_project
+      write_postconditions(project)
+      chunks = chunks_of(project).transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal 3, chunks.fetch("app/base.rb:35:2").compact.size
+      assert_equal [nil, nil, ["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:36:2")
+    end
+  end
+
+  def test_a_memo_a_class_handed_on_through_a_local_writes_is_carried_back
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Builder
+          class HasMany
+            def self.build: (untyped model, Symbol name) -> void
+            def self.define_readers: (untyped mixin, Symbol name) -> void
+          end
+        end
+
+        module Core
+          module ClassMethods
+            @generated_association_methods: Module?
+            def generated_association_methods: () -> untyped
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+          def self.has_many: (Symbol name) -> Symbol
+        end
+
+        class Post < Base
+        end
+
+        module Post::GeneratedAssociationMethods
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Builder
+          class HasMany
+            def self.build(model, name)
+              define_readers(model.generated_association_methods, name)
+            end
+
+            def self.define_readers(mixin, name)
+              mixin.class_eval "def \#{name}; 1; end"
+            end
+          end
+        end
+
+        module Core
+          module ClassMethods
+            def generated_association_methods
+              @generated_association_methods ||= begin
+                mod = const_set(:GeneratedAssociationMethods, Module.new)
+                include mod
+                mod
+              end
+            end
+          end
+        end
+
+        class Base
+          extend Core::ClassMethods
+
+          def self.has_many(name)
+            klass = self
+            Builder::HasMany.build(klass, name)
+            name
+          end
+        end
+
+        class Post < Base
+          has_many :comments
+          has_many :tags
+        end
+      RUBY
+
+      project = setup_project
+      write_postconditions(project)
+      chunks = chunks_of(project).transform_values { |list| list.map { |chunk| chunk && [chunk.source, chunk.target] } }
+
+      assert_equal 3, chunks.fetch("app/base.rb:36:2").compact.size
+      assert_equal [["def tags; 1; end", "::Post::GeneratedAssociationMethods"]], chunks.fetch("app/base.rb:37:2")
+    end
+  end
+
+  def test_a_frame_entered_on_an_instance_records_only_what_it_writes
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Store
+          def create!: () -> Store
+          def save: () -> bool
+        end
+
+        class Base
+          def self.save: () -> void
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Store
+          def create!
+            save
+            self
+          end
+
+          def save = true
+        end
+
+        class Base
+          def self.save
+            class_eval "def saved; end"
+          end
+
+          def self.has_rich_text(name)
+            Store.new.create!
+            class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content; end"], evals_of(setup_project).fetch("app/base.rb:22:2")
+    end
+  end
+
+  def test_a_delegation_in_a_branch_the_call_site_kills_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name, ?enabled: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name, enabled: true)
+            Writer.generate(self, name) if enabled
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content, enabled: false
+        end
+      RUBY
+
+      assert_empty evals_of(setup_project)
+    end
+  end
+
+  def test_a_delegation_the_call_site_does_not_decide_records_a_hole
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name, ?enabled: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name, enabled: true)
+            Writer.generate(self, name) if enabled
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content, enabled: rand > 0.5
+        end
+      RUBY
+
+      assert_equal({ "app/base.rb:14:2" => [nil] }, evals_of(setup_project))
+    end
+  end
+
+  def test_an_eval_and_a_delegation_are_kept_in_source_order
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}_writer; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}_reader; end"
+            Writer.generate(self, name)
+            class_eval "def \#{name}_last; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        {
+          "app/base.rb:16:2" => [
+            "def content_reader; end",
+            "def content_writer; end",
+            "def content_last; end"
+          ]
+        },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_each_parameter_a_frame_writes_on_lands_on_the_class_it_was_handed
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, untyped other, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, other, name)
+            owner.module_eval "def \#{name}; end"
+            other.module_eval "def \#{name}_elsewhere; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Writer.generate(self, String, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      chunks = chunks_of(setup_project).fetch("app/base.rb:15:2")
+
+      assert_equal(
+        [["def content; end", "::Article"], ["def content_elsewhere; end", "::String"]],
+        chunks.map { |chunk| [chunk.source, chunk.target] }
+      )
+    end
+  end
+
+  def test_the_inner_frame_gets_its_own_defaults
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name, ?bool enabled) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name, enabled = true)
+            if enabled
+              owner.module_eval "def \#{name}; end"
+            end
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name)
+            Writer.generate(self, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:16:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_a_default_reaches_the_returns_the_inner_frame_reads
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name, untyped scope) -> void
+          def self.label: (Symbol name, untyped scope) -> Symbol
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name, ?untyped scope) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name, scope)
+            owner.module_eval "def \#{label(name, scope)}; end"
+          end
+
+          def self.label(name, scope)
+            name
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name, scope = nil)
+            Writer.generate(self, name, scope)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal(
+        { "app/base.rb:18:2" => ["def content; end"] },
+        evals_of(setup_project)
+      )
+    end
+  end
+
+  def test_a_call_whose_argument_is_not_fixed_records_a_hole
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+          def self.chosen: () -> Symbol
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}; end"
+          end
+
+          def self.chosen
+            :content
+          end
+        end
+
+        class Article < Base
+          has_rich_text chosen
+        end
+      RUBY
+
+      assert_equal [nil], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  # The failure the whole idea has to avoid: with the condition still open both
+  # branches fold, and a consumer handed both writes a class two methods where
+  # runtime has one. Neither is claimed.
+  def test_a_condition_the_call_site_does_not_decide_records_holes
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, ?writable: bool) -> untyped
+          def self.dynamic: () -> bool
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, writable: true)
+            if writable
+              class_eval "def \#{name}_rw; end"
+            else
+              class_eval "def \#{name}_ro; end"
+            end
+          end
+
+          def self.dynamic
+            true
+          end
+        end
+
+        class Article < Base
+          slot :size, writable: dynamic
+        end
+      RUBY
+
+      assert_equal [nil, nil], evals_of(setup_project).fetch("app/base.rb:16:2")
+    end
+  end
+
+  # A `case` branch runs only when every other one is dead. Two live branches
+  # decide nothing, however many of the rest the checker ruled out.
+  def test_a_case_with_two_live_branches_records_holes
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, Symbol mode) -> untyped
+          def self.mode: () -> Symbol
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, mode)
+            case mode
+            when :ro then class_eval "def \#{name}_ro; end"
+            when :rw then class_eval "def \#{name}_rw; end"
+            end
+          end
+
+          def self.mode
+            :ro
+          end
+        end
+
+        class Article < Base
+          slot :size, mode
+        end
+      RUBY
+
+      assert_equal [nil, nil], evals_of(setup_project).fetch("app/base.rb:15:2")
+    end
+  end
+
+  # A lambda the macro returns writes nothing until something calls it, and
+  # nothing here knows whether anything does.
+  def test_a_body_the_call_does_not_run_is_not_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}_now; end"
+            -> { class_eval "def \#{name}_never; end" }
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content_now; end"], evals_of(setup_project).fetch("app/base.rb:9:2")
+    end
+  end
+
+  # A macro taking no arguments fixes everything it has, so there is nothing for
+  # the literal gate on RETURN specialization to say about it.
+  def test_a_call_with_no_arguments_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.install: () -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.install
+            class_eval "def installed; end"
+          end
+        end
+
+        class Article < Base
+          install
+        end
+      RUBY
+
+      assert_equal ["def installed; end"], evals_of(setup_project).fetch("app/base.rb:8:2")
+    end
+  end
+
+  # And a call that passes nothing still takes its defaults, which is enough to
+  # decide a branch on its own.
+  def test_a_default_alone_decides_a_branch
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (?writable: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(writable: false)
+            if writable
+              class_eval "def size_rw; end"
+            else
+              class_eval "def size_ro; end"
+            end
+          end
+        end
+
+        class Article < Base
+          slot
+        end
+      RUBY
+
+      assert_equal ["def size_ro; end"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  def test_a_guard_whose_first_disjunct_holds_keeps_the_literal
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (*Symbol names) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(*names)
+            methods = []
+            names.each do |name|
+              unless name.is_a?(Symbol) || name.is_a?(String)
+                raise TypeError, "x"
+              end
+              methods << "def \#{name}; end"
+            end
+            class_eval(methods.join(";"))
+          end
+        end
+
+        class Article < Base
+          slot :size
+        end
+      RUBY
+
+      assert_equal ["def size; end"], evals_of(setup_project).fetch("app/base.rb:15:2")
+    end
+  end
+
+  def test_a_heredoc_flattened_with_tr_is_read
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval <<~CODE.tr("\\n", ";")
+              def \#{name}
+                1
+              end
+            CODE
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content;  1;end;"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  def test_a_default_naming_an_earlier_parameter_takes_its_value
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, ?accessor: bool, ?reader: bool, ?writer: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, accessor: true, reader: accessor, writer: accessor)
+            class_eval "def \#{name}; end" if reader
+            class_eval "def \#{name}=(value); end" if writer
+          end
+        end
+
+        class Article < Base
+          slot :size, writer: false
+          slot :color, accessor: false, writer: true
+        end
+      RUBY
+
+      evals = evals_of(setup_project)
+
+      assert_equal ["def size; end"], evals.fetch("app/base.rb:9:2")
+      assert_equal ["def color=(value); end"], evals.fetch("app/base.rb:10:2")
+    end
+  end
+
+  def test_a_positional_default_naming_an_earlier_parameter_takes_its_value
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (Symbol name, ?Symbol reader) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(name, reader = name)
+            class_eval "def \#{reader}; @\#{name}; end"
+          end
+        end
+
+        class Article < Base
+          slot :size
+          slot :color, :hue
+        end
+      RUBY
+
+      evals = evals_of(setup_project)
+
+      assert_equal ["def size; @size; end"], evals.fetch("app/base.rb:8:2")
+      assert_equal ["def hue; @color; end"], evals.fetch("app/base.rb:9:2")
+    end
+  end
+
+  def test_a_class_the_macro_runs_on_is_not_a_singleton_class
+    in_tmpdir do
+      write("sig/class.rbs", <<~RBS)
+        class Class
+          # @rbs_infer |...
+          def slot: (Symbol name) -> void
+        end
+
+        class Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Class
+          def slot(name)
+            if singleton_class?
+              class_eval "def on_singleton; end"
+            else
+              class_eval "def \#{name}; end"
+            end
+          end
+        end
+
+        class Base
+          slot :size
+        end
+      RUBY
+
+      assert_equal ["def size; end"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  def test_arrays_a_multiple_assignment_starts_are_followed
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (*Symbol names) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(*names)
+            readers, writers = [], []
+            names.each do |name|
+              readers << "def \#{name}; end"
+              writers << "def \#{name}=(value); end"
+            end
+            class_eval(readers.join(";") + ";" + writers.join(";"))
+          end
+        end
+
+        class Article < Base
+          slot :size
+        end
+      RUBY
+
+      assert_equal ["def size; end;def size=(value); end"], evals_of(setup_project).fetch("app/base.rb:13:2")
+    end
+  end
+
+  def test_an_array_built_in_a_loop_splatted_into_a_literal_is_read
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.slot: (*Symbol names) -> untyped
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.slot(*names)
+            methods = []
+            names.each do |name|
+              methods << "def \#{name}; end"
+            end
+            class_eval(["class << self", *methods, "end"].join(";"))
+          end
+        end
+
+        class Article < Base
+          slot :size
+        end
+      RUBY
+
+      assert_equal ["class << self;def size; end;end"], evals_of(setup_project).fetch("app/base.rb:12:2")
+    end
+  end
+
+  # `class_methods do … end` puts the def lexically in the concern and the
+  # methods on its `ClassMethods`. `@implements`, injected from the module
+  # self-type sidecar, is what says so — without reading it the def is keyed
+  # under a name no call site ever resolves to, and the body is never
+  # specialized.
+  def test_a_def_inside_an_implementing_block_is_keyed_by_that_module
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Attribute
+          def self.class_methods: () { () -> void } -> void
+
+          module ClassMethods
+            def has_rich_text: (Symbol name) -> untyped
+          end
+        end
+
+        class Article
+          extend Attribute::ClassMethods
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Attribute
+          def self.class_methods(&block)
+          end
+
+          class_methods do # @implements ::Attribute::ClassMethods
+            def has_rich_text(name) # @type self: singleton(::Article) & ::Attribute::ClassMethods
+              class_eval "def \#{name}; end"
+            end
+          end
+        end
+
+        class Article
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["def content; end"], evals_of(setup_project).fetch("app/base.rb:13:2")
+    end
+  end
+
+  def test_write_drops_a_stale_sidecar
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", "class Base\nend\n")
+      path = write("sig/generated/.steep_string_evals.yml", "---\nversion: 1\ncall_sites: {}\n")
+
+      project = setup_project
+      runner = Specializations::Runner.new(project)
+      runner.write(runner.run)
+
+      refute_predicate path, :file?
+    end
+  end
+
+  def test_write_emits_the_sidecar
+    in_tmpdir do
+      write("sig/base.rbs", MACRO_RBS)
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}; end"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      project = setup_project
+      runner = Specializations::Runner.new(project)
+      runner.write(runner.run)
+
+      assert_equal(
+        { "version" => 3, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] } },
+        YAML.safe_load(runner.evals_output_path.read)
+      )
+    end
+  end
+end

@@ -112,7 +112,7 @@ module Steep
           send = case node.type
                  when :send, :csend
                    node
-                 when :block, :numblock
+                 when :block, :numblock, :itblock
                    node.children[0]
                  end
 
@@ -163,7 +163,7 @@ module Steep
           send = case node.type
                  when :send, :csend
                    node
-                 when :block, :numblock
+                 when :block, :numblock, :itblock
                    node.children[0]
                  end
 
@@ -245,10 +245,10 @@ module Steep
                   loc ||= node.loc.operator if node.loc.respond_to?(:operator) # steep:ignore NoMethod
                   loc ||= node.loc.selector if node.loc.respond_to?(:selector) # steep:ignore NoMethod
                   loc
-                when :block
+                when :block, :numblock, :itblock
                   node.children[0].loc.selector
                 end
-          super(node: node, location: loc || node.loc.expression)
+          super(node: node, location: loc || node.loc&.expression)
           @type = type
           @method = method
         end
@@ -512,7 +512,7 @@ module Steep
         include ResultPrinter
 
         def initialize(node:, expected:, actual:, result:)
-          super(node: node, location: node.loc.name) # steep:ignore NoMethod
+          super(node: node, location: node.type == :block ? node.children[0].loc.selector : node.loc.name) # steep:ignore NoMethod
           @expected = expected
           @actual = actual
           @result = result
@@ -624,6 +624,28 @@ module Steep
 
         def header_line
           "Cannot find the declaration of #{kind}: `#{name}`"
+        end
+      end
+
+      # felixefelip/steep#101. A body annotated `@type self:` / `@type self_method:` with a
+      # type name the environment does not declare. Reported instead of raised: the
+      # annotation names a type, and an unknown type in an annotation is what diagnostics
+      # are for — the same treatment `UnknownConstant` gives a constant in the code.
+      #
+      # Raising was measurably worse than wrong. The name usually belongs to GENERATED code
+      # (an ERB template's `ERBFoo`), so the message named a class the user never typed, and
+      # it came out of `RBS::DefinitionBuilder` as a bare RuntimeError — killing the whole
+      # run rather than the one file.
+      class UnknownSelfTypeAnnotation < Base
+        attr_reader :name
+
+        def initialize(node:, name:)
+          super(node: node)
+          @name = name
+        end
+
+        def header_line
+          "Cannot find the declaration of the annotated self type: `#{name}` (checking with `untyped` self)"
         end
       end
 
@@ -1061,7 +1083,7 @@ module Steep
         def header_line
           header =
             case node&.type
-            when :send, :csend, :block, :numblock
+            when :send, :csend, :block, :numblock, :itblock
               "The method is deprecated"
             when :const, :casgn
               "The constant is deprecated"
@@ -1077,6 +1099,67 @@ module Steep
           end
 
           header
+        end
+      end
+
+      class PreconditionUnsatisfied < Base
+        attr_reader :method_name, :expression_source, :contract_source
+
+        def initialize(node:, method_name:, expression_source:, contract_source:)
+          super(node: node, location: node.location.expression)
+          @method_name = method_name
+          @expression_source = expression_source
+          @contract_source = contract_source
+        end
+
+        def header_line
+          "`#{method_name}` requires `#{expression_source}` to be non-nil here"
+        end
+
+        def detail_lines
+          contract_source ? "Contract source: #{contract_source}" : nil
+        end
+      end
+
+      # A `send`/`__send__`/`public_send` spelled with a literal name (felixefelip/steep#137)
+      # naming a method the receiver cannot be called with: either no method by that name
+      # at all, or — for `public_send`, which respects visibility — a private one, which is
+      # a `NoMethodError` at runtime even though the name resolves. Two situations, two
+      # messages: the second one is not "no such method", it is "not through this door".
+      #
+      # `NoMethod`'s judgment, under an ID of its own so a project can tune it separately.
+      # `send` is reached for precisely where the method is not statically obvious —
+      # runtime-defined methods, an app's own attributes, private API from outside — and
+      # `send(:x) if respond_to?(:x)` is careful code this reports, because a guard puts
+      # nothing in the RBS.
+      class UnresolvedSend < Base
+        attr_reader :type
+        attr_reader :method
+
+        # How the call was spelled (`send` / `__send__` / `public_send`), because the fix
+        # differs: for the first two the method has to exist, for the last it also has to
+        # be public.
+        attr_reader :spelling
+
+        def initialize(node:, location:, type:, method:, spelling:, private_method:)
+          super(node: node, location: location)
+          @type = type
+          @method = method
+          @spelling = spelling
+          @private_method = private_method
+        end
+
+        # Whether the name resolved and only visibility stopped the call.
+        def private_method?
+          @private_method
+        end
+
+        def header_line
+          if private_method?
+            "`#{spelling}` cannot call `#{method}` on `#{type}`, which declares it private"
+          else
+            "`#{spelling}` names `#{method}`, which type `#{type}` does not have"
+          end
         end
       end
 
@@ -1145,12 +1228,14 @@ module Steep
             UnexpectedTypeArgument => :hint,
             UnexpectedYield => :warning,
             UnknownConstant => :warning,
+            UnknownSelfTypeAnnotation => :warning,
             UnknownGlobalVariable => :warning,
             UnknownRecordKey => :information,
             UnknownInstanceVariable => :information,
             UnreachableBranch => :hint,
             UnreachableValueBranch => :hint,
             UnresolvedOverloading => :error,
+            UnresolvedSend => :error,
             UnsatisfiableConstraint => :hint,
             UnsupportedSyntax => :hint,
           }
@@ -1209,12 +1294,14 @@ module Steep
             UnexpectedTypeArgument => :error,
             UnexpectedYield => :error,
             UnknownConstant => :error,
+            UnknownSelfTypeAnnotation => :error,
             UnknownGlobalVariable => :error,
             UnknownRecordKey => :warning,
             UnknownInstanceVariable => :error,
             UnreachableBranch => :information,
             UnreachableValueBranch => :warning,
             UnresolvedOverloading => :error,
+            UnresolvedSend => :error,
             UnsatisfiableConstraint => :error,
             UnsupportedSyntax => :information,
           }
@@ -1274,12 +1361,14 @@ module Steep
             UnexpectedTypeArgument => nil,
             UnexpectedYield => :information,
             UnknownConstant => :hint,
+            UnknownSelfTypeAnnotation => :hint,
             UnknownGlobalVariable => :hint,
             UnknownRecordKey => :hint,
             UnknownInstanceVariable => :hint,
             UnreachableBranch => :hint,
             UnreachableValueBranch => :hint,
             UnresolvedOverloading => :information,
+            UnresolvedSend => :information,
             UnsatisfiableConstraint => :hint,
             UnsupportedSyntax => :hint,
           }

@@ -54,19 +54,37 @@ module Steep
         end
       end
 
-      attr_reader :factory, :object_shape_cache, :union_shape_cache, :singleton_shape_cache, :implicitly_returns_nil
+      attr_reader :factory, :object_shape_cache, :union_shape_cache, :singleton_shape_cache, :closed_shape_cache, :implicitly_returns_nil, :underscore_casts
 
-      def initialize(factory, implicitly_returns_nil:)
+      def initialize(factory, implicitly_returns_nil:, underscore_casts:)
         @factory = factory
         @object_shape_cache = {}
         @union_shape_cache = {}
         @singleton_shape_cache = {}
+        @closed_shape_cache = {}
+        @method_overload_cache = {}
+        @method_overload_index = {}
+        @method_entry_cache = {}
+        @method_entry_index = {}
         @implicitly_returns_nil = implicitly_returns_nil
+        @underscore_casts = underscore_casts
       end
 
       def shape(type, config)
-        Steep.logger.tagged "shape(#{type})" do
-          if shape = raw_shape(type, config)
+        if stats = Subtyping::Stats.active
+          stats.measure_shape(type) do
+            shape0(type, config)
+          end
+        else
+          shape0(type, config)
+        end
+      end
+
+      def shape0(type, config)
+        Steep.logger.tagged(-> { "shape(#{type})" }) do
+          if closed_shape?(type)
+            closed_shape(type, config)
+          elsif shape = raw_shape(type, config)
             # Optimization that skips unnecessary substitution
             if type.free_variables.include?(AST::Types::Self.instance)
               shape
@@ -82,11 +100,47 @@ module Steep
       end
 
       def fetch_cache(cache, key)
-        if cache.key?(key) # steep:ignore ArgumentTypeMismatch
+        if cache.key?(key)
           return cache.fetch(key)
         end
 
         cache[key] = yield
+      end
+
+      def closed_shape?(type)
+        type.free_variables.empty? && (closed_shape_cache.key?(type) || config_free_shape?(type))
+      end
+
+      def closed_shape(type, config)
+        closed_shape_cache.fetch(type) do
+          closed_shape_cache[type] = raw_shape(type, config)
+        end
+      end
+
+      def cached_raw_shape(type, config)
+        if closed_shape?(type)
+          closed_shape(type, config)
+        else
+          raw_shape(type, config)
+        end
+      end
+
+      def config_free_shape?(type)
+        case type
+        when AST::Types::Name::Instance, AST::Types::Name::Singleton, AST::Types::Literal, AST::Types::Nil,
+             AST::Types::Boolean, AST::Types::Logic::Base, AST::Types::Proc, AST::Types::Tuple, AST::Types::Record,
+             AST::Types::FiniteSet, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral, AST::Types::RangeLiteral,
+             AST::Types::ObjectState
+          true
+        when AST::Types::Union, AST::Types::Intersection
+          type.types.all? {|ty| config_free_shape?(ty) }
+        when AST::Types::Name::Alias
+          # The free variables of an alias type do not include the ones in its expansion
+          expanded = factory.expand_alias(type)
+          expanded.free_variables.empty? && config_free_shape?(expanded)
+        else
+          false
+        end
       end
 
       def raw_shape(type, config)
@@ -125,7 +179,7 @@ module Steep
               subst = class_subst(name).update(self_type: union)
               shapes << object_shape(name.name).subst(subst, type: union)
             else
-              shapes.concat(types.map {|ty| raw_shape(ty, config) or return })
+              shapes.concat(types.map {|ty| cached_raw_shape(ty, config) or return })
             end
           end
 
@@ -134,15 +188,15 @@ module Steep
           end
         when AST::Types::Intersection
           shapes = type.types.map do |type|
-            raw_shape(type, config) or return
+            cached_raw_shape(type, config) or return
           end
           intersection_shape(type, shapes)
         when AST::Types::Name::Alias
           expanded = factory.expand_alias(type)
-          if shape = raw_shape(expanded, config)
+          if shape = cached_raw_shape(expanded, config)
             shape.update(type: type)
           end
-        when AST::Types::Literal
+        when AST::Types::Literal, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral, AST::Types::RangeLiteral
           instance_type = type.back_type
           subst = class_subst(instance_type).update(self_type: type)
           object_shape(instance_type.name).subst(subst, type: type)
@@ -163,6 +217,23 @@ module Steep
               class_subst(array).update(self_type: type).merge(app_subst(array))
             )
           end
+        when AST::Types::FiniteSet
+          # Every method a `::Set` of these members has, and no specialised
+          # entry of its own: what a finite set answers differently is
+          # `include?`, and that is the fold's question rather than the shape's.
+          set = AST::Builtin::Set.instance_type(type.element_type)
+          object_shape(set.name).subst(
+            class_subst(set).update(self_type: type).merge(app_subst(set))
+          )
+        when AST::Types::ObjectState
+          # The class's own shape. What the object holds is answered at the
+          # reader's call (`TypeConstruction#object_state_reader_call`), against
+          # the method the call resolved to.
+          instance = type.back_type
+          object_shape(instance.name).subst(
+            class_subst(instance).update(self_type: type).merge(app_subst(instance)),
+            type: type
+          )
         when AST::Types::Record
           record_shape(type) do |hash|
             object_shape(hash.name).subst(
@@ -205,9 +276,15 @@ module Steep
               class_subst(type).update(self_type: nil).merge(app_subst(type)),
               type: type
             )
+        when AST::Types::ObjectState
+          instance = type.back_type
+          object_shape(instance.name).subst(
+            class_subst(instance).update(self_type: nil).merge(app_subst(instance)),
+            type: type
+          )
         when AST::Types::Name::Interface
           object_shape(type.name).subst(app_subst(type), type: type)
-        when AST::Types::Literal
+        when AST::Types::Literal, AST::Types::MetaClass, AST::Types::MethodObject, AST::Types::RegexpLiteral, AST::Types::RangeLiteral
           instance_type = type.back_type
           subst = class_subst(instance_type).update(self_type: nil)
           object_shape(instance_type.name).subst(subst, type: type)
@@ -226,6 +303,25 @@ module Steep
           if bound = config.upper_bound(type.name)
             self_shape(bound, config)&.update(type: type)
           end
+        # A composite self type distributes over its components *as a self
+        # shape* — each member keeps `self` unsubstituted, because `self` names
+        # the receiver as a whole, not the member that happens to host the
+        # method. Falling through to `raw_shape` substituted `self` with the
+        # hosting component, so `def m: () -> self` inherited from one member
+        # returned that member's concrete type: a module annotated
+        # `@type instance: Card & Card::Eventable` (the shape every module
+        # self-type annotation takes) had `update!: () -> self` return `::Card`,
+        # which then fails `::Card <: self` against its own declared `-> self`.
+        when AST::Types::Intersection
+          shapes = type.types.map do |ty|
+            self_shape(ty, config) or return
+          end
+          intersection_shape(type, shapes)
+        when AST::Types::Union
+          shapes = type.types.map do |ty|
+            self_shape(ty, config) or return
+          end
+          union_shape(type, shapes)
         else
           raw_shape(type, config)
         end
@@ -277,17 +373,16 @@ module Steep
           definition = factory.definition_builder.build_singleton(type_name)
 
           definition.methods.each do |name, method|
-            Steep.logger.tagged "method = #{type_name}.#{name}" do
-              overloads = method.defs.map do |type_def|
-                method_name = method_name_for(type_def, name)
-                method_type = factory.method_type(type_def.type)
-                method_type = replace_primitive_method(method_name, type_def, method_type)
-                method_type = replace_kernel_class(method_name, type_def, method_type) { AST::Builtin::Class.instance_type }
-                method_type = add_implicitly_returns_nil(type_def.each_annotation, method_type)
-                Shape::MethodOverload.new(method_type, [type_def])
-              end
+            if name == :class
+              Steep.logger.tagged(-> { "method = #{type_name}.#{name}" }) do
+                overloads = method.defs.map do |type_def|
+                  build_method_overload(name, type_def, AST::Builtin::Class.instance_type)
+                end
 
-              shape.methods[name] = Interface::Shape::Entry.new(method_name: name, private_method: method.private?, overloads: overloads)
+                shape.methods[name] = Interface::Shape::Entry.new(method_name: name, private_method: method.private?, overloads: overloads)
+              end
+            else
+              shape.methods[name] = shared_method_entry(name, method)
             end
           end
 
@@ -309,24 +404,120 @@ module Steep
           definition or raise
 
           definition.methods.each do |name, method|
-            Steep.logger.tagged "method = #{type_name}##{name}" do
-              overloads = method.defs.map do |type_def|
-                method_name = method_name_for(type_def, name)
-                method_type = factory.method_type(type_def.type)
-                method_type = replace_primitive_method(method_name, type_def, method_type)
-                if type_name.class?
-                  method_type = replace_kernel_class(method_name, type_def, method_type) { AST::Types::Name::Singleton.new(name: type_name) }
+            if name == :class && type_name.class?
+              Steep.logger.tagged(-> { "method = #{type_name}##{name}" }) do
+                singleton_type = AST::Types::Name::Singleton.new(name: type_name)
+                overloads = method.defs.map do |type_def|
+                  build_method_overload(name, type_def, singleton_type)
                 end
-                method_type = add_implicitly_returns_nil(type_def.each_annotation, method_type)
-                Shape::MethodOverload.new(method_type, [type_def])
-              end
 
-              shape.methods[name] = Interface::Shape::Entry.new(method_name: name, private_method: method.private?, overloads: overloads)
+                shape.methods[name] = Interface::Shape::Entry.new(method_name: name, private_method: method.private?, overloads: overloads)
+              end
+            else
+              shape.methods[name] = shared_method_entry(name, method)
             end
           end
 
           shape
         end
+      end
+
+      def shared_method_entry(name, method)
+        cache = @method_entry_cache[name] ||= begin
+          hash = {} #: Hash[RBS::Definition::Method, Shape::Entry]
+          hash.compare_by_identity
+        end
+        cache[method] ||= begin
+          private_method = method.private?
+          overloads = method.defs.map do |type_def|
+            shared_method_overload(name, type_def)
+          end
+
+          indexed_method_entry(name, private_method, overloads)
+        end
+      end
+
+      def indexed_method_entry(name, private_method, overloads)
+        # Methods rebuilt for each definition convert to the same overloads when their type defs
+        # are shared, and share one entry through this index. The overloads are shared objects,
+        # so the identity of the first one discriminates almost all of the entries.
+        index = @method_entry_index[name] ||= {}
+        key = overloads[0]&.object_id || 0
+
+        case bucket = index[key]
+        when nil
+          index[key] = Interface::Shape::Entry.new(method_name: name, private_method: private_method, overloads: overloads)
+        when Array
+          bucket.find {|entry| same_overloads?(entry, private_method, overloads) } ||
+            Interface::Shape::Entry.new(method_name: name, private_method: private_method, overloads: overloads).tap {|entry| bucket << entry }
+        else
+          if same_overloads?(bucket, private_method, overloads)
+            bucket
+          else
+            Interface::Shape::Entry.new(method_name: name, private_method: private_method, overloads: overloads).tap do |entry|
+              index[key] = [bucket, entry]
+            end
+          end
+        end
+      end
+
+      def same_overloads?(entry, private_method, overloads)
+        return false unless entry.private_method? == private_method
+
+        entry_overloads = entry.overloads
+        return false unless entry_overloads.size == overloads.size
+
+        entry_overloads.each_with_index.all? {|overload, index| overload.equal?(overloads[index]) }
+      end
+
+      def shared_method_overload(name, type_def)
+        cache = @method_overload_cache[name] ||= begin
+          hash = {} #: Hash[RBS::Definition::Method::TypeDef, Shape::MethodOverload]
+          hash.compare_by_identity
+        end
+        cache[type_def] ||= indexed_method_overload(name, type_def)
+      end
+
+      def indexed_method_overload(name, type_def)
+        # Value-equal type defs may be different objects between definitions. They are indexed
+        # here by the identity of their type, which discriminates almost all of them, and the
+        # remaining components are compared in the bucket.
+        index = @method_overload_index[name] ||= {}
+        key = type_def.type.object_id
+
+        case bucket = index[key]
+        when nil
+          index[key] = build_method_overload(name, type_def, nil)
+        when Array
+          bucket.find {|overload| same_type_def?(overload, type_def) } ||
+            build_method_overload(name, type_def, nil).tap {|overload| bucket << overload }
+        else
+          if same_type_def?(bucket, type_def)
+            bucket
+          else
+            build_method_overload(name, type_def, nil).tap do |overload|
+              index[key] = [bucket, overload]
+            end
+          end
+        end
+      end
+
+      def same_type_def?(overload, type_def)
+        defn = overload.method_defs[0] or return false
+        defn.member.equal?(type_def.member) &&
+          defn.defined_in == type_def.defined_in &&
+          defn.implemented_in == type_def.implemented_in
+      end
+
+      def build_method_overload(name, type_def, kernel_class_type)
+        method_name = method_name_for(type_def, name)
+        method_type = factory.method_type(type_def.type)
+        method_type = replace_primitive_method(method_name, type_def, method_type)
+        if kernel_class_type
+          method_type = replace_kernel_class(method_name, type_def, method_type) { kernel_class_type }
+        end
+        method_type = add_implicitly_returns_nil(type_def.each_annotation, method_type)
+        Shape::MethodOverload.new(method_type, [type_def])
       end
 
       def union_shape(shape_type, shapes)
@@ -363,25 +554,48 @@ module Steep
                 end
               end
 
-              method_overloads = {} #: Hash[Shape::MethodOverload, bool]
+              # Keyed by the CALL SHAPE — everything a method type says except its
+              # return: the type parameters, the parameters, and the block. The defs
+              # only record where a type came from, so pairs that land on the same
+              # shape are one overload carrying every side's defs.
+              #
+              # The key has to be the call shape rather than the whole method type,
+              # because an overload set is resolved FIRST-MATCH. Two entries that
+              # accept exactly the same arguments can never both be selected — the
+              # second is unreachable — so keeping it buys no precision and costs the
+              # fold its whole complexity class: each member multiplies the
+              # accumulator instead of merging into it, and the overload count becomes
+              # the *product* over the union's members.
+              #
+              # `singleton(A) | singleton(B) | ...` over 27 ActiveRecord models is
+              # where that stops being theoretical. Each member's `where` has two
+              # overloads (`()` and `(*untyped)`), the four pairs at each fold step
+              # keep all four — the two mixed ones intersect their parameters down to
+              # `()`, colliding with the first — and the set doubles per member:
+              # 2**27 unions of a method type, measured at 5s for 10 members, 55s for
+              # 13, and never finishing for 27. Collapsing on the call shape walks the
+              # members instead, and the type Steep resolves a call to is unchanged,
+              # since it was already reading the first entry only.
+              defss = {} #: Hash[[Array[TypeParam], Function::Params?, Block?], [MethodType, Array[RBS::Definition::Method::TypeDef]]]
 
               overloads1.each do |overload1|
                 overloads2.each do |overload2|
                   if overload1.method_type == overload2.method_type
-                    overload = Shape::MethodOverload.new(overload1.method_type, overload1.method_defs + overload2.method_defs)
-                    method_overloads[overload] = true
+                    type = overload1.method_type
                   else
-                    if type = MethodType.union(overload1.method_type, overload2.method_type, subtyping)
-                      overload = Shape::MethodOverload.new(type, overload1.method_defs + overload2.method_defs)
-                      method_overloads[overload] = true
-                    end
+                    type = MethodType.union(overload1.method_type, overload2.method_type, subtyping)
+                    next unless type
                   end
+
+                  _, defs = defss[[type.type_params, type.type.params, type.block]] ||= [type, []]
+                  defs.concat(overload1.method_defs)
+                  defs.concat(overload2.method_defs)
                 end
               end
 
-              break nil if method_overloads.empty?
+              break nil if defss.empty?
 
-              method_overloads.keys
+              defss.each_value.map {|type, defs| Shape::MethodOverload.new(type, defs) }
             end
           end
         end
@@ -394,15 +608,59 @@ module Steep
 
         shapes.each do |s|
           shape.methods.merge!(s.methods) do |name, old_entry, new_entry|
-            if old_entry.public_method? && new_entry.private_method?
+            case
+            when old_entry.public_method? && new_entry.private_method?
               old_entry
-            else
+            when old_entry.private_method? && new_entry.public_method?
               new_entry
+            else
+              Interface::Shape::Entry.new(method_name: name, private_method: old_entry.private_method?) do
+                intersection_overloads(old_entry.overloads, new_entry.overloads)
+              end
             end
           end
         end
 
         shape
+      end
+
+      # A value typed by an intersection satisfies every member, so every member's
+      # overloads are on it — the merge above used to keep only the last member that
+      # happened to define the name, and the rest were gone.
+      #
+      # What that dropped is not a corner case: `Kernel#class` is baked per type into
+      # `object_shape`, so `@type instance: Filter & Filter::Fields` — the shape every
+      # module self-type annotation takes — answered `self.class` with
+      # `singleton(::Filter::Fields)`, and the host's class methods (a concern's own
+      # `class_methods do` block among them) were not there to call.
+      #
+      # Overloads that accept the same arguments cannot both be selected — resolution is
+      # FIRST-MATCH — so keeping both buys nothing; those fold into one overload whose
+      # return type is the intersection of theirs, which is what the value actually
+      # returns. `Filter & Filter::Validated` therefore keeps answering `creator` with
+      # the marker's `(::User & ::User::Validated)`: `simplify_return_type` drops the
+      # wider `::User?` the intersection implies. Overloads with distinct call shapes are
+      # kept side by side, first member first.
+      def intersection_overloads(overloads1, overloads2)
+        merged = {} #: Hash[[Array[TypeParam], Function::Params?, Block?], Shape::MethodOverload]
+
+        [*overloads1, *overloads2].each do |overload|
+          method_type = overload.method_type
+          key = [method_type.type_params, method_type.type.params, method_type.block] #: [Array[TypeParam], Function::Params?, Block?]
+
+          if existing = merged[key]
+            if intersected = MethodType.intersection(existing.method_type, method_type, subtyping)
+              merged[key] = Shape::MethodOverload.new(
+                intersected,
+                existing.method_defs + overload.method_defs
+              )
+            end
+          else
+            merged[key] = overload
+          end
+        end
+
+        merged.values
       end
 
       def method_name_for(type_def, name)
@@ -592,11 +850,31 @@ module Steep
           )
         end
 
+        to_ary_entry = Shape::Entry.new(
+          method_name: :to_ary,
+          private_method: false,
+          overloads: [
+            Shape::MethodOverload.new(
+              MethodType.new(
+                type_params: [],
+                type: Function.new(
+                  params: Function::Params.empty,
+                  return_type: tuple,
+                  location: nil
+                ),
+                block: nil
+              ),
+              []
+            )
+          ]
+        )
+
         shape.methods[:[]] = aref_entry
         shape.methods[:[]=] = aref_update_entry
         shape.methods[:fetch] = fetch_entry
         shape.methods[:first] = first_entry
         shape.methods[:last] = last_entry
+        shape.methods[:to_ary] = to_ary_entry
 
         shape
       end

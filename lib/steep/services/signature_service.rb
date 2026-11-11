@@ -48,18 +48,19 @@ module Steep
       end
 
       class LoadedStatus
-        attr_reader :files, :builder, :implicitly_returns_nil
+        attr_reader :files, :builder, :implicitly_returns_nil, :underscore_casts
 
-        def initialize(files:, builder:, implicitly_returns_nil:)
+        def initialize(files:, builder:, implicitly_returns_nil:, underscore_casts:)
           @files = files
           @builder = builder
           @implicitly_returns_nil = implicitly_returns_nil
+          @underscore_casts = underscore_casts
         end
 
         def subtyping
           @subtyping ||= begin
             factory = AST::Types::Factory.new(builder: builder)
-            interface_builder = Interface::Builder.new(factory, implicitly_returns_nil: implicitly_returns_nil)
+            interface_builder = Interface::Builder.new(factory, implicitly_returns_nil: implicitly_returns_nil, underscore_casts: underscore_casts)
             Subtyping::Check.new(builder: interface_builder)
           end
         end
@@ -79,17 +80,19 @@ module Steep
       RBSFileStatus = _ = Struct.new(:path, :content, :source, keyword_init: true)
 
       attr_reader :implicitly_returns_nil
+      attr_reader :underscore_casts
 
-      def initialize(status:, implicitly_returns_nil:)
+      def initialize(status:, implicitly_returns_nil:, underscore_casts:)
         @status = status
         @implicitly_returns_nil = implicitly_returns_nil
+        @underscore_casts = underscore_casts
       end
 
-      def self.load_from(loader, implicitly_returns_nil:)
+      def self.load_from(loader, implicitly_returns_nil:, underscore_casts:)
         env = RBS::Environment.from_loader(loader).resolve_type_names
         builder = RBS::DefinitionBuilder.new(env: env)
-        status = LoadedStatus.new(builder: builder, files: {}, implicitly_returns_nil: implicitly_returns_nil)
-        new(status: status, implicitly_returns_nil: implicitly_returns_nil)
+        status = LoadedStatus.new(builder: builder, files: {}, implicitly_returns_nil: implicitly_returns_nil, underscore_casts: underscore_casts)
+        new(status: status, implicitly_returns_nil: implicitly_returns_nil, underscore_casts: underscore_casts)
       rescue RBS::ParsingError => exn
         # When library RBS contains syntax error, load only *core* libraries and set `SyntaxErrorStatus`.
         core_loader = RBS::EnvironmentLoader.new(core_root: loader.core_root)
@@ -100,7 +103,7 @@ module Steep
           diagnostics: [Diagnostic::Signature.from_rbs_error(exn, factory: _ = nil)],
           last_builder: RBS::DefinitionBuilder.new(env: core_env)
         )
-        service = new(status: status, implicitly_returns_nil: implicitly_returns_nil)
+        service = new(status: status, implicitly_returns_nil: implicitly_returns_nil, underscore_casts: underscore_casts)
         # Add the failed library path to env_rbs_paths so it's recognized as a library path by TypeCheckService
         if exn.location
           service.env_rbs_paths << Pathname(exn.location.buffer.name)
@@ -293,7 +296,7 @@ module Steep
                         )
                       when RBS::DefinitionBuilder::AncestorBuilder
                         builder2 = update_builder(ancestor_builder: result, paths: paths)
-                        LoadedStatus.new(builder: builder2, files: files, implicitly_returns_nil: implicitly_returns_nil)
+                        LoadedStatus.new(builder: builder2, files: files, implicitly_returns_nil: implicitly_returns_nil, underscore_casts: underscore_casts)
                       end
           end
         end

@@ -1,0 +1,57 @@
+# Generated from test/postconditions_test.rb with RBS::Inline
+
+class PostconditionsTest < Minitest::Test
+  Postconditions: untyped
+
+  def test_empty_store: () -> untyped
+
+  def test_parses_instance_entry: () -> untyped
+
+  def test_parses_both_branches: () -> untyped
+
+  def test_lookup_absolute_type_name_strips_double_colon: () -> untyped
+
+  def test_duplicate_entries_first_wins: () -> untyped
+
+  def test_skips_entries_missing_both_branches: () -> untyped
+
+  def test_branch_rbs_type_caches_parse: () -> untyped
+
+  def test_branch_rbs_type_returns_nil_on_invalid_string: () -> untyped
+
+  def test_parses_drops_entry: () -> untyped
+
+  def test_drops_default_is_empty_array_when_slot_absent: () -> untyped
+
+  def test_parses_returns_establishes_entry: () -> untyped
+
+  def test_branch_with_only_returns_establishes_is_valid: () -> untyped
+
+  def test_returns_establishes_default_is_empty_array_when_slot_absent: () -> untyped
+
+  def test_returns_establishes_skips_non_string_entries: () -> untyped
+
+  def test_branch_with_only_drops_is_valid: () -> untyped
+
+  def test_drops_rbs_types_parses_lazily_and_caches: () -> untyped
+
+  def test_drops_rbs_types_skips_invalid_entries: () -> untyped
+
+  def test_parses_drops_skips_non_string_entries: () -> untyped
+
+  def test_parses_drops_non_array_input_treated_as_no_drops: () -> untyped
+
+  def test_load_merges_multiple_sidecars_under_sig: () -> untyped
+
+  def test_load_returns_empty_when_no_sidecar_present: () -> untyped
+
+  def test_parses_via_receiver: () -> untyped
+
+  def test_parses_via_receiver_only_branch_without_self: () -> untyped
+
+  def test_via_receiver_skipped_when_through_missing_hash_sign: () -> untyped
+
+  def test_via_receiver_caches_rbs_type: () -> untyped
+
+  def test_load_skips_invalid_yaml: () -> untyped
+end

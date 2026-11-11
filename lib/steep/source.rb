@@ -1,3 +1,5 @@
+require "herb"
+
 module Steep
   class Source
     attr_reader :buffer
@@ -31,13 +33,46 @@ module Steep
     end
 
     def self.new_parser
-      Prism::Translation::Parser33.new(Builder.new).tap do |parser|
+      Prism::Translation::Parser34.new(Builder.new).tap do |parser|
         parser.diagnostics.all_errors_are_fatal = true
         parser.diagnostics.ignore_warnings = true
       end
     end
 
     def self.parse(source_code, path:, factory:)
+      if path.to_s.end_with?(".erb")
+        source_code = extract_ruby_from_erb(source_code)
+
+        if ENV["STEEP_ERB_CONVENTION"] && (erb_class = ErbSelfTypeResolver.resolve(path))
+          # `self_method` (not plain `self`): an ERB template compiles to a
+          # method at runtime, so give the top-level body that method identity —
+          # letting method-entry facts narrow reads in it. Appended at the END so
+          # ERB line positions stay 1:1 (a physical `def` wrapper would shift them).
+          source_code = source_code + "\n# @type self_method: #{erb_class}#__rbs_infer__body"
+        end
+      end
+
+      if ENV["STEEP_MODULE_CONVENTION"] && path.to_s.end_with?(".rb") && (entry = ModuleSelfTypes.entry_for(path))
+        ModuleSelfTypes.self_types_of(entry).each do |mod|
+          next unless mod["anchor"]
+
+          # Rides existing lines and shifts nothing. The module-wide annotations
+          # are not written into the source at all — they are attached to their
+          # node after the parse, below.
+          source_code = ModuleSelfTypes.inject_defs(
+            source_code,
+            defs: mod["defs"],
+            anchor: mod["anchor"].to_s
+          )
+        end
+        if entry["blocks"]
+          source_code = ModuleSelfTypes.inject_blocks(
+            source_code,
+            blocks: Array(entry["blocks"])
+          )
+        end
+      end
+
       buffer = ::Parser::Source::Buffer.new(path.to_s, 1, source: source_code)
       node, comments = new_parser().parse_with_comments(buffer)
 
@@ -91,11 +126,60 @@ module Steep
         map.fetch(node) << annot
       end
 
+      if node && ENV["STEEP_MODULE_CONVENTION"] && path.to_s.end_with?(".rb") && (entry = ModuleSelfTypes.entry_for(path))
+        attach_scope_annotations(
+          entry: entry,
+          node: node,
+          mapping: map,
+          annotation_parser: annotation_parser,
+          buffer: buffer
+        )
+      end
+
       ignores = comments.filter_map do |comment|
         AST::Ignore.parse(comment, buffer)
       end
 
       new(buffer: buffer, path: path, node: node, mapping: map, comments: comments, ignores: ignores)
+    end
+
+    def self.extract_ruby_from_erb(source_code)
+      ::Herb.extract_ruby(source_code, semicolons: true, comments: true)
+    end
+
+    # Puts the sidecar's module-wide annotations on the node their anchor names.
+    #
+    # They used to be spliced into the source as new lines, which moved every
+    # position below them — the checker reported and recorded line numbers the
+    # file does not have (felixefelip/steep#176). Attaching them here means the
+    # source Steep parses IS the file on disk, so nothing downstream has to know
+    # an annotation was supplied from outside it.
+    #
+    # An annotation the file already carries wins: the sidecar is derived, and a
+    # hand-written one is the author saying something the derivation should not
+    # argue with.
+    #
+    # `location` is the anchor's own — the annotation exists in no file, and the
+    # module it describes is where anything said about it should point.
+    def self.attach_scope_annotations(entry:, node:, mapping:, annotation_parser:, buffer:)
+      ModuleSelfTypes.scope_annotations(entry).each do |anchor, lines|
+        ModuleSelfTypes.scope_nodes(node, anchor).each do |target|
+          location = RBS::Location.new(
+            buffer: buffer,
+            start_pos: target.loc.expression.begin_pos,
+            end_pos: target.loc.expression.begin_pos
+          )
+
+          existing = mapping[target] || []
+          lines.each do |line|
+            annotation = annotation_parser.parse(line.delete_prefix("#").strip, location: location) or next
+            next if existing.any? { |other| other.class == annotation.class }
+
+            mapping[target] ||= []
+            mapping.fetch(target) << annotation
+          end
+        end
+      end
     end
 
     def self.construct_mapping(node:, annotations:, mapping:, line_range: nil)
@@ -231,7 +315,7 @@ module Steep
         end
 
       when :rescue
-        body, resbodies, else_node, loc = deconstruct_rescue_node!(node)
+        body, _, else_node, loc = deconstruct_rescue_node!(node)
 
         if else_node
           loc.else or raise
@@ -257,7 +341,7 @@ module Steep
         annot.line or next
 
         case node.type
-        when :def, :module, :class, :block, :numblock, :ensure, :defs, :resbody
+        when :def, :module, :class, :block, :numblock, :itblock, :ensure, :defs, :resbody
           location = node.loc
           location.line <= annot.line && annot.line < location.last_line
         else
@@ -293,6 +377,31 @@ module Steep
       end
 
       node.updated(type, children)
+    end
+
+    # What `Accumulators` reads out of this file's AST, computed once.
+    #
+    # It belongs here and not on `TypeConstruction` because a construction is
+    # built anew for every method body (and again for every branch within one),
+    # so memoising it there charged the whole file's AST once per method — a
+    # cost that grows with the SQUARE of the file. The analysis reads the AST
+    # and nothing else, so one answer serves every construction over this
+    # source, however many times a body is re-checked.
+    def accumulators
+      @accumulators ||= Accumulators.analyze(node)
+    end
+
+    # The constants this file writes once and only reads, computed once for the
+    # same reason as above: a construction is built per method body, and this
+    # answer is about the whole file.
+    def constants
+      @constants ||= Constants.analyze(node)
+    end
+
+    # The assignments whose local is typed by how the method goes on to use it
+    # — see `LocalAssignments`. Once per file, for the reason above.
+    def local_assignments
+      @local_assignments ||= LocalAssignments.analyze(node)
     end
 
     def annotations(block:, factory:, context:)
@@ -356,7 +465,6 @@ module Steep
 
     def find_heredoc_nodes(line, column, position)
       each_heredoc_node() do |nodes, location|
-        node = nodes[0]
         loc = location.heredoc_body #: Parser::Source::Range
 
         if range = loc.to_range
@@ -470,7 +578,7 @@ module Steep
       return false unless send_node
 
       if send_node.type == :send
-        receiver, method, args = deconstruct_send_node!(send_node)
+        receiver, method, _ = deconstruct_send_node!(send_node)
 
         return false unless receiver
 
@@ -565,13 +673,13 @@ module Steep
                   end
                 ]
               )
-            when :numblock
-              send, size, body = node.children
+            when :numblock, :itblock
+              send, arg, body = node.children
               node = node.updated(
                 nil,
                 [
                   map_child_node(send) {|child| insert_type_node(child, child_assertions) },
-                  size,
+                  arg,
                   insert_type_node(body, child_assertions)
                 ]
               )
@@ -648,7 +756,7 @@ module Steep
         case node.type
         when :send, :csend
           node
-        when :block, :numblock
+        when :block, :numblock, :itblock
           send = node.children[0]
           case send.type
           when :send, :csend
@@ -657,7 +765,7 @@ module Steep
         end
 
       if send_node
-        receiver_node, name, _, location = deconstruct_send_node!(send_node)
+        receiver_node, _, _, location = deconstruct_send_node!(send_node)
 
         if receiver_node
           if location.dot && location.selector

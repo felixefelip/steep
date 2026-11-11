@@ -17,6 +17,8 @@ module Steep
       #
       attr_reader implicitly_returns_nil: bool
 
+      attr_reader underscore_casts: bool
+
       attr_reader project: Project
 
       attr_reader unreferenced: bool
@@ -32,7 +34,8 @@ module Steep
         code_diagnostics_config: untyped,
         project: Project,
         unreferenced: bool,
-        implicitly_returns_nil: bool
+        implicitly_returns_nil: bool,
+        underscore_casts: bool
       ) -> void
 
       # The options that applies to this target

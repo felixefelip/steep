@@ -1,0 +1,21 @@
+module Steep
+  class Source
+    class OnlyDefs < Source
+      @whole: Source
+
+      def accumulators: () -> untyped
+
+      def constants: () -> untyped
+
+      def local_assignments: () -> untyped
+
+      def initialize: (Source source, Array[Parser::AST::Node] defs) -> void
+
+      private
+
+      def each_enclosing_def: (untyped node, Set[Parser::AST::Node] defs, ?Array[Parser::AST::Node] enclosing) { (Parser::AST::Node) -> void } -> void
+
+      def each_removed_def: (untyped node, Set[Parser::AST::Node] kept) { (Parser::AST::Node) -> void } -> void
+    end
+  end
+end

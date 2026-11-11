@@ -1,0 +1,118 @@
+# Generated from test/specializations_test.rb with RBS::Inline
+
+class SpecializationsTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  Specializations: untyped
+
+  Project: untyped
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: (?steepfile: untyped) -> untyped
+
+  STEEPFILE: ::String
+
+  FIXTURE_RBS: ::String
+
+  FIXTURE_RUBY: ::String
+
+  def test_runner_records_one_return_per_argument_tuple: () -> untyped
+
+  def test_runner_records_nothing_for_a_call_that_fixes_no_literal: () -> untyped
+
+  def test_runner_specializes_a_positional_argument: () -> untyped
+
+  # A rest parameter holds the arguments its call passed, in order and no more:
+  # the call builds that array, so the body checked for that call reads it as
+  # a tuple — the count of an `each` over it included. Anything that could
+  # change it unseen (a mutating call, a second name) takes that away.
+  def test_runner_reads_a_rest_parameter_as_the_arguments_passed: () -> untyped
+
+  # A frame that hands its rest parameter on: the array it hands is the one the
+  # call built, and nothing touched it before the hand-off, so the callee's
+  # parameter arrives holding exactly that — and the call site is keyed on it.
+  # Anything that could have changed it first, or a second name for it in the
+  # same call, takes that away.
+  def test_runner_follows_a_collection_handed_to_another_method: () -> untyped
+
+  # What a callee's parameter arrives holding is known only for a call made
+  # once, with an array nothing but this body could have changed. A hand-off in
+  # a block runs once per pass, the callee pushing onto the array each time; a
+  # method DECLARED to return a tuple may hand back an array anyone pushed onto.
+  def test_runner_declines_a_hand_off_it_cannot_follow: () -> untyped
+
+  # An expanded `each` runs its passes in order, so a pass reads what the one
+  # before it wrote. The argument fixes `first` and `cur` for the first pass
+  # only: decided again on the second, from the write.
+  def test_runner_threads_a_loop_pass_into_the_next: () -> untyped
+
+  # Each pass rebinds the parameter to the next element, which invalidates the
+  # calls cached on it — and a conditional in the body joined them back to the
+  # first element's answer. ActiveSupport's `generate` has that shape, and
+  # `delegate :a, :b` defined `a` twice.
+  def test_runner_binds_each_pass_to_its_own_element_across_a_join: () -> untyped
+
+  # felixefelip/rbs_infer#345 stage S5. `relay` has no literal in its own body —
+  # it hands its parameter on — so its return is only specializable once `label`
+  # already is, which is a second generation.
+  def test_runner_carries_a_literal_across_two_calls: () -> untyped
+
+  # A tuple whose argument is a literal only because the call inside it
+  # specialized: `shout` passes `label(true)`, typed `String` until `label` has
+  # its entry and `"LOUD"` after.
+  def test_runner_grows_a_tuple_from_a_specialized_argument: () -> untyped
+
+  # The fixpoint's termination, which is the whole reason widening exists: every
+  # generation folds a longer literal and supplies a tuple never seen before.
+  def test_runner_terminates_on_a_body_that_folds_a_longer_literal: () -> untyped
+
+  # The other divergence, and the one a generation count was hiding: no new tuple
+  # is ever supplied — `f(flag)` calls itself with the same `(true)` — yet the
+  # return folds one more `x` every generation. The widening of a return that
+  # disagrees with the generation before is what stops it, and `String` is the
+  # honest answer: the program does not fix this value.
+  def test_runner_widens_a_return_that_keeps_growing: () -> untyped
+
+  # felixefelip/steep#207. `dup` answers `self`, so the copy starts out as the
+  # literal it was made from — and `sub!` changes it in place. What the body
+  # records is the value it leaves (felixefelip/steep#209), never the one it
+  # was called with.
+  def test_runner_records_the_value_a_literal_mutated_in_place_leaves: () -> untyped
+
+  # The shape `ActiveSupport::Inflector.apply_inflections` has: the `sub!` is
+  # inside the block, `break` included.
+  def test_runner_records_nothing_for_a_literal_mutated_inside_a_block: () -> untyped
+
+  # felixefelip/steep#209, item 2: the stateless controls. `sub!` applied to
+  # a copy is pinned by the felixefelip/steep#207 test above.
+  def test_runner_folds_the_core_calls_an_inflector_rule_is_applied_with: () -> untyped
+
+  def test_runner_writes_and_deletes_the_sidecar: () -> untyped
+
+  # A sidecar entry is TEXT, read back through `RBS::Parser.parse_type`, and a
+  # type RBS cannot spell does not survive that round trip — silently, since
+  # `singleton_class(::Probe)` parses as the alias `singleton_class`. So what is
+  # recorded is what a signature can say.
+  def test_runner_records_a_type_a_signature_can_say: () -> untyped
+
+  # What that is worth avoiding: the spelling of a type RBS cannot say parses
+  # as something else rather than failing.
+  def test_a_type_rbs_cannot_say_is_written_as_the_one_it_can: () -> untyped
+
+  def test_store_ignores_a_sidecar_from_another_schema_version: () -> untyped
+
+  def test_a_call_site_reads_back_the_specialized_return_type: () -> untyped
+
+  def test_a_call_site_reads_the_declaration_without_a_sidecar: () -> untyped
+
+  private
+
+  # `{ "method name" => type }` for every `def` in `path`, as an ordinary check
+  # of the project sees them.
+  def body_types: (untyped project, untyped path) -> untyped
+end

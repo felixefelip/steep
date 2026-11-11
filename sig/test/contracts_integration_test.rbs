@@ -1,0 +1,52 @@
+# Generated from test/contracts_integration_test.rb with RBS::Inline
+
+class ContractsIntegrationTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  Contracts: untyped
+
+  Diagnostic: untyped
+
+  CONTRACT_RBS: ::String
+
+  def use_name_contract: () -> untyped
+
+  def unenforced_name_contract: () -> untyped
+
+  def test_unenforced_contract_does_not_narrow_body: () -> untyped
+
+  def test_contract_narrows_pure_receiver_inside_body: () -> untyped
+
+  def test_caller_without_nil_check_emits_precondition_diagnostic: () -> untyped
+
+  def test_caller_with_nil_check_does_not_emit_diagnostic: () -> untyped
+
+  # felixefelip/rbs_infer#71: after a postcondition narrows `self` to a marker
+  # intersection (`Foo & Foo::AfterSet`, where the marker refines `name` to
+  # non-nil), a self-call to a contracted method the marker satisfies must be
+  # (a) recognized as a call site and (b) recorded as satisfied. Otherwise the
+  # contract's Enforcement never counts the site, `enforced` stays false, and
+  # the body is never narrowed — the `TagDestroy#parse_xml`-after-`test_nokogiri`
+  # case that motivated the fix.
+  def test_self_call_satisfied_by_marker_narrowed_self: () -> untyped
+
+  def test_no_contract_means_no_change_in_behavior: () -> untyped
+
+  # Explicit-receiver call sites (felixefelip/steep, external-setter
+  # preconditions). `attr_accessor` makes the setter available so
+  # `bar.name = "x"` narrows `bar.name` (attribute-write narrowing), and the
+  # precondition on `bar.use_name` is then checked against that receiver.
+  EXPLICIT_RECEIVER_RBS: ::String
+
+  def use_name_bar_contract: () -> untyped
+
+  def test_explicit_receiver_precondition_satisfied_after_attr_write: () -> untyped
+
+  def test_explicit_receiver_precondition_unsatisfied_without_attr_write: () -> untyped
+end

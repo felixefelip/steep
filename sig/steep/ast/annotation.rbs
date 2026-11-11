@@ -71,7 +71,11 @@ module Steep
 
           attr_reader args: Array[Symbol]
 
-          def initialize: (name: RBS::TypeName, args: Array[Symbol]) -> void
+          def initialize: (name: RBS::TypeName, args: Array[Symbol], ?singleton: bool) -> void
+
+          # Whether the annotation names the class object's method table rather
+          # than its instances'.
+          def singleton?: () -> bool
 
           def ==: (untyped other) -> bool
 
@@ -82,9 +86,13 @@ module Steep
 
         include Located
 
+        # Every module the annotation names, in the order written.
+        attr_reader names: Array[Module]
+
+        # The first of them, which is all a class or module body reads.
         attr_reader name: Module
 
-        def initialize: (name: Module, ?location: loc?) -> void
+        def initialize: (names: Array[Module], ?location: loc?) -> void
 
         def ==: (untyped other) -> bool
       end

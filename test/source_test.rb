@@ -9,6 +9,47 @@ class SourceTest < Minitest::Test
   include SubtypingHelper
   include FactoryHelper
 
+  # One analysis for the file, not one per method. A `TypeConstruction` is
+  # built anew for every method body, so memoising it there charged the whole
+  # file's AST once per method.
+  def test_accumulators_are_analyzed_once_per_source
+    source = Steep::Source.parse(<<~RUBY, path: Pathname("a.rb"), factory: RBS::Factory.new)
+      class Scans
+        def a
+          parts = []
+          parts << "a"
+          parts.join(";")
+        end
+
+        def b
+          parts = []
+          parts << "b"
+          parts.join(";")
+        end
+      end
+    RUBY
+
+    assert_equal 2, source.accumulators.at_reads.size
+    assert_same source.accumulators, source.accumulators
+  end
+
+  def test_constants_are_analyzed_once_per_source
+    source = Steep::Source.parse(<<~RUBY, path: Pathname("b.rb"), factory: RBS::Factory.new)
+      class Reads
+        KEPT = ["a"]
+        GONE = ["b"]
+        GONE = ["c"]
+
+        def a = KEPT.include?("a")
+        def b = KEPT.include?("b")
+        def c = GONE.include?("c")
+      end
+    RUBY
+
+    assert_equal 2, source.constants.size
+    assert_same source.constants, source.constants
+  end
+
   def test_foo
     with_factory({ "a.rbs" => <<-RBS }) do |factory|
 module Foo
@@ -355,7 +396,7 @@ end
 
   def test_empty_clauses
     with_factory do |factory|
-      source = Steep::Source.parse(<<-EOF, path: Pathname("foo.rb"), factory: factory)
+      Steep::Source.parse(<<-EOF, path: Pathname("foo.rb"), factory: factory)
 case
 when bar
 else
@@ -1040,5 +1081,124 @@ super { } # $ nil
         end
       end
     end
+  end
+
+  # The injected annotation is `@type self_method:`, not a plain `@type self:` (#86): a
+  # template compiles to a METHOD at runtime, so the body is given that method's identity
+  # rather than only its receiver's type — which is what lets method-entry facts narrow
+  # reads in it. `SelfMethod` binds `self` exactly as `SelfType` does, and names the
+  # method on top; asserting the method name is the half a `SelfType` could never carry.
+  def test_erb_convention_injects_self_method_annotation
+    with_factory({ "erb_class.rbs" => <<~RBS }) do |factory|
+        class ERBPostsShow
+        end
+      RBS
+
+      erb_code = <<~ERB
+        <h1><%= @post.title %></h1>
+      ERB
+
+      ENV["STEEP_ERB_CONVENTION"] = "1"
+      source = Steep::Source.parse(erb_code, path: Pathname("app/views/posts/show.html.erb"), factory: factory)
+
+      annotations = source.mapping[source.node] || []
+      self_annotation = annotations.find { |a| a.is_a?(Steep::AST::Annotation::SelfMethod) }
+      refute_nil self_annotation,
+                 "Expected @type self_method: ERBPostsShow#__rbs_infer__body annotation to be injected"
+      assert_equal "ERBPostsShow", self_annotation.type.to_s
+      assert_equal :__rbs_infer__body, self_annotation.method_name
+    ensure
+      ENV.delete("STEEP_ERB_CONVENTION")
+    end
+  end
+
+  def test_erb_convention_not_injected_without_env_var
+    with_factory do |factory|
+      erb_code = <<~ERB
+        <h1><%= @post.title %></h1>
+      ERB
+
+      ENV.delete("STEEP_ERB_CONVENTION")
+      source = Steep::Source.parse(erb_code, path: Pathname("app/views/posts/show.html.erb"), factory: factory)
+
+      annotations = source.mapping[source.node] || []
+      self_annotation = annotations.find { |a| a.is_a?(Steep::AST::Annotation::SelfType) }
+      assert_nil self_annotation, "Expected no self type annotation without STEEP_ERB_CONVENTION"
+    end
+  end
+
+  def test_only_defs_keeps_the_defs_given_and_the_ones_enclosing_them
+    with_factory do |factory|
+      source = Steep::Source.parse(<<~RUBY, path: Pathname("foo.rb"), factory: factory)
+        module Macro
+          def self.included(base)
+            base.class_eval do
+              def written = 1
+            end
+          end
+
+          def other = 2
+        end
+      RUBY
+
+      written = dig(source.node, 1, 0, 3, 2)
+      assert_equal :written, written.children[0]
+
+      assert_equal parse_ruby(<<~RUBY).node, Steep::Source::OnlyDefs.new(source, [written]).node
+        module Macro
+          def self.included(base)
+            base.class_eval do
+              def written = 1
+            end
+          end
+
+          nil
+        end
+      RUBY
+    end
+  end
+
+  def test_only_defs_drops_the_annotations_of_the_defs_it_removes
+    with_factory do |factory|
+      source = Steep::Source.parse(<<~RUBY, path: Pathname("foo.rb"), factory: factory)
+        class Foo
+          def kept
+            # @type var x: Integer
+            x = 1
+          end
+
+          def removed
+            # @type var y: String
+            y = ""
+          end
+        end
+      RUBY
+
+      kept = dig(source.node, 2, 0)
+      pruned = Steep::Source::OnlyDefs.new(source, [kept])
+
+      class_annotations = pruned.annotations(block: pruned.node, factory: factory, context: nil)
+      assert_nil class_annotations.var_type(lvar: :y)
+      method_annotations = pruned.annotations(block: dig(pruned.node, 2, 0), factory: factory, context: nil)
+      refute_nil method_annotations.var_type(lvar: :x)
+    end
+  end
+
+  def test_only_defs_keeps_the_analyses_of_the_whole_file
+    source = Steep::Source.parse(<<~RUBY, path: Pathname("c.rb"), factory: RBS::Factory.new)
+      class Reads
+        KEPT = ["a"]
+        GROWN = ["b"]
+
+        def read = KEPT.include?("a") || GROWN.include?("b")
+        def grow = GROWN << "c"
+      end
+    RUBY
+
+    read = dig(source.node, 2, 2)
+    pruned = Steep::Source::OnlyDefs.new(source, [read])
+
+    assert_same source.constants, pruned.constants
+    assert_equal 1, pruned.constants.size
   end
 end

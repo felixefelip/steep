@@ -1,0 +1,50 @@
+# Generated from test/string_fold_test.rb with RBS::Inline
+
+# felixefelip/steep#209, item 2: the core calls an inflector rule is applied
+# with, folded over a literal receiver, a literal pattern and a literal
+# replacement.
+class StringFoldTest < Minitest::Test
+  include TestHelper
+
+  include TypeErrorAssertions
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  def check: (untyped source_text, ?literal_method_registry: untyped) -> untyped
+
+  def test_sub_with_a_regexp_folds: () -> untyped
+
+  def test_sub_with_a_backreference_folds: () -> untyped
+
+  # `sub` takes a string pattern literally, where `match?` would compile it.
+  def test_sub_with_a_string_pattern_takes_it_literally: () -> untyped
+
+  def test_delete_suffix_folds: () -> untyped
+
+  def test_sub_with_a_replacement_hash_does_not_fold: () -> untyped
+
+  # `sub!` changes the value in place: the variable is the new literal from
+  # here on, and the call answers it.
+  def test_sub_bang_that_matches_sets_the_variable: () -> untyped
+
+  # No match: the value is as it was, and `sub!` answers nil.
+  def test_sub_bang_that_does_not_match_keeps_the_variable: () -> untyped
+
+  # The review case on felixefelip/steep#215: there is no literal "." in
+  # "abc", so `sub!` changes nothing and answers nil — `match?(".")`, which
+  # compiles the pattern, would have said it matched.
+  def test_sub_bang_with_a_string_pattern_that_does_not_occur_answers_nil: () -> untyped
+
+  def test_sub_bang_with_a_string_pattern_that_occurs_sets_the_variable: () -> untyped
+
+  # Not a valid regexp, which matters only to a reader that compiles it.
+  def test_sub_bang_with_a_regexp_metacharacter_as_a_string_pattern: () -> untyped
+
+  def test_sub_bang_over_an_operand_it_cannot_read_widens: () -> untyped
+
+  def test_a_redefined_sub_bang_does_not_fold: () -> untyped
+end

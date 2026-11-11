@@ -39,6 +39,22 @@ module Steep
 
     SPECIAL_LVAR_NAMES = Set[:_, :__any__, :__skip__]
 
+    # Whether a local by this name is a cast: written, it is `untyped` whatever
+    # it is assigned, and read, it is `untyped`. `__any__` and `__skip__`
+    # always; `_` only where the target asks for upstream's convention
+    # (`underscore_casts!`) — otherwise `_ = user` is an ordinary local, typed
+    # by `user`, as in any Ruby that was not written for this checker.
+    #
+    # A PARAMETER named `_` is still not typed: there the name says "unused",
+    # and `|_, _|` binds one name twice.
+    def self.cast_lvar?(name, underscore_casts:)
+      name == :__any__ || name == :__skip__ || (name == :_ && underscore_casts)
+    end
+
+    def cast_lvar?(name)
+      TypeConstruction.cast_lvar?(name, underscore_casts: checker.builder.underscore_casts)
+    end
+
     # a synthetic variable name for anonymous block params (can't conflict with
     # user variables since Ruby doesn't allow * in local variable names).
     ANONYMOUS_BLOCK_PASSABLE_LVAR = :"*block"
@@ -49,6 +65,15 @@ module Steep
     attr_reader :source
     attr_reader :annotations
     attr_reader :typing
+    attr_reader :contracts
+    attr_reader :postconditions
+    attr_reader :callbacks
+    attr_reader :specializations
+    attr_reader :literal_method_registry
+    attr_reader :delegation_registry
+    attr_reader :constructor_bindings
+    attr_reader :return_forwarding
+    attr_reader :return_alias
 
     attr_reader :context
 
@@ -77,19 +102,35 @@ module Steep
     end
 
     def self_type
-      context.self_type
+      # `refined_self_type` is set by `LogicTypeInterpreter` when a
+      # postcondition narrows the receiver of an implicit-self or `self.x`
+      # call (felixefelip/steep#25). When present, it overlays the
+      # method-context's `self_type` so subsequent dispatches inside the
+      # narrowed branch see the refined shape — without this, the
+      # `:self` AST node and implicit-self sends would always resolve
+      # against the widest (declared) self.
+      context.type_env.refined_self_type || context.self_type
     end
 
     def variable_context
       context.variable_context
     end
 
-    def initialize(checker:, source:, annotations:, typing:, context:)
+    def initialize(checker:, source:, annotations:, typing:, context:, contracts: Contracts::Store.empty, postconditions: Postconditions::Store.empty, callbacks: Callbacks::Store.empty, specializations:, literal_method_registry:, delegation_registry:, constructor_bindings:, return_forwarding:, return_alias:)
       @checker = checker
       @source = source
       @annotations = annotations
       @typing = typing
       @context = context
+      @contracts = contracts
+      @postconditions = postconditions
+      @callbacks = callbacks
+      @specializations = specializations
+      @literal_method_registry = literal_method_registry
+      @delegation_registry = delegation_registry
+      @constructor_bindings = constructor_bindings
+      @return_forwarding = return_forwarding
+      @return_alias = return_alias
     end
 
     def with_new_typing(typing)
@@ -98,7 +139,16 @@ module Steep
         source: source,
         annotations: annotations,
         typing: typing,
-        context: context
+        context: context,
+        contracts: contracts,
+        postconditions: postconditions,
+        callbacks: callbacks,
+        specializations: specializations,
+        literal_method_registry: literal_method_registry,
+        delegation_registry: delegation_registry,
+        constructor_bindings: constructor_bindings,
+        return_forwarding: return_forwarding,
+        return_alias: return_alias
       )
     end
 
@@ -117,7 +167,16 @@ module Steep
           source: source,
           annotations: annotations,
           typing: typing,
-          context: context
+          context: context,
+          contracts: contracts,
+          postconditions: postconditions,
+          callbacks: callbacks,
+          specializations: specializations,
+          literal_method_registry: literal_method_registry,
+          delegation_registry: delegation_registry,
+          constructor_bindings: constructor_bindings,
+          return_forwarding: return_forwarding,
+          return_alias: return_alias
         )
       else
         self
@@ -153,6 +212,101 @@ module Steep
       end
     end
 
+    def ivar_import_commands_for_type(type, except_definition: nil)
+      case type
+      when AST::Types::Name::Instance
+        if except_definition && except_definition.type_name == type.name
+          return []
+        end
+        definition = checker.factory.definition_builder.build_instance(type.name)
+        [TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory).merge!]
+      when AST::Types::Name::Singleton
+        if except_definition && except_definition.type_name == type.name
+          return []
+        end
+        definition = checker.factory.definition_builder.build_singleton(type.name)
+        [TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory).merge!]
+      when AST::Types::Intersection
+        type.types.flat_map { |t| ivar_import_commands_for_type(t, except_definition: except_definition) }
+      else
+        []
+      end
+    rescue
+      []
+    end
+
+    # The super of `method_name` as seen from a HOST named by the self type,
+    # rather than from the module the method is written in.
+    #
+    # `super` is resolved from the ancestors of wherever the method is DEFINED.
+    # For a mixin that chain is the module and its own includes, so a method in
+    # `Filter::Fields` never sees `Filter`'s `include Filter::GeneratedAttributeMethods`
+    # — `def creator_id; super || false; end` read `untyped` even though the column
+    # accessor it overrides is typed. This is not specific to ActiveSupport::Concern
+    # or to `included do`; it is every mixin whose method overrides one the host
+    # gets from somewhere else.
+    #
+    # nil (leaving the caller's behaviour unchanged) whenever the self type names
+    # no usable host, the host's chain has no entry for the module, or the hosts
+    # disagree — see the union note below.
+    def super_method_through_self_type(method_name)
+      module_context or return nil
+      own_name = module_context.class_name or return nil
+      instance_type = module_context.instance_type or return nil
+
+      supers = self_type_host_names(instance_type, own_name).filter_map do |host|
+        super_method_in_host(host, own_name, method_name)
+      end.uniq
+
+      # Two hosts mean two chains, and one `RBS::Definition::Method` cannot say
+      # "whichever of these self is". Answering with one host's super would type
+      # the other host's `super` as a method it does not have, so a disagreement
+      # keeps the pre-existing `untyped` instead. (Identical supers are not a
+      # disagreement — `uniq` above.)
+      supers.first if supers.size == 1
+    end
+
+    # The class names an instance self type names, minus the module's own — the
+    # annotated type is `Host & Mod` (a union of those when the module has several
+    # hosts), so the hosts are its class components.
+    def self_type_host_names(type, own_name)
+      names =
+        case type
+        when AST::Types::Union, AST::Types::Intersection
+          type.types.flat_map { |t| self_type_host_names(t, own_name) }
+        when AST::Types::Name::Instance
+          [type.name]
+        else
+          []
+        end
+
+      names.uniq.reject { |name| name == own_name }
+    end
+
+    # Walks the host's method chain to the entry the MODULE contributes and
+    # returns what sits behind it.
+    #
+    # Taking `build_instance(host).methods[name].super_method` directly is off by
+    # one whenever the host (or a module mixed in closer than this one) overrides
+    # the method too: the top entry is then the host's and its super is this
+    # module's own, so `super` would be typed as the very method being checked.
+    def super_method_in_host(host, own_name, method_name)
+      entry = checker.factory.definition_builder.build_instance(host).methods[method_name]
+
+      while entry
+        return entry.super_method if entry.defined_in == own_name
+
+        entry = entry.super_method
+      end
+
+      nil
+    rescue RBS::BaseError
+      # A host the environment cannot build (a generic applied wrongly, a name
+      # only the annotation mentions) contributes no super rather than raising
+      # out of an unrelated method's type check.
+      nil
+    end
+
     def for_new_method(method_name, node, args:, self_type:, definition:)
       annots = source.annotations(block: node, factory: checker.factory, context: nesting)
       definition_method_type = if definition
@@ -165,6 +319,11 @@ module Steep
       annotation_method_type = annotations.method_type(method_name)
 
       method_type = annotation_method_type || definition_method_type
+
+      if method_type && (arguments = specialization_arguments(node))
+        method_type = arguments.substitute(method_type)
+        self_type = specialized_self = arguments.self_type if arguments.self_type
+      end
 
       unless method_type
         if definition
@@ -195,13 +354,26 @@ module Steep
 
       super_method = if definition
                        if (this_method = definition.methods[method_name])
-                         if module_context&.class_name == this_method.defined_in
+                         if module_context&.class_name == this_method.implemented_in
                            this_method.super_method
                          else
                            this_method
                          end
                        end
                      end
+
+      # A module's own ancestors end at the module, so a method it defines has no
+      # super — but at runtime the method runs on an instance of the HOST, and
+      # `super` walks the host's chain from the module's position. The self type
+      # is what names that host, and `super` was the one thing not reading it: an
+      # ordinary send in the same body resolves against `Host & Mod`, while
+      # `super` resolved against `Mod` alone and fell back to `untyped`.
+      #
+      # Only as a FALLBACK. When the module's own chain answers, that answer is
+      # already correct and more specific: what sits behind `Mod` in the host's
+      # ancestors is whatever `Mod` itself includes, and nothing the host mixes in
+      # can be inserted between them.
+      super_method ||= super_method_through_self_type(method_name)
 
       if definition && method_type
         variable_context = TypeInference::Context::TypeVariableContext.new(method_type.type_params, parent_context: self.variable_context)
@@ -211,7 +383,7 @@ module Steep
 
       method_params =
         if method_type
-          TypeInference::MethodParams.build(node: node, method_type: method_type)
+          TypeInference::MethodParams.build(node: node, method_type: method_type, keyword_rest: arguments&.keyword_rest)
         else
           TypeInference::MethodParams.empty(node: node)
         end
@@ -230,19 +402,24 @@ module Steep
         return_type: annots.return_type || method_type&.type&.return_type || AST::Builtin.any_type,
         super_method: super_method,
         forward_arg_type: method_params.forward_arg_type,
-        block_param_name: block_param_name
+        block_param_name: block_param_name,
+        node: node
       )
 
       local_variable_types = method_params.each_param.with_object({}) do |param, hash| #$ Hash[Symbol, AST::Types::t]
         if param.name
-          unless SPECIAL_LVAR_NAMES.include?(param.name)
-            hash[param.name] = param.var_type
+          if !SPECIAL_LVAR_NAMES.include?(param.name)
+            hash[param.name] = method_context.held_locals.held?(param.name) ? Specializations.param_type(param, arguments) : ObjectStates.settled(self, Specializations.param_type(param, arguments))
+          elsif param.name == :_ && !cast_lvar?(:_)
+            # Untyped as before, but bound: an ordinary `_` from outside must
+            # not show through it.
+            hash[param.name] = AST::Builtin.any_type
           end
         elsif param.is_a?(TypeInference::MethodParams::BlockParameter)
-          hash[ANONYMOUS_BLOCK_PASSABLE_LVAR] = param.var_type
+          hash[ANONYMOUS_BLOCK_PASSABLE_LVAR] = Specializations.param_type(param, arguments)
         end
       end
-      type_env = context.type_env.assign_local_variables(local_variable_types)
+      type_env = ObjectStates.entered_method(context.type_env).assign_local_variables(local_variable_types)
 
       type_env = TypeInference::TypeEnvBuilder.new(
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots).merge!.on_duplicate! do |name, original, annotated|
@@ -259,8 +436,14 @@ module Steep
           end
         end,
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory),
+        TypeInference::TypeEnvBuilder::Command::ImportClassVariableDefinition.new(definition, checker.factory),
+        *ivar_import_commands_for_type(self_type, except_definition: definition),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annots).merge!
       ).build(type_env)
+
+      type_env = apply_callbacks_for_method(method_name, type_env)
+      type_env = apply_contract_self_type(node, method_name, type_env)
+      type_env = ObjectStates::ClassStates.entered_method(self, method_context, self_type, apply_method_entry_facts(method_name, type_env), arguments)
 
       method_params.errors.each do |error|
         typing.add_error error
@@ -273,12 +456,21 @@ module Steep
                        TypeInference::MethodCall::MethodContext.new(
                          method_name: SingletonMethodName.new(type_name: module_context.class_name, method_name: method_name)
                        )
-                     when AST::Types::Name::Instance, AST::Types::Intersection
+                     # A union joins the intersection here rather than getting a
+                     # branch of its own: this context records WHICH METHOD is
+                     # being checked, built from `module_context.class_name`, and
+                     # never reads `self_type` itself. A module mixed into two
+                     # classes has two possible selves — one at a time, which is
+                     # a union — and its methods are still methods of the module
+                     # being defined. Raising instead left the method untyped,
+                     # silently (felixefelip/steep#130).
+                     when AST::Types::Name::Instance, AST::Types::Intersection, AST::Types::Union
                        TypeInference::MethodCall::MethodContext.new(
                          method_name: InstanceMethodName.new(type_name: module_context.class_name, method_name: method_name)
                        )
                      else
-                       raise "Unexpected self_type: #{self_type}"
+                       # `def obj.foo` where the type of `obj` doesn't name a class or module, `untyped` included
+                       TypeInference::MethodCall::UnknownContext.new()
                      end
 
       self.class.new(
@@ -290,13 +482,452 @@ module Steep
           module_context: module_context,
           block_context: nil,
           break_context: nil,
-          self_type: annots.self_type || self_type,
+          self_type: specialized_self || annots.self_type || self_type,
           type_env: type_env,
           call_context: call_context,
           variable_context: variable_context
         ),
         typing: typing,
+        contracts: contracts,
+        postconditions: postconditions,
+        callbacks: callbacks,
+        specializations: specializations,
+        literal_method_registry: literal_method_registry,
+        delegation_registry: delegation_registry,
+        constructor_bindings: constructor_bindings,
+        return_forwarding: return_forwarding,
+        return_alias: return_alias
       )
+    end
+
+    # What a parameter was handed by the call this body is being checked for,
+    # or nil when it is checked for none — the ordinary check, where the
+    # parameter holds whatever any caller passes.
+    def arrived_types(element)
+      arguments = specialization_arguments(element.def_node) or return nil
+      tuple = arguments.arrived(element.def_node, element.name) or return nil
+      return nil unless tuple.types.all? { |type| LiteralIntrinsics.fold_value?(type) }
+
+      tuple.types
+    end
+
+    # What a local born from a call holds: the collection the checker computed
+    # for that call, where the call is one that hands back an array nobody else
+    # holds (`Accumulators::FRESH`). Elements need only be values the fold can
+    # read — `parameters` holds `[kind, name]` pairs.
+    def built_types(element)
+      node = element.node
+      tuple = typing.vouched_of(node: node)
+      return nil unless tuple.is_a?(AST::Types::Tuple)
+      return nil unless built_value?(node, tuple)
+
+      return nil unless fresh_call?(node) || Accumulators::Noise.harmless?(self, element.exposed)
+      return nil unless tuple.types.all? { |type| LiteralIntrinsics.fold_value?(type) }
+
+      tuple.types
+    end
+
+    # Whether `node` is a call to a method in `Accumulators::FRESH`, which
+    # hands back an array nobody else holds.
+    def fresh_call?(node)
+      call = typing.call_of(node: node)
+      call.is_a?(TypeInference::MethodCall::Typed) && Accumulators::FRESH.include?(MethodIdentity.key(call))
+    rescue Typing::UnknownNodeError
+      false
+    end
+
+    # Records, for every local this call is handed that `Accumulators` vouches
+    # for, the tuple it holds as the call is made — which is what the callee's
+    # parameter arrives holding, and what the call site's specialization is
+    # keyed on (`Specializations::Arguments.from_send`).
+    def record_vouched_arguments(arguments)
+      HashMutation.vouch_held_records(self, arguments)
+      handed = source.accumulators.at_args
+      return if handed.empty?
+
+      arguments.each do |argument|
+        values = argument.type == :kwargs ? argument.children.filter_map { |pair| pair.children[1] if pair.type == :pair } : [argument]
+
+        values.each do |value|
+          types = handed[value]&.then { |elements| Accumulators::Contents.types(self, elements) } or next
+
+          typing.add_vouched(value, AST::Types::Tuple.new(types: types))
+        end
+      end
+    end
+
+    # Records the collection this call evaluates to where the checker COMPUTED
+    # it — folded it, read it off a reflection, or took the return recorded for
+    # the arguments this call passes — rather than read it off the declaration.
+    # Only such a tuple says what the array holds; a declared one describes an
+    # array the call may hand back from anywhere:
+    #
+    #   def names: () -> [:a]          # `@names ||= [:a]`
+    #   names.push(:z)
+    #   gen(names)                     # `[:a, :z]` at runtime
+    #
+    # Read back by `built_value?` and `Specializations::Arguments.argument_type`.
+    def record_built_value(node, call, declared_return_type)
+      type = call.return_type
+      return unless collection_value?(type)
+
+      typing.add_vouched(node, type)
+      typing.add_nominal(node, declared_return_type)
+    end
+
+    # Checks the body of an `each` once per element of its receiver, with the
+    # parameter bound to that element and the env the pass before it left. Keeps
+    # each pass's typing (`Typing#pass_typings`, never saved into the program's)
+    # and, for a loop `Accumulators` counted, what each pass pushes — and which
+    # arm of every conditional it pushes under the pass took.
+    #
+    # Declined — the loop left unexpanded, so the local has no contents — unless
+    # the call is Array's own `each`, unreplaced by the project, over a
+    # collection whose length the receiver's type states.
+    def record_iterations(node, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
+      entries = source.accumulators.loops[node]
+      typing.add_iterations(node, nil) if entries
+
+      intrinsic = iteration_intrinsic(decls)
+      return unless intrinsic&.collect == :each
+
+      param = block_params.params.first
+      return unless block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
+
+      collection = iterated_collection(node.children[0], receiver_type)&.tap { |known| typing.expand(node) if known.types.empty? } or return
+
+      # Each pass starts where the one before it left off, as it does when the
+      # loop runs: a local of the method written in the body, or an ivar, is
+      # what the next pass reads.
+      #
+      #     ["x", "y"].each do |p|
+      #       if first then parts << p else parts << "rest" end   # "x;rest"
+      #       first = false
+      #     end
+      #
+      # Only the locals the body is entered with carry over. One born in the
+      # body is bound anew on every pass, and the parameter is the next element.
+      env = UnrolledEach.starting_env(self, entry, (block_body && typing.unwidened_of(node: block_body)) || {})
+      carried = env.local_variable_types.keys
+
+      passes = collection.types.map do |element|
+        pass = entry
+          .with_new_typing(typing.new_child)
+          .update_type_env { env.refine_types(local_variable_types: { param.var => element }) }
+        body_type, pass_context = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
+        # A pass that cannot finish is the last one that runs, and the count
+        # is of every element.
+        return if body_type.is_a?(AST::Types::Bot)
+        typing.add_pass_typing(node, pass.typing)
+
+        exit_env = pass_context.type_env
+        env = exit_env.update(local_variable_types: exit_env.local_variable_types.slice(*carried))
+
+        record = {}.compare_by_identity #: Typing::iteration_pass
+        Accumulators.each_entry(entries || []) { |value| Accumulators::Contents.record(pass, value, record) }
+        record
+      end
+
+      typing.add_iterations(node, passes) if entries
+    end
+
+    # The entry of `IterationIntrinsics` a block call resolved to, or nil.
+    def iteration_intrinsic(decls)
+      names = decls.map { |decl| decl.method_name.to_s }.uniq
+      return unless names.size == 1
+
+      IterationIntrinsics.entry(MethodIdentity.normalize(names.first), override_registry: literal_method_registry)
+    end
+
+    # The receiver of a block call as a collection the checker knows, or nil.
+    # A local `Accumulators` vouches for is read where the call reads it; any
+    # other receiver has to be a collection the checker built or this file
+    # writes out.
+    def iterated_collection(send_node, receiver_type)
+      collection = accumulated_type(send_node) || literal_operand_type(send_node.children[0], receiver_type)
+      return unless collection.is_a?(AST::Types::Tuple)
+      # Each element is a check of the whole body, so the bound is on the work.
+      return if collection.types.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
+
+      collection
+    end
+
+    # What a `map` or `filter_map` block hands back over a collection the
+    # checker knows: the body checked once per element, with its parameters
+    # bound to that element, and the values collected in order.
+    #
+    # Unlike `record_iterations` the passes do not carry anything from one to
+    # the next — only the VALUE of each is asked for, and the locals the body
+    # closes over keep the types every run of a block assumes. A body that can
+    # leave early is declined: `next` hands back a value this does not read,
+    # and `break` a value for the whole call.
+    def iterated_value(node, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
+      return unless block_body
+      intrinsic = iteration_intrinsic(decls) or return
+      return if intrinsic.collect == :each
+      return if jumps_out?(block_body)
+
+      collection = iterated_collection(node.children[0], receiver_type)&.tap { |known| typing.expand(node) if known.types.empty? } or return
+
+      results = collection.types.map do |element|
+        bindings = IterationIntrinsics.element_bindings(block_params, element) or return
+        pass = entry
+          .with_new_typing(typing.new_child)
+          .update_type_env { |env| env.refine_types(local_variable_types: bindings) }
+        type, _ = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
+        typing.add_pass_typing(node, pass.typing)
+        # An array written out is read off its elements, as a hint may widen it.
+        block_body.type == :array ? pass.literal_operand_type(block_body, type) : type
+      end
+
+      IterationIntrinsics.collect(intrinsic, results)
+    end
+
+    # The same, for `map(&:first)`: `Symbol#to_proc` calls the method on each
+    # element, so each pass is that call, checked with the element as receiver.
+    def iterated_by_symbol(node, symbol, receiver_type:, decls:)
+      intrinsic = iteration_intrinsic(decls) or return
+      return if intrinsic.collect == :each
+      return if literal_method_registry.blocked?(IterationIntrinsics::SYMBOL_TO_PROC)
+
+      collection = iterated_collection(node, receiver_type) or return
+      element_node = node.updated(:lvar, [ITERATED_ELEMENT])
+      call_node = node.updated(:send, [element_node, symbol])
+
+      results = collection.types.map do |element|
+        pass = with_new_typing(typing.new_child)
+          .update_type_env { |env| env.assign_local_variable(ITERATED_ELEMENT, element, nil) }
+        type, _ = pass.synthesize(call_node)
+        type
+      end
+
+      IterationIntrinsics.collect(intrinsic, results)
+    end
+
+    # The local a symbol's pass binds the element to. Not a name Ruby can
+    # spell, so it can shadow nothing the program reads.
+    ITERATED_ELEMENT = :"*element"
+
+    # The env a condition leaves on one side, joined from the operands that can
+    # reach it. In `!x.nil? || nil.respond_to?(:name)` the right operand is
+    # `false`, so the `||` is true only where the left one is, and the left
+    # one's narrowing is the whole answer. Joining the side that cannot happen
+    # put back what it narrowed away.
+    def join_reachable(*results)
+      reachable = results.reject(&:unreachable)
+      reachable = results if reachable.empty?
+
+      context.type_env.join(*reachable.map(&:env))
+    end
+
+    def jumps_out?(node)
+      return false unless node.is_a?(::Parser::AST::Node)
+      return true if Accumulators::JUMPS.include?(node.type)
+
+      node.children.any? { |child| jumps_out?(child) }
+    end
+
+    # A single reflection call the checker answered with the method it found.
+    #
+    # Only where nothing else in the call can raise: its receiver and
+    # arguments are read, not called. `foo.bar.public_instance_method(:x)`
+    # can raise from `foo.bar` — a `NoMethodError` is a `NameError` — and the
+    # rescue would run for it.
+    def resolved_reflection?(node, type)
+      return false unless node.type == :send && type.is_a?(AST::Types::MethodObject)
+
+      receiver, _method_name, *arguments = node.children
+      [receiver, *arguments].all? { |operand| operand.nil? || READ_OPERANDS.include?(operand.type) }
+    end
+
+    # Operands evaluated by reading: a variable, a constant the checker
+    # resolved, `self`, a literal.
+    READ_OPERANDS = %i[lvar ivar cvar gvar const self sym str int float nil true false].freeze
+
+    # A single reflection call on a method the module does not have.
+    def raising_reflection?(node)
+      return false unless node.type == :send
+
+      call = typing.call_of(node: node)
+      return false unless call.is_a?(TypeInference::MethodCall::Typed)
+
+      receiver = node.children[0] or return false
+      argument_types = node.children.drop(2).map do |argument|
+        return false unless typing.has_type?(argument)
+
+        literal_operand_type(argument, typing.type_of(node: argument))
+      end
+
+      ReflectionIntrinsics.raises_name_error?(
+        call: call,
+        receiver_type: typing.type_of(node: receiver),
+        argument_types: argument_types,
+        factory: checker.factory,
+        override_registry: literal_method_registry
+      )
+    rescue Typing::UnknownNodeError
+      false
+    end
+
+    # Whether one of these clauses catches a `NameError`: a bare `rescue`
+    # (`StandardError`), or one listing a class `::NameError` descends from.
+    #
+    # Asked of the types the checker gave the listed classes, which the
+    # `:rescue` above synthesized: `NameError` written inside a module that
+    # defines its own is that module's, an alias of `NameError` is
+    # `NameError`, and `rescue *ERRORS` lists what `ERRORS` holds. A class it
+    # could not resolve does not count — the rescue is then typed as any
+    # other.
+    def rescues_name_error?(resbodies)
+      name_error_name = RBS::TypeName.parse("::NameError")
+      # An environment that does not declare it cannot say what descends from it.
+      return false unless checker.factory.env.class_decls.key?(name_error_name)
+
+      name_error = AST::Types::Name::Instance.new(name: name_error_name, args: [])
+
+      resbodies.any? do |resbody|
+        classes = resbody.children[0]
+        next true unless classes
+
+        classes.children.any? do |klass|
+          rescued_classes(klass).any? do |rescued|
+            check_relation(sub_type: name_error, super_type: to_instance_type(rescued)).success?
+          end
+        end
+      end
+    end
+
+    # The class objects one entry of a rescue list names, as typed.
+    def rescued_classes(node)
+      return [] unless typing.has_type?(node) || node.type == :splat
+
+      type =
+        if node.type == :splat
+          inner = node.children[0] or return []
+          return [] unless typing.has_type?(inner)
+
+          element_types(expand_alias(typing.type_of(node: inner)))
+        else
+          [expand_alias(typing.type_of(node: node))]
+        end
+
+      type.flat_map { |t| t.is_a?(AST::Types::Union) ? t.types : [t] }
+          .select { |t| t.is_a?(AST::Types::Name::Singleton) }
+    end
+
+    # What a splatted list holds: a tuple's members, an array's element.
+    def element_types(type)
+      case type
+      when AST::Types::Tuple
+        type.types.map { |t| expand_alias(t) }
+      when AST::Types::Name::Instance
+        type.name.to_s == "::Array" && type.args.size == 1 ? [expand_alias(type.args[0])] : []
+      else
+        []
+      end
+    end
+
+    # The literal `node` evaluates to where each `if` it is chosen by is
+    # decided: a plain string spelled in the arm the check kept, or a value
+    # already typed as a literal. nil where an `if` stayed open.
+    def decided_literal(node)
+      case node.type
+      when :str
+        AST::Types::Literal.new(value: node.children[0])
+      when :begin
+        decided_literal(node.children.last)
+      when :if
+        case typing.arm_of(node: node)
+        when :then then node.children[1] && decided_literal(node.children[1])
+        when :else then node.children[2] && decided_literal(node.children[2])
+        end
+      else
+        type = typed_as(node)
+        type if type.is_a?(AST::Types::Literal)
+      end
+    end
+
+    # Which arm of `node` this check leaves reachable, for a conditional some
+    # push sits under, or that chooses an interpolated local's value. Read off
+    # the same answer the checker reports `UnreachableBranch` from, so the arm
+    # counted is the arm it type-checked.
+    #
+    # Only a value the checker computed rules out the falsy side: a declaration
+    # never says `nil` where the value may be one (an ivar before it is set,
+    # `Hash#[]` for a key it lacks).
+    def record_arm(node, cond_type, truthy:, falsy:)
+      return unless source.accumulators.branches[node] || source.local_assignments.choices[node]
+
+      arm =
+        if falsy.unreachable && !truthy.unreachable
+          :then if LiteralIntrinsics.computed_truthy?(cond_type)
+        elsif truthy.unreachable && !falsy.unreachable
+          :else
+        end
+
+      typing.add_arm(node, arm)
+    end
+
+
+    # The tuple an array built by `<<` holds where this call reads it, or nil for
+    # every other call — which is nearly all of them.
+    #
+    # Handed to the fold rather than written into the type environment, because
+    # refining the local makes `Array[Elem]#<<` demand the first element's type
+    # and the next push stops type-checking. The contents are the same; this is
+    # the half of it that changes nothing else.
+    #
+    # Read off the source, which holds one analysis for the whole file — this
+    # construction is one of many over it.
+    def accumulated_type(node)
+      return nil unless node.type == :send || node.type == :lvar
+
+      elements = source.accumulators.at_reads[node] or return nil
+      types = Accumulators::Contents.types(self, elements) or return nil
+
+      AST::Types::Tuple.new(types: types)
+    end
+
+    # `{ local name => tuple }` for the locals this call completes, or nil
+    # anywhere else — the half of the analysis the type environment hears about.
+    # More than one name because a single `fill(parts, others)` can be the last
+    # thing that happens to each of them.
+    def accumulated_final_types(node)
+      # A loop or a conditional completes a local as a `<<` does: the block or
+      # `if` node is the statement.
+      return nil unless node.type == :send || node.type == :block || node.type == :if || node.type == :op_asgn
+
+      entries = source.accumulators.final[node] or return nil
+
+      types = {} #: Hash[Symbol, AST::Types::t]
+      entries.each do |name, elements|
+        element_types = Accumulators::Contents.types(self, elements) or next
+
+        types[name] = AST::Types::Tuple.new(types: element_types)
+      end
+
+      types.empty? ? nil : types
+    end
+
+    # The last push into an array this body builds gives the local the tuple
+    # it is worth from there on — so `return parts` hands back what went into
+    # it, and not `Array[untyped]`. Only the LAST: a tuple makes
+    # `Array[Elem]#<<` demand the first element's type, and a push after that
+    # would stop type-checking.
+    def with_accumulated_finals(node)
+      finals = accumulated_final_types(node) or return self
+      update_type_env { |env| env.refine_types(local_variable_types: finals) }
+    end
+
+    # The argument types a specialization pass is checking this body under
+    # (felixefelip/rbs_infer#345, stage S4). nil during an ordinary type check.
+    def specialization_arguments(node)
+      return nil if specializations.empty?
+
+      path = source.path or return nil
+      offset = node.loc.expression&.begin_pos or return nil
+
+      specializations.active_arguments([path.to_s, offset])
     end
 
     def with_method_constr(method_name, node, args:, self_type:, definition:)
@@ -312,7 +943,11 @@ module Steep
           if checker.factory.class_name?(absolute_name) || checker.factory.module_name?(absolute_name)
             AST::Annotation::Implements::Module.new(
               name: absolute_name,
-              args: annotation.name.args
+              args: annotation.name.args,
+              # Carried, not re-derived: this only resolves the NAME, and
+              # dropping the flag here would quietly turn `singleton(::Foo)`
+              # back into `::Foo` — the same name, the other method table.
+              singleton: annotation.name.singleton?
             )
           else
             Steep.logger.error "Unknown class name given to @implements: #{annotation.name.name}"
@@ -336,6 +971,9 @@ module Steep
     def default_module_context(implement_module_name, nesting:)
       if implement_module_name
         module_name = checker.factory.absolute_type_name(implement_module_name.name, context: nesting) or raise
+
+        return singleton_module_context(module_name, implement_module_name, nesting: nesting) if implement_module_name.singleton?
+
         module_args = implement_module_name.args.map {|name| AST::Types::Var.new(name: name) }
 
         instance_def = checker.factory.definition_builder.build_instance(module_name)
@@ -366,6 +1004,44 @@ module Steep
       end
     end
 
+    # The context a `class << self` body has, named by `@implements
+    # singleton(::Foo)` instead of opened lexically.
+    #
+    # The two are the same claim about the same body: a `def` in either defines
+    # `Foo.bar`, so the DEFINEE — `instance_definition`, which is what a `def`
+    # is checked against — is `Foo`'s singleton, and the `self` inside it is the
+    # class object. `for_sclass` derives exactly this from the type of the
+    # receiver it is opening; here the annotation states it, which a block
+    # reopening a singleton through a value (`base.singleton_class.class_eval`)
+    # needs because the receiver's own type says only `Class`
+    # (felixefelip/steep#152).
+    #
+    # Type ARGUMENTS have nowhere to go and the parser refuses them: a singleton
+    # class is one type whatever its instances are parameterised by.
+    def singleton_module_context(module_name, implement_module_name, nesting:)
+      instance_type = AST::Types::Name::Singleton.new(name: module_name)
+
+      module_type =
+        case checker.factory.env.constant_entry(module_name)
+        when RBS::Environment::ModuleEntry, RBS::Environment::ModuleAliasEntry
+          AST::Builtin::Module.instance_type
+        else
+          AST::Builtin::Class.instance_type
+        end
+
+      TypeInference::Context::ModuleContext.new(
+        instance_type: instance_type,
+        module_type: module_type,
+        implement_name: implement_module_name,
+        nesting: nesting,
+        class_name: module_name,
+        instance_definition: checker.factory.definition_builder.build_singleton(module_name),
+        # `Class`/`Module` is an instance type, so there is no singleton
+        # definition behind it to reopen — the same nil `for_sclass` leaves.
+        module_definition: nil
+      )
+    end
+
     def for_module(node, new_module_name)
       new_nesting = [nesting, new_module_name || false] #: RBS::Resolver::context
 
@@ -388,7 +1064,7 @@ module Steep
             instance_type: AST::Types::Intersection.build(
               types: [
                 AST::Builtin::Object.instance_type,
-                *module_entry.self_types.map {|module_self|
+                *checker.factory.module_self_types(module_entry).map {|module_self|
                   type = case
                         when module_self.name.interface?
                           RBS::Types::Interface.new(
@@ -456,6 +1132,7 @@ module Steep
         TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(checker.factory),
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(module_context.module_definition, checker.factory),
+        TypeInference::TypeEnvBuilder::Command::ImportClassVariableDefinition.new(module_context.module_definition, checker.factory),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annots).merge!,
         TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annots)
       ).build(TypeInference::TypeEnv.new(module_const_env))
@@ -474,7 +1151,16 @@ module Steep
           type_env: module_type_env,
           call_context: TypeInference::MethodCall::ModuleContext.new(type_name: module_context.class_name),
           variable_context: variable_context
-        )
+        ),
+        contracts: contracts,
+        postconditions: postconditions,
+        callbacks: callbacks,
+        specializations: specializations,
+        literal_method_registry: literal_method_registry,
+        delegation_registry: delegation_registry,
+        constructor_bindings: constructor_bindings,
+        return_forwarding: return_forwarding,
+        return_alias: return_alias
       )
     end
 
@@ -547,6 +1233,7 @@ module Steep
         TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annots),
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots),
         TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(singleton_definition, checker.factory),
+        TypeInference::TypeEnvBuilder::Command::ImportClassVariableDefinition.new(singleton_definition, checker.factory),
       ).build(TypeInference::TypeEnv.new(class_const_env))
 
       class_body_context = TypeInference::Context.new(
@@ -565,7 +1252,16 @@ module Steep
         source: source,
         annotations: annots,
         typing: typing,
-        context: class_body_context
+        context: class_body_context,
+        contracts: contracts,
+        postconditions: postconditions,
+        callbacks: callbacks,
+        specializations: specializations,
+        literal_method_registry: literal_method_registry,
+        delegation_registry: delegation_registry,
+        constructor_bindings: constructor_bindings,
+        return_forwarding: return_forwarding,
+        return_alias: return_alias
       )
     end
 
@@ -653,13 +1349,13 @@ module Steep
         instance_definition: instance_definition
       )
 
-      singleton_definition = checker.factory.definition_builder.build_singleton(module_context.class_name)
       type_env =
         TypeInference::TypeEnvBuilder.new(
           TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(checker.factory),
           TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annots),
           TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annots),
-          TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(instance_definition, checker.factory)
+          TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(instance_definition, checker.factory),
+          TypeInference::TypeEnvBuilder::Command::ImportClassVariableDefinition.new(instance_definition, checker.factory)
         ).build(TypeInference::TypeEnv.new(context.type_env.constant_env))
 
       body_context = TypeInference::Context.new(
@@ -678,7 +1374,16 @@ module Steep
         source: source,
         annotations: annots,
         typing: typing,
-        context: body_context
+        context: body_context,
+        contracts: contracts,
+        postconditions: postconditions,
+        callbacks: callbacks,
+        specializations: specializations,
+        literal_method_registry: literal_method_registry,
+        delegation_registry: delegation_registry,
+        constructor_bindings: constructor_bindings,
+        return_forwarding: return_forwarding,
+        return_alias: return_alias
       )
     end
 
@@ -713,7 +1418,7 @@ module Steep
       Pair.new(type: type, constr: constr)
     end
 
-    def add_call(call)
+    def add_call(call, entered: self)
       case call
       when TypeInference::MethodCall::NoMethodError
         typing.add_error(call.error)
@@ -724,13 +1429,13 @@ module Steep
       end
 
       typing.add_typing(call.node, call.return_type, nil)
-      typing.add_call(call.node, call)
+      typing.add_call(call.node, call, self_type: self_type, exact_self: Specializations.exact_self(entered), keyed_self: Specializations.keyed_self(entered, call), self_ivars: ObjectStates.call_ivars(entered, call), class_states: ObjectStates::ClassStates.of_call(entered, call))
 
       Pair.new(type: call.return_type, constr: self)
     end
 
     def synthesize(node, hint: nil, condition: false)
-      Steep.logger.tagged "synthesize:(#{node.location&.yield_self {|loc| loc.expression.to_s.split(/:/, 2).last } || "-"})" do
+      Steep.logger.tagged(-> { "synthesize:(#{node.location&.yield_self {|loc| loc.expression.to_s.split(/:/, 2).last } || "-"})" }) do
         Steep.logger.debug node.type
         case node.type
         when :begin, :kwbegin
@@ -761,13 +1466,13 @@ module Steep
           yield_self do
             name, rhs = node.children
 
-            case name
-            when :_, :__any__
+            case
+            when name == :__skip__
+              add_typing(node, type: AST::Builtin.any_type)
+            when cast_lvar?(name)
               synthesize(rhs, hint: AST::Builtin.any_type).yield_self do |pair|
                 add_typing(node, type: AST::Builtin.any_type, constr: pair.constr)
               end
-            when :__skip__
-              add_typing(node, type: AST::Builtin.any_type)
             else
               if enforced_type = context.type_env.enforced_type(name)
                 case
@@ -781,10 +1486,32 @@ module Steep
               end
 
               if rhs
-                rhs_type, rhs_constr, rhs_context = synthesize(rhs, hint: hint).to_ary
+                rhs_type, rhs_constr, _ = synthesize(rhs, hint: hint).to_ary
 
                 constr = rhs_constr.update_type_env do |type_env|
                   var_type = rhs_type
+
+                  # A new array the checker computed, held by a local. Its
+                  # contents are `Accumulators`' to follow (a `Built` birth); as
+                  # a tuple TYPE they would go stale at the first `push`, and
+                  # the first `<<` would have to be the first element. So the
+                  # local holds what the call declares.
+                  if (nominal = typing.nominal_of(node: rhs)) && typing.vouched_of(node: rhs) == rhs_type && fresh_call?(rhs)
+                    var_type = nominal
+                  end
+
+                  # A local read only inside `#{}` keeps the literal its
+                  # decided value spells — see `LocalAssignments`.
+                  if source.local_assignments.interpolated[node] && !type_env.enforced_type(name) &&
+                     (literal = rhs_constr.decided_literal(rhs))
+                    var_type = literal
+                  end
+
+                  # A local read only as a condition keeps the `true`/`false` it
+                  # is assigned — see `LocalAssignments` (`decided`).
+                  if source.local_assignments.decided[node] && !type_env.enforced_type(name)
+                    var_type = AST::Types::Literal.new(value: rhs.type == :true)
+                  end
 
                   if enforced_type = type_env.enforced_type(name)
                     if result = no_subtyping?(sub_type: rhs_type, super_type: enforced_type)
@@ -808,6 +1535,11 @@ module Steep
                   type_env.assign_local_variable(name, var_type, enforced_type)
                 end
 
+                # felixefelip/steep#56: `x = build` where `build` declares a
+                # `returns.establishes` postcondition imports the return-value
+                # attribute facts onto `x` (so a later `x.save` is satisfied).
+                constr = Postconditions::ReturnEstablishmentApplier.new(constr).apply(name: name, rhs: rhs)
+
                 constr.add_typing(node, type: rhs_type)
               else
                 add_typing(node, type: enforced_type || AST::Builtin.any_type)
@@ -819,7 +1551,8 @@ module Steep
           yield_self do
             var = node.children[0]
 
-            if SPECIAL_LVAR_NAMES.include?(var)
+            if cast_lvar?(var) || (var == :_ && !context.type_env[var])
+              # …or a `_` nothing assigned: a parameter, which stays untyped.
               add_typing node, type: AST::Builtin.any_type
             else
               if (type = context.type_env[var])
@@ -830,20 +1563,20 @@ module Steep
             end
           end
 
-        when :ivasgn
+        when :ivasgn, :cvasgn
           name = node.children[0]
           rhs = node.children[1]
 
           rhs_type, constr = synthesize(rhs, hint: context.type_env[name])
 
-          constr.ivasgn(node, rhs_type)
+          ObjectStates::EnteredSelf.assigned(ObjectStates::ClassMemos.born(constr.ivasgn(node, rhs_type), name, rhs), name, rhs)
 
         when :ivar
           yield_self do
             name = node.children[0]
 
             if type = context.type_env[name]
-              add_typing(node, type: type)
+              HashMutation.read_ivar(self, node, type)
             else
               fallback_to_any node
             end
@@ -866,6 +1599,8 @@ module Steep
               new_node = node.updated(:lvasgn, [lhs.children[0], send_node])
 
               type, constr = synthesize(new_node, hint: hint)
+
+              constr = constr.with_accumulated_finals(node)
 
               constr.add_typing(node, type: type)
 
@@ -930,7 +1665,7 @@ module Steep
                   receiver_type: self_type,
                   method_name: method_context!.name || raise("method context must have a name"),
                   method: super_method,
-                  arguments: node.children,
+                  arguments: with_method_block(node),
                   block_params: nil,
                   block_body: nil,
                   tapp: nil,
@@ -938,7 +1673,7 @@ module Steep
                 )
 
                 if call && constr
-                  constr.add_call(call)
+                  ObjectStates::Supers.after(constr.add_call(call), node)
                 else
                   error = Diagnostic::Ruby::UnresolvedOverloading.new(
                     node: node,
@@ -998,33 +1733,7 @@ module Steep
               new = new.synthesize_children(args_node)
 
               body_pair = if body_node
-                            return_type = expand_alias(new.method_context!.return_type)
-                            if !return_type.is_a?(AST::Types::Void)
-                              new.check(body_node, return_type) do |_, actual_type, result|
-                                if new.method_context!.attribute_setter?
-                                  typing.add_error(
-                                    Diagnostic::Ruby::SetterBodyTypeMismatch.new(
-                                      node: node,
-                                      expected: new.method_context!.return_type,
-                                      actual: actual_type,
-                                      result: result,
-                                      method_name: new.method_context!.name
-                                    )
-                                  )
-                                else
-                                  typing.add_error(
-                                    Diagnostic::Ruby::MethodBodyTypeMismatch.new(
-                                      node: node,
-                                      expected: new.method_context!.return_type,
-                                      actual: actual_type,
-                                      result: result
-                                    )
-                                  )
-                                end
-                              end
-                            else
-                              new.synthesize(body_node)
-                            end
+                            MethodBody.check(new, node, body_node, setters: true)
                           else
                             return_type = expand_alias(new.method_context!.return_type)
                             if !return_type.is_a?(AST::Types::Void)
@@ -1057,6 +1766,7 @@ module Steep
                           end
 
               if body_node
+                ObjectStates.record_exit(new, node, body_pair)
                 # Add context to ranges from the end of the method body to the beginning of the `end` keyword
                 if node.loc.end
                   # Skip end-less def
@@ -1070,7 +1780,7 @@ module Steep
                 module_context.defined_instance_methods << node.children[0]
               end
 
-              add_typing(node, type: AST::Builtin::Symbol.instance_type)
+              add_typing(node, type: test_literal_type(name, hint) || AST::Builtin::Symbol.instance_type)
             end
           end
 
@@ -1121,21 +1831,8 @@ module Steep
             end
 
             if node.children[3]
-              return_type = expand_alias(new.method_context!.return_type)
-              if !return_type.is_a?(AST::Types::Void)
-                new.check(node.children[3], return_type) do |return_type, actual_type, result|
-                  typing.add_error(
-                    Diagnostic::Ruby::MethodBodyTypeMismatch.new(
-                      node: node,
-                      expected: return_type,
-                      actual: actual_type,
-                      result: result
-                    )
-                  )
-                end
-              else
-                new.synthesize(node.children[3])
-              end
+              body_pair = MethodBody.check(new, node, node.children[3], setters: false)
+              ObjectStates.record_exit(new, node, body_pair)
             end
           end
 
@@ -1143,7 +1840,7 @@ module Steep
             module_context.defined_module_methods << node.children[1]
           end
 
-          add_typing(node, type: AST::Builtin::Symbol.instance_type)
+          add_typing(node, type: test_literal_type(node.children[1], hint) || AST::Builtin::Symbol.instance_type)
 
         when :return
           yield_self do
@@ -1166,7 +1863,7 @@ module Steep
             end
 
             if method_return_type
-              unless method_context.nil? || method_return_type.is_a?(AST::Types::Void)
+              unless method_context.nil? || method_return_type.is_a?(AST::Types::Void) || Specializations::CallSiteUnions.body_answer(self, method_context.node)
                 result = constr.check_relation(sub_type: value_type, super_type: method_return_type)
 
                 if result.failure?
@@ -1194,6 +1891,7 @@ module Steep
               end
             end
 
+            constr.typing.add_jump_env(node, constr.context.type_env)
             constr.add_typing(node, type: AST::Builtin.bottom_type)
           end
 
@@ -1232,6 +1930,7 @@ module Steep
             typing.add_error Diagnostic::Ruby::UnexpectedJump.new(node: node)
           end
 
+          typing.add_jump_env(node, context.type_env)
           add_typing(node, type: AST::Builtin.bottom_type)
 
         when :next
@@ -1454,10 +2153,12 @@ module Steep
         when :true, :false
           ty = node.type == :true ? AST::Types::Literal.new(value: true) : AST::Types::Literal.new(value: false)
 
-          case
-          when hint && check_relation(sub_type: ty, super_type: hint).success? && !hint.is_a?(AST::Types::Any) && !hint.is_a?(AST::Types::Top)
-            add_typing(node, type: unwrap(hint))
-          when condition
+          fits_hint = hint && !hint.is_a?(AST::Types::Any) && !hint.is_a?(AST::Types::Top) &&
+            check_relation(sub_type: ty, super_type: hint).success?
+
+          # Narrowing needs something to narrow under: `x = true` stays `bool`,
+          # or a later `x = false` is an error.
+          if condition || fits_hint
             add_typing(node, type: ty)
           else
             add_typing(node, type: AST::Types::Boolean.instance)
@@ -1466,7 +2167,8 @@ module Steep
         when :hash, :kwargs
           # :kwargs happens for method calls with keyword argument, but the method doesn't have keyword params.
           # Conversion from kwargs to hash happens, and this when-clause is to support it.
-          type_hash(node, hint: hint).tap do |pair|
+          pair = type_hash(node, hint: hint)
+          HashMutation.held_literal(pair.constr, node, hint: hint) || pair.tap do |pair|
             if pair.type == AST::Builtin::Hash.instance_type(fill_untyped: true)
               case hint
               when AST::Types::Any, AST::Types::Top, AST::Types::Void
@@ -1484,14 +2186,15 @@ module Steep
             synthesize(child)
           end
 
-          add_typing(node, type: AST::Builtin::String.instance_type)
+          literal = node.type == :dstr ? LiteralSyntax.string(node, typing) : nil
+          add_typing(node, type: literal || AST::Builtin::String.instance_type)
 
         when :dsym
           each_child_node(node) do |child|
             synthesize(child)
           end
 
-          add_typing(node, type: AST::Builtin::Symbol.instance_type)
+          add_typing(node, type: LiteralSyntax.symbol(node, typing) || AST::Builtin::Symbol.instance_type)
 
         when :class
           yield_self do
@@ -1536,6 +2239,7 @@ module Steep
               end
             end
 
+            exit = nil
             with_class_constr(node, class_name, super_name) do |constructor|
               if module_type = constructor.module_context&.module_type
                 _, constructor = constructor.add_typing(name_node, type: module_type)
@@ -1546,14 +2250,14 @@ module Steep
               constructor.typing.cursor_context.set_node_context(node, constructor.context)
               constructor.typing.cursor_context.set_body_context(node, constructor.context)
 
-              constructor.synthesize(node.children[2]) if node.children[2]
+              exit = ObjectStates::ClassStates.entered(constructor, self).synthesize(node.children[2]).constr if node.children[2]
 
               if constructor.module_context&.implement_name && !namespace_module?(node)
                 constructor.validate_method_definitions(node, constructor.module_context.implement_name || raise)
               end
             end
 
-            add_typing(node, type: AST::Builtin.nil_type)
+            ObjectStates::ClassStates.left(self, exit).add_typing(node, type: AST::Builtin.nil_type)
           end
 
         when :module
@@ -1579,6 +2283,7 @@ module Steep
               constr.typing.source_index.add_definition(constant: module_name, definition: name_node)
             end
 
+            exit = nil
             with_module_constr(node, module_name) do |constructor|
               if module_type = constructor.module_context&.module_type
                 _, constructor = constructor.add_typing(name_node, type: module_type)
@@ -1589,14 +2294,14 @@ module Steep
               constructor.typing.cursor_context.set_node_context(node, constructor.context)
               constructor.typing.cursor_context.set_body_context(node, constructor.context)
 
-              constructor.synthesize(node.children[1]) if node.children[1]
+              exit = ObjectStates::ClassStates.entered(constructor, self).synthesize(node.children[1]).constr if node.children[1]
 
               if constructor.module_context&.implement_name && !namespace_module?(node)
                 constructor.validate_method_definitions(node, constructor.module_context.implement_name || raise)
               end
             end
 
-            add_typing(node, type: AST::Builtin.nil_type)
+            ObjectStates::ClassStates.left(self, exit).add_typing(node, type: AST::Builtin.nil_type)
           end
 
         when :sclass
@@ -1714,7 +2419,7 @@ module Steep
                 constr = type_check_untyped_args(node.children)
               end
 
-              add_typing(node, type: block_type.type.return_type)
+              add_typing(node, type: block_type.type.return_type, constr: ObjectStates::Yields.replayed(constr, node))
             elsif method_type.type.params
               typing.add_error(Diagnostic::Ruby::UnexpectedYield.new(node: node))
               fallback_to_any node
@@ -1728,12 +2433,16 @@ module Steep
 
         when :zsuper
           yield_self do
-            if method_context && method_context.method
+            if method_context&.method && method_context.super_method && (super_node = explicit_super(node, method_context.node))
+              type, constr = synthesize(super_node, hint: hint)
+              constr.typing.add_explicit_super(node, super_node)
+              constr.add_typing(node, type: ObjectStates::KeyedMemo.read_type(constr, node) || type)
+            elsif method_context && method_context.method
               if method_context.super_method
                 types = method_context.super_method.method_types.map {|method_type|
                   checker.factory.method_type(method_type).type.return_type
                 }
-                add_typing(node, type: union_type(*types))
+                add_typing(node, type: ObjectStates::KeyedMemo.read_type(self, node) || union_type(*types))
               else
                 fallback_to_any(node) do
                   Diagnostic::Ruby::UnexpectedSuper.new(node: node, method: method_context.name)
@@ -1745,55 +2454,7 @@ module Steep
           end
 
         when :array
-          yield_self do
-            if node.children.empty?
-              if hint
-                array = AST::Builtin::Array.instance_type(AST::Builtin.any_type)
-                if check_relation(sub_type: array, super_type: hint).success?
-                  add_typing node, type: unwrap(hint)
-                else
-                  add_typing node, type: array
-                end
-              else
-                typing.add_error Diagnostic::Ruby::UnannotatedEmptyCollection.new(node: node)
-                add_typing node, type: AST::Builtin::Array.instance_type(AST::Builtin.any_type)
-              end
-            else
-              if hint
-                tuples = select_flatten_types(hint) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
-                unless tuples.empty?
-                  fallback_pair = nil #: Pair?
-                  tuples.each do |tuple|
-                    typing.new_child() do |child_typing|
-                      if pair = with_new_typing(child_typing).try_tuple_type(node, tuple)
-                        if pair.constr.check_relation(sub_type: pair.type, super_type: tuple).success?
-                          return pair.with(constr: pair.constr.save_typing)
-                        end
-                        fallback_pair ||= pair.with(constr: pair.constr.save_typing)
-                      end
-                    end
-                  end
-                  return fallback_pair if fallback_pair
-                end
-              end
-
-              if hint
-                arrays = select_flatten_types(hint) {|type| AST::Builtin::Array.instance_type?(type) } #: Array[AST::Types::Name::Instance]
-                unless arrays.empty?
-                  arrays.each do |array|
-                    typing.new_child() do |child_typing|
-                      pair = with_new_typing(child_typing).try_array_type(node, array)
-                      if pair.constr.check_relation(sub_type: pair.type, super_type: hint).success?
-                        return pair.with(constr: pair.constr.save_typing)
-                      end
-                    end
-                  end
-                end
-              end
-
-              try_array_type(node, nil)
-            end
-          end
+          array_literal(node, hint)
 
         when :and
           yield_self do
@@ -1801,7 +2462,7 @@ module Steep
 
             left_type, constr, left_context = synthesize(left_node, hint: hint, condition: true).to_ary
 
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions, self_type: self_type)
             left_truthy, left_falsy = interpreter.eval(env: left_context.type_env, node: left_node)
 
             if left_type.is_a?(AST::Types::Logic::Env)
@@ -1815,7 +2476,7 @@ module Steep
                 .for_branch(right_node)
                 .synthesize(right_node, hint: hint, condition: true).to_ary
 
-            right_truthy, right_falsy = interpreter.eval(env: right_context.type_env, node: right_node)
+            right_truthy, right_falsy = interpreter.eval(env: right_context.type_env, node: right_node).each { _1.unreachable! if left_truthy.unreachable }
 
             case
             when left_truthy.unreachable
@@ -1825,15 +2486,15 @@ module Steep
             when left_falsy.unreachable
               # Always left_truthy ==> right
               env = right_context.type_env
-              type = right_type
+              type = TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy)
             when right_truthy.unreachable && right_falsy.unreachable
               env = left_falsy.env
               type = left_falsy.type
             else
               env = context.type_env.join(left_falsy.env, right_context.type_env)
-              type = union_type(left_falsy.type, right_type)
+              type = union_type(left_falsy.type, TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy))
 
-              unless type.is_a?(AST::Types::Any)
+              unless type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Literal)
                 if check_relation(sub_type: type, super_type: AST::Types::Boolean.instance).success?
                   type = AST::Types::Boolean.instance
                 end
@@ -1843,7 +2504,7 @@ module Steep
             if condition
               type = AST::Types::Logic::Env.new(
                 truthy: right_truthy.env,
-                falsy: context.type_env.join(left_falsy.env, right_falsy.env),
+                falsy: join_reachable(left_falsy, right_falsy),
                 type: type
               )
             end
@@ -1860,7 +2521,7 @@ module Steep
             end
             left_type, constr, left_context = synthesize(left_node, hint: left_hint, condition: true).to_ary
 
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions, self_type: self_type)
             left_truthy, left_falsy = interpreter.eval(env: left_context.type_env, node: left_node)
 
             if left_type.is_a?(AST::Types::Logic::Env)
@@ -1874,7 +2535,7 @@ module Steep
                 .for_branch(right_node)
                 .synthesize(right_node, hint: left_truthy.type, condition: true).to_ary
 
-            right_truthy, right_falsy = interpreter.eval(env: right_context.type_env, node: right_node)
+            right_truthy, right_falsy = interpreter.eval(env: right_context.type_env, node: right_node).each { _1.unreachable! if left_falsy.unreachable }
 
             case
             when left_falsy.unreachable
@@ -1883,15 +2544,15 @@ module Steep
             when left_truthy.unreachable
               # Always left_falsy ==> right
               env = right_context.type_env
-              type = right_type
+              type = TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy)
             when right_truthy.unreachable && right_falsy.unreachable
               env = left_truthy.env
               type = left_truthy.type
             else
               env = context.type_env.join(left_truthy.env, right_context.type_env)
-              type = union_type(left_truthy.type, right_type)
+              type = union_type(left_truthy.type, TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy))
 
-              unless type.is_a?(AST::Types::Any)
+              unless type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Literal)
                 if check_relation(sub_type: type, super_type: AST::Types::Boolean.instance).success?
                   type = AST::Types::Boolean.instance
                 end
@@ -1900,7 +2561,7 @@ module Steep
 
             if condition
               type = AST::Types::Logic::Env.new(
-                truthy: context.type_env.join(left_truthy.env, right_truthy.env),
+                truthy: join_reachable(left_truthy, right_truthy),
                 falsy: right_falsy.env,
                 type: type
               )
@@ -1914,14 +2575,26 @@ module Steep
             cond, true_clause, false_clause = node.children
 
             cond_type, constr = synthesize(cond, condition: true).to_ary
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: constr.typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: constr.typing, config: builder_config, postconditions: postconditions, self_type: constr.self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
+
+            # Keep what the interpreter just concluded, so a later pass reads the
+            # checker's own answer about this condition instead of re-deriving it
+            # from the AST. No-op unless the typing was asked to record.
+            constr.typing.record_branch_envs(node, entry: constr.context.type_env, truthy: truthy.env, falsy: falsy.env)
+            constr.record_arm(node, cond_type, truthy: truthy, falsy: falsy)
 
             if true_clause
               true_pair =
                 constr
                   .update_type_env { truthy.env }
                   .for_branch(true_clause)
+                  # Argument-sensitive entry facts (peça 3): `if which == :name` reaches its
+                  # truthy clause only for callers who passed `:name`, so that partition's
+                  # facts hold here — the `if` analogue of a `when :name` clause. Only the
+                  # truthy side: "not this literal" pins the argument to nothing. `elsif` is
+                  # a nested `:if`, so it is covered by the same path.
+                  .yield_self {|c| TypeInference::ArgumentFacts.apply_for_condition(c, cond) }
                   .tap {|constr| typing.cursor_context.set_node_context(true_clause, constr.context) }
                   .synthesize(true_clause, hint: hint)
             end
@@ -1955,10 +2628,23 @@ module Steep
                   end
                 end
               else
-                envs << falsy.env
+                # `unless falsy.unreachable` here too, which the truthy side
+                # above has had all along. Without it an `x = y if cond` whose
+                # condition is DECIDED still joins the env of the branch that
+                # cannot run, and the value the condition just settled comes out
+                # a union of both:
+                #
+                #     receiver = "class"
+                #     receiver = "self.#{receiver}" if RESERVED.include?(receiver)
+                #     receiver   # ("self.class" | "class"), for a condition
+                #                #   the checker answered `true`
+                envs << falsy.env unless falsy.unreachable
               end
 
-              env.join(*envs)
+              # Both branches gone: nothing after this runs, and there is no env
+              # to join. The one the `if` was entered with is what the
+              # unreachable code is checked against.
+              envs.empty? ? env : env.join(*envs)
             end
 
             if truthy.unreachable
@@ -2014,7 +2700,22 @@ module Steep
               end
             end
 
-            node_type = union_type_unify(true_pair&.type || AST::Builtin.nil_type, false_pair&.type || AST::Builtin.nil_type)
+            true_type = true_pair&.type || AST::Builtin.nil_type
+            false_type = false_pair&.type || AST::Builtin.nil_type
+
+            node_type =
+              if truthy.unreachable && !falsy.unreachable
+                false_type
+              elsif falsy.unreachable && !truthy.unreachable
+                true_type
+              else
+                union_type_unify(true_type, false_type)
+              end
+
+            # A decided conditional can be the last push into an array, as a
+            # `<<` can.
+            constr = constr.with_accumulated_finals(node)
+
             add_typing(node, type: node_type, constr: constr)
           end
 
@@ -2025,82 +2726,19 @@ module Steep
             cond, *whens, els = node.children
 
             constr = self #: TypeConstruction
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions, self_type: self_type)
 
             if cond
               types, envs = TypeInference::CaseWhen.type_check(constr, node, interpreter, hint: hint, condition: condition)
             else
-              branch_results = [] #: Array[Pair]
-
-              condition_constr = constr
-
-              whens.each do |when_clause|
-                when_clause_constr = condition_constr
-                body_envs = [] #: Array[TypeInference::TypeEnv]
-
-                # @type var tests: Array[Parser::AST::Node]
-                # @type var body: Parser::AST::Node?
-                *tests, body = when_clause.children
-
-                branch_reachable = false
-
-                tests.each do |test|
-                  test_type, condition_constr = condition_constr.synthesize(test, condition: true)
-                  truthy, falsy = interpreter.eval(env: condition_constr.context.type_env, node: test)
-                  truthy_env = truthy.env
-                  falsy_env = falsy.env
-
-                  condition_constr = condition_constr.update_type_env { falsy_env }
-                  body_envs << truthy_env
-
-                  branch_reachable ||= !truthy.unreachable
-                end
-
-                branch_result =
-                  if body
-                    when_clause_constr
-                      .update_type_env {|env| env.join(*body_envs) }
-                      .for_branch(body)
-                      .tap {|constr| typing.cursor_context.set_node_context(body, constr.context) }
-                      .synthesize(body, hint: hint)
-                  else
-                    Pair.new(type: AST::Builtin.nil_type, constr: when_clause_constr)
-                  end
-
-                branch_results << branch_result
-
-                unless branch_reachable
-                  unless branch_result.type.is_a?(AST::Types::Bot)
-                    typing.add_error(
-                      Diagnostic::Ruby::UnreachableValueBranch.new(
-                        node: when_clause,
-                        type: branch_result.type,
-                        location: when_clause.location.keyword || raise
-                      )
-                    )
-                  end
-                end
-              end
-
-              if els
-                branch_results << condition_constr.synthesize(els, hint: hint)
-              else
-                branch_results << Pair.new(type: AST::Builtin.nil_type, constr: condition_constr)
-              end
-
-              branch_results.reject! do |result|
-                result.type.is_a?(AST::Types::Bot)
-              end
-
-              types = branch_results.map(&:type)
-              envs = branch_results.map {|result| result.constr.context.type_env }
+              types, envs = TypeInference::CaseWhen.type_check_conditions(constr, node, interpreter, hint: hint)
             end
 
             constr = constr.update_type_env do |env|
-              env.join(*envs)
+              envs.empty? ? env : env.join(*envs)
             end
 
-            add_typing(node, type: union_type_unify(*types), constr: constr)
+            add_typing(node, type: types.empty? ? AST::Types::Bot.instance : union_type_unify(*types), constr: constr)
           end
 
         when :rescue
@@ -2176,12 +2814,34 @@ module Steep
               no_subtyping?(sub_type: pair.type, super_type: AST::Types::Bot.instance)
             end
 
+            # A reflection the checker resolved found the method it names, and
+            # a missing method is the one thing it raises for. So the rescue
+            # clauses are still checked, but do not run:
+            #
+            #   method_object = begin
+            #     receiver_class.public_instance_method(method)   # unbound_method(::Post.human_name)
+            #   rescue NameError
+            #     nil                                             # not this
+            #   end
+            #
+            # which is how `ActiveSupport::Delegation.generate` reads a target's
+            # parameter list.
+            resbody_pairs = [] if body_pair && resolved_reflection?(node.children[0], body_pair.type)
+
+            # …and the other half: a reflection on a method the module does not
+            # have raises, so only the rescue runs. `Delegation.generate`'s
+            # fallback to `"..."`, for a target that has no such method.
+            raises = body_pair && raising_reflection?(node.children[0]) && rescues_name_error?(resbodies)
+
             resbody_types = resbody_pairs.map(&:type)
             resbody_envs = resbody_pairs.map {|pair| pair.context.type_env }
 
             else_constr = body_pair&.constr || self
 
-            if else_node
+            if raises
+              update_type_env { |env| env.join(*resbody_envs) }
+                .add_typing(node, type: resbody_types.empty? ? AST::Types::Bot.instance : union_type(*resbody_types))
+            elsif else_node
               else_type, else_constr = else_constr.for_branch(else_node).synthesize(else_node, hint: hint)
               else_constr
                 .update_type_env {|env| env.join(*resbody_envs, env) }
@@ -2263,6 +2923,7 @@ module Steep
 
             if var_type
               if body
+                constr = AssignedLiterals.widen_changed_in(constr, body)
                 body_constr = constr.update_type_env do |type_env|
                   type_env = type_env.assign_local_variables({ var_name => var_type })
                   pins = type_env.pin_local_variables(nil)
@@ -2295,9 +2956,12 @@ module Steep
         when :while, :until
           yield_self do
             cond, body = node.children
-            cond_type, constr = synthesize(cond, condition: true).to_ary
+            # A loop runs its condition and body any number of times, so a
+            # mutation anywhere in it is seen from the first pass after
+            # (felixefelip/steep#207) — as for a block.
+            _, constr = AssignedLiterals.widen_changed_in(self, node).synthesize(cond, condition: true).to_ary
 
-            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config)
+            interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: builder_config, postconditions: postconditions, self_type: self_type)
             truthy, falsy = interpreter.eval(env: constr.context.type_env, node: cond)
             truthy_env = truthy.env
             falsy_env = falsy.env
@@ -2338,7 +3002,7 @@ module Steep
           yield_self do
             cond, body = node.children
 
-            _, cond_constr, = synthesize(cond)
+            _, cond_constr, = AssignedLiterals.widen_changed_in(self, node).synthesize(cond)
 
             if body
               for_loop =
@@ -2347,7 +3011,7 @@ module Steep
                   .for_branch(body, break_context: TypeInference::Context::BreakContext.new(break_type: hint || AST::Builtin.nil_type, next_type: nil))
 
               typing.cursor_context.set_node_context(body, for_loop.context)
-              _, body_constr, body_context = for_loop.synthesize(body)
+              _, _, body_context = for_loop.synthesize(body)
 
               constr = cond_constr.update_type_env {|env| env.join(env, body_context.type_env) }
 
@@ -2380,7 +3044,7 @@ module Steep
             synthesize(child)
           end
 
-          add_typing(node, type: AST::Builtin::Regexp.instance_type)
+          add_typing(node, type: LiteralSyntax.regexp(node, typing) || AST::Builtin::Regexp.instance_type)
 
         when :regopt
           # ignore
@@ -2399,13 +3063,15 @@ module Steep
             case asgn.type
             when :lvasgn
               type, constr = synthesize(rhs, hint: hint)
-              constr.lvasgn(asgn, type)
-            when :ivasgn
-              type, constr = synthesize(rhs, hint: hint)
-              constr.ivasgn(asgn, type)
+              type, constr = constr.lvasgn(asgn, type)
+              constr.add_typing(node, type: type)
+            when :ivasgn, :cvasgn
+              type, constr = ObjectStates::ClassMemos.or_assigned(self, node, hint)
+              constr.add_typing(node, type: type)
             when :gvasgn
               type, constr = synthesize(rhs, hint: hint)
-              constr.gvasgn(asgn, type)
+              type, constr = constr.gvasgn(asgn, type)
+              constr.add_typing(node, type: type)
             when :send
               children = asgn.children.dup
               children[1] = :"#{children[1]}="
@@ -2419,7 +3085,8 @@ module Steep
                           end
               node_ = node.updated(node_type, [asgn, rhs_])
 
-              synthesize(node_, hint: hint)
+              type, constr = synthesize(node_, hint: hint)
+              constr.add_typing(node, type: type)
             else
               Steep.logger.error { "#{node.type} with #{asgn.type} lhs is not supported"}
               fallback_to_any(node)
@@ -2428,7 +3095,9 @@ module Steep
 
         when :defined?
           type_any_rec(node, only_children: true)
-          add_typing(node, type: AST::Builtin.optional(AST::Builtin::String.instance_type))
+          # A constant the program declares is one `defined?` finds.
+          defined = context.type_env.constant_of(node.children[0]) ? AST::Types::Literal.new(value: "constant") : nil
+          add_typing(node, type: defined || AST::Builtin.optional(AST::Builtin::String.instance_type))
 
         when :gvasgn
           yield_self do
@@ -2559,51 +3228,8 @@ module Steep
             add_typing node, type: AST::Builtin.any_type
           end
 
-        when :cvasgn
-          name, rhs = node.children
-
-          type, constr = synthesize(rhs, hint: hint)
-
-          var_type =
-            if class_vars = module_context.class_variables
-              if ty = class_vars[name]
-                checker.factory.type(ty)
-              end
-            end
-
-          if var_type
-            result = constr.check_relation(sub_type: type, super_type: var_type)
-
-            if result.success?
-              add_typing node, type: type, constr: constr
-            else
-              fallback_to_any node do
-                Diagnostic::Ruby::IncompatibleAssignment.new(
-                  node: node,
-                  lhs_type: var_type,
-                  rhs_type: type,
-                  result: result
-                )
-              end
-            end
-          else
-            fallback_to_any(node)
-          end
-
         when :cvar
-          name = node.children[0] #: Symbol
-          var_type =
-            if cvs = module_context.class_variables
-              if ty = cvs[name]
-                checker.factory.type(ty)
-              end
-            end
-
-          if var_type
-            add_typing node, type: var_type
-          else
-            fallback_to_any node
-          end
+          context.type_env[node.children[0]]&.then { |type| add_typing(node, type: type) } || fallback_to_any(node)
 
         when :alias
           add_typing node, type: AST::Builtin.nil_type
@@ -2696,7 +3322,7 @@ module Steep
             constr.add_typing(node, type: type)
           end
 
-        when :block, :numblock, :send, :csend
+        when :block, :numblock, :itblock, :send, :csend
           synthesize_sendish(node, hint: hint, tapp: nil)
 
         when :forwarded_args, :forward_arg
@@ -2746,9 +3372,11 @@ module Steep
           send_type, constr =
             type_send(node, send_node: node, block_params: nil, block_body: nil, unwrap: true, tapp: tapp, hint: hint).to_ary
 
+          type = constr.csend_receiver_may_be_nil?(node.children[0]) ? union_type(send_type, AST::Builtin.nil_type) : send_type
+
           constr
-            .update_type_env { context.type_env.join(constr.context.type_env, context.type_env) }
-            .add_typing(node, type: union_type(send_type, AST::Builtin.nil_type))
+            .update_type_env { csend_env_join(pre: context.type_env, post: constr.context.type_env, receiver: node.children[0]) }
+            .add_typing(node, type: type)
         end
       when :block
         yield_self do
@@ -2757,7 +3385,7 @@ module Steep
             # @type var node: Parser::AST::Node & Parser::AST::_BlockNode
             type_lambda(node, params_node: params, body_node: body, type_hint: hint)
           else
-            type_send(node, send_node: send_node, block_params: params, block_body: body, unwrap: send_node.type == :csend, tapp: tapp, hint: hint)
+            DefinedMethods.check(self, node) { type_send(node, send_node: send_node, block_params: params, block_body: body, unwrap: send_node.type == :csend, tapp: tapp, hint: hint) }
           end
         end
       when :numblock
@@ -2779,9 +3407,69 @@ module Steep
             type_send(node, send_node: send_node, block_params: params, block_body: body, unwrap: send_node.type == :csend, tapp: tapp, hint: hint)
           end
         end
+      when :itblock
+        yield_self do
+          send_node, _name, body = node.children
+
+          arg_nodes = [Parser::AST::Node.new(:procarg0, [:it])]
+          params = Parser::AST::Node.new(:args, arg_nodes)
+
+          if send_node.type == :lambda
+            # @type var node: Parser::AST::Node & Parser::AST::_BlockNode
+            type_lambda(node, params_node: params, body_node: body, type_hint: hint)
+          else
+            type_send(node, send_node: send_node, block_params: params, block_body: body, unwrap: send_node.type == :csend, tapp: tapp, hint: hint)
+          end
+        end
       else
         raise "Unexpected node is given to `#synthesize_sendish` (#{node.type}, #{node.location.first_line})"
       end
+    end
+
+    # Whether `x&.m` can end without calling `m`: `&.` skips the call when `x`
+    # is nil, so the result is nilable exactly when `x` may be nil. `nil`
+    # added for any receiver typed `Person&.name` as `"Ana"?` — a value no run
+    # can produce.
+    #
+    # Asked of subtyping, not of the receiver's spelling: `top` and `untyped`
+    # hold nil without writing it. (`Object` does not, to this checker: it
+    # rejects `nil` assigned to an `Object`.) A type variable may be
+    # instantiated with nil, and a receiver with no type recorded is not known
+    # to exclude it; both keep the nil.
+    def csend_receiver_may_be_nil?(receiver)
+      return true unless receiver && typing.has_type?(receiver)
+
+      receiver_type = checker.factory.deep_expand_alias(typing.type_of(node: receiver)) || typing.type_of(node: receiver)
+      members = receiver_type.is_a?(AST::Types::Union) ? receiver_type.types : [receiver_type]
+      return true if members.any? { |member| member.is_a?(AST::Types::Var) }
+
+      check_relation(sub_type: AST::Builtin.nil_type, super_type: receiver_type).success?
+    end
+
+    # The env after `x&.m`. The join is the whole point — the CALL may not have
+    # happened, so nothing it established can be assumed — but the RECEIVER always
+    # ran: `&.` evaluates `x` and only then decides. `TypeEnv#join` keeps a pure
+    # call only when both sides hold it, and the receiver's own registration was
+    # made while synthesizing it, so it exists on one side only and was dropped.
+    #
+    # That is why `latest&.label && latest.stamp` could not narrow `latest` while
+    # `entry&.label && entry.stamp` could: a local survives the join, a pure call
+    # did not. Carrying the receiver subtree's registrations back restores the
+    # symmetry, and composes down a chain — each `&.` carries its own receiver, so
+    # by the time the outermost one joins, the root is present on both sides.
+    def csend_env_join(pre:, post:, receiver:)
+      joined = pre.join(post, pre)
+      return joined unless receiver.is_a?(Parser::AST::Node)
+
+      nodes = Set[receiver]
+      each_descendant_node(receiver) { |child| nodes << child }
+
+      carried = post.pure_method_calls.select do |node, _|
+        nodes.include?(node) && !joined.pure_method_calls.key?(node)
+      end
+      return joined if carried.empty?
+
+      joined.merge(pure_method_calls: carried)
     end
 
     def masgn_lhs?(lhs)
@@ -2798,7 +3486,7 @@ module Steep
     def lvasgn(node, type)
       name = node.children[0]
 
-      if SPECIAL_LVAR_NAMES.include?(name)
+      if cast_lvar?(name)
         add_typing(node, type: AST::Builtin.any_type)
       else
         if enforced_type = context.type_env.enforced_type(name)
@@ -2824,19 +3512,39 @@ module Steep
     def ivasgn(node, rhs_type)
       name = node.children[0]
 
-      lhs_type = context.type_env[name]
+      declared_type = context.type_env.declared_instance_variable_type(name)
+      assignment_passed = false
 
-      if lhs_type
-        if (result = check_relation(sub_type: rhs_type, super_type: lhs_type)).failure?
+      if declared_type
+        if (result = check_relation(sub_type: rhs_type, super_type: declared_type)).failure?
           typing.add_error(
-            Diagnostic::Ruby::IncompatibleAssignment.new(node: node, lhs_type: lhs_type, rhs_type: rhs_type, result: result)
+            Diagnostic::Ruby::IncompatibleAssignment.new(node: node, lhs_type: declared_type, rhs_type: rhs_type, result: result)
           )
+        else
+          assignment_passed = true
         end
       else
-        typing.add_error(Diagnostic::Ruby::UnknownInstanceVariable.new(node: node, name: name))
+        typing.add_error(node.type == :cvasgn ? Diagnostic::Ruby::FallbackAny.new(node: node) : Diagnostic::Ruby::UnknownInstanceVariable.new(node: node, name: name))
       end
 
-      add_typing(node, type: rhs_type)
+      # Phase 1 of felixefelip/steep#16: when the declared ivar type is a
+      # Union, refine the env's current ivar type to the RHS type. This
+      # selects the matching branch on a narrowing assignment and resets
+      # any previously narrowed view (from a prior assignment or from the
+      # intersection attr-write narrowing in felixefelip/steep#1) to the
+      # RHS type — keeping subtype checks honest against the declared
+      # union and giving readers the most precise type seen at this
+      # program point.
+      narrowed = ObjectStates.assigned_ivar(context.type_env[name], declared_type, rhs_type, passed: assignment_passed)
+
+      update_type_env do |env|
+        # ivar pure-call narrowing (issue felixefelip/steep#8): once the ivar
+        # is reassigned, any pure_method_calls cached on `@name` are stale and
+        # must be dropped so subsequent `@name.foo` doesn't reuse the previous
+        # type.
+        env = env.invalidate_pure_node(env.variable_node(name))
+        narrowed ? env.refine_types(instance_variable_types: { name => narrowed }) : env
+      end.add_typing(node, type: rhs_type)
     end
 
     def gvasgn(node, rhs_type)
@@ -2872,10 +3580,8 @@ module Steep
           if node.type == :splat
             asgn_node = node.children[0]
             next unless asgn_node
-            var_type = asgn_node.type
           else
             asgn_node = node
-            var_type = type
           end
 
           case asgn_node.type
@@ -3138,6 +3844,8 @@ module Steep
         block_block_hint: block_hint,
         block_annotations: block_annotations,
         block_self_hint: self_hint,
+        # A lambda has no receiver to reopen.
+        implicit_implements: nil,
         node_type_hint: nil
       )
 
@@ -3150,11 +3858,14 @@ module Steep
       block =
         if block_param = params.block_param
           if block_param_type = block_param.type
-            case block_param_type
+            # Expanding aliases because the cases below test the structure of the type
+            expanded_type = deep_expand_alias(block_param_type) || block_param_type
+
+            case expanded_type
             when AST::Types::Proc
-              Interface::Block.new(type: block_param_type.type, optional: false, self_type: block_param_type.self_type)
+              Interface::Block.new(type: expanded_type.type, optional: false, self_type: expanded_type.self_type)
             else
-              if proc_type = optional_proc?(block_param_type)
+              if proc_type = optional_proc?(expanded_type)
                 Interface::Block.new(type: proc_type.type, optional: true, self_type: proc_type.self_type)
               else
                 block_constr.typing.add_error(
@@ -3277,8 +3988,128 @@ module Steep
       nil
     end
 
-    def type_send_interface(node, interface:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:)
-      method = interface.methods[method_name]
+    # `send_dispatch:` is the literal-name `send` this call came from, or nil for an
+    # ordinary call (felixefelip/steep#137). Required rather than defaulted: a call site
+    # that forgot it would silently report the unresolved name as a missing `send`.
+    # Checks a call whose receiver is a union ONE BRANCH AT A TIME, each with the
+    # `self` that branch was declared to travel with. Returns the `Pair` when it
+    # applies and every branch checks; nil otherwise, and the ordinary path runs
+    # untouched.
+    #
+    # Why this exists. Two parameters of one method travel together across its
+    # call sites — `bazinga(Baz)` from `Bar`, `bazinga(BazOther)` from
+    # `BarOther` — and no RBS states that. Checking the call once, the branches'
+    # method types are merged and the parameter comes out contravariant, so
+    # `module_included.bazingado(self)` demands a `self` that satisfies EVERY
+    # branch: `singleton(Bar) & singleton(BarOther)`, a type nothing is. That is
+    # right for a fixed argument, and `self` here is not fixed — it is whichever
+    # host made the call, correlated with the branch
+    # (felixefelip/rbs_infer#231).
+    #
+    # The branch's `self` rides `TypeEnv#refined_self_type`, the same per-branch
+    # slot a predicate's postcondition already uses (felixefelip/steep#25), so
+    # everything downstream — the `:self` node, implicit-self sends — sees it
+    # without knowing where it came from.
+    #
+    # Gated hard: a union receiver, a declared path per branch, and the receiver
+    # written as a plain read of the parameter the paths name. Anything else and
+    # this returns nil, because "the receiver is THIS branch" and "the parameter
+    # was THIS" have to be the same sentence for the pairing to hold.
+    def try_correlated_paths(node:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:, private:, dispatch:)
+      return nil unless receiver_type.is_a?(AST::Types::Union)
+
+      selves = correlated_branch_selves(receiver, receiver_type) or return nil
+
+      # Every branch is checked in its own child typing. They type the same
+      # nodes, so one is saved with the others joined into it; a branch that
+      # failed has already made the whole thing return nil.
+      results = selves.map do |branch, self_type|
+        child = typing.new_child
+        constr = with_new_typing(child)
+        constr = constr.update_type_env {|env| env.with_refined_self(self_type) }
+
+        interface = constr.calculate_interface(branch, private: private) or return nil
+        pair = constr.type_send_interface(
+          node,
+          interface: interface,
+          receiver: receiver,
+          receiver_type: branch,
+          method_name: method_name,
+          arguments: arguments,
+          block_params: block_params,
+          block_body: block_body,
+          tapp: tapp,
+          hint: hint,
+          send_dispatch: dispatch
+        )
+        return nil unless child.errors.empty?
+
+        [pair, child]
+      end
+
+      pair, child = results.last
+      pair or return nil
+      child.tap { _1.join_branches!(results[...-1].map(&:last)) }.save!
+
+      # The refinement is the branch's, not the caller's: it ends with the call,
+      # exactly as a postcondition's refinement ends with its branch.
+      outer_self = context.type_env.refined_self_type
+      constr = pair.constr.with_new_typing(typing).update_type_env {|env| env.with_refined_self(outer_self) }
+
+      Pair.new(type: AST::Types::Union.build(types: results.map {|branch_pair, _| branch_pair.type }), constr: constr)
+    end
+
+    # `[[branch, self type], ...]` when every branch of the receiver has a path
+    # declaring the `self` that goes with it, else nil.
+    def correlated_branch_selves(receiver, receiver_type)
+      entries = declared_paths or return nil
+      return nil unless receiver.type == :lvar
+
+      parameter = receiver.children[0].to_s
+      branches = receiver_type.types.map do |branch|
+        wanted = normalize_declared_type(branch.to_s)
+        entry = entries.find {|e| normalize_declared_type(e["when"][parameter].to_s) == wanted } or return nil
+        self_type = parse_annotation_type(entry["self"]) or return nil
+        [branch, self_type]
+      end
+      return nil if branches.empty?
+
+      branches
+    end
+
+    # The generator writes a type as the sources spell it (`singleton(Wrap::Baz)`)
+    # and it arrives here resolved (`singleton(::Wrap::Baz)`). The root `::` is
+    # the only difference and it is not one.
+    def normalize_declared_type(string)
+      string.sub(/\A::/, "").sub(/\Asingleton\(::/, "singleton(")
+    end
+
+    # The paths the sidecar declares for the method being checked, or nil. Keyed
+    # by the file, the enclosing module's leaf name and the method name — the
+    # same three things the generator wrote them under.
+    def declared_paths
+      return nil unless ENV["STEEP_MODULE_CONVENTION"]
+
+      method = method_context&.name or return nil
+      path = node_path(source.node) or return nil
+      entry = Source::ModuleSelfTypes.entry_for(path) or return nil
+      anchor = module_context&.module_type&.to_s&.split("::")&.last&.delete_suffix(")") or return nil
+
+      Source::ModuleSelfTypes.paths_of(entry, anchor, method)
+    end
+
+    def node_path(node)
+      node&.location&.expression&.source_buffer&.name
+    end
+
+    def parse_annotation_type(string)
+      checker.factory.type(RBS::Parser.parse_type(string))
+    rescue RBS::ParsingError, RBS::BaseError, StandardError
+      nil
+    end
+
+    def type_send_interface(node, interface:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:, send_dispatch:)
+      method = ArrayWrites.entry(self, interface.methods[method_name], receiver_type)
 
       if method
         call, constr = type_method_call(
@@ -3294,6 +4125,7 @@ module Steep
         )
 
         if call && constr
+          entered = constr
           case method_name.to_s
           when "[]="
             if test_send_node(node) {|_, _, _, loc| !loc.dot }
@@ -3304,21 +4136,201 @@ module Steep
             end
           when /\w=\Z/
             last_arg = arguments.last or raise
-            if typing.has_type?(last_arg)
-              call = call.with_return_type(typing.type_of(node: last_arg))
-            end
+            call = call.with_return_type(typing.type_of(node: last_arg)) if typing.has_type?(last_arg)
           end
 
           if call.is_a?(TypeInference::MethodCall::Typed)
+            declared_return_type = call.return_type
+            record_vouched_arguments(arguments)
+            nominal = call
+            call = Specializations.specialized_call(self, node, call, block: block_params || block_body)
+            unless block_params || block_body
+              call = constr.literal_intrinsic_call(
+                call,
+                receiver_type: receiver_type,
+                arguments: arguments,
+                declared_return_type: declared_return_type
+              )
+              call = constr.reflection_intrinsic_call(
+                call,
+                receiver_type: receiver_type,
+                arguments: arguments,
+                declared_return_type: declared_return_type
+              )
+              # felixefelip/steep#205: what an object built with known values
+              # holds, and what its readers answer.
+              call, constr = ObjectStates.answered(constr, call, node: node, receiver_type: receiver_type, arguments: arguments)
+            end
+            call = ObjectStates::Tap.answered(constr, call, node: node, receiver_type: receiver_type) if block_params
+            record_built_value(node, call, declared_return_type) unless call.equal?(nominal)
+
+            constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)
+
+            constr = constr.with_accumulated_finals(node)
+
+            # Phase 1: type subtraction on attribute write for intersection
+            # receivers (issue felixefelip/steep#1). When an attribute write
+            # invalidates one component's invariant (the getter's return type),
+            # drop that component from the intersection. Handles two forms of
+            # receiver: a local variable (refine `local_variable_types`) and a
+            # cached pure send like an `attr_reader` returning an intersection
+            # (refine `pure_call_types`). Other receivers are left alone — for
+            # them the existing `invalidate_pure_node` flow runs instead.
+            if receiver &&
+                method_name.to_s =~ /\w=\Z/ &&
+                receiver_type.is_a?(AST::Types::Intersection) &&
+                (last_arg = arguments.last) &&
+                typing.has_type?(last_arg)
+              rhs_type = typing.type_of(node: last_arg)
+              remaining = receiver_type.types.select do |component|
+                accepts_attribute_write?(component, method_name, rhs_type)
+              end
+              if !remaining.empty? && remaining.size < receiver_type.types.size
+                new_type = AST::Types::Intersection.build(types: remaining)
+                case receiver.type
+                when :lvar
+                  var_name = receiver.children[0] #: Symbol
+                  constr = constr.update_type_env do |env|
+                    env.refine_types(local_variable_types: { var_name => new_type })
+                  end
+                when :ivar
+                  ivar_name = receiver.children[0] #: Symbol
+                  constr = constr.update_type_env do |env|
+                    env.refine_types(instance_variable_types: { ivar_name => new_type })
+                  end
+                when :send
+                  if constr.context.type_env.pure_method_calls.key?(receiver)
+                    constr = constr.update_type_env do |env|
+                      env.refine_types(pure_call_types: { receiver => new_type })
+                    end
+                  end
+                end
+              end
+            end
+
+            # Phase 2 of felixefelip/steep#16: transparent attr_writer /
+            # attr_reader on `self`. When the call resolves to an attribute
+            # method (RBS `attr_reader`/`attr_writer`/`attr_accessor`) whose
+            # backing ivar is declared as a union, route the write through
+            # the same narrowing path as a direct `@x = expr` (Phase 1), and
+            # the read through the env's current ivar type instead of the
+            # declared method return type. This makes POROs that expose the
+            # ivar via attr methods narrow as naturally as controllers using
+            # direct ivars.
+            if self_receiver_for_attr?(receiver) &&
+                (attr_ivar = attr_method_backing_ivar(call.method_decls)) &&
+                (declared_ivar_type = constr.context.type_env.declared_instance_variable_type(attr_ivar)) &&
+                declared_ivar_type.is_a?(AST::Types::Union)
+              if method_name.to_s.end_with?("=")
+                if (last_arg = arguments.last) && typing.has_type?(last_arg)
+                  rhs_type = typing.type_of(node: last_arg)
+                  constr = constr.update_type_env do |env|
+                    env.refine_types(instance_variable_types: { attr_ivar => rhs_type })
+                  end
+                end
+              else
+                current_ivar_type = constr.context.type_env.instance_variable_types[attr_ivar]
+                if current_ivar_type && current_ivar_type != call.return_type
+                  call = call.with_return_type(current_ivar_type)
+                  constr.add_typing(node, type: current_ivar_type)
+                end
+              end
+            end
+
+            # Phase 1 of felixefelip/steep#23: unconditional postcondition.
+            # When a `.steep_postconditions.yml` entry declares an
+            # `unconditional:` branch for the method being called, apply
+            # its refinements to the env right after dispatch — independent
+            # of whether the call's return value is consumed as a guard.
+            # Covers `update!`-style bang methods (narrow receiver), the
+            # `set_company` pattern (narrow a caller ivar that the method
+            # body assigned to), and combinations of both.
+            constr = constr.apply_unconditional_postconditions(
+              node: node,
+              call: call,
+              receiver: receiver
+            )
+
+            # felixefelip/rbs_infer#71: a `Const.attr = <non-nil>` write whose
+            # setter carries an `establishes_consts` postcondition proves sibling
+            # `Const.<other>` reads non-nil for the rest of the frame.
+            constr = constr.apply_const_establishes_on_write(
+              node: node,
+              call: call,
+              receiver: receiver
+            )
+
+            constr = constr.apply_param_establishments(call: call, arguments: arguments)
+
+            # felixefelip/steep#68 (item 1): the callee may WRITE ivars this
+            # frame has narrowed — directly, or through anything it calls on
+            # `self`. Drop those narrowings, or the caller keeps believing a
+            # fact the call already invalidated.
+            constr = constr.apply_ivar_effects(call: call, receiver: receiver)
+
+            # felixefelip/steep#68 (item 2). Two halves at this site:
+            #
+            #  * REGISTER — calling a guard (`authenticate_user`) whose entry
+            #    carries `conditional_returns` records, in the caller's env,
+            #    that `self.current_user` is non-nil while `@halted` is falsy.
+            #  * APPLY — calling `current_user` itself: if such a fact is on
+            #    record and its gate ivar is currently known falsy (established
+            #    by an earlier `return if performed?`), narrow this call's
+            #    return type to the proven-present type.
+            constr = constr.register_conditional_returns(call: call, receiver: receiver)
+            # Whether a postcondition FACT (items 2/3/4 below) narrowed this
+            # node's return type. Such a fact is proven at this exact program
+            # point and must survive the pure-method-call restoration below —
+            # otherwise a pure ivar getter (`def self.name; @name; end`) whose
+            # cached return type is the declared (widened) type would clobber it.
+            # felixefelip/steep#76.
+            fact_narrowed = false
+            if self_receiver_for_attr?(receiver) &&
+                (spec = constr.conditional_return_spec(call)) &&
+                constr.ivar_known_falsy?(spec.fetch(:gate_ivar))
+              narrowed = spec.fetch(:type)
+              call = call.with_return_type(narrowed)
+              constr.add_typing(node, type: narrowed)
+              fact_narrowed = true
+            end
+
+            # felixefelip/steep#68 (item 3): the same APPLY, but for a read of a
+            # constant attribute (`Current.user`) rather than a self-method — the
+            # fact came from a `Const.attr = <non-nil>` write in the guard.
+            if (spec = constr.conditional_const_return_spec(node, receiver)) &&
+                constr.ivar_known_falsy?(spec.fetch(:gate_ivar))
+              narrowed = spec.fetch(:type)
+              call = call.with_return_type(narrowed)
+              constr.add_typing(node, type: narrowed)
+              fact_narrowed = true
+            end
+
+            # felixefelip/steep#68 (item 4): the UNGATED apply of a fact the
+            # runner proved holds at this method's entry (a guard ran before it
+            # and didn't halt). Same narrowing as items 2/3, but with no gate.
+            if (narrowed = constr.method_entry_narrowed_type(node, receiver))
+              call = call.with_return_type(narrowed)
+              constr.add_typing(node, type: narrowed)
+              fact_narrowed = true
+            end
+
             if (pure_call, type = constr.context.type_env.pure_method_calls.fetch(node, nil))
-              if type
+              if type && !fact_narrowed
                 call = pure_call.update(node: node, return_type: type)
                 constr.add_typing(node, type: call.return_type)
               end
             else
               if pure_send?(call, receiver, arguments)
-                constr = constr.update_type_env do |env|
-                  env.add_pure_call(node, call, call.return_type)
+                narrowed = constr.contract_narrowed_type(node, call.return_type)
+                if narrowed
+                  constr = constr.update_type_env do |env|
+                    env.add_pure_call(node, call, call.return_type).refine_types(pure_call_types: { node => narrowed })
+                  end
+                  call = call.with_return_type(narrowed)
+                else
+                  constr = constr.update_type_env do |env|
+                    env.add_pure_call(node, call, call.return_type)
+                  end
                 end
               else
                 constr = constr.update_type_env do |env|
@@ -3330,6 +4342,15 @@ module Steep
                 end
               end
             end
+
+            # After `receiver.attr = value`, record `receiver.attr` (read) as
+            # the assigned value's type, so a later read — or a contract
+            # precondition on it — sees the narrowed (non-nil) type. Runs after
+            # the pure-node invalidation above so it isn't cleared by it.
+            constr = constr.narrow_attribute_write(
+              node: node, receiver: receiver, receiver_type: receiver_type,
+              method_name: method_name, arguments: arguments
+            )
 
             if (_, message = deprecated_send?(call))
               send_node, _ = deconstruct_sendish_and_block_nodes(node)
@@ -3346,7 +4367,8 @@ module Steep
             end
           end
 
-          if node.type == :csend || ((node.type == :block || node.type == :numblock) && node.children[0].type == :csend)
+          if (node.type == :csend || ((node.type == :block || node.type == :numblock || node.type == :itblock) && node.children[0].type == :csend)) &&
+             constr.csend_receiver_may_be_nil?(receiver)
             optional_type = AST::Types::Union.build(types: [call.return_type, AST::Builtin.nil_type])
             call = call.with_return_type(optional_type)
           end
@@ -3420,7 +4442,7 @@ module Steep
           end
         end
 
-        constr.add_call(call)
+        constr.add_call(call, entered: entered || constr)
       else
         skips = [] #: Array[Parser::AST::Node?]
         skips << receiver if receiver
@@ -3452,13 +4474,30 @@ module Steep
           end
         end
 
+        error =
+          if send_dispatch
+            Diagnostic::Ruby::UnresolvedSend.new(
+              node: node,
+              location: send_dispatch.name_node.location.expression,
+              type: interface&.type || receiver_type,
+              method: method_name,
+              spelling: send_dispatch.spelling,
+              # `send`/`__send__` ignore visibility, so reaching this branch through one of
+              # them means the name resolves nowhere at all.
+              private_method: !send_dispatch.reaches_private? &&
+                declares_private_method?(receiver_type, method_name)
+            )
+          else
+            Diagnostic::Ruby::NoMethod.new(node: node, method: method_name, type: interface&.type || receiver_type)
+          end
+
         constr.add_call(
           TypeInference::MethodCall::NoMethodError.new(
             node: node,
             context: context.call_context,
             method_name: method_name,
             receiver_type: receiver_type,
-            error: Diagnostic::Ruby::NoMethod.new(node: node, method: method_name, type: interface&.type || receiver_type)
+            error: error
           )
         )
       end
@@ -3500,7 +4539,80 @@ module Steep
       end
 
       receiver_type = checker.factory.deep_expand_alias(recv_type)
+      # An implicit-self / `self` send inside a block whose declared self is
+      # `untyped` (`^() [self: untyped]`) must resolve as untyped — otherwise the
+      # receiver stays `Self`, whose interface can't be built against an untyped
+      # self, and every call wrongly reports "self does not have method ...".
+      # Expanding `Self` to the (untyped) self here routes it to the `Any` arm.
+      if receiver_type.is_a?(AST::Types::Self) && self_type.is_a?(AST::Types::Any)
+        receiver_type = self_type
+      end
+      receiver_type, constr = ObjectStates::Nested.read_through(constr, receiver, receiver_type, method_name) if receiver
       private = receiver.nil? || receiver.type == :self
+
+      # felixefelip/steep#137. A literal-name `send` is a call to that method, so replace
+      # the three things that describe *which* call this is and let the rest of the method
+      # run unchanged. The name literal is synthesized here because it stops being an
+      # argument: nothing downstream would type it otherwise.
+      if (dispatch = send_dispatch(receiver_type: receiver_type, method_name: method_name, arguments: arguments))
+        _, constr = constr.synthesize(dispatch.name_node)
+        method_name = dispatch.method_name
+        arguments = dispatch.arguments
+        private = dispatch.reaches_private?
+      end
+
+      # felixefelip/steep#207. A call that may change a String in place — this
+      # one, or one inside its block on a variable from out here — widens the
+      # String literal that variable was typed by.
+      if block_body
+        constr = AssignedLiterals.widen_changed_in(constr, block_body, shadowed: StringMutation.block_parameter_names(block_params))
+      end
+      if receiver
+        unwidened_receiver_type = receiver_type
+        receiver_type, constr = StringMutation.widen_receiver(
+          constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
+        )
+        receiver_type = ObjectStates::Tap.receiver_type(constr, node, receiver, receiver_type, method_name) if block_params
+      end
+
+      # Delegation chain narrowing (felixefelip/steep#32). If the
+      # called method's source body is a forward delegate
+      # (`def m; receiver.x; end`), substitute the call site with the
+      # expanded `host.receiver.x` form for narrowing purposes — so
+      # refinements on the chain (postcondition markers, pure_call
+      # cache from a prior predicate) reach the actual return. The
+      # original node still gets its typing recorded; the synthetic
+      # nodes used internally don't pollute external walks because
+      # they live only inside the recursive synthesize call.
+      if receiver && (inlined_type_constr = try_delegation_inline(node: node, receiver: receiver, recv_type: receiver_type, method_name: method_name, hint: hint))
+        inlined_type, inlined_constr = inlined_type_constr
+        return Pair.new(type: inlined_type, constr: inlined_constr)
+      end
+
+      # Correlated paths (felixefelip/steep#143). A union receiver whose
+      # branches were declared to travel with a `self` of their own is checked
+      # one branch at a time, each with that `self`, instead of once against the
+      # branches merged.
+      if receiver
+        correlated = try_correlated_paths(
+          node: node,
+          receiver: receiver,
+          receiver_type: receiver_type,
+          method_name: method_name,
+          arguments: arguments,
+          block_params: block_params,
+          block_body: block_body,
+          tapp: tapp,
+          hint: hint,
+          private: private,
+          dispatch: dispatch
+        )
+        return correlated.with(
+          constr: ObjectStates.after_call(
+            correlated.constr, node: node, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments
+          )
+        ) if correlated
+      end
 
       type, constr =
         case receiver_type
@@ -3509,7 +4621,7 @@ module Steep
 
         when AST::Types::Any
           case node.type
-          when :block, :numblock
+          when :block, :numblock, :itblock
             # @type var node: Parser::AST::Node & Parser::AST::_BlockNode
             block_annotations = source.annotations(block: node, factory: checker.factory, context: nesting)
             block_params or raise
@@ -3547,7 +4659,8 @@ module Steep
               block_params: block_params,
               block_body: block_body,
               tapp: tapp,
-              hint: hint
+              hint: hint,
+              send_dispatch: dispatch
             )
           else
             constr = constr.synthesize_children(node, skips: [receiver])
@@ -3562,6 +4675,13 @@ module Steep
             )
           end
         end
+
+      if receiver && !(block_params || block_body)
+        type, constr = StringMutation.fold_in_place(
+          constr, node, receiver, unwidened_receiver_type, method_name, arguments, type: type, private: private
+        )
+      end
+      constr = ObjectStates.after_call(constr, node: node, method_name: method_name, receiver: receiver, receiver_type: receiver_type, arguments: arguments)
 
       Pair.new(type: type, constr: constr)
     end
@@ -3591,12 +4711,841 @@ module Steep
       end
     end
 
+    # The three spellings of one dispatch, mapped to whether it reaches private methods.
+    # `__send__` is the one a defensive library uses, precisely because `send` can be
+    # overridden; `public_send` respects visibility, which is the whole reason it exists.
+    SEND_SPELLINGS = { send: true, __send__: true, public_send: false } #: Hash[Symbol, bool]
+
+    # Where the language's own spellings are declared: `__send__` on `BasicObject`,
+    # `send` as `Kernel`'s alias of it, `public_send` on `Kernel`. A `send` declared
+    # anywhere else — `Ractor#send`, a socket's, an app's message bus — is an ordinary
+    # method that happens to share the name, and its first argument is a value.
+    SEND_OWNERS = Set[
+      RBS::TypeName.parse("::BasicObject"),
+      RBS::TypeName.parse("::Kernel"),
+      RBS::TypeName.parse("::Object")
+    ] #: Set[RBS::TypeName]
+
+    # The call a literal-name `send` stands for (felixefelip/steep#137).
+    class SendDispatch
+      # The literal that names the method, so the diagnostic can point at it rather than
+      # at the `send` selector.
+      attr_reader :name_node
+
+      # The method actually called, and the arguments it actually receives — the name
+      # literal dropped.
+      attr_reader :method_name
+      attr_reader :arguments
+
+      # How the call was written, for the message.
+      attr_reader :spelling
+
+      def initialize(name_node:, method_name:, arguments:, spelling:, reaches_private:)
+        @name_node = name_node
+        @method_name = method_name
+        @arguments = arguments
+        @spelling = spelling
+        @reaches_private = reaches_private
+      end
+
+      # Whether the dispatch ignores visibility, as `send`/`__send__` do.
+      def reaches_private?
+        @reaches_private
+      end
+    end
+
+    # felixefelip/steep#137. `recv.send(:foo, ...)` with a LITERAL name is a call to
+    # `foo`: the receiver's type is known and the name is right there, so the only thing
+    # the spelling adds over `recv.foo(...)` is that it ignores visibility. Not a corner
+    # of the language either — it is how MRI invokes the mixin hooks, since `rb_funcall`
+    # dispatches by name and `append_features`/`included` are private on `Module`.
+    #
+    # Returns the call it stands for, or nil when this is not that shape. Two ways it is
+    # not: the name is computed (`send(name)`), which no static analysis decides, or the
+    # `send` being called is not the language's.
+    #
+    # Deliberately not a node rewrite. The same node is typed; only the method name, the
+    # argument list and the visibility handed to the ordinary dispatch path change, so
+    # arity, overload resolution, block checking, special methods and the return type all
+    # come from the machinery every other call already goes through.
+    def send_dispatch(receiver_type:, method_name:, arguments:)
+      return nil unless receiver_type
+
+      reaches_private = SEND_SPELLINGS[method_name]
+      return nil if reaches_private.nil?
+
+      name_node = arguments.first or return nil
+      dispatched = literal_method_name(name_node) or return nil
+      return nil unless core_send?(receiver_type, method_name)
+
+      SendDispatch.new(
+        name_node: name_node,
+        method_name: dispatched,
+        arguments: arguments.drop(1),
+        spelling: method_name,
+        reaches_private: reaches_private
+      )
+    end
+
+    # The method name an argument spells, when it spells one at all. A symbol or string
+    # literal names a method; `:"a#{b}"`, a variable and a constant do not, and nothing
+    # static says which method they mean.
+    def literal_method_name(node)
+      case node.type
+      when :sym
+        node.children[0]
+      when :str
+        node.children[0].to_sym
+      end
+    end
+
+    # Whether the `send` being called is the language's, and not a method of the same name
+    # the receiver declares. Also what keeps this off an `untyped` receiver: there is no
+    # shape to ask, so there is no dispatch to read.
+    def core_send?(receiver_type, method_name)
+      entry = calculate_interface(receiver_type, method_name, private: true)
+      return false unless entry
+
+      defs = entry.overloads.flat_map(&:method_defs)
+      return false if defs.empty?
+
+      defs.all? {|defn| SEND_OWNERS.include?(defn.defined_in) }
+    end
+
+    # Whether the receiver has the method but declares it private — the difference between
+    # `public_send` naming nothing and `public_send` naming a door it cannot use.
+    def declares_private_method?(receiver_type, method_name)
+      entry = calculate_interface(receiver_type, method_name, private: true)
+      entry ? entry.private_method? : false
+    end
+
+    # Phase 1 of "type subtraction on attribute write" (issue felixefelip/steep#1).
+    # Returns true when `rhs_type` is compatible with `component_type`'s
+    # invariant for the attribute. We check the matching getter's return type
+    # rather than the setter's parameter so that components which only narrow
+    # the getter (e.g. a "Valid" refinement that promises non-nil reads while
+    # inheriting a wide setter) get dropped on a write that breaks the
+    # narrowed invariant.
+    def accepts_attribute_write?(component_type, setter_name, rhs_type)
+      getter_name = setter_name.to_s.chomp("=").to_sym
+      entry = calculate_interface(component_type, getter_name, private: false)
+      return true unless entry
+
+      entry.overloads.any? do |overload|
+        ret = overload.method_type.type.return_type
+        check_relation(sub_type: rhs_type, super_type: ret).success?
+      end
+    end
+
+    # Phase 2 of felixefelip/steep#16: the attribute transparency rule
+    # only applies when the receiver of the send is the current `self`
+    # — either implicit (no receiver node) or an explicit `self` node.
+    # A non-self receiver might refer to another instance whose backing
+    # ivar is not the one in our env, so transparency would be unsound.
+    def self_receiver_for_attr?(receiver)
+      receiver.nil? || receiver.type == :self
+    end
+
+    # Phase 2 of felixefelip/steep#16: returns the backing instance
+    # variable name for an attribute method call, or nil if any decl
+    # in the call's method_decls is not an attr_reader/attr_writer/
+    # attr_accessor — including when a `def` override is in the
+    # resolution path (the override breaks transparency). When the RBS
+    # declaration sets `ivar_name: false`, the attr has no backing ivar
+    # and transparency does not apply.
+    def attr_method_backing_ivar(method_decls)
+      return nil if method_decls.empty?
+
+      ivars = method_decls.map do |decl|
+        member = decl.method_def&.member
+        case member
+        when RBS::AST::Members::AttrReader, RBS::AST::Members::AttrWriter, RBS::AST::Members::AttrAccessor
+          case member.ivar_name
+          when false
+            return nil
+          else
+            member.ivar_name || :"@#{member.name}"
+          end
+        else
+          return nil
+        end
+      end
+
+      unique = ivars.uniq
+      unique.size == 1 ? unique.first : nil
+    end
+
     def expand_self(type)
       if type.is_a?(AST::Types::Self) && self_type
         self_type
       else
         type
       end
+    end
+
+    # Applies the `unconditional:` branch of a postcondition entry to the
+    # env after a call. Distinct from `when_true`/`when_false`, which fire
+    # only when the call is the guard of a conditional — `unconditional:`
+    # fires at every call site.
+    #
+    # Three sub-slots are honored, with different applicability rules:
+    #
+    # - **`ivars:`** — refines the CALLER's ivars (set_company pattern,
+    #   felixefelip/steep#23). Only fires for self/implicit-self
+    #   receivers; for non-self receivers the ivars belong to a
+    #   different object and refining the caller's env doesn't apply.
+    #
+    # - **`self:`** — refines the RECEIVER's type using REPLACE
+    #   semantics (felixefelip/steep#31). Works for both self and
+    #   non-self receivers: self routes through `refined_self_type`
+    #   (steep#25), others route through local_variable_types /
+    #   instance_variable_types / pure_call_types depending on the
+    #   receiver node shape. Useful for `update!`/`save!`-style methods
+    #   that raise on failure — if the call returned, the receiver is
+    #   in the post-success state.
+    #
+    # - **`drops:`** — subtracts markers from the receiver's type
+    #   (felixefelip/steep#29 + #31). Filters intersection components
+    #   matching the listed type names. Useful for setters that lose a
+    #   marker invariant — e.g., `obj.clear_name` after which `obj` no
+    #   longer has the `Confirmed` marker.
+    #
+    # `via_receiver:` inside `unconditional:` is parsed but not yet
+    # applied — follow-up.
+    # felixefelip/steep#68 (item 1). Widens every ivar the callee MAY write back
+    # to its declared type, dropping any narrowing this frame had established —
+    # and drops the pure-call facts cached on it, exactly as an in-frame `@x = …`
+    # already does (`ivasgn`).
+    #
+    # Only for self/implicit-self receivers: `other.foo` writes OTHER's ivars.
+    #
+    # An ivar the entry also REFINES is left alone: `apply_unconditional_postconditions`
+    # has just given it a precise type, which is strictly better than the declared
+    # one and already accounts for the write.
+    #
+    # This is the invalidation half of the effect. The other half — knowing WHICH
+    # exit the callee took, and hence what actually holds (`performed? == false`
+    # => `current_user` non-nil) — is item 2: the path-sensitive exit state.
+    def apply_ivar_effects(call:, receiver:)
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self if postconditions.empty?
+      return self unless self_receiver_for_attr?(receiver)
+
+      entry = lookup_unconditional_postcondition_entry(call)
+      return self unless entry
+      return self if entry.may_write_ivars.empty?
+
+      refined = entry.unconditional&.ivar_type_strings&.keys || []
+      env = context.type_env
+      updates = {} #: Hash[Symbol, AST::Types::t]
+
+      entry.may_write_ivars.each do |name|
+        next if refined.include?(name)
+
+        declared = env.declared_instance_variable_type(name) or next
+        next if env.instance_variable_types[name] == declared
+
+        updates[name] = declared
+      end
+
+      update_type_env do |type_env|
+        # Widen any narrowed ivar the callee may have overwritten back to its
+        # declared type...
+        unless updates.empty?
+          updates.each_key do |name|
+            type_env = type_env.invalidate_pure_node(::Parser::AST::Node.new(:ivar, [name]))
+          end
+          type_env = type_env.refine_types(instance_variable_types: updates)
+        end
+        # ...and drop cached pure self-predicates whose value depends on an ivar
+        # the callee may have written (`performed?` reads `@__rbs_infer__performed`).
+        type_env.invalidate_self_pure_calls
+      end
+    end
+
+    # felixefelip/steep#68 item 2 — REGISTER. When a called method's entry
+    # carries `conditional_returns`, record each in the caller's env so a later
+    # call to the proven method can consume it (gated on the ivar's falsy state).
+    def register_conditional_returns(call:, receiver:)
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self if postconditions.empty?
+      return self unless self_receiver_for_attr?(receiver)
+
+      entry = lookup_unconditional_postcondition_entry(call)
+      return self unless entry
+      return self if entry.conditional_returns.empty? && entry.conditional_const_returns.empty?
+
+      constr = self
+      entry.conditional_returns.each do |method, spec|
+        type = checker.factory.type(spec.fetch(:type)) rescue next
+        constr = constr.update_type_env do |env|
+          env.with_conditional_method_return(method, gate_ivar: spec.fetch(:gate_ivar), type: type)
+        end
+      end
+      # item 3: constant-attribute facts (`Current.user`), keyed by path string.
+      entry.conditional_const_returns.each do |path, spec|
+        type = checker.factory.type(spec.fetch(:type)) rescue next
+        constr = constr.update_type_env do |env|
+          env.with_conditional_const_return(path, gate_ivar: spec.fetch(:gate_ivar), type: type)
+        end
+      end
+      constr
+    end
+
+    # felixefelip/steep#68 item 2 — APPLY (lookup half). The recorded
+    # conditional-return spec for the method being called, or nil.
+    def conditional_return_spec(call)
+      return nil if context.type_env.conditional_method_returns.empty?
+
+      call.method_decls.filter_map do |decl|
+        context.type_env.conditional_method_returns[decl.method_name.method_name]
+      end.first
+    end
+
+    # felixefelip/steep#68 item 4 — the unconditional (method-entry) narrowing
+    # for a self-method call or a `Const.attr` read, or nil. No gate: the fact
+    # was seeded at method entry, where it holds outright.
+    def method_entry_narrowed_type(node, receiver)
+      env = context.type_env
+      return nil if env.unconditional_method_returns.empty? && env.unconditional_const_returns.empty?
+      return nil unless node.type == :send
+
+      if self_receiver_for_attr?(receiver)
+        env.unconditional_method_returns[node.children[1]]
+      elsif receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
+        base = resolved_const_name_string(receiver) or return nil
+        env.unconditional_const_returns["#{base}.#{node.children[1]}"]
+      elsif (base = memoized_singleton_accessor_base(receiver))
+        env.unconditional_const_returns["#{base}.#{node.children[1]}"]
+      end
+    end
+
+    # The memoized-singleton READ path — companion to the write-side
+    # establishment in felixefelip/steep#76/#77. A sibling attribute established
+    # non-nil at a `Const.attr = <non-nil>` write can be read back two ways:
+    # through the singleton getter (`Foo.user`, handled by
+    # the `:const` branch above) OR directly through the memoized accessor
+    # (`Foo.foo_instance.user`). Both name the SAME slot — `foo_instance` is
+    # `@x ||= Foo.new` (stable identity) and the singleton setter that
+    # established the fact wrote THROUGH it (`self.user=` -> `foo_instance.user =`).
+    # So a receiver of shape `Const.<accessor>` whose resolved return type is an
+    # INSTANCE of `Const` canonicalizes to the same `Const.attr` fact key. This
+    # is the exact memoized-accessor recognition the establishment inference
+    # already trusts on the write side
+    # (`Postconditions::Inferrer#delegating_instance_receiver?`) — it's the
+    # return TYPE, not the accessor's name, that makes the identity sound, so a
+    # memoized accessor under any name is covered. Returns the const base string,
+    # or nil.
+    def memoized_singleton_accessor_base(receiver)
+      return nil unless receiver.is_a?(::Parser::AST::Node) && receiver.type == :send
+
+      const = receiver.children[0]
+      return nil unless const.is_a?(::Parser::AST::Node) && const.type == :const
+
+      base = resolved_const_name_string(const) or return nil
+      recv_type = (typing.type_of(node: receiver) rescue nil) or return nil
+      recv_type = checker.factory.unwrap_optional(recv_type) || recv_type
+      return nil unless recv_type.is_a?(AST::Types::Name::Instance)
+      return base if recv_type.name.to_s.sub(/\A::/, "") == base
+
+      nil
+    end
+
+    # The fully-qualified name of a constant receiver (`Foo` written inside
+    # `Example3` → `Example3::Foo`), read off its inferred singleton type so a
+    # nested or aliased constant keys `unconditional_const_returns` by identity
+    # rather than by its source spelling — both the write-site seed and this
+    # read-site lookup resolve the same way, and a `.steep_postconditions.yml`
+    # entry (always keyed by the full class name) is found. Falls back to the
+    # literal lexical path when the type is unavailable; for a top-level
+    # constant (`Current`) the two coincide, so item 4 is unaffected.
+    def resolved_const_name_string(receiver)
+      type = typing.type_of(node: receiver) rescue nil
+      if type.is_a?(AST::Types::Name::Singleton)
+        return type.name.to_s.sub(/\A::/, "")
+      end
+      constant_path_string(receiver).sub(/\A::/, "")
+    end
+
+    # felixefelip/steep#68 item 3 — APPLY (lookup half). The recorded
+    # constant conditional-return for a `Const.attr` read node, or nil. The
+    # receiver must be a bare constant (`Current`), so the path is unambiguous.
+    #
+    # Resolved, not lexical: the env is seeded with the sidecar's key verbatim,
+    # and the sidecar is written under the resolved name, so `Registry.user` read
+    # inside `Outer` has to look up `Outer::Registry.user`.
+    def conditional_const_return_spec(node, receiver)
+      return nil if context.type_env.conditional_const_returns.empty?
+      return nil unless node.type == :send
+      return nil unless receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
+
+      base = resolved_const_name_string(receiver) or return nil
+      context.type_env.conditional_const_returns["#{base}.#{node.children[1]}"]
+    end
+
+    # `(:const nil :Current)` / `(:const (:const nil :A) :B)` => "Current" / "A::B".
+    def constant_path_string(node)
+      parent, name = node.children
+      parent ? "#{constant_path_string(parent)}::#{name}" : name.to_s
+    end
+
+    # Whether `ivar` is currently narrowed to a type with no truthy inhabitant
+    # (`nil`/`false`) — the gate for a conditional return. A widened
+    # (declared-`bool`) ivar is NOT falsy, so the fact stays gated until a
+    # `return if performed?` proves it.
+    def ivar_known_falsy?(ivar)
+      type = context.type_env[ivar] or return false
+      falsy_only?(type)
+    end
+
+    def falsy_only?(type)
+      case type
+      when AST::Types::Nil
+        true
+      when AST::Types::Literal
+        type.value == false
+      when AST::Types::Name::Instance
+        type.name.to_s == "::FalseClass"
+      when AST::Types::Union
+        type.types.all? { |t| falsy_only?(t) }
+      else
+        false
+      end
+    end
+
+    def apply_unconditional_postconditions(node:, call:, receiver:)
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self if postconditions.empty?
+
+      entry = lookup_unconditional_postcondition_entry(call)
+      return self unless entry&.unconditional
+
+      branch = entry.unconditional
+      constr = self
+
+      # 1. ivars: only fires for self/implicit-self receivers (refines
+      #    the CALLER's ivars, set_company pattern).
+      if !branch.ivar_type_strings.empty? && self_receiver_for_attr?(receiver)
+        updates = {} #: Hash[Symbol, AST::Types::t]
+        branch.ivar_rbs_types.each do |name, rbs_type|
+          ast_type = checker.factory.type(rbs_type) rescue nil
+          updates[name] = ast_type if ast_type
+        end
+        unless updates.empty?
+          constr = constr.update_type_env { |env| env.refine_types(instance_variable_types: updates) }
+        end
+      end
+
+      # 2. self: refines the receiver's type via REPLACE. Skipped if
+      # any class name referenced inside `branch.rbs_type` (typically
+      # a marker like `Foo::AfterX`) isn't declared in RBS — applying
+      # the refinement anyway would crash `build_instance` later
+      # whenever Steep tries to compute a shape on the intersection.
+      # Sidecar emitters can race ahead of marker-class generation
+      # (rbs_rails today doesn't emit markers, rbs_infer does);
+      # tolerating dangling references keeps an in-progress project
+      # type-checking rather than aborting the whole run.
+      if branch.rbs_type && marker_references_resolvable?(branch.rbs_type)
+        new_receiver_type = checker.factory.type(branch.rbs_type) rescue nil
+        constr = constr.refine_receiver_for_unconditional(receiver, new_receiver_type) if new_receiver_type
+      end
+
+      # 3. drops: subtracts markers from the receiver's type.
+      unless branch.drops_type_strings.empty?
+        current = current_receiver_type_for_unconditional(receiver, constr)
+        if current
+          dropped = apply_drops_to_type_unconditional(current, branch)
+          if dropped && !dropped.equal?(current)
+            constr = constr.refine_receiver_for_unconditional(receiver, dropped)
+          end
+        end
+      end
+
+      constr
+    end
+
+    # felixefelip/rbs_infer#71 — the memoized-singleton delegation. A singleton
+    # setter `Const.user = <non-nil>` establishes sibling constant attributes
+    # (`Const.name`) non-nil, because the setter's body forwards to the memoized
+    # instance whose own `user=` writes `name`. The fact lives on the setter's
+    # `unconditional.establishes_consts` slot. Seed each `Const.<attr>` into
+    # `unconditional_const_returns`, keyed EXACTLY as the read-site
+    # (`method_entry_narrowed_type`, item 4) looks it up, so a later `Const.name`
+    # read narrows with no gate and no pure-node pre-registration.
+    #
+    # A dedicated path (rather than a step inside
+    # `apply_unconditional_postconditions`) because that method's entry lookup
+    # only resolves INSTANCE method names and bails for a singleton receiver —
+    # here the call IS the singleton setter, keyed by the constant's own name.
+    # Gated on a NON-NIL right-hand side: setting the attribute to `nil`
+    # establishes nothing.
+    #
+    # Both spellings of the write are honored, symmetric to the read side
+    # (`memoized_singleton_accessor_base`): the singleton setter (`Foo.user =`)
+    # AND the direct write through the memoized accessor
+    # (`Foo.foo_instance.user =`) name the same slot, so both establish (non-nil
+    # rhs) and — crucially for soundness — INVALIDATE (nilable rhs) the same
+    # `Const.attr` fact. Without the accessor spelling, a `Foo.foo_instance.user
+    # = nil` after a `Foo.user = <non-nil>` would leave a stale non-nil fact and
+    # mask the nil at a later `Foo.user` / `Foo.foo_instance.user` read.
+    def apply_const_establishes_on_write(node:, call:, receiver:)
+      return self if postconditions.empty?
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self unless node.type == :send
+
+      method = node.children[1]
+      # A `\w=` setter (`user=`), the same shape the `w=` return-type handling
+      # keys on — excludes `==`/`<=`/`>=`/`!=`.
+      return self unless method.to_s =~ /\w=\z/
+
+      base =
+        if receiver.is_a?(::Parser::AST::Node) && receiver.type == :const
+          resolved_const_name_string(receiver)
+        else
+          memoized_singleton_accessor_base(receiver)
+        end
+      base or return self
+
+      last_arg = node.children.last
+      return self unless last_arg.is_a?(::Parser::AST::Node) && typing.has_type?(last_arg)
+
+      # The attribute this write targets (`user` for `user=`), and its own fact
+      # key. Invalidation keys on THIS, not on the setter's `establishes_consts`,
+      # so a nil write invalidates even through a plain `attr_accessor` setter
+      # that establishes nothing itself (e.g. `name` was established non-nil by a
+      # sibling `user=` write, then written nil via `name=`).
+      written_attr = method.to_s.chomp("=")
+
+      entry = postconditions.lookup_instance(base, method)
+      branch = entry&.unconditional
+      # Sibling attributes this setter would establish non-nil (`user=` also
+      # writes `name`); dropped alongside the written attr on a nil write.
+      sibling_paths = branch ? branch.const_establishes_rbs_types.keys.map { |attr| "#{base}.#{attr}" } : []
+
+      # A nilable/nil write to `Const.attr` (written directly as `Const.attr =` or
+      # through the memoized accessor as `Const.foo_instance.attr =`) invalidates
+      # the written attr's own established non-nil fact AND any sibling facts this
+      # setter proves — otherwise a stale `Const.attr: NonNil` would survive the
+      # write and mask the nil at a later read. felixefelip/steep#76 (RC3),
+      # generalized to the written attribute so a plain-accessor setter with no
+      # `establishes_consts` still invalidates. Runs before the non-nil
+      # establishment below so the two never coexist for the same write.
+      if contract_nullable_type?(typing.type_of(node: last_arg))
+        drop = ["#{base}.#{written_attr}", *sibling_paths]
+        dropped_attrs = drop.map { |path| path.delete_prefix("#{base}.") }
+        return update_type_env do |env|
+          env = env.update(unconditional_const_returns: env.unconditional_const_returns.reject { |k, _| drop.include?(k) })
+          invalidate_pure_slot_reads(env, base, dropped_attrs)
+        end
+      end
+
+      # Non-nil write — establish the sibling facts. Needs a setter that actually
+      # proves them; a plain accessor with no `establishes_consts` establishes
+      # nothing (only invalidation above is unconditional on the written attr).
+      return self unless branch
+      return self if branch.const_establishes_type_strings.empty?
+
+      consts = {} #: Hash[String, AST::Types::t]
+      branch.const_establishes_rbs_types.each do |attr, rbs_type|
+        ast_type = checker.factory.type(rbs_type) rescue next
+        consts["#{base}.#{attr}"] = ast_type
+      end
+      return self if consts.empty?
+
+      update_type_env { |env| env.with_method_entry_facts(self_methods: {}, consts: consts) }
+    end
+
+    # Companion to the const-path fact invalidation above. Dropping the fact
+    # (`unconditional_const_returns`) is not enough on a nilable write: Steep's
+    # pure-send cache (`pure_method_calls`) may still hold a NON-NIL type for the
+    # getter read of the same slot, cached at an earlier narrowed read. That
+    # cache is keyed structurally (`Parser::AST::Node#==` ignores line), so the
+    # `Const.attr` read node at a later line is the SAME key; with the fact now
+    # gone (`fact_narrowed` false), the stale cached non-nil type WINS at the
+    # read and masks the nil. Invalidate those cached reads for every dropped
+    # attribute — both the direct getter (`Const.attr`) and the memoized-accessor
+    # read (`Const.<accessor>.attr`) whose receiver resolves to the same base,
+    # the two spellings this write already recognizes. Each entry is set to
+    # `[call, nil]` — the same shape `invalidate_pure_node` produces — so the
+    # next read re-derives the (nilable) declared type. felixefelip/steep#76/#82.
+    def invalidate_pure_slot_reads(env, base, attrs)
+      attr_syms = attrs.map(&:to_sym)
+      invalidation = {} #: Hash[Parser::AST::Node, [TypeInference::MethodCall::Typed, AST::Types::t?]]
+      env.pure_method_calls.each do |read_node, pair|
+        next unless read_node.type == :send
+        next unless attr_syms.include?(read_node.children[1])
+        recv = read_node.children[0]
+        next unless recv.is_a?(::Parser::AST::Node)
+        resolved =
+          if recv.type == :const
+            resolved_const_name_string(recv)
+          else
+            memoized_singleton_accessor_base(recv)
+          end
+        next unless resolved == base
+        call, _ = pair
+        invalidation[read_node] = [call, nil]
+      end
+      return env if invalidation.empty?
+      env.merge(pure_method_calls: invalidation)
+    end
+
+    # Walks `rbs_type` collecting every class/module name referenced
+    # inside, then checks each against the env's known declarations.
+    # Returns `false` on the first unknown name so the caller can
+    # bail out of refinement before building shapes that would crash.
+    # `RBS::Types::Intersection` and `Union` are the common shapes for
+    # marker payloads (`Foo & Foo::AfterX`); leaf types like literals
+    # and `void`/`nil` carry no class name and don't need validation.
+    def marker_references_resolvable?(rbs_type)
+      Callbacks::ConstantNarrowing.markers_resolvable?(rbs_type, factory: checker.factory)
+    end
+
+    # Routes a receiver-type refinement to the appropriate env slot
+    # based on the receiver node's shape. Mirror of
+    # `LogicTypeInterpreter#refine_node_type` but unconditional — sets
+    # the same `new_type` regardless of branch.
+    def refine_receiver_for_unconditional(receiver, new_type)
+      if receiver.nil? || (receiver.respond_to?(:type) && receiver.type == :self)
+        return update_type_env { |env| env.with_refined_self(new_type) }
+      end
+
+      case receiver.type
+      when :lvar
+        name = receiver.children[0]
+        update_type_env { |env| env.refine_types(local_variable_types: { name => new_type }) }
+      when :ivar
+        name = receiver.children[0]
+        update_type_env { |env| env.refine_types(instance_variable_types: { name => new_type }) }
+      when :send
+        # Pure call cached in env — refine its return type entry.
+        return self unless context.type_env[receiver]
+        update_type_env { |env| env.refine_types(pure_call_types: { receiver => new_type }) }
+      else
+        self
+      end
+    end
+
+    # Resolves the current type of a receiver for the purposes of
+    # applying `drops:`. For self receivers, prefers
+    # `env.refined_self_type` (steep#25) over the bound `self_type`.
+    def current_receiver_type_for_unconditional(receiver, constr)
+      if receiver.nil? || (receiver.respond_to?(:type) && receiver.type == :self)
+        return constr.context.type_env.refined_self_type || constr.self_type
+      end
+
+      constr.typing.type_of(node: receiver) rescue nil
+    end
+
+    # Subtraction logic for `unconditional.drops`. Filters intersection
+    # components matching the named markers, distributes through
+    # unions, leaves non-aggregate types alone (subtracting `T` from
+    # `T` alone would yield empty; preserve type to avoid producing
+    # malformed output).
+    def apply_drops_to_type_unconditional(type, branch)
+      drop_names = branch.drops_rbs_types.filter_map do |rbs_type|
+        case rbs_type
+        when RBS::Types::ClassInstance, RBS::Types::Interface
+          rbs_type.name.absolute!
+        end
+      end
+      return type if drop_names.empty?
+
+      do_apply_drops_unconditional(type, drop_names)
+    end
+
+    def do_apply_drops_unconditional(type, drop_names)
+      case type
+      when AST::Types::Intersection
+        remaining = type.types.reject { |t| drop_matches_unconditional?(t, drop_names) }
+        return type if remaining.size == type.types.size
+        if remaining.empty?
+          AST::Builtin.any_type
+        elsif remaining.size == 1
+          remaining.first
+        else
+          AST::Types::Intersection.build(types: remaining)
+        end
+      when AST::Types::Union
+        new_branches = type.types.map { |t| do_apply_drops_unconditional(t, drop_names) }
+        return type if new_branches == type.types
+        AST::Types::Union.build(types: new_branches)
+      else
+        type
+      end
+    end
+
+    def drop_matches_unconditional?(type, drop_names)
+      case type
+      when AST::Types::Name::Instance, AST::Types::Name::Interface
+        drop_names.include?(type.name)
+      else
+        false
+      end
+    end
+
+    # Applies callback-declared postconditions at method entry (issue
+    # felixefelip/steep#27). For each callback entry whose `runs_before`
+    # includes `method_name`, look up the handler's `unconditional`
+    # postcondition (already loaded from `.steep_postconditions.yml`,
+    # issue #23) and refine the env's `instance_variable_types`.
+    #
+    # Returns the (possibly refined) env. Pure: doesn't mutate self.
+    #
+    # Order matters for last-wins composition: callback entries are
+    # applied in their stored order, so the gen-erator emits in
+    # declaration order and the latest declaration wins on conflicting
+    # ivar writes. Mirrors Rails' `before_action` ordering semantics.
+    # felixefelip/steep#68 item 4. Seeds the facts the runner proved hold at
+    # this method's entry — that a guard running before it (and not halting)
+    # established. They land as UNCONDITIONAL self-method / constant narrowings
+    # (no gate: the method running is itself the proof the guard didn't halt),
+    # consumed at the corresponding read sites in the body.
+    def apply_method_entry_facts(method_name, type_env)
+      return type_env if postconditions.empty?
+
+      class_name = module_context&.class_name or return type_env
+      facts = postconditions.lookup_method_entry_facts(class_name.to_s, method_name) or return type_env
+
+      self_methods = to_ast_types(facts[:self_methods])
+      consts = to_ast_types(facts[:consts])
+      ivars = to_ast_types(facts[:ivars] || {})
+      return type_env if self_methods.empty? && consts.empty? && ivars.empty?
+
+      type_env = type_env.with_method_entry_facts(self_methods: self_methods, consts: consts)
+      # An ivar fact refines the declared ivar type at entry, the same slot a
+      # postcondition's `unconditional.ivars` uses (felixefelip/steep#92 item 4).
+      type_env = type_env.refine_types(instance_variable_types: ivars) unless ivars.empty?
+      type_env
+    end
+
+    def to_ast_types(rbs_types)
+      rbs_types.each_with_object({}) do |(key, rbs_type), acc|
+        type = checker.factory.type(rbs_type) rescue next
+        acc[key] = type
+      end
+    end
+
+    def apply_callbacks_for_method(method_name, type_env)
+      return type_env if callbacks.empty?
+
+      class_name = module_context&.class_name
+      return type_env unless class_name
+
+      matching = callbacks.lookup_callbacks_for_method(class_name.to_s, method_name)
+      return type_env if matching.empty?
+
+      matching.each do |entry|
+        # Self-narrowing (e.g. ActiveRecord after-validation callback): the
+        # record is known to satisfy its validations at the callback's entry,
+        # so refine `self` to the given type (e.g. `Dose & Dose::Validated`).
+        # Flows through `refined_self_type`, which `#self_type` prefers.
+        if entry.applies_self
+          if self_type = parse_callback_self_type(entry.applies_self)
+            type_env = type_env.with_refined_self(self_type)
+          end
+        end
+
+        # Constant narrowing (steep#27 follow-up): global state proven
+        # populated by an earlier callback (e.g. CurrentAttributes set by a
+        # guarded before_action). Lands in the env's `constant_types` — the
+        # same slot `@type const` annotations use, which `synthesize_constant`
+        # consults first — so `Current.user` inside the method dispatches on
+        # the marker-decorated singleton. Registered under both the relative
+        # and absolute names to cover `Current` and `::Current` reads.
+        unless entry.applies_constants.empty?
+          updates = Callbacks::ConstantNarrowing.constant_type_updates(entry.applies_constants, factory: checker.factory)
+          type_env = type_env.merge(constant_types: updates) unless updates.empty?
+        end
+
+        # Handler-style ivar narrowing (controller before_action): apply the
+        # handler's `unconditional` postcondition ivar refinements.
+        if entry.handler_method && !postconditions.empty?
+          postcondition_entry = postconditions.lookup_instance(entry.class_name, entry.handler_method)
+          branch = postcondition_entry&.unconditional
+          if branch && !branch.ivar_type_strings.empty?
+            updates = {} #: Hash[Symbol, AST::Types::t]
+            branch.ivar_rbs_types.each do |name, rbs_type|
+              ast_type = checker.factory.type(rbs_type) rescue nil
+              updates[name] = ast_type if ast_type
+            end
+            type_env = type_env.refine_types(instance_variable_types: updates) unless updates.empty?
+          end
+        end
+      end
+
+      type_env
+    end
+
+    # `self` on entry, when every statically visible call site was observed to
+    # pass the same receiver type (felixefelip/steep#158). Sits beside
+    # `apply_callbacks_for_method` and lands in the same slot
+    # (`with_refined_self`) — the difference is only where the fact comes from:
+    # rbs_rails DECLARES the callback one, and this one is READ off the call
+    # sites by `Contracts::Enforcement`.
+    #
+    # Replaces the declared self, exactly as `applies_self` does — never
+    # intersects with `self_type`, which at this point is still the CLASS BODY's
+    # self (`singleton(Card) & singleton(Card::Exportable)`) and would produce a
+    # self type that is both a singleton and an instance. Nothing is lost by
+    # replacing: the observed type is a receiver the method actually resolved
+    # on, so it already carries the module the `def` lives in.
+    def apply_contract_self_type(node, method_name, type_env)
+      return type_env if contracts.empty?
+      # Instance methods only. `def self.foo` and `def foo` share a name but not
+      # a contract, and `lookup_instance` would hand the singleton the instance
+      # one's `self`.
+      return type_env if node.type == :defs
+
+      class_name = module_context&.class_name
+      return type_env unless class_name
+
+      contract = contracts.lookup_instance(class_name.to_s.sub(/\A::/, ""), method_name)
+      # Same gate as `contract_narrowed_type`: an unenforced contract is a
+      # fiction — some call site skips it, or there are none at all — and
+      # narrowing on it would silence the body errors it was hiding.
+      return type_env unless contract&.enforced
+
+      req = contract.requires.find { |r| r.is_a?(Contracts::Predicate::SelfType) }
+      return type_env unless req
+
+      observed = parse_callback_self_type(req.type)
+      return type_env unless observed
+
+      type_env.with_refined_self(observed)
+    end
+
+    # Whether a call site passing `observed` as the receiver discharges a
+    # `self_type` requirement. Plain subtyping: the body was checked with the
+    # required type as `self`, so anything below it is safe to hand in.
+    def contract_self_type_holds?(required, observed)
+      no_subtyping?(sub_type: observed, super_type: required).nil?
+    end
+
+    # Parses an `applies_self` RBS type string (e.g. "Dose & Dose::Validated")
+    # into an AST type, or nil if it fails to parse.
+    def parse_callback_self_type(string)
+      rbs_type = RBS::Parser.parse_type(string)
+      return nil unless rbs_type
+      checker.factory.type(rbs_type)
+    rescue StandardError => e
+      Steep.logger.warn { "[callbacks] failed to parse applies_self #{string.inspect}: #{e.message}" }
+      nil
+    end
+
+    # Mirror of `LogicTypeInterpreter#lookup_postcondition_entry` for the
+    # type construction side. Walks method_decls and checks each defining
+    # type, since the same method may be declared in different ancestors.
+    def lookup_unconditional_postcondition_entry(call)
+      call.method_decls.each do |decl|
+        name = decl.method_name
+        case name
+        when InstanceMethodName
+          entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
+          return entry if entry
+        end
+      end
+      nil
     end
 
     SPECIAL_METHOD_NAMES = {
@@ -3687,9 +5636,240 @@ module Steep
       nil
     end
 
+    # Replaces a successfully-dispatched core call's nominal return with its
+    # exact literal value when every operand is literal and the closed intrinsic
+    # table can evaluate it safely. The selected declaration remains the upper
+    # bound: even a buggy intrinsic cannot manufacture a return the RBS method
+    # does not permit.
+    def literal_intrinsic_call(call, receiver_type:, arguments:, declared_return_type:)
+      # A tuple the accumulator analysis computed is read as it is. Every other
+      # tuple arriving as a type is refused by `literal_operand_type`, because an
+      # annotation outlives the mutation that invalidates it — and this one
+      # cannot, since the analysis strikes the local on any call but a read.
+      receiver_type = accumulated_type(call.node) || literal_operand_type(call.node.children[0], receiver_type)
+
+      argument_types = arguments.map do |argument|
+        return call unless typing.has_type?(argument)
+
+        literal_operand_type(argument, typing.type_of(node: argument))
+      end
+
+      type = LiteralIntrinsics.fold(
+        call: call,
+        receiver_type: receiver_type,
+        argument_types: argument_types,
+        override_registry: literal_method_registry
+      ) or return call
+
+      return call unless decided_predicate?(type, declared_return_type) || check_relation(sub_type: type, super_type: declared_return_type).success?
+
+      call.with_return_type(type)
+    end
+
+    # A predicate the checker types as a narrowing (`==` is `ReceiverIsArg`)
+    # that the fold answered with one boolean. A `true | false` keeps the
+    # narrowing, which is what tells the branches apart.
+    def decided_predicate?(type, declared_return_type)
+      declared_return_type.is_a?(AST::Types::Logic::Base) &&
+        type.is_a?(AST::Types::Literal) && (type.value == true || type.value == false)
+    end
+
+    # Replaces a reflection's nominal return — `::Class`, `::UnboundMethod`,
+    # `::Method::param_types` — with what the DECLARATION being reflected on
+    # says. Nothing is evaluated: `public_instance_method(:name).parameters`
+    # asks for the parameter list an RBS method type already states, and the
+    # selected declaration remains the upper bound.
+    #
+    # The receiver is taken as it was inferred rather than recovered from the
+    # source: what a reflection needs is the module a type NAMES, and a type is
+    # where that is written. Only the method name is read as a literal, the way
+    # every other argument is.
+    def reflection_intrinsic_call(call, receiver_type:, arguments:, declared_return_type:)
+      argument_types = arguments.map do |argument|
+        return call unless typing.has_type?(argument)
+
+        literal_operand_type(argument, typing.type_of(node: argument))
+      end
+
+      type = ReflectionIntrinsics.fold(
+        call: call,
+        receiver_type: ReflectionIntrinsics.receiver_of(self, call, receiver_type),
+        argument_types: argument_types,
+        factory: checker.factory,
+        override_registry: literal_method_registry
+      ) || StringEvalIntrinsics.fold(self, call: call, receiver_type: receiver_type, argument_types: argument_types) or return call
+
+      return call unless check_relation(sub_type: type, super_type: ObjectStates.state_in(declared_return_type)&.back_type || declared_return_type).success?
+
+      call.with_return_type(type)
+    end
+
+    # Literal syntax remains exact information even when contextual typing has
+    # widened the node to its nominal class (for example, a method body checked
+    # against `String`). Specialized calls already arrive here as literal types;
+    # this only recovers values that are visibly literal in the source.
+    def literal_operand_type(node, inferred_type)
+      inferred_type = self_type if inferred_type.is_a?(AST::Types::Self) && self_type.is_a?(AST::Types::Literal)
+      return inferred_type if inferred_type.is_a?(AST::Types::Literal) || inferred_type.is_a?(AST::Types::RegexpLiteral)
+      return built_here_only(inferred_type) unless node.is_a?(::Parser::AST::Node)
+      return accumulated_type(node) if node.type == :lvar && accumulated_type(node)
+
+      # An array written out in the source is exact information the same way a
+      # string is, and the element types are NOT where it survives: `["a#{b}",
+      # "c"]` infers `Array['ab' | String]`, the plain element having widened
+      # into the union. So the tuple is read off the nodes, one element at a
+      # time, through this same recovery.
+      if node.type == :array
+        elements = node.children.flat_map do |child|
+          next literal_operand_type(child.children[0], AST::Builtin.any_type).then { |splatted| splatted.is_a?(AST::Types::Tuple) ? splatted.types : [nil] } if child.type == :splat
+          # An element the checker has not reached yet is still a node, and a
+          # node that spells a value out needs nothing else to be read. Only an
+          # interpolation needs the type, and one of those simply declines here
+          # as it would have before.
+          inferred = typing.recorded_type_of(node: child) || AST::Builtin.any_type
+          element = child.type == :self ? AST::Types::Self.instance : literal_operand_type(child, inferred)
+          element if LiteralIntrinsics.held?(element) || element.is_a?(AST::Types::Literal) || element.is_a?(AST::Types::Tuple) || element.is_a?(AST::Types::RegexpLiteral) || element.is_a?(AST::Types::Nil) || LiteralIntrinsics.literal_union?(element)
+        end
+
+        return elements.all? ? AST::Types::Tuple.new(types: elements) : built_here_only(inferred_type)
+      end
+
+      # A collection the checker built at this very call. It is what this file's
+      # own expression evaluated to, not a type something else was annotated
+      # with — which is the difference `built_here_only` is about, and
+      # `record_built_value` is where the checker says which one it is.
+      return inferred_type if (node.type == :send || node.type == :block) && built_value?(node, inferred_type)
+      return inferred_type if inferred_type.is_a?(AST::Types::Tuple) && CollectionMutation.entered_with?(self, node)
+
+      # Parentheses are a node of their own, and what is inside them is the
+      # value — a collection as much as a literal. The `:begin` arm further down
+      # passes only a `Literal` through, which is what `(KEYWORDS + EXTRA)` as
+      # the receiver of `.to_set` needed and did not get.
+      if node.type == :begin && node.children.one?
+        nested = literal_operand_type(node.children[0], inferred_type)
+        return nested if written_out_value?(nested)
+      end
+
+      # A pattern has no RBS literal to arrive as, so the node is the only
+      # place one is ever read — the way `:str` is read below, one type over.
+      if node.type == :regexp
+        return LiteralSyntax.regexp(node, typing) || built_here_only(inferred_type)
+      end
+
+      if node.type == :irange || node.type == :erange
+        return LiteralSyntax.range(node, typing) || built_here_only(inferred_type)
+      end
+
+      # A constant whose value is written out ONCE in this file and only read
+      # afterwards. The array is not built at this call site, but it is built in
+      # this file and nothing here can have changed it since — the same claim
+      # `built_here_only` protects, reached through a name Ruby means to be
+      # written once instead of through the literal itself.
+      #
+      # Held against the type the read actually resolved to, so a name that
+      # turns out to be some other constant — one a gem declares under the
+      # namespace this read sits in — is refused rather than answered with this
+      # file's value.
+      if node.type == :const
+        initializer, written_as = source.constants[node] || constructor_bindings.constant_literal(node.children[1])
+        # The walk keys by the bare name; only the CHECKER knows which constant
+        # a bare read resolved to. `RESERVED` read inside `module Other` is not
+        # `Owner::RESERVED` just because this file writes one of those, and the
+        # two can have the same type — so the relation check below would let it
+        # through and the name has to be compared outright.
+        resolved = initializer && typing.source_index.reference(constant_node: node)
+
+        recovered =
+          if resolved && resolved.to_s == written_as
+            # A chain — `(KEYWORDS + EXTRA).to_set.freeze` — is a value the FOLD
+            # built, and the constant is typed in the class body above every
+            # method that reads it, so its type IS the answer. The node is the
+            # fallback, and it is what a plain `%w(…)` needs, since an array
+            # literal types as `Array[Elem]` however literal its elements.
+            built = typed_as(initializer)
+            collection_value?(built) ? built : literal_operand_type(initializer, AST::Builtin.any_type)
+          end
+
+        if (written_out_value?(recovered) || recovered.is_a?(AST::Types::Literal)) &&
+           check_relation(sub_type: recovered, super_type: inferred_type).success?
+          return recovered
+        end
+
+        return built_here_only(inferred_type)
+      end
+
+      value =
+        case node.type
+        when :int, :str, :sym, :def then node.children[0]
+        when :defs then node.children[1]
+        when :true then true
+        when :false then false
+        when :begin
+          if node.children.one?
+            nested = literal_operand_type(node.children[0], inferred_type)
+            nested.value if nested.is_a?(AST::Types::Literal)
+          end
+        when :send
+          receiver, method_name, *arguments = node.children
+          if arguments.empty? && receiver&.type == :int && [:+@, :-@].include?(method_name)
+            integer = receiver.children[0]
+            method_name == :-@ ? -integer : integer
+          end
+        end
+
+      value.nil? ? built_here_only(inferred_type) : AST::Types::Literal.new(value: value)
+    end
+
+    # A tuple that ARRIVES as a type describes an array this call did not build
+    # — a local, a parameter — and a type outlives mutations a value does not:
+    #
+    #   # @type var parts: ["a", "b"]
+    #   parts = ["a", "b"]
+    #   parts.reverse!
+    #   parts.join(";")      # folds to "a;b", runs as "b;a"
+    #
+    # So a tuple is BUILT above, out of the array written at this call site, and
+    # never passed through from the type. `any` is what an operand this cannot
+    # read exactly looks like, and the fold declines it.
+    # The type recorded for `node`, through the parent chain a method body's
+    # typing hangs off: `has_type?` asks only the child, and a constant is typed
+    # in the CLASS body, above every method that reads it.
+    def typed_as(node)
+      typing.type_of(node: node)
+    rescue Typing::UnknownNodeError
+      nil
+    end
+
+    # A value the fold can take as a collection operand.
+    def collection_value?(type)
+      type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::FiniteSet)
+    end
+
+    # A value the fold can take whole, that no scalar `Literal` spells.
+    def written_out_value?(type)
+      collection_value?(type) || type.is_a?(AST::Types::RegexpLiteral)
+    end
+
+    # `type` is the collection the checker built at `node` (`record_built_value`),
+    # and nothing narrowed the call's type after it did.
+    def built_value?(node, type)
+      collection_value?(type) && typing.vouched_of(node: node) == type
+    end
+
+    def built_here_only(type)
+      type.is_a?(AST::Types::Tuple) ? AST::Types::Any.new : type
+    end
+
     def type_method_call(node, method_name:, receiver_type:, method:, arguments:, block_params:, block_body:, tapp:, hint:)
       # @type var fails: Array[[TypeInference::MethodCall::t, TypeConstruction]]
       fails = []
+
+      # An overload that succeeded only because an `untyped` argument is
+      # compatible with the value it is keyed on. Held aside rather than
+      # returned, so a later overload that matches on more than that wins
+      # instead; if none does, this one is still the answer.
+      # @type var deferred: [TypeInference::MethodCall::t, TypeConstruction]?
+      deferred = nil
 
       method.overloads.each do |overload|
         Steep.logger.tagged overload.method_type.to_s do
@@ -3718,16 +5898,30 @@ module Steep
             )
 
             if call.is_a?(TypeInference::MethodCall::Typed)
-              constr.typing.save!
-              return [
-                call,
-                update_type_env { constr.context.type_env }
-              ]
+              if untyped_arg_matched_value_param?(node, overload, arguments, constr.typing)
+                deferred ||= [call, constr]
+              else
+                constr.typing.save!
+                return [
+                  call,
+                  update_type_env { constr.context.type_env }
+                ]
+              end
             else
               fails << [call, constr]
             end
           end
         end
+      end
+
+      if deferred
+        call, constr = deferred
+        constr.typing.save!
+
+        return [
+          call,
+          update_type_env { constr.context.type_env }
+        ]
       end
 
       non_arity_errors = fails.reject do |call, _|
@@ -3759,6 +5953,94 @@ module Steep
       else
         nil
       end
+    end
+
+    # True when `overload` accepted the call only because an `untyped` argument is
+    # compatible with a parameter keyed on a *value* — `nil`, or a literal like
+    # `true` or `:sym`.
+    #
+    # Such a parameter says "the caller passed exactly this value", which an
+    # `untyped` expression is never known to have done: `untyped` matches it the
+    # way it matches everything else, so the overload is picked on a fact nobody
+    # established. When another overload matches on more than that, it is the
+    # better answer — the value-keyed one is usually the degenerate case:
+    #
+    #     def self?.Array: (nil) -> []
+    #                    | [T] (array[T] | _ToA[T] array_like) -> Array[T]
+    #                    | [T] (T ele) -> [T]
+    #
+    # `Array(untyped)` took `(nil) -> []`, the empty tuple, whose element type is
+    # `bot`; every consumer downstream then inherits `bot` — `.filter(&:present?)`
+    # on it asks for a `^(bot) -> boolish` block, which nothing can supply. Held
+    # back, the call answers `::Array[untyped]` instead.
+    #
+    # A real `nil` argument still selects the overload: its type is `nil`, not
+    # `untyped`, so nothing here fires. So does an `untyped` argument when *every*
+    # matching overload is value-keyed — they are all deferred, and the first one
+    # is restored, preserving the declaration order.
+    #
+    # Only positional parameters are inspected: an argument list with a splat does
+    # not map to parameters one-for-one, and answers `false`.
+    def untyped_arg_matched_value_param?(node, overload, arguments, typing)
+      method_type = overload.method_type
+      params = method_type.type.params or return false
+
+      # Runs on every successful dispatch, so answer the overwhelmingly common
+      # case — no parameter is keyed on a value at all — before mapping any
+      # argument to a parameter.
+      value_keyed = false
+      params.positional_params&.each do |param|
+        if value_keyed_type?(param.type)
+          value_keyed = true
+          break
+        end
+      end
+      return false unless value_keyed
+
+      args = TypeInference::SendArgs.new(node: node, arguments: arguments, type: method_type)
+      positional = args.positional_arg
+
+      while (value, positional = positional.next())
+        case value
+        when TypeInference::SendArgs::PositionalArgs::NodeParamPair
+          if value_keyed_type?(value.param.type) && untyped_node?(value.node, typing: typing)
+            return true
+          end
+        when TypeInference::SendArgs::PositionalArgs::SplatArg
+          return false
+        end
+      end
+
+      false
+    end
+
+    # A type that names values rather than a set of them: `nil`, a literal, or a
+    # union of those.
+    def value_keyed_type?(type)
+      case type
+      when AST::Types::Nil, AST::Types::Literal
+        true
+      when AST::Types::Union
+        type.types.all? {|ty| value_keyed_type?(ty) }
+      else
+        false
+      end
+    end
+
+    # `Typing#has_type?` reads one level only — an argument typed while checking an
+    # earlier overload lives in a parent typing until `save!` merges it — so walk up.
+    def untyped_node?(node, typing:)
+      current = typing #: Typing?
+
+      while current
+        if current.has_type?(node)
+          return current.type_of(node: node).is_a?(AST::Types::Any)
+        end
+
+        current = current.parent
+      end
+
+      false
     end
 
     def with_child_typing()
@@ -3867,7 +6149,7 @@ module Steep
             constr
               .with_child_typing()
               .try_tuple_type!(arg.node.children[0])
-          arg.type = arg_type
+          arg.type, arg.itself = Splatted.spread(constr, arg_type)
 
         when TypeInference::SendArgs::PositionalArgs::MissingArg
           # ignore
@@ -4102,8 +6384,27 @@ module Steep
             if hint && !fvs.empty?
               if hint.free_variables.subset?(self_type.free_variables)
                 if check_relation(sub_type: method_type.type.return_type, super_type: hint, constraints: constraints).success?
-                  method_type, solved, s = apply_solution(errors, node: node, method_type: method_type) do
-                    constraints.solution(checker, variables: fvs, context: ccontext)
+                  # Solve only the variables the hint actually constrained. A hint
+                  # that says nothing about a variable — `untyped`, or any supertype
+                  # of the return like `Object` — still makes the relation succeed,
+                  # and `Constraints#solution` answers an unconstrained variable with
+                  # `untyped`. Solving over all of `fvs` therefore *pins* the block's
+                  # type variable to `untyped` here, before the block body is even
+                  # typed, and the body's real type is discarded:
+                  #
+                  #     def bar        # `() -> untyped`, or no RBS at all
+                  #       [1].map { "a" }   # => Array[untyped], not Array[String]
+                  #     end
+                  #
+                  # Same filter the post-block solution below applies, for the same
+                  # reason: an unconstrained variable is one the *block* still has to
+                  # determine.
+                  hint_fvs = fvs.select {|var| constraints.has_constraint?(var) }.to_set
+
+                  unless hint_fvs.empty?
+                    method_type, solved, s = apply_solution(errors, node: node, method_type: method_type) do
+                      constraints.solution(checker, variables: hint_fvs, context: ccontext)
+                    end
                   end
                 end
 
@@ -4124,6 +6425,7 @@ module Steep
                 block_block_hint: nil,
                 block_annotations: block_annotations,
                 block_self_hint: method_type.block.self_type,
+                implicit_implements: implicit_block_reopen(node),
                 node_type_hint: method_type.type.return_type
               )
 
@@ -4202,6 +6504,7 @@ module Steep
                   )
                 }
 
+                entry_constr = block_constr
                 block_body_type = block_constr.synthesize_block(
                   node: node,
                   block_body: block_body,
@@ -4249,6 +6552,38 @@ module Steep
                 end
 
                 block_constr.typing.save!
+
+                constr.record_iterations(
+                  node,
+                  entry: entry_constr,
+                  receiver_type: receiver_type,
+                  block_params: block_params_,
+                  block_body: block_body,
+                  block_type_hint: method_type.block.type.return_type,
+                  decls: decls
+                )
+
+                iterated = constr.iterated_value(
+                  node,
+                  entry: entry_constr,
+                  receiver_type: receiver_type,
+                  block_params: block_params_,
+                  block_body: block_body,
+                  block_type_hint: method_type.block.type.return_type,
+                  decls: decls
+                )
+
+                constr, iterated = UnrolledEach.apply(
+                  constr,
+                  node,
+                  iterated: iterated,
+                  entry: entry_constr,
+                  receiver_type: receiver_type,
+                  block_params: block_params_,
+                  block_body: block_body,
+                  block_type_hint: method_type.block.type.return_type,
+                  decls: decls
+                )
               else
                 # Failed to infer the type of block parameters
                 constr.type_block_without_hint(node: node, block_annotations: block_annotations, block_params: block_params_, block_body: block_body) do |error|
@@ -4344,7 +6679,9 @@ module Steep
             when arg.compatible?
               if arg.node
                 # Block pass (&block) is given
-                node_type, constr = constr.synthesize(arg.node, hint: arg.node_type)
+                # Passing `proc_type` instead of `node_type` because a block-pass argument is a proc, not `nil`.
+                # `nil` is still allowed by the `node_type` check below.
+                node_type, constr = constr.synthesize(arg.node, hint: arg.proc_type)
 
                 nil_given =
                   constr.check_relation(sub_type: node_type, super_type: AST::Builtin.nil_type).success? &&
@@ -4361,7 +6698,7 @@ module Steep
                   errors << Diagnostic::Ruby::RequiredBlockMissing.new(
                     node: node,
                     method_type: method_type
-                  )
+                  ) if arg.block&.required?
                 else
                   # non-nil value is given
                   constr.check_relation(sub_type: node_type, super_type: arg.node_type, constraints: constraints).else do |result|
@@ -4377,6 +6714,11 @@ module Steep
                     constraints.solution(checker, variables: method_type.free_variables, context: ccontext)
                   }
                   method_type = eliminate_vars(method_type, type_param_names) unless solved
+
+                  symbol = arg.node.children[0]
+                  if symbol&.type == :sym
+                    iterated = constr.iterated_by_symbol(node, symbol.children[0], receiver_type: receiver_type, decls: decls)
+                  end
                 end
               else
                 # Block is not given
@@ -4415,7 +6757,7 @@ module Steep
 
               node_type, constr = constr.synthesize(arg.node)
 
-              unless constr.check_relation(sub_type: node_type, super_type: AST::Builtin.nil_type).success?
+              unless method_block_pass?(arg.node, node) || constr.check_relation(sub_type: node_type, super_type: AST::Builtin.nil_type).success?
                 errors << Diagnostic::Ruby::UnexpectedBlockGiven.new(
                   node: node,
                   method_type: method_type
@@ -4423,6 +6765,16 @@ module Steep
               end
             end
           end
+        end
+
+        # A collection the passes above answered exactly, held to the
+        # declaration like every other value the checker computes, and vouched
+        # for as built here — it is a new array, and nothing else holds it.
+        if iterated && (IterationIntrinsics.rewritten?(iteration_intrinsic(decls), node, errors) || (errors.empty? &&
+           check_relation(sub_type: iterated, super_type: return_type || method_type.type.return_type).success?))
+          constr.typing.add_nominal(node, return_type || method_type.type.return_type)
+          return_type = iterated
+          constr.typing.add_vouched(node, iterated)
         end
 
         call = if errors.empty?
@@ -4495,6 +6847,10 @@ module Steep
         block_block_hint: nil,
         block_annotations: block_annotations,
         block_self_hint: nil,
+        # Reached when the call has no block type to zip against (an untyped
+        # receiver, an unresolved overload). The reopen is a property of the call
+        # SHAPE, not of the method type, so it still holds here.
+        implicit_implements: implicit_block_reopen(node),
         node_type_hint: nil
       )
 
@@ -4544,7 +6900,81 @@ module Steep
       end
     end
 
-    def for_block(body_node, block_params:, block_param_hint:, block_next_type:, block_block_hint:, block_annotations:, node_type_hint:, block_self_hint:)
+    # `class_eval`/`module_eval` reopen the receiver: the block's default definee is
+    # the receiver, so a `def` inside defines the receiver's INSTANCE method. That is
+    # the same operation as writing the body inside `class X ... end`.
+    #
+    # `instance_eval` is deliberately absent. Its block self is bound the same way
+    # (`[self: self]` in both signatures), but its default definee is the receiver's
+    # SINGLETON class, so giving it this treatment would attribute the def to the
+    # instance side — the wrong half.
+    MODULE_REOPENING_METHODS = Set[:class_eval, :module_eval].freeze
+
+    # The `@implements` a `X.class_eval do ... end` block states implicitly, or nil
+    # when the call is not that shape.
+    #
+    # Steep already knew both halves of this and only ever connected them by hand.
+    # The block's `self` is already the receiver — `class_eval`'s signature binds it
+    # (`[self: self]`) — and `for_block` already enters a module context for a block
+    # when told to, which is what `# @implements X` does. Without deriving it, the
+    # defs landed in whatever context the block was written in: at top level, on
+    # `::Object`, reported as "not declared in RBS", and `super` inside one had
+    # nothing to resolve against.
+    #
+    # Only a CONSTANT receiver is read, because only then is the definee decidable.
+    # `obj.class_eval` reopens whatever class `obj` happens to be, and the string form
+    # (`class_eval "def x; end"`) has no block and no readable body at all — the
+    # genuinely undecidable cases, left alone.
+    def implicit_block_reopen(node)
+      send_node, _params, _body = node.children
+      return nil unless send_node.type == :send
+
+      receiver, method_name, *args = send_node.children
+      return nil unless MODULE_REOPENING_METHODS.include?(method_name)
+      return nil unless args.empty?
+      return nil unless receiver.is_a?(Parser::AST::Node)
+
+      type_name = reopened_class_name(receiver) or return nil
+      absolute = checker.factory.absolute_type_name(type_name, context: nesting) or return nil
+
+      env = checker.factory.definition_builder.env
+      return nil unless env.class_entry(absolute, normalized: true)
+
+      # A generic class reopened this way would need its type parameters bound, which
+      # is what `for_class` sets up and a block does not: entering it with no args
+      # would build `Array` where `Array[Elem]` is required. Declining leaves the
+      # ordinary call typing, which is what happened before.
+      return nil unless checker.factory.definition_builder.build_instance(absolute).type_params_decl.empty?
+
+      AST::Annotation::Implements::Module.new(name: type_name, args: [])
+    rescue RBS::BaseError
+      nil
+    end
+
+    # The class the receiver denotes, taken from its TYPE rather than from its spelling.
+    #
+    # A constant's type is `singleton(X)` — and so is that of any variable or parameter
+    # holding the class. Reading the constant NODE recognised only the spelling and
+    # missed every case where the class arrives as a VALUE, which is exactly how Ruby's
+    # own `included` hook hands it over:
+    #
+    #   def self.included(base)
+    #     base.class_eval do ... end     # reopens the includer
+    #   end
+    #
+    # `base` is typed `singleton(Includer)` as soon as anything calls the hook, so the
+    # type says what the spelling cannot. A union of singletons (a module with several
+    # hosts) is not a `Name::Singleton` and declines here, which is the same answer the
+    # disagreeing-hosts case gets everywhere else.
+    def reopened_class_name(receiver)
+      type = typing.type_of(node: receiver)
+      type.is_a?(AST::Types::Name::Singleton) ? type.name : nil
+    rescue Steep::Typing::UnknownNodeError
+      # The receiver has not been typed yet (or at all) — nothing to read.
+      nil
+    end
+
+    def for_block(body_node, block_params:, block_param_hint:, block_next_type:, block_block_hint:, block_annotations:, node_type_hint:, block_self_hint:, implicit_implements:)
       block_param_pairs = block_param_hint && block_params.zip(block_param_hint, block_block_hint, factory: checker.factory)
 
       # @type var param_types_hash: Hash[Symbol?, AST::Types::t]
@@ -4582,7 +7012,12 @@ module Steep
         end
       end
 
+      # A block parameter `_` is still untyped, but where `_` is an ordinary
+      # local it is BOUND: `_ = user; items.each { |_| _.name }` reads the
+      # element, not the user.
+      shadows_underscore = param_types_hash.key?(:_) && !cast_lvar?(:_)
       param_types_hash.delete_if {|name, _| name && SPECIAL_LVAR_NAMES.include?(name) }
+      param_types_hash[:_] = AST::Builtin.any_type if shadows_underscore
 
       param_types = param_types_hash.each.with_object({}) do |pair, hash| #$ Hash[Symbol, [AST::Types::t, AST::Types::t?]]
         name, type = pair
@@ -4598,19 +7033,13 @@ module Steep
       type_env = type_env.merge(local_variable_types: pins)
       type_env = type_env.merge(local_variable_types: param_types)
       type_env = TypeInference::TypeEnvBuilder.new(
-        if self_binding = block_annotations.self_type || block_self_hint
-          definition =
-            case self_binding
-            when AST::Types::Name::Instance
-              checker.factory.definition_builder.build_instance(self_binding.name)
-            when AST::Types::Name::Singleton
-              checker.factory.definition_builder.build_singleton(self_binding.name)
-            end
-
-          if definition
-            TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory)
+        *(
+          if self_binding = block_annotations.self_type || block_self_hint
+            ivar_import_commands_for_type(self_binding)
+          else
+            []
           end
-        end,
+        ),
         TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(block_annotations).merge!.on_duplicate! do |name, outer_type, inner_type|
           next if outer_type.is_a?(AST::Types::Var) || inner_type.is_a?(AST::Types::Var)
           next unless body_node
@@ -4632,8 +7061,16 @@ module Steep
                      node_type_hint
                    end
 
+      # Every module the block names beyond the first. `for_block` enters ONE of
+      # them below — a constructor has one module context — so the rest travel
+      # with the block and `synthesize_block` checks the body against each.
+      reopened_modules = (block_annotations.implement_module_annotation&.names || [])
+                           .drop(1)
+                           .map {|implements| default_module_context(implements, nesting: nesting) }
+
       block_context = TypeInference::Context::BlockContext.new(
-        body_type: block_annotations.block_type
+        body_type: block_annotations.block_type,
+        reopened_modules: reopened_modules
       )
       break_context = TypeInference::Context::BreakContext.new(
         break_type: break_type || AST::Builtin.any_type,
@@ -4643,8 +7080,10 @@ module Steep
       self_type = block_self_hint || self.self_type
       module_context = self.module_context
 
-      if implements = block_annotations.implement_module_annotation
-        module_context = default_module_context(implements.name, nesting: nesting)
+      # An explicit `@implements` on the block wins: it is the author overriding what
+      # the call shape says, which is the whole point of writing it.
+      if implements = block_annotations.implement_module_annotation&.name || implicit_implements
+        module_context = default_module_context(implements, nesting: nesting)
         self_type = module_context.module_type
       end
 
@@ -4671,13 +7110,22 @@ module Steep
           type_env: type_env,
           call_context: self.context.call_context,
           variable_context: variable_context
-        )
+        ),
+        contracts: contracts,
+        postconditions: postconditions,
+        callbacks: callbacks,
+        specializations: specializations,
+        literal_method_registry: literal_method_registry,
+        delegation_registry: delegation_registry,
+        constructor_bindings: constructor_bindings,
+        return_forwarding: return_forwarding,
+        return_alias: return_alias
       )
     end
 
     def synthesize_block(node:, block_type_hint:, block_body:)
       if block_body
-        body_type, _, context = synthesize(block_body, hint: block_context&.body_type || block_type_hint)
+        body_type, context = synthesize_block_body(node: node, block_type_hint: block_type_hint, block_body: block_body)
 
         if annotated_body_type = block_context&.body_type
           if result = no_subtyping?(sub_type: body_type, super_type: annotated_body_type)
@@ -4695,11 +7143,80 @@ module Steep
 
         range = block_body.loc.expression.end_pos..node.loc.end.begin_pos
         typing.cursor_context.set(range, context)
+        typing.add_block_exit(node, context.type_env)
 
         body_type
       else
         AST::Builtin.nil_type
       end
+    end
+
+    # The type `block_body` synthesizes to — before any annotation replaces it
+    # — and the context it leaves, which is the env a next run of the same
+    # block starts from (`record_iterations`).
+    def synthesize_block_body(node:, block_type_hint:, block_body:)
+      body_type, _, context = synthesize(block_body, hint: block_context&.body_type || block_type_hint)
+
+      check_reopened_modules(block_body, hint: block_context&.body_type || block_type_hint)
+
+      [body_type, context]
+    end
+
+    # Re-checks the block body under every module the annotation names beyond the
+    # first, and reports what only those runs find.
+    #
+    # A block replayed onto two classes runs twice at runtime, once per definee,
+    # and its `def`s land on both. One pass can only enter one of them: it types
+    # the body against that class's methods and declares its `def`s against that
+    # class's RBS, and says nothing at all about the other. So the body is
+    # checked once per definee, which is what running it twice means.
+    #
+    # Each extra run goes in its own CHILD typing and the child is never saved:
+    # the nodes are already typed by the first pass, and a second answer for the
+    # same node is not something the typing can hold. Only the ERRORS are
+    # brought back — they are the part that is about the definee rather than
+    # about the node — and only the ones the first pass did not already report,
+    # so a body wrong for both classes is one diagnostic per class rather than
+    # the same one twice.
+    #
+    # Costless for every ordinary block: `reopened_modules` is empty unless the
+    # annotation named more than one module (felixefelip/steep#149).
+    def check_reopened_modules(block_body, hint:)
+      reopened = block_context&.reopened_modules or return
+      return if reopened.empty?
+
+      reported = typing.errors.map {|error| error_signature(error) }.to_set
+
+      # `@implements` binds the block's `self` to the class object — that is what
+      # `class_eval` does — so each extra definee brings its own. But only when
+      # `self` came from the annotation in the first place: an explicit
+      # `@type self:` is the author naming a self that holds for the block
+      # however it is run, and every definee must be checked against THAT.
+      implements_bound_self = module_context&.module_type == self_type
+
+      reopened.each do |reopened_context|
+        child = typing.new_child
+        constr = with(typing: child).update_context do |context|
+          context.with(
+            module_context: reopened_context,
+            self_type: implements_bound_self ? reopened_context.module_type : self_type
+          )
+        end
+
+        constr.synthesize(block_body, hint: hint)
+
+        child.errors.each do |error|
+          typing.add_error(error) if reported.add?(error_signature(error))
+        end
+      end
+    end
+
+    # What makes two diagnostics the same one for the purpose above. Steep's
+    # diagnostics have no `==`, and the pair that matters here — the same
+    # complaint from two definees — differs only in its rendered text, which is
+    # where the definee's name appears.
+    def error_signature(error)
+      [error.class, error.node&.loc&.expression&.begin_pos, error.header_line]
     end
 
     def nesting
@@ -4765,6 +7282,13 @@ module Steep
     end
 
     def validate_method_definitions(node, module_name)
+      # `@implements singleton(::Foo)` on a class or module BODY, where the
+      # definee is fixed by the `class` keyword and cannot be a singleton. The
+      # two sets below are read off the instance/module split, which a singleton
+      # context does not have — every class method of Foo would be demanded of
+      # this body. Nothing to validate rather than something wrong to report.
+      return if module_name.singleton?
+
       module_name_1 = module_name.name
       module_entry = checker.factory.env.module_class_entry(module_name_1, normalized: true) or raise
       member_decl_count = module_entry.each_decl.count do |decl|
@@ -4941,7 +7465,7 @@ module Steep
         else
           literal_type = AST::Types::Literal.new(value: literal)
           if check_relation(sub_type: literal_type, super_type: hint).success?
-            unwrap(hint)
+            literal_type
           end
         end
       end
@@ -5091,6 +7615,90 @@ module Steep
         subst = constraints.solution(checker, variables: variables, context: context)
 
         type.subst(subst)
+      end
+    end
+
+    # An array a body HANDS BACK is worth its tuple. Everywhere else the literal
+    # widens to `Array[Elem]`, and that is not timidity: a name makes the array
+    # reachable, and a tuple takes only what it already holds —
+    #
+    #     parts = ["a", "b"]   # were this `["a", "b"]`,
+    #     parts << "c"         # this would stop type-checking
+    #
+    # — so the widening buys the mutation. In the positions a body's value
+    # leaves from, no name here holds the array and no `<<` here can make its
+    # length or its order a lie, so there is nothing to buy.
+    #
+    # The tuple is read off the source nodes, not off the element types the
+    # ordinary path has already widened, and it is taken only while it still
+    # satisfies whatever was asked of the literal — a declaration is never
+    # contradicted, only met more exactly.
+    def array_literal(node, hint)
+      pair = synthesize_array_literal(node, hint)
+      return pair if pair.type.is_a?(AST::Types::Tuple)
+      return pair unless source.accumulators.returned[node]
+
+      tuple = pair.constr.literal_operand_type(node, pair.type)
+      return pair unless tuple.is_a?(AST::Types::Tuple)
+      return pair if hint && !pair.constr.check_relation(sub_type: tuple, super_type: hint).success?
+
+      pair.constr.add_typing(node, type: tuple)
+    end
+
+    # The array literal as it types without that: a tuple where something asked
+    # for one, otherwise `Array[Elem]` over the union of the elements.
+    def synthesize_array_literal(node, hint)
+      if node.children.empty?
+        if hint
+          array = AST::Builtin::Array.instance_type(AST::Builtin.any_type)
+          if !hint.is_a?(AST::Types::Any) && check_relation(sub_type: array, super_type: hint).success?
+            add_typing node, type: unwrap(hint)
+          else
+            add_typing node, type: array
+          end
+        else
+          typing.add_error Diagnostic::Ruby::UnannotatedEmptyCollection.new(node: node)
+          add_typing node, type: AST::Builtin::Array.instance_type(AST::Builtin.any_type)
+        end
+      else
+        if hint
+          tuples = select_flatten_types(hint) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
+          if tuples.empty?
+            if converted = try_convert(hint, :to_ary)
+              tuples = select_flatten_types(converted) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
+            end
+          end
+          unless tuples.empty?
+            fallback_pair = nil #: Pair?
+            tuples.each do |tuple|
+              typing.new_child() do |child_typing|
+                if pair = with_new_typing(child_typing).try_tuple_type(node, tuple)
+                  if pair.constr.check_relation(sub_type: pair.type, super_type: tuple).success?
+                    return pair.with(constr: pair.constr.save_typing)
+                  end
+                  fallback_pair ||= pair.with(constr: pair.constr.save_typing)
+                end
+              end
+            end
+            return fallback_pair if fallback_pair
+          end
+        end
+
+        if hint
+          arrays = select_flatten_types(hint) {|type| AST::Builtin::Array.instance_type?(type) } #: Array[AST::Types::Name::Instance]
+          unless arrays.empty?
+            arrays.each do |array|
+              typing.new_child() do |child_typing|
+                pair = with_new_typing(child_typing).try_array_type(node, array)
+                if pair.constr.check_relation(sub_type: pair.type, super_type: hint).success?
+                  return pair.with(constr: pair.constr.save_typing)
+                end
+              end
+            end
+          end
+        end
+
+        try_array_type(node, nil)
       end
     end
 
@@ -5383,6 +7991,898 @@ module Steep
             )
           )
         end
+      end
+    end
+
+    def contract_for_current_method
+      return nil if contracts.empty?
+      mc = method_context
+      return nil unless mc&.name
+      class_name = module_context&.class_name
+      return nil unless class_name
+
+      contracts.lookup_instance(class_name.to_s.sub(/\A::/, ""), mc.name)
+    end
+
+    # True when the method currently being type-checked has an *enforced*
+    # contract that requires `expr` (`self.x`) non-nil — so it holds on entry
+    # and throughout the body, discharging a `self` call that needs the same.
+    def enclosing_contract_guarantees?(expr)
+      contract = contract_for_current_method
+      return false unless contract&.enforced
+
+      contract.requires.any? do |req|
+        req.is_a?(Contracts::Predicate::NotNil) && contract_expr_equal?(req.expr, expr)
+      end
+    end
+
+    def contract_expr_equal?(a, b)
+      return false unless a.class == b.class
+
+      case a
+      when Contracts::Expr::SelfRef
+        true
+      when Contracts::Expr::Send
+        a.method == b.method && a.chain == b.chain && contract_expr_equal?(a.receiver, b.receiver)
+      else
+        false
+      end
+    end
+
+    # "Class#method" of the instance method currently being type-checked, or
+    # nil at class-body scope / when the context is unknown. Used to attribute
+    # an inherited (transitive) precondition obligation to the enclosing method.
+    def enclosing_instance_method_key
+      mc = method_context
+      return nil unless mc&.name
+      class_name = module_context&.class_name
+      return nil unless class_name
+
+      "#{class_name.to_s.sub(/\A::/, "")}##{mc.name}"
+    end
+
+    def contract_narrowed_type(node, original_type)
+      return nil unless node.type == :send
+
+      contract = contract_for_current_method
+      return nil unless contract
+      # Only narrow when the contract is enforced at all call sites. When it is
+      # not (some caller skips the check, or there are zero static call sites —
+      # e.g. Rails actions called by the framework), the precondition is a
+      # fiction: skipping narrowing lets the body errors it was hiding surface.
+      return nil unless contract.enforced
+
+      contract.requires.each do |req|
+        next unless req.is_a?(Contracts::Predicate::NotNil)
+        next unless contract_expression_matches?(req.expr, node)
+
+        truthy_type, _ = checker.factory.partition_union(original_type)
+        return truthy_type if truthy_type && !truthy_type.equal?(original_type)
+      end
+      nil
+    end
+
+    def contract_expression_matches?(expr, node)
+      return false unless expr.is_a?(Contracts::Expr::Send)
+      variants = build_contract_send_variants(expr)
+      # felixefelip/steep#62: also match the aliased local-attr form of the
+      # expression (`record.post.user` for `self.owner.user`), so a deref through
+      # a local that projects a self path narrows once the contract is enforced.
+      variants += alias_substituted_variants(expr)
+      variants.any? { |built| built == node }
+    end
+
+    # For each `[local, attr] => path` alias of the current method whose `path`
+    # is a prefix of `expr`'s self path, build the node `local.attr.<remaining>`
+    # — the form the body actually wrote (`record.post.user`) for a `self`-rooted
+    # contract expression (`self.owner.user`). (felixefelip/steep#62)
+    def alias_substituted_variants(expr)
+      aliases = current_method_aliases
+      locals = current_method_local_aliases
+      return [] if aliases.empty? && locals.empty?
+
+      full = [expr.method] + expr.chain
+      attr_variants = aliases.filter_map do |(local, attr), path|
+        next unless path.size <= full.size && full[0, path.size] == path
+        node = ::Parser::AST::Node.new(:send, [::Parser::AST::Node.new(:lvar, [local]), attr])
+        full[path.size..].each do |seg|
+          node = ::Parser::AST::Node.new(:send, [node, seg])
+        end
+        node
+      end
+
+      # A local that IS a strict prefix of the path (`_ = post` for
+      # `self.post.user`): the body wrote `_.user`. The local itself needs no
+      # variant — it holds what the narrowed reader returned.
+      local_variants = locals.filter_map do |local, entry|
+        path = entry.fetch(:path)
+        next unless path.size < full.size && full[0, path.size] == path
+        full[path.size..].inject(::Parser::AST::Node.new(:lvar, [local])) do |node, seg|
+          ::Parser::AST::Node.new(:send, [node, seg])
+        end
+      end
+
+      attr_variants + local_variants
+    end
+
+    # The `{ [local, attr] => [path_syms] }` aliases of the method currently
+    # being type-checked, derived syntactically from its body (the same
+    # derivation the contracts inferrer uses). Memoized per construction.
+    def current_method_aliases
+      # Reached only from `contract_narrowed_type`, which already gates on the
+      # current method having an *enforced* contract — a narrow set — so the
+      # per-method def lookup + memo here is cheap in aggregate.
+      mc = method_context
+      return {} unless mc&.name
+      class_name = module_context&.class_name
+      return {} unless class_name
+      bare = class_name.to_s.sub(/\A::/, "")
+      key = "#{bare}##{mc.name}"
+
+      @method_aliases_cache ||= {}
+      return @method_aliases_cache[key] if @method_aliases_cache.key?(key)
+
+      body = find_method_def_body(bare, mc.name)
+      aliases = body ? Contracts::AliasResolver.local_attr_aliases(body, class_name: bare, return_aliases: return_alias.to_h) : {}
+      @method_aliases_cache[key] = aliases
+    end
+
+    # The locals of the current method that are a self path (`_ = user`), per
+    # `Contracts::AliasResolver.local_aliases`. Memoized like the attr aliases.
+    def current_method_local_aliases
+      mc = method_context
+      return {} unless mc&.name
+      class_name = module_context&.class_name
+      return {} unless class_name
+      bare = class_name.to_s.sub(/\A::/, "")
+      key = "#{bare}##{mc.name}"
+
+      @method_local_aliases_cache ||= {}
+      return @method_local_aliases_cache[key] if @method_local_aliases_cache.key?(key)
+
+      body = find_method_def_body(bare, mc.name)
+      @method_local_aliases_cache[key] = body ? Contracts::AliasResolver.local_aliases(body) : {}
+    end
+
+    # Locate the body node of `class_name#method_name` in the current source.
+    def find_method_def_body(class_name, method_name)
+      root = source.node or return nil
+      find_def_in(root, class_name, method_name, nesting: [])
+    end
+
+    def find_def_in(node, class_name, method_name, nesting:)
+      return nil unless node.is_a?(::Parser::AST::Node)
+      case node.type
+      when :class, :module
+        const_node = node.children[0]
+        name = const_name_of(const_node)
+        new_nesting = name ? nesting + [name] : nesting
+        body = node.type == :class ? node.children[2] : node.children[1]
+        find_def_in(body, class_name, method_name, nesting: new_nesting)
+      when :def
+        return node.children[2] if nesting.join("::") == class_name && node.children[0] == method_name.to_sym
+        nil
+      else
+        node.children.each do |c|
+          result = find_def_in(c, class_name, method_name, nesting: nesting)
+          return result if result
+        end
+        nil
+      end
+    end
+
+    def const_name_of(node)
+      return nil unless node.is_a?(::Parser::AST::Node) && node.type == :const
+      scope, name = node.children
+      case scope&.type
+      when nil, :cbase then name.to_s
+      when :const
+        prefix = const_name_of(scope)
+        prefix ? "#{prefix}::#{name}" : name.to_s
+      end
+    end
+
+    # Narrow `receiver.attr` to the assigned value's type after
+    # `receiver.attr = value`, when the getter is a pure attr reader on a
+    # stable receiver. Steep already narrows local vars, ivars, and
+    # self-attrs on assignment; this extends the same flow-narrowing to an
+    # attr read on a narrowable receiver, so `x.attr = v` lets a later
+    # `x.attr` — or a contract precondition referencing it — observe the
+    # non-nil type. Bounded by the same pure-node invalidation as every
+    # other pure call: a write to `receiver` (or `receiver.attr`) drops it.
+    def narrow_attribute_write(node:, receiver:, receiver_type:, method_name:, arguments:)
+      return self unless receiver
+
+      name = method_name.to_s
+      return self unless name.end_with?("=")
+      return self if name == "==" || name == "[]="
+      attr = name.delete_suffix("=")
+      return self if attr.empty?
+      # `self.attr = v` is already narrowed via the backing ivar (Phase 2 of
+      # steep#16); an intersection receiver is owned by the attribute-write
+      # dropout (steep#1). Only handle the remaining gap — a plain non-self,
+      # non-intersection receiver, where nothing narrows `receiver.attr` today.
+      return self if receiver.type == :self
+      return self if receiver_type.is_a?(AST::Types::Intersection)
+      return self unless narrowable_pure_receiver?(receiver)
+
+      last_arg = arguments.last
+      return self unless last_arg && typing.has_type?(last_arg)
+      rhs_type = typing.type_of(node: last_arg)
+
+      cache_attribute_read(receiver, attr.to_sym, rhs_type, location: node.location) || self
+    end
+
+    # After `publish(box)`, `box.value` is what `publish` always writes
+    # (`unconditional.params`), as if `box.value = :published` were written
+    # here. Positional arguments only, up to the first one whose position is
+    # not its parameter's.
+    def apply_param_establishments(call:, arguments:)
+      return self unless call.is_a?(TypeInference::MethodCall::Typed)
+      return self if postconditions.empty?
+
+      entry = lookup_param_establishments_entry(call) or return self
+      constr = self
+      entry.unconditional.param_establishes_rbs_types.each do |index, attrs|
+        prefix = arguments.first(index + 1)
+        next unless prefix.size == index + 1
+        next if prefix.any? { |arg| %i[splat kwargs block_pass forwarded_args forwarded_restarg].include?(arg.type) }
+
+        argument = prefix.last
+        next if argument.type == :self || !constr.narrowable_pure_receiver?(argument)
+
+        attrs.each do |attr, rbs_type|
+          type = checker.factory.type(rbs_type) rescue next
+          constr = constr.cache_attribute_read(argument, attr, type, location: argument.location, fits_reader: true) || constr
+        end
+      end
+      constr
+    end
+
+    # Entries are keyed by class and method name alone, so a name the class
+    # defines both as `publish` and `self.publish` establishes nothing.
+    def lookup_param_establishments_entry(call)
+      call.method_decls.each do |decl|
+        name = decl.method_name
+        next unless name.is_a?(InstanceMethodName) || name.is_a?(SingletonMethodName)
+        next if !name.type_name.class? || defined_on_both_sides?(name.type_name, name.method_name)
+
+        entry = postconditions.lookup_instance(name.type_name.to_s, name.method_name)
+        return entry if entry&.unconditional && !entry.unconditional.param_establishes_type_strings.empty?
+      end
+      nil
+    end
+
+    def defined_on_both_sides?(type_name, method_name)
+      builder = checker.factory.definition_builder
+      [builder.build_instance(type_name), builder.build_singleton(type_name)].all? do |definition|
+        definition.methods[method_name]&.defs&.any? { |defn| defn.implemented_in == type_name }
+      end
+    rescue RBS::BaseError
+      true
+    end
+
+    # Nil when nothing is cached.
+    def cache_attribute_read(receiver, attr, type, location:, fits_reader: false)
+      read_node = ::Parser::AST::Node.new(:send, [receiver, attr], location: location)
+
+      getter_call = nil #: TypeInference::MethodCall::Typed?
+      begin
+        # Type the read in a throwaway child typing purely to obtain a real
+        # getter `MethodCall` (and confirm it is a pure attr reader). The
+        # child is discarded — never `save!`d — so no diagnostics/typings for
+        # the synthetic read leak into the real flow.
+        typing.new_child do |child|
+          pair = with_new_typing(child).synthesize(read_node, hint: nil)
+          call = pair.constr.typing.call_of(node: read_node)
+          if call.is_a?(TypeInference::MethodCall::Typed) &&
+              pair.constr.typing.errors.empty? &&
+              pure_send?(call, receiver, [])
+            getter_call = call
+          end
+        end
+      rescue StandardError => exn
+        Steep.logger.warn { "[contracts] attr-write narrowing failed for #{attr}=: #{exn.message}" }
+        return nil
+      end
+      return nil unless getter_call
+      # Against what the reader declares, not `return_type`: a read narrowed
+      # earlier in this frame returns the narrowed type, and the value a call
+      # leaves behind replaces that narrowing rather than refining it.
+      return nil if fits_reader && !check_relation(sub_type: type, super_type: getter_call.actual_method_type.type.return_type).success?
+
+      update_type_env do |env|
+        env.add_pure_call(read_node, getter_call, type)
+      end
+    end
+
+    # A receiver whose pure attr reads Steep can cache and narrow: a local
+    # variable, an ivar, `self`, or an already-cached pure send.
+    def narrowable_pure_receiver?(receiver)
+      case receiver.type
+      when :lvar, :ivar, :self
+        true
+      when :send
+        context.type_env.pure_method_calls.key?(receiver)
+      else
+        false
+      end
+    end
+
+    def build_contract_send_variants(expr, base_receiver: nil, location: nil)
+      return [] unless expr.receiver.is_a?(Contracts::Expr::SelfRef)
+
+      # `self.<method>...` inside the method uses the two self forms
+      # (implicit / explicit `self`). At an explicit-receiver call site the
+      # precondition is about `<receiver>.<method>...`, so the caller passes
+      # the concrete receiver node to substitute for `self`.
+      bases = base_receiver ? [base_receiver] : [nil, Parser::AST::Node.new(:self, [])]
+
+      # A `location` (the call-site's) is carried onto the synthetic nodes so a
+      # diagnostic built while synthesizing them has a real location instead of
+      # nil. Node `==`/`hash` ignore location, so cached-read lookups and the
+      # `built == node` match in `contract_expression_matches?` are unaffected.
+      bases.map do |recv|
+        chained = Parser::AST::Node.new(:send, [recv, expr.method], location: location)
+        expr.chain.each do |seg|
+          chained = Parser::AST::Node.new(:send, [chained, seg], location: location)
+        end
+        chained
+      end
+    end
+
+    def check_precondition_at_call_site(node, receiver, receiver_type, method_name, call:)
+      return if contracts.empty?
+
+      # A `Klass.new(...)` call site: the constructed instance's `initialize`
+      # precondition (`not_nil self.<reader>...`) is discharged by whatever the
+      # matching constructor argument makes true, not by anything on the
+      # explicit `singleton(Klass)` receiver. Handle it separately, then stop —
+      # the normal receiver path has nothing to add for `singleton(...)`.
+      if method_name == :new && receiver_type.is_a?(AST::Types::Name::Singleton)
+        check_constructor_precondition_at_new_site(node, receiver_type.name)
+        return
+      end
+
+      # Implicit-self / `self` calls check the precondition on `self`; an
+      # explicit receiver (`column.set_default_user_name`) checks it on that
+      # receiver — but only when the receiver is a narrowable pure node, so
+      # `column.board` can actually be proven non-nil by flow (e.g. after
+      # `column.board = board`, via `narrow_attribute_write`).
+      explicit_receiver = !receiver.nil? && receiver.type != :self
+      return unless receiver.nil? || receiver.type == :self ||
+        narrowable_pure_receiver?(receiver) || return_forwarding_receiver?(receiver)
+
+      # A contract is keyed by the type whose SOURCE declares the method, and for
+      # a concern that is the MODULE. The receiver's own type never carries that
+      # name: `(Post & Post::Validated)` decomposes to `Post` and
+      # `Post::Validated`, while `greet` lives on `Post::Exportable`. So a call
+      # to a concern's method matched no contract, was never observed as a call
+      # site, and `Enforcement` saw `seen: 0` — never enforced however precisely
+      # the receiver's marker proved the precondition (felixefelip/steep#157).
+      #
+      # The call's `method_decls` name the ancestor the method actually resolved
+      # in, which is the same reading `lookup_unconditional_postcondition_entry`
+      # already does for the postconditions sidecar. Appended rather than
+      # substituted: the receiver's own names stay first, so a method the class
+      # itself declares keeps matching exactly as before.
+      target_names = precondition_target_type_names(receiver_type) +
+        contract_declaring_type_names(call)
+      return if target_names.empty?
+
+      contract = target_names.filter_map do |name|
+        contracts.lookup_instance(name.to_s.sub(/\A::/, ""), method_name)
+      end.first
+      return unless contract
+
+      base_receiver = explicit_receiver ? receiver : nil
+      env = context.type_env
+
+      # What this call site hands the method as `self`. An explicit receiver is
+      # its own type; a `self`/implicit call passes the enclosing `self`, which
+      # `#self_type` already reports as REFINED when an enforced contract (or a
+      # callback, or a postcondition) narrowed it — so a self-call inside a
+      # method that itself got refined observes the refined type, and the
+      # Runner's fixpoint propagates a marker down a self-call chain.
+      observed_self = explicit_receiver ? receiver_type : self_type
+      # EVERY receiver, not just the interesting ones. Whether the type is worth
+      # refining to is decided later, but whether the call sites AGREE can only
+      # be decided here — and a site left unrecorded is a site that cannot
+      # disagree. Filtering to intersections at this point let one validated
+      # caller define `self` for a method a bare receiver also called.
+      if observed_self
+        typing.observe_contract_receiver_type(key: contract.key, type: observed_self.to_s)
+      end
+      # A `self` call to a contracted method that the enclosing method does
+      # not satisfy propagates the requirement upward: the enclosing method
+      # inherits `requires self.x`. (An explicit receiver carries no self
+      # obligation — the requirement is about that receiver.) The Runner
+      # closes these over the self-call graph to a fixpoint.
+      enclosing_key = explicit_receiver ? nil : enclosing_instance_method_key
+      all_satisfied = true
+      contract.requires.each do |req|
+        # A `self_type` requirement is discharged by the receiver alone: it says
+        # what `self` is inside the body, and this call site's receiver either is
+        # that type or is not. There is nothing to establish by flow, so no
+        # obligation is propagated to the enclosing method either — a caller
+        # cannot make its own receiver validated by checking something.
+        if req.is_a?(Contracts::Predicate::SelfType)
+          # Fails OPEN on an unparseable type. `apply_contract_self_type` cannot
+          # refine the body with a type it cannot parse either, so the body was
+          # checked unrefined — reporting its call sites as unsatisfied would
+          # unenforce the contract and take the NotNil narrowing down with it,
+          # for a requirement that never applied.
+          next unless (required = parse_callback_self_type(req.type))
+          next if observed_self && contract_self_type_holds?(required, observed_self)
+
+          all_satisfied = false
+          typing.add_error(
+            Diagnostic::Ruby::PreconditionUnsatisfied.new(
+              node: node,
+              method_name: method_name,
+              expression_source: "self: #{req.type}",
+              contract_source: contracts.source
+            )
+          )
+          next
+        end
+
+        next unless req.is_a?(Contracts::Predicate::NotNil)
+        next if precondition_holds?(req.expr, env, base_receiver: base_receiver, location: node.location)
+        # A `self` call is also satisfied when the enclosing method's own
+        # enforced contract already requires the same `self.x`: its callers
+        # guarantee it on entry, so it holds throughout the body even without a
+        # local read to narrow. This is what lets a chain (`save` →
+        # `set_default_user_name`) converge — once `save` inherits and enforces
+        # the requirement, its inner call is discharged.
+        next if base_receiver.nil? && enclosing_contract_guarantees?(req.expr)
+
+        # felixefelip/steep#64: an explicit receiver that aliases a self path
+        # (`record.post` == `self.owner`, from `record = build`) makes the
+        # requirement about `record.<expr>` really `self.<translated>` on the
+        # *enclosing* method — satisfied once that method's enforced contract
+        # guarantees it, and otherwise propagated to it so forwarding at its own
+        # call site can discharge it (`@post.assignments.create!`).
+        translated = base_receiver && alias_translated_requirement(req.expr, base_receiver)
+        next if translated && enclosing_contract_guarantees?(translated)
+
+        all_satisfied = false
+        if translated
+          if (translated_key = enclosing_instance_method_key)
+            typing.observe_precondition_obligation(key: translated_key, expr: translated)
+          end
+        elsif enclosing_key
+          typing.observe_precondition_obligation(key: enclosing_key, expr: req.expr)
+        end
+        typing.add_error(
+          Diagnostic::Ruby::PreconditionUnsatisfied.new(
+            node: node,
+            method_name: method_name,
+            expression_source: contract_expression_source(req.expr),
+            contract_source: contracts.source
+          )
+        )
+      end
+
+      # Record that this contracted method has a (statically visible) call site
+      # and whether it satisfied the precondition. Contracts::Enforcement
+      # aggregates these across the project to decide if the contract is
+      # enforced (all call sites satisfy, and at least one exists).
+      typing.observe_contract_call_site(key: contract.key, satisfied: all_satisfied)
+    end
+
+    # felixefelip/steep#64. Translate a precondition `self.<expr>` checked on an
+    # explicit receiver `base_receiver` (`record`) into a self-rooted requirement
+    # on the enclosing method, when `base_receiver`'s deref aliases a self path
+    # in this method (`record.post` == `self.owner`, from `record = build`):
+    # `record.post.user` → `self.owner.user`. Returns the translated
+    # `Contracts::Expr`, or nil when no alias reroots it.
+    def alias_translated_requirement(expr, base_receiver)
+      return nil unless expr.is_a?(Contracts::Expr::Send)
+      aliases = current_method_aliases
+      return nil if aliases.empty? && current_method_local_aliases.empty?
+
+      node = ::Parser::AST::Node.new(:send, [base_receiver, expr.method])
+      expr.chain.each { |seg| node = ::Parser::AST::Node.new(:send, [node, seg]) }
+
+      path = Contracts::AliasResolver.resolve_self_path(node, aliases, current_method_local_aliases)
+      return nil unless path && !path.empty?
+
+      Contracts::Expr::Send.new(
+        receiver: Contracts::Expr::SelfRef.instance,
+        method: path.first,
+        chain: path.drop(1)
+      )
+    end
+
+    # felixefelip/steep#60. At `Klass.new(args)`, translate each `initialize`
+    # precondition `not_nil self.<reader>.<tail>` into a requirement on the
+    # constructor argument the reader's ivar is bound to. When that argument is
+    # `self`, the requirement becomes `not_nil self.<tail>` on the *enclosing*
+    # method — so a getter that hands its own `self` to a proxy
+    # (`Proxy.new(self)`) inherits the proxy body's deref obligation, which the
+    # marker-enforced contract on the getter's call site then discharges.
+    #
+    # Observes the `initialize` contract call site (so the constructor can be
+    # enforced once every `.new` site is satisfied) and, for an unsatisfied
+    # self-rooted requirement, emits the translated obligation on the enclosing
+    # method for the Runner's fixpoint. Emits no diagnostic: the requirement is
+    # derived, not a direct user call, and this path only runs under the
+    # Enforcement pass (whose diagnostics are discarded).
+    def check_constructor_precondition_at_new_site(node, class_type_name)
+      class_key = class_type_name.to_s.sub(/\A::/, "")
+      contract = contracts.lookup_instance(class_key, :initialize)
+      return unless contract
+
+      bindings = constructor_bindings.bindings_for(class_key)
+      return unless bindings
+
+      arguments = node.children[2..] || []
+      env = context.type_env
+      enclosing_key = enclosing_instance_method_key
+
+      all_satisfied = true
+      contract.requires.each do |req|
+        next unless req.is_a?(Contracts::Predicate::NotNil)
+
+        translated = translate_constructor_requirement(req.expr, bindings, arguments)
+        case translated
+        when :trivial
+          next
+        when nil
+          # Can't map this requirement to an argument (unknown reader, non-self
+          # argument). Can't prove it here → conservatively leave the
+          # constructor unenforced rather than narrow on an unproven basis.
+          all_satisfied = false
+        else
+          next if precondition_holds?(translated, env, base_receiver: nil, location: node.location)
+          next if enclosing_contract_guarantees?(translated)
+
+          all_satisfied = false
+          if enclosing_key
+            typing.observe_precondition_obligation(key: enclosing_key, expr: translated)
+          end
+        end
+      end
+
+      typing.observe_contract_call_site(key: contract.key, satisfied: all_satisfied)
+    end
+
+    # Map an `initialize` requirement `self.<reader>.<tail>` to the constructor
+    # argument bound to `<reader>`. Returns a self-rooted `Contracts::Expr` for
+    # the `<tail>` chain when the argument is `self`, `:trivial` when there is no
+    # tail (the requirement reduces to `not_nil self`, always true), or nil when
+    # it can't be translated (reader not a constructor-bound param, or the
+    # argument isn't `self`).
+    def translate_constructor_requirement(expr, bindings, arguments)
+      return nil unless expr.is_a?(Contracts::Expr::Send)
+      return nil unless expr.receiver.is_a?(Contracts::Expr::SelfRef)
+
+      param_index = bindings[expr.method]
+      return nil unless param_index
+
+      arg = arguments[param_index]
+      return nil unless arg.is_a?(::Parser::AST::Node) && arg.type == :self
+
+      tail = expr.chain
+      return :trivial if tail.empty?
+
+      Contracts::Expr::Send.new(
+        receiver: Contracts::Expr::SelfRef.instance,
+        method: tail.first,
+        chain: tail.drop(1)
+      )
+    end
+
+    def precondition_target_type_names(receiver_type)
+      case receiver_type
+      when AST::Types::Name::Instance
+        [receiver_type.name]
+      when AST::Types::Self
+        # `self_type` may itself be a marker-refined intersection
+        # (`TagDestroy & TagDestroy::AfterTestNokogiri`) after a postcondition
+        # narrowed self at a preceding self-call — decompose it the same way an
+        # explicit intersection receiver is, so a subsequent contracted
+        # self-call is still recognized as a call site (felixefelip/rbs_infer#71).
+        st = self_type
+        st.is_a?(AST::Types::Self) ? [] : precondition_target_type_names(st)
+      when AST::Types::Intersection
+        # A marker-refined receiver such as `(Post & Post::Validated)`: the
+        # contract lives on the base class, while the nested marker only refines
+        # return types. Offer every instance member as a candidate; the caller
+        # keeps the first that actually carries a contract for `method_name`.
+        receiver_type.types.flat_map { |t| precondition_target_type_names(t) }
+      else
+        []
+      end
+    end
+
+    # The types whose RBS declares the method this call resolved to — the owner
+    # of each `method_decl`, which for a method reached through an `include` is
+    # the module rather than the receiver's class. Mirrors
+    # `lookup_unconditional_postcondition_entry`, which walks the same decls for
+    # the same reason: "the same method may be declared in different ancestors".
+    def contract_declaring_type_names(call)
+      call.method_decls.filter_map do |decl|
+        name = decl.method_name
+        name.type_name if name.is_a?(InstanceMethodName)
+      end
+    end
+
+    def precondition_holds?(expr, env, base_receiver: nil, location: nil)
+      variants = build_contract_send_variants(expr, base_receiver: base_receiver, location: location)
+      # felixefelip/steep#62 return forwarding: when the explicit receiver is a
+      # call whose result forwards `expr`'s head reader to its own receiver
+      # (`@post.assignments.owner` == `@post`), the requirement `self.owner.user`
+      # collapses to `@post.user` — provable via `@post`'s marker.
+      if base_receiver && (forwarded = return_forwarded_send(expr, base_receiver, location))
+        variants += [forwarded]
+      end
+      variants.any? do |built|
+        entry = env.pure_method_calls.fetch(built, nil)
+        if entry
+          _call, type = entry
+          next true if type && !contract_nullable_type?(type)
+        end
+        # No flow fact cached the read. Fall back to the receiver's static type:
+        # a marker-refined receiver (e.g. `(Post & Post::Validated)`) can already
+        # guarantee `receiver.attr` is non-nil through the marker's refined return
+        # type, even though the bare class types it nilable. This covers both an
+        # explicit aliased receiver (`base_receiver` set, felixefelip/steep#62)
+        # and a `self` call whose `self` a preceding postcondition narrowed to a
+        # marker intersection (`self` is `X & X::AfterFoo`, so `self.attr` types
+        # non-nil through the marker) — the read that establishes it lives in a
+        # different method, so nothing cached a flow fact here
+        # (felixefelip/rbs_infer#71). When `self` is unrefined, the synthesized
+        # `self.attr` is still nilable and this returns false, so a genuinely
+        # unestablished self-call is left to propagate to the enclosing contract.
+        contract_send_type_non_nil?(built)
+      end
+    end
+
+    # Synthesize a contract's `receiver.attr...` send against the current
+    # environment and report whether its type is provably non-nil. Lets a
+    # marker-refined receiver type (an `X & X::Validated` intersection) discharge
+    # a `not_nil` precondition at the call site without a local read to populate
+    # the pure-call flow cache. Mirrors the throwaway-child synthesize pattern in
+    # `narrow_attribute_write`: the child typing is discarded, so no
+    # diagnostics/typings for the synthetic read leak into the real flow.
+    # felixefelip/steep#62. If `base_receiver` is `X.m` and calling `m` returns
+    # a proxy whose `expr`'s head reader is the receiver (per the return-
+    # forwarding registry), then `base_receiver.<head>.<chain>` is just
+    # `X.<chain>`. Build that collapsed send so the precondition can be
+    # discharged against `X`'s (marker-refined) type. Returns nil when no
+    # forwarding applies.
+    def return_forwarded_send(expr, base_receiver, location)
+      return nil if return_forwarding.empty?
+      return nil unless expr.is_a?(Contracts::Expr::Send)
+      return nil unless base_receiver.is_a?(::Parser::AST::Node) && base_receiver.type == :send
+
+      inner_receiver, method, *args = base_receiver.children
+      return nil unless inner_receiver && args.empty?
+      return nil unless typing.has_type?(inner_receiver)
+
+      readers = forwarding_readers_for(inner_receiver, method)
+      return nil unless readers&.include?(expr.method)
+
+      node = inner_receiver
+      expr.chain.each do |seg|
+        node = ::Parser::AST::Node.new(:send, [node, seg], location: location)
+      end
+      node
+    end
+
+    # The forwarded readers registered for `receiver.method`, resolving
+    # `receiver`'s class from its static type (walking a marker intersection to
+    # the base class the method lives on). nil when nothing is registered.
+    def forwarding_readers_for(receiver, method)
+      return nil unless typing.has_type?(receiver)
+      precondition_target_type_names(typing.type_of(node: receiver)).each do |name|
+        readers = return_forwarding.lookup(name.to_s.sub(/\A::/, ""), method)
+        return readers if readers
+      end
+      nil
+    rescue StandardError
+      nil
+    end
+
+    # A receiver of the shape `X.m` where `m` is a return-forwarding call — used
+    # to let `check_precondition_at_call_site` proceed on such a receiver even
+    # though it is not a narrowable pure node (the forwarding collapses it).
+    def return_forwarding_receiver?(node)
+      return false if return_forwarding.empty?
+      return false unless node.is_a?(::Parser::AST::Node) && node.type == :send
+      inner, method, *args = node.children
+      return false unless inner && args.empty?
+      !forwarding_readers_for(inner, method).nil?
+    end
+
+    #
+    # Synthesizing the read checks the read's own preconditions, and one of
+    # those can be this same read: a recursive `decode` whose callee requires
+    # `not_nil self.decode` inherits that requirement itself. A read already
+    # being proved further up is not proved by assuming it — it stays unproved.
+    def contract_send_type_non_nil?(send_node)
+      stack = (Thread.current[:steep_contract_send_stack] ||= [])
+      key = [self_type, send_node]
+      return false if stack.include?(key)
+
+      stack.push(key)
+      non_nil = false
+      begin
+        typing.new_child do |child|
+          pair = with_new_typing(child).synthesize(send_node, hint: nil)
+          if pair.constr.typing.errors.empty? && (type = pair.type)
+            non_nil = !contract_nullable_type?(type)
+          end
+        end
+      ensure
+        stack.pop
+      end
+      non_nil
+    rescue StandardError => exn
+      Steep.logger.warn { "[contracts] static precondition check failed: #{exn.message}" }
+      false
+    end
+
+    def contract_nullable_type?(type)
+      case type
+      when AST::Types::Nil
+        true
+      when AST::Types::Union
+        type.types.any? { |t| contract_nullable_type?(t) }
+      else
+        false
+      end
+    end
+
+    def contract_expression_source(expr)
+      case expr
+      when Contracts::Expr::Send
+        "self." + ([expr.method] + expr.chain).map(&:to_s).join(".")
+      else
+        expr.inspect
+      end
+    end
+
+    # Delegation chain narrowing (felixefelip/steep#32). When typing
+    # `host.<method>` and `<method>` is a known forward delegate on
+    # `host`'s class, build a synthetic AST for the expanded send
+    # (`host.<receiver>.<delegate_method>`) and synthesize it
+    # recursively. The original call node receives the inlined type;
+    # multi-hop chains compose naturally because each recursive
+    # synthesize re-enters this code path.
+    #
+    # Returns `[type, constr]` on hit, `nil` on miss — callers fall
+    # through to the normal type_send path. Cap of 4 hops prevents
+    # infinite recursion on degenerate `def m; m; end` shapes.
+    def try_delegation_inline(node:, receiver:, recv_type:, method_name:, hint:)
+      return nil unless delegation_registry
+
+      class_name = delegation_class_name_from_type(recv_type)
+      return nil unless class_name
+
+      info = delegation_registry.lookup(class_name, method_name)
+      return nil unless info
+
+      stack = (Thread.current[:steep_delegation_stack] ||= [])
+      key = [class_name, method_name]
+      return nil if stack.include?(key)
+      return nil if stack.size >= 4
+
+      intermediate = build_delegation_intermediate_node(receiver, info) or return nil
+      # Carry the original call's location onto the synthetic node so any
+      # diagnostic built while synthesizing it (e.g. NoMethod) has a real
+      # location instead of `nil` (which used to crash the diagnostic and
+      # flood the logs with FATAL backtraces during the contracts passes).
+      inlined = ::Parser::AST::Node.new(:send, [intermediate, info.delegate_method], location: node.location)
+
+      stack.push(key)
+      hit = nil #: Pair?
+      begin
+        # Synthesize the inlined form in a throwaway child typing. Keep it
+        # (save! into the parent) only when the delegate target resolves
+        # cleanly; on a miss the child is discarded so no spurious
+        # diagnostics leak, and we return nil so the caller falls back to the
+        # normal type_send path (the receiver's own RBS signature).
+        typing.new_child do |child_typing|
+          pair = with_new_typing(child_typing).synthesize(inlined, hint: hint)
+          if pair.constr.typing.errors.empty?
+            hit = pair
+            pair.constr.typing.save!
+          end
+        end
+      rescue StandardError => e
+        Steep.logger.warn { "[delegation] inline failed for #{class_name}##{method_name}: #{e.message}" }
+        return nil
+      ensure
+        stack.pop
+      end
+
+      return nil unless hit
+
+      # `hit.constr` carries the env refinements from synthesizing the inlined
+      # chain; rebase it onto the (now saved-into) parent typing so the
+      # refinements reach the caller while typings persist in the parent.
+      constr = hit.constr.with_new_typing(typing)
+      constr.add_typing(node, type: hit.type)
+      # Mirror the inlined call's `MethodCall` onto the original
+      # node. Without this, `typing.call_of(node: original)` returns
+      # nil and consumers that go through method_calls — LSP hover,
+      # signature-help, etc. — render the call as untyped even
+      # though `steep check` (which consults `typing.type_of` for
+      # errors) reports the refined type correctly. The two paths
+      # should agree.
+      mirror_inlined_method_call(original: node, inlined: inlined, constr: constr, method_name: method_name, receiver_type: recv_type)
+      [hit.type, constr]
+    end
+
+    def mirror_inlined_method_call(original:, inlined:, constr:, method_name:, receiver_type:)
+      inlined_call = constr.typing.call_of(node: inlined) rescue nil
+      return unless inlined_call
+
+      case inlined_call
+      when TypeInference::MethodCall::Typed
+        constr.typing.add_call(
+          original,
+          TypeInference::MethodCall::Typed.new(
+            node: original,
+            context: inlined_call.context,
+            method_name: method_name,
+            receiver_type: receiver_type,
+            actual_method_type: inlined_call.actual_method_type,
+            method_decls: inlined_call.method_decls,
+            return_type: inlined_call.return_type
+          ),
+          self_type: constr.self_type, exact_self: Specializations.exact_self(constr), keyed_self: Specializations.keyed_self(constr, inlined_call),
+          self_ivars: ObjectStates.call_ivars(constr, inlined_call),
+          class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
+        )
+      when TypeInference::MethodCall::Untyped
+        constr.typing.add_call(
+          original,
+          TypeInference::MethodCall::Untyped.new(
+            node: original,
+            context: inlined_call.context,
+            method_name: method_name
+          ),
+          self_type: constr.self_type, exact_self: Specializations.exact_self(constr), keyed_self: Specializations.keyed_self(constr, inlined_call),
+          self_ivars: ObjectStates.call_ivars(constr, inlined_call),
+          class_states: ObjectStates::ClassStates.of_call(constr, inlined_call)
+        )
+      end
+    end
+
+    # Best-effort class-name extraction from a Steep AST type. Covers
+    # the common shapes the registry can resolve against: plain
+    # ClassInstance and the first ClassInstance inside an Intersection
+    # (the typical `Klass & Klass::Marker` shape produced by
+    # postcondition narrowing).
+    def delegation_class_name_from_type(type)
+      case type
+      when AST::Types::Name::Instance
+        type.name.to_s.sub(/\A::/, "")
+      when AST::Types::Intersection
+        type.types.each do |t|
+          name = delegation_class_name_from_type(t)
+          return name if name
+        end
+        nil
+      end
+    end
+
+    # Builds the AST node representing the delegation's receiver-of-
+    # receiver, to be wrapped in the outer `:send` for synthesize.
+    # `:ivar` delegation is only inlinable when the caller is on
+    # self/implicit-self — ivars belong to the receiver and aren't
+    # reachable from cross-receiver call sites.
+    def build_delegation_intermediate_node(receiver, info)
+      case info.receiver_kind
+      when :attr_send
+        ::Parser::AST::Node.new(:send, [receiver, info.receiver_name])
+      when :ivar
+        return nil unless receiver.nil? || (receiver.respond_to?(:type) && receiver.type == :self)
+        ::Parser::AST::Node.new(:ivar, [info.receiver_name])
       end
     end
   end

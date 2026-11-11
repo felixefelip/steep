@@ -20,14 +20,14 @@ module Steep
 
           latest_constr, unreachable_pattern = latest_result
 
-          type, constr = yield(test_node, latest_constr, unreachable_pattern)
+          yield(test_node, latest_constr, unreachable_pattern)
           truthy_result, falsy_result = logic.eval(env: latest_constr.context.type_env, node: test_node)
 
           pattern_results << [pat, truthy_result, falsy_result]
         end
 
         def latest_result
-          if (_, truthy, falsy = pattern_results.last)
+          if (_, _, falsy = pattern_results.last)
             [
               initial_constr.update_type_env { falsy.env },
               falsy.unreachable
@@ -68,10 +68,72 @@ module Steep
       include NodeHelper
       extend NodeHelper
 
+      # `[types, envs]` of the branches a `case` with no subject may take: each
+      # `when` whose tests may hold, and the `else` where every test may fail.
+      # A test that always holds leaves the clauses after it checked but not
+      # joined, as `if` does with a branch its condition rules out; only a
+      # clause whose own tests never hold is reported.
+      def self.type_check_conditions(constr, node, logic, hint:)
+        _, *whens, els = node.children
+        typing = constr.typing
+        results = [] #: Array[TypeConstruction::Pair]
+        condition_constr = constr
+        falls_through = true
+
+        whens.each do |when_clause|
+          clause_constr = condition_constr
+          entered = falls_through
+          body_envs = [] #: Array[TypeEnv]
+          *tests, body = when_clause.children
+          reachable = false
+
+          tests.each do |test|
+            _, condition_constr = condition_constr.synthesize(test, condition: true)
+            truthy, falsy = logic.eval(env: condition_constr.context.type_env, node: test)
+            condition_constr = condition_constr.update_type_env { falsy.env }
+            body_envs << truthy.env
+            reachable ||= !truthy.unreachable
+            falls_through &&= !falsy.unreachable
+          end
+
+          result =
+            if body
+              clause_constr
+                .update_type_env {|env| env.join(*body_envs) }
+                .for_branch(body)
+                .tap {|constr| typing.cursor_context.set_node_context(body, constr.context) }
+                .synthesize(body, hint: hint)
+            else
+              TypeConstruction::Pair.new(type: AST::Builtin.nil_type, constr: clause_constr)
+            end
+
+          if entered && reachable
+            results << result
+          else
+            typing.add_dead_clause(when_clause)
+            if entered && !result.type.is_a?(AST::Types::Bot)
+              typing.add_error(Diagnostic::Ruby::UnreachableValueBranch.new(node: when_clause, type: result.type, location: when_clause.location.keyword || raise))
+            end
+          end
+        end
+
+        otherwise = els ? condition_constr.synthesize(els, hint: hint) : TypeConstruction::Pair.new(type: AST::Builtin.nil_type, constr: condition_constr)
+        results << otherwise if falls_through
+        results.reject! {|result| result.type.is_a?(AST::Types::Bot) }
+
+        [results.map(&:type), results.map {|result| result.constr.context.type_env }]
+      end
+
       def self.type_check(constr, node, logic, hint:, condition:)
         case_when = new(node, logic) do |condition_node|
           constr.synthesize(condition_node)
         end
+
+        # Argument-sensitive entry facts (peça 3): when the case subject is a bare read of a
+        # method parameter, a `when :literal` branch is reachable only for callers who passed
+        # that literal — and those callers established the const facts recorded for this
+        # (param, literal) partition. Apply them inside the matching branch.
+        arg_facts = argument_facts_for(constr, case_when.condition_node)
 
         case_when.when_clauses() do |when_pats, patterns, body_node, loc|
           patterns.each do |pat|
@@ -84,6 +146,7 @@ module Steep
 
           if body_node
             body_constr = body_constr.for_branch(body_node)
+            body_constr = apply_argument_facts(body_constr, arg_facts, patterns) unless arg_facts.empty?
             type, body_constr = body_constr.synthesize(body_node, hint: hint, condition: condition)
           else
             type = AST::Builtin.nil_type
@@ -110,6 +173,24 @@ module Steep
         end
 
         case_when.result()
+      end
+
+      # `{ LiteralKey => { const_path => AST type } }` for the argument-sensitive partitions
+      # whose parameter is the case subject, or `{}`. Only a bare `case <param>` qualifies —
+      # the subject must be a direct read of a method parameter for the (param == literal)
+      # correlation to hold.
+      def self.argument_facts_for(constr, condition_node)
+        return {} unless condition_node.is_a?(Parser::AST::Node) && condition_node.type == :lvar
+
+        ArgumentFacts.partitions_for(constr, condition_node.children[0])
+      end
+
+      # Merge into the branch env the const facts of every partition whose literal matches one
+      # of this `when`'s patterns — narrowing const reads (`Foo.name`) exactly as a
+      # method-entry const fact does, but only inside this branch.
+      def self.apply_argument_facts(body_constr, arg_facts, patterns)
+        keys = patterns.filter_map { |pat| Postconditions::LiteralKey.of(pat) }
+        ArgumentFacts.apply(body_constr, ArgumentFacts.facts_for(arg_facts, keys))
       end
 
       attr_reader :location, :node, :condition_node, :when_nodes, :else_node
@@ -160,6 +241,7 @@ module Steep
           )
 
           if body_result.unreachable
+            typing.add_dead_clause(when_node)
             if body_result.type.is_a?(AST::Types::Any) || initial_constr.no_subtyping?(sub_type: body_result.type, super_type: AST::Builtin.bottom_type)
               typing.add_error(
                 Diagnostic::Ruby::UnreachableValueBranch.new(
@@ -196,6 +278,7 @@ module Steep
         else_result or raise
 
         if unreachable
+          typing.add_dead_clause(else_node) if else_node
           if else_result.type.is_a?(AST::Types::Any) || initial_constr.no_subtyping?(sub_type: else_result.type, super_type: AST::Builtin.bottom_type)
             typing.add_error(
               Diagnostic::Ruby::UnreachableValueBranch.new(

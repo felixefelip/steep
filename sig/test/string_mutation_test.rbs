@@ -1,0 +1,49 @@
+# Generated from test/string_mutation_test.rb with RBS::Inline
+
+# felixefelip/steep#207. A literal type names the VALUE a string holds, and a
+# call that may change that value in place makes the name a lie from then on.
+class StringMutationTest < Minitest::Test
+  include TestHelper
+
+  include TypeErrorAssertions
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  def check: (untyped source_text, ?untyped signatures) -> untyped
+
+  def test_a_mutation_widens_the_local_it_was_called_on: () -> untyped
+
+  def test_a_mutation_widens_every_literal_of_a_union: () -> untyped
+
+  def test_a_mutation_widens_the_ivar_it_was_called_on: () -> untyped
+
+  def test_a_call_that_leaves_the_value_unchanged_keeps_the_literal: () -> untyped
+
+  # A block can reach the receiver through the local it closes over, and what
+  # it does there is not this call's to vouch for.
+  def test_a_call_with_a_block_widens: () -> untyped
+
+  # `ActiveSupport::Inflector.apply_inflections`, less the `break` (whose own
+  # diagnostic is beside the point): the mutation is inside the block, and a
+  # block's body is checked with the outer locals pinned — so what it narrows
+  # there never comes back out on its own.
+  def test_a_mutation_inside_a_block_widens_the_outer_local: () -> untyped
+
+  def test_a_mutation_in_a_nested_block_widens_the_outer_local: () -> untyped
+
+  def test_a_mutation_inside_a_block_widens_the_ivar: () -> untyped
+
+  # The block's own parameter is another variable, whatever its name.
+  def test_a_block_parameter_of_the_same_name_is_not_the_outer_local: () -> untyped
+
+  def test_a_read_inside_a_block_keeps_the_literal: () -> untyped
+
+  def test_a_mutation_inside_a_loop_widens_the_outer_local: () -> untyped
+
+  # A project that redefines one of them writes what the program runs instead.
+  def test_a_redefined_method_is_not_vouched_for: () -> untyped
+end

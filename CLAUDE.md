@@ -98,8 +98,8 @@ bundle exec rake build
 **Steepfile**: Defines type checking targets
 - `check`: Directories to type check
 - `signature`: RBS signature directories
-- `library`: Standard library dependencies
-- `collection_config`: External RBS definitions
+- `library`: RBSs that rbs collection doesn't manage
+- `collection_config`: Path to `rbs_collection.yaml` (the project root one is read by default)
 - Multiple targets supported (app, test, bin)
 
 **RBS Collection**: Manages external type definitions via `rbs_collection.steep.yaml`
@@ -112,3 +112,7 @@ bundle exec rake build
 - Diagnostic severity levels: error, warning, information, hint
 - Supports gradual typing with @dynamic annotations
 - Implements LSP for IDE integration
+
+## Engineering principles (fork)
+
+@docs/engineering/comments-only-when-code-is-hard.md

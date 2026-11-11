@@ -3,5 +3,9 @@
 class TypeTest < Minitest::Test
   Types: untyped
 
+  # A set is unordered and without repeats, so two written differently are one
+  # type — which is what a `Tuple` of the same members is not.
+  def test_finite_set_is_normalised: () -> untyped
+
   def test_level: () -> untyped
 end

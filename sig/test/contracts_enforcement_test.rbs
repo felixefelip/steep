@@ -1,0 +1,212 @@
+# Generated from test/contracts_enforcement_test.rb with RBS::Inline
+
+# Tests for felixefelip/steep#20: a precondition contract is only enforced when
+# every static call site satisfies it AND at least one exists. When it is not
+# enforced, the main check stops narrowing the body so the errors the
+# precondition was hiding surface again.
+class ContractsEnforcementTest < Minitest::Test
+  include TestHelper
+
+  include ShellHelper
+
+  Contracts: untyped
+
+  Project: untyped
+
+  Diagnostic: untyped
+
+  Services: untyped
+
+  def dirs: () -> untyped
+
+  def write: (untyped relative, untyped content) -> untyped
+
+  def setup_project: (steepfile: untyped) -> untyped
+
+  STEEPFILE: ::String
+
+  # Type-checks a single source file with the given contracts store and returns
+  # the resulting Typing, so tests can inspect body diagnostics.
+  def type_check_file: (untyped project, untyped relative, untyped store) -> untyped
+
+  def store_of: (untyped contracts) -> untyped
+
+  FOO_RBS: ::String
+
+  def test_enforced_when_sole_caller_checks_precondition: () -> untyped
+
+  def test_not_enforced_when_a_caller_skips_the_check: () -> untyped
+
+  def test_mixed_callers_flag_only_the_failing_one: () -> untyped
+
+  def test_not_enforced_when_no_static_call_sites: () -> untyped
+
+  # Integration: the order_factory motivating case. A Rails action (no static
+  # caller) whose body relies on an inferred precondition must surface the
+  # hidden errors. Both `self.company.name` reads should error, not just the
+  # one after reassignment.
+  CONTROLLER_RBS: ::String
+
+  def test_rails_action_without_callers_surfaces_body_errors: () -> untyped
+
+  # felixefelip/steep#59: a precondition is enforced when its sole call site
+  # proves the requirement through the receiver's *static type* — a
+  # marker-refined intersection like `(Post & Post::Validated)` on which the
+  # marker refines the required attribute to non-nil — even with no local read
+  # to populate the pure-call flow cache. This exercises both halves of the
+  # fix: the `Intersection` receiver being observed at all
+  # (`precondition_target_type_names`), and being satisfied without a flow fact
+  # (`precondition_holds?`'s static-type fallback).
+  #
+  # `greet`'s body has a trailing statement on purpose: a single-send body
+  # (`def greet; user.name; end`) is a forward-delegate shape, which the
+  # delegation inliner (#32) rewrites at the call site, bypassing the
+  # precondition check entirely — so the contract would never be observed.
+  # `Post::Validated` is a standalone marker (NOT `< Post`), mirroring what
+  # rbs_rails emits: a subclass would make `(Post & Post::Validated)` simplify
+  # to just `Post::Validated`, dropping the base member the contract lives on.
+  # As a separate class the intersection is preserved, and `.user` resolves
+  # against both members (`User?` from Post, `User` from the marker) to non-nil.
+  MARKER_RBS: ::String
+
+  def test_enforced_when_sole_caller_has_marker_refined_receiver: () -> untyped
+
+  # The same shape as the two above, except the contracted method is defined in
+  # an included MODULE (a Rails concern) rather than on the class itself. The
+  # contract is inferred under the module's name (`Post::Exportable#greet`),
+  # while the call site's receiver is a `(Post & Post::Validated)` — a type
+  # whose own names are `Post` and `Post::Validated` and never the module the
+  # method actually lives on.
+  MODULE_MARKER_RBS: ::String
+
+  def test_enforced_when_the_contracted_method_comes_from_an_included_module: () -> untyped
+
+  # The other half: without the marker the module's contract must stay
+  # unenforced. The call site is now VISIBLE (that is the fix), so this pins
+  # that seeing it does not mean accepting it — an unsatisfied caller is
+  # counted, and the body keeps reporting the error the precondition hid.
+  def test_not_enforced_when_the_module_method_caller_lacks_the_marker: () -> untyped
+
+  def test_not_enforced_when_caller_receiver_lacks_the_marker: () -> untyped
+
+  # felixefelip/rbs_infer#71 (full pipeline): a self-call whose `self` a
+  # *preceding postcondition* narrowed to a marker intersection — the real
+  # `TagDestroy` shape, with the `.steep_postconditions.yml` sidecar INFERRED by
+  # Steep (not hand-written). `set_xml` writes `@xml` non-nil, so the
+  # postconditions Runner infers `self` → `Widget & Widget::AfterSetXml`; `run`
+  # calls `set_xml` before `use_xml`, whose body dereferences `self.xml`. Through
+  # the postconditions Runner → contracts Runner + Enforcement → check, the
+  # inferred `not_nil xml` contract on `use_xml` must become enforced (its sole
+  # call site is satisfied by the marker), so the body narrows and `xml.nodes`
+  # type-checks. On the old code the intersection-self call site was neither
+  # recognized nor discharged, so `enforced` stayed false and `xml.nodes`
+  # surfaced a NoMethod. (`AfterSetXml` is declared in the RBS the way rbs_infer
+  # emits its marker classes; the inferrer names the marker to match.)
+  #
+  # Since #94, method-entry facts carry IVARS, and this is exactly the shape they
+  # cover: `use_xml`'s sole caller runs `set_xml` first, so the Runner records
+  # `Widget#use_xml -> @xml: ::XmlDoc` and the body no longer errors. Contracts are
+  # inferred FROM errors (`Contracts::Inferrer` reads `NoMethod` diagnostics), so no
+  # contract is inferred here any more — not because the guarantee weakened, but
+  # because a stronger mechanism discharges it before a diagnostic exists.
+  #
+  # The assertions below therefore pin the OUTCOME (`xml.nodes` clean, no
+  # `PreconditionUnsatisfied`), which is what the test was always really about, plus
+  # the entry fact that now delivers it. The contract path itself stays covered by
+  # the shapes entry facts cannot reach — an EXTERNAL caller with a marker-refined
+  # receiver (`test_enforced_when_sole_caller_has_marker_refined_receiver`) and the
+  # constructor-chain tests below.
+  def test_entry_facts_discharge_a_sole_self_caller_establishing_via_postcondition: () -> untyped
+
+  # felixefelip/steep#60: close a precondition across a constructor ivar-binding
+  # and a `.new` argument site. `Proxy#probe` dereferences `self.owner.user`;
+  # `owner` is `@owner`, bound in `initialize` to the constructor argument. When
+  # the sole construction site hands `self` to `Proxy.new` from a getter
+  # (`Post#assignments`) whose own caller has a marker-refined receiver, the
+  # chain closes with no generics:
+  #
+  #   Proxy#probe  requires not_nil self.owner.user   (inferred)
+  #     → self-call closure →  Proxy#initialize inherits it
+  #     → `.new(self)` translation →  Post#assignments requires not_nil self.user
+  #     → enforced at `post.assignments` (post: Post & Post::Validated) via #59
+  #
+  # The registry that maps `owner` → constructor arg index is built from source
+  # by `Project#constructor_binding_registry` and consumed only in the
+  # Enforcement pass, so `Contracts::Runner.run` exercises the whole chain.
+  PROXY_RBS: ::String
+
+  PROXY_APP: ::String
+
+  # felixefelip/steep#158. The reported shape: a concern method passes a
+  # self-send to a helper whose parameter wants a marker.
+  #
+  #   creator: export_user(creator)
+  #           ^ Cannot pass `(::User | nil)` as `(::User & ::User::Validated)`
+  #
+  # `Card#creator` is `User?`; `Card::Validated#creator` is
+  # `(User & User::Validated)`. The single call site hands `export` a
+  # `(Card & Card::Validated)`, so which of the two applies is settled — but
+  # nothing carried it inside. `NotNil` cannot: `not_nil self.creator` on a
+  # `User?` yields `User`, still not the marker the parameter wants.
+  MARKER_SELF_RBS: ::String
+
+  # The `@type instance` annotation is what rbs_infer injects for a concern —
+  # the module's methods run with the host's instance type. It is the DECLARED
+  # self; the contract's job is to narrow it with what the callers proved.
+  MARKER_SELF_APP: ::String
+
+  def test_marker_receiver_at_call_site_refines_self_in_the_body: () -> untyped
+
+  # The other half of the discipline: one lax call site and the refinement is
+  # gone. `Card::Validated` proves nothing about a bare `Card`, and taking the
+  # meet of the two would let the validated caller define what the unvalidated
+  # one gets to assume.
+  def test_disagreeing_receivers_leave_self_unrefined: () -> untyped
+
+  def test_closes_precondition_through_constructor_and_new_site: () -> untyped
+
+  def test_does_not_close_when_construction_site_lacks_the_marker: () -> untyped
+
+  # Local mirror of Runner#expr_signature, for asserting a contract's requires.
+  def expr_sig: (untyped expr) -> untyped
+
+  # felixefelip/steep#62 end-to-end: a deref through a local that projects a
+  # self path (`record = build; record.post.user`, where `build` returns a
+  # record whose `post` is `self.owner`) is rooted at `self.owner.user`,
+  # enforced at an external `.create!` site via return forwarding
+  # (`@post.assignments.owner` == `@post`), and narrowed in the body. Exercises
+  # all three registries (constructor-binding, return-forwarding, return-alias).
+  FORWARD_RBS: ::String
+
+  FORWARD_APP: ::String
+
+  def test_closes_deref_through_return_aliased_local_at_forwarded_site: () -> untyped
+
+  def test_does_not_close_forwarded_site_without_marker: () -> untyped
+
+  # felixefelip/steep#64 end-to-end: a real `before_validation` deref
+  # `post.user.name` (two nilable hops, `self.post: Post?` and
+  # `self.post.user: User?`) reached via `record.save` in a proxy. Gap 1 infers
+  # both hops on `save`/`run_cb`; gap 2 translates `record.post.user` at
+  # `record.save` through the alias (`record.post` == `self.owner`) to
+  # `self.owner.user` on the proxy's `create`, discharged by forwarding at
+  # `@post.assignments.create`.
+  MULTIHOP_RBS: ::String
+
+  MULTIHOP_APP: ::String
+
+  def test_closes_multihop_callback_deref_through_aliased_record_save: () -> untyped
+
+  def test_does_not_close_multihop_without_marker: () -> untyped
+
+  # A local that IS a self path (`_ = user`) roots the deref through it at
+  # `self.user` — the shape ActiveSupport's `delegate` writes. Enforced by a
+  # caller holding a validated record, and the body narrows.
+  LOCAL_ALIAS_RBS: ::String
+
+  LOCAL_ALIAS_APP: ::String
+
+  def test_closes_deref_through_a_local_that_is_a_self_path: () -> untyped
+
+  def test_does_not_close_a_local_self_path_for_an_unvalidated_caller: () -> untyped
+end

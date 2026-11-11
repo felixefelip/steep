@@ -19,7 +19,9 @@ module Steep
 
           attr_reader type: AST::Types::t
 
-          def initialize: (node: Parser::AST::Node, type: AST::Types::t) -> void
+          attr_reader whole: bool
+
+          def initialize: (node: Parser::AST::Node, type: AST::Types::t, ?whole: bool) -> void
 
           include Equatable
 
@@ -30,6 +32,8 @@ module Steep
           attr_reader node: Parser::AST::Node
 
           attr_accessor type: AST::Types::t?
+
+          attr_accessor itself: bool?
 
           def initialize: (node: Parser::AST::Node) -> void
 
@@ -199,6 +203,14 @@ module Steep
 
         def pair: () -> [Parser::AST::Node, Interface::Function]?
 
+        # The type of the block, as a proc type
+        #
+        %a{pure} def proc_type: () -> AST::Types::Proc
+
+        # The type a block-pass argument node is allowed to have
+        #
+        # Same as `proc_type`, but `nil` is allowed too if the block is optional, because passing `nil` means passing no block.
+        #
         %a{pure} def node_type: () -> AST::Types::t
       end
 

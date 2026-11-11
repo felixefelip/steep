@@ -1,0 +1,711 @@
+module Steep
+  module TypeInference
+    # Walks a parsed Ruby AST and, for each class, maps an attr-style reader
+    # method to the *positional constructor parameter* its backing ivar is
+    # assigned from:
+    #
+    #   class Proxy
+    #     def initialize(klass, owner); @owner = owner; end
+    #     def owner; @owner; end
+    #   end
+    #   # => { "Proxy" => { owner: 1 } }
+    #
+    # Consumed by `TypeConstruction` at `.new` call sites to translate an
+    # `initialize` precondition on `self.<reader>...` into an obligation on the
+    # matching constructor argument (felixefelip/steep#60): given
+    # `Proxy#initialize requires not_nil self.owner.user`, a call
+    # `Proxy.new(klass, self)` implies `not_nil self.user` on the enclosing
+    # method, because `@owner` is bound to argument index 1 (`self`).
+    #
+    # Detection is purely syntactic and conservative: a reader qualifies only
+    # when its body is exactly `@ivar`, and that ivar is assigned in
+    # `initialize` exactly from a plain positional parameter (`arg`/`optarg`).
+    # Anything else (computed reader, splat/kwarg params, conditional
+    # assignment) is skipped — the translation is only sound for a direct bind.
+    #
+    # The same `@ivar => param_index` bindings are also kept per `initialize`
+    # (`Scan#initializers`): `Klass.new(:posts)` holds `:posts` in `@name`
+    # wherever `initialize` binds it (felixefelip/steep#205). Whether anything
+    # writes the ivar afterwards is the postconditions' `may_write`, not this.
+    class ConstructorBindingAnalyzer
+      # `readers` as above. `initializers` lists, per class or module, every
+      # `initialize` this source defines for it, or nil for one that binds
+      # nothing this can read: two, across sources or within one, and which
+      # runs is a question of load order. `methods` lists, per class or module,
+      # every instance method this source may define for it, as its `Body`
+      # when the definition always runs, nil otherwise.
+      #
+      # `singleton_methods` the same, for the methods defined on the class
+      # object itself: `def self.x`, and a `def` in `class << self`.
+      #
+      # `class_bodies` counts the bodies the source writes for each class or
+      # module that run any code but a method definition, under every name the
+      # constant may resolve to. One that only defines methods sets nothing on
+      # the class, nor does one declaring a module. One whose only code mixes in
+      # constants is in `mixin_bodies` instead, as the names they may resolve
+      # to: the mixed-in modules' hooks are the code it runs. `declared` is
+      # every class or module the source writes a body for.
+      # `born_hashes` and `born_objects`: the ivars a statement of a body sets
+      # to `{}`, or to `Klass.new` handed nothing, each with how. Where both
+      # `@x = …` and `@x ||= …` set one, the assignment.
+      # `class_body_cvars`: for each class or module, the class variables its
+      # body, outside its methods, assigns anything but `nil`.
+      JOIN_BIRTHS = proc { |_, *hows| hows.include?(:ivasgn) ? :ivasgn : :or_asgn }
+
+      Scan = Struct.new(:readers, :initializers, :methods, :singleton_methods, :conditional_methods, :aliases, :class_bodies, :mixin_bodies, :declared, :born_hashes, :born_objects, :class_body_cvars, keyword_init: true)
+
+      # One method, as far as the object it runs on goes:
+      #
+      # - `bindings`: `@ivar => position` for each ivar it assigns straight
+      #   from the argument at that call-site position;
+      # - `writes`: every ivar it assigns at all;
+      # - `super_args`: what its `super` hands on (felixefelip/steep#230). Nil
+      #   when it calls none; for each position of the `super` call, the
+      #   call-site position of the argument passed there, or nil when that is
+      #   not one of this method's arguments as given; `:opaque` when the
+      #   `super` may not run, or which arguments land where is not known;
+      # - `self_sends`: the methods it calls on `self`; `other_sends`, those it
+      #   calls on anything but `self` or a constant;
+      # - `exposes_self`: whether `self` may reach anything but those calls,
+      #   a block included (felixefelip/steep#205, stage 2);
+      # - `exposes_self_besides_return`, `returns_self`, `returned_sends`:
+      #   where its value may be `self` (`SelfReturns`);
+      # - `iterations`: where the only blocks that may are each handed to a
+      #   method called on an ivar, those as `[ivar, method]`; nil otherwise;
+      # - `ivar_uses`: each mention of an ivar it reads, as a
+      #   `ClassMemoAnalyzer::Use`;
+      # - `returns`: the ivar it returns, when its body is exactly that.
+      # - `hands_back`: the methods it calls on `self` with nothing, where
+      #   every value it returns is one of those calls; a `yield` answers only
+      #   a caller that hands a block.
+      # - `hands_back_element`: `[memo, index, builds, omitted]` where every
+      #   value it returns is what a memo called on `self` holds under the
+      #   positional parameter at `index`, read (`memo[key]`) or stored if
+      #   missing (`memo[key] ||= value`); `builds` where each stores
+      #   `Klass.new` handed nothing, `:self` where one of them is `new` on
+      #   `self` (`ClassMemos.built_here?`); `omitted` the key a call that leaves
+      #   the parameter out reads, where its default is a literal.
+      # - `stores_element`: `[ivar, key index, value index]` where its body is
+      #   exactly `@ivar[key] = value`, both positional parameters.
+      # - `block_super`: `[ivar, method]` where its body is exactly
+      #   `@ivar.method { super }`.
+      # - `hands_back_elements`: `[memo, calls]` where every value it returns
+      #   is an element of `memo` read or stored as above under any key, or
+      #   one of `calls`, made on `self`; `memo` is nil where it reads none.
+      # - `keyed_memo`: on a hash's own method, `[read, value]` where it stores
+      #   `value` under its first parameter when `read` of it finds nothing
+      #   there (`super || store(key, value)`).
+      # - `outside_state`: whether it reads a global, a match or `self.class`
+      #   other than to call a method on it, which `own_class_sends` lists;
+      # - `cvars`: the class variables it reads, `@@x ||= …` included, and
+      #   `cvar_writes` those it assigns otherwise, `cvar_memos` those it
+      #   assigns by `||=`;
+      # - `const_reads`: for each constant it mentions, the names it may
+      #   resolve to, innermost first; `const_sends`, those with the method
+      #   called on that constant.
+      # - `memo`: `[ivar, class names, wrappers, by_self]` when its body is
+      #   exactly `@ivar ||= Klass.new`, with the classes `Klass` may name from
+      #   where it is written; or that `Klass.new` with calls that take a block
+      #   made on it, `wrappers`, innermost first (`Klass.new.tap { … }`).
+      #   `by_self` where it is `new` called on `self`, which builds an
+      #   instance of whichever class receives the call. Not a `returns`: while
+      #   the ivar is unset it answers the new object, not what the ivar held.
+      #   A fifth, `allocated`, where it is `allocate` instead of `new`, which
+      #   runs no `initialize`; a sixth, the `a` of each `a || @ivar` the body
+      #   hands back after the memo (`HandedBack.fallbacks`).
+      # - `ivars`: the ivars it reads;
+      # - `memoizes`: the ivar, when its body is exactly `@ivar ||= value`;
+      # - `memoized_hash`: the ivar, when that value is `{}`;
+      # - `calls`: whether it makes a call or a `yield`, a `super` aside;
+      # - `empties`: the ivars a statement of the body sets to `[]`, alone or
+      #   in a parallel assignment;
+      # - `literal_writes`: the ivars every assignment of the body sets to a
+      #   hash or array literal;
+      # - `rebuilds`: the ivars it only writes as `@ivar += …`, a new array
+      #   built out of the one it held;
+      # - `handed`: the ivars whose object it lets out, naming one other than as
+      #   the receiver of a call, the target of an assignment or the value it
+      #   returns as a reader (`returns`).
+      # - `consts`: every name a constant it mentions may resolve to.
+      Body = Struct.new(
+        :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
+        :empties, :literal_writes, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
+        :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, :other_sends, keyword_init: true
+      ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
+
+      def self.analyze(node)
+        scan(node).readers
+      end
+
+      def self.scan(node)
+        new.scan(node)
+      end
+
+      def initialize
+        @result = {} #: Hash[String, Hash[Symbol, Integer]]
+        @initializers = {} #: Hash[String, Array[Body?]]
+        @methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
+        @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
+        @conditional_methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
+        @aliases = {} #: Hash[String, Hash[Symbol, Symbol]]
+        @class_bodies = Hash.new(0) #: Hash[String, Integer]
+        @mixin_bodies = {} #: Hash[String, Array[Array[String]]]
+        @declared = Set[] #: Set[String]
+        @born_hashes = {} #: Hash[String, Hash[Symbol, Symbol]]
+        @born_objects = {} #: Hash[String, Hash[Symbol, Symbol]]
+        @class_body_cvars = {} #: Hash[String, Set[Symbol]]
+      end
+
+      def scan(node)
+        walk(node, nesting: []) if node.is_a?(::Parser::AST::Node)
+        Scan.new(
+          readers: @result, initializers: @initializers, methods: @methods, singleton_methods: @singleton_methods, conditional_methods: @conditional_methods, aliases: @aliases,
+          class_bodies: @class_bodies, mixin_bodies: @mixin_bodies, declared: @declared, born_hashes: @born_hashes,
+          born_objects: @born_objects, class_body_cvars: @class_body_cvars
+        )
+      end
+
+      private
+
+      def walk(node, nesting:)
+        case node.type
+        when :class
+          const_node, _super, body = node.children
+          name = const_to_name(const_node)
+          new_nesting = name ? nesting + [name] : nesting
+          record_body(defined_names(const_node, nesting), body, new_nesting)
+          if body && name
+            register_class(body, nesting: new_nesting)
+            register_initializers(body, names: defined_names(const_node, nesting))
+            register_methods(body, names: defined_names(const_node, nesting))
+            register_singleton_methods(body, names: defined_names(const_node, nesting), nesting: new_nesting)
+          end
+          walk(body, nesting: new_nesting) if body
+        when :module
+          const_node, body = node.children
+          name = const_to_name(const_node)
+          new_nesting = name ? nesting + [name] : nesting
+          record_body(defined_names(const_node, nesting), body, new_nesting)
+          # A module's `initialize` runs for the classes that include it.
+          if body && name
+            register_initializers(body, names: defined_names(const_node, nesting))
+            register_methods(body, names: defined_names(const_node, nesting))
+            register_singleton_methods(body, names: defined_names(const_node, nesting), nesting: new_nesting)
+          end
+          walk(body, nesting: new_nesting) if body
+        else
+          node.children.each { |c| walk(c, nesting: nesting) if c.is_a?(::Parser::AST::Node) }
+        end
+      end
+
+      # Collect `@ivar => param_index` from `initialize` and `reader => @ivar`
+      # from single-ivar reader defs at this class level, then compose the two
+      # into `reader => param_index` entries.
+      def register_class(body, nesting:)
+        ivar_to_param = {} #: Hash[Symbol, Integer]
+        reader_to_ivar = {} #: Hash[Symbol, Symbol]
+
+        each_stmt(body) do |stmt|
+          next unless stmt.type == :def
+          mname, args, mbody = stmt.children
+          if mname == :initialize
+            ivar_to_param.merge!(ivar_param_bindings(args, mbody))
+          elsif (ivar = single_ivar_reader(mbody))
+            reader_to_ivar[mname] = ivar
+          end
+        end
+
+        entries = {} #: Hash[Symbol, Integer]
+        reader_to_ivar.each do |reader, ivar|
+          idx = ivar_to_param[ivar]
+          entries[reader] = idx if idx
+        end
+        return if entries.empty?
+
+        key = nesting.join("::")
+        (@result[key] ||= {}).merge!(entries)
+      end
+
+      # Every `def initialize` in this class body, under each class the
+      # constant may name. Where it may name two, which class it builds is not
+      # known, and it binds nothing.
+      def register_initializers(body, names:)
+        each_initialize(body) do |args, mbody|
+          initializer = names.size == 1 ? method_body(args, mbody) : nil
+          names.each { |name| (@initializers[name] ||= []) << initializer }
+        end
+      end
+
+      # Every instance method this class body may define, as its `Body` when
+      # that is certain. Where the constant may name two classes, which one
+      # has the method is not known, so it reads none. An alias the body makes
+      # is recorded with the name it copies.
+      #
+      # One defined in a branch of the class body is read as well, apart: what
+      # it may do, whether or not it is defined.
+      def register_methods(body, names:)
+        each_method_definition(body, direct: true) do |mname, method_body, aliased|
+          method_body = nil unless names.size == 1
+          names.each { |name| ((@methods[name] ||= {})[mname] ||= []) << method_body }
+          (@aliases[names.first] ||= {})[mname] = aliased if aliased && names.size == 1
+        end
+        return unless names.size == 1
+
+        each_branch(body) do |branch|
+          each_method_definition(branch, direct: true) do |mname, method_body, aliased|
+            ((@conditional_methods[names.first] ||= {})[mname] ||= []) << method_body
+            (@aliases[names.first] ||= {})[mname] = aliased if aliased
+          end
+        end
+      end
+
+      def each_branch(body, &block)
+        each_stmt(body) { |stmt| stmt.children.drop(1).each { |branch| yield branch if branch } if stmt.type == :if }
+      end
+
+      # Every method this class body may define on the class object, as for
+      # `register_methods`.
+      def register_singleton_methods(body, names:, nesting:)
+        each_singleton_definition(body) do |mname, args, mbody|
+          method_body = names.size == 1 ? method_body(args, mbody, nesting: nesting, defined_as: names.first) : nil
+          names.each { |name| ((@singleton_methods[name] ||= {})[mname] ||= []) << method_body }
+        end
+      end
+
+      def each_singleton_definition(body, &block)
+        each_stmt(body) do |stmt|
+          case stmt.type
+          when :defs
+            yield(*stmt.children.drop(1)) if stmt.children[0].type == :self
+          when :sclass
+            next unless stmt.children[0].type == :self
+
+            each_stmt(stmt.children[1]) { |inner| (parts = DefinedMethods.def_parts(inner, singleton: false)) && yield(*parts) }
+          when :block
+            (parts = DefinedMethods.def_parts(stmt, singleton: true)) && yield(*parts)
+          end
+        end
+      end
+
+      # Yields each method name `node` may define on the class whose body it
+      # is, with its `Body` when the definition always runs: a `def`, an
+      # `attr_*`, a `define_method` block (`DefinedMethods.literal`), as a
+      # statement of the body or under a modifier (`private def x = @x`).
+      #
+      # Anything else that may name a method counts, with no body this reads:
+      # an `alias`, `alias_method`, any other `define_method`, or a definition under a
+      # condition, inside a block (`class_eval do`) or inside another method.
+      # A nested class, module or singleton body defines elsewhere.
+      def each_method_definition(node, direct:, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+        return yield(defined, (method_body(node.children[1], node.children[2]) if direct)) if node.type == :block && (defined, = DefinedMethods.def_parts(node, singleton: false))
+
+        case node.type
+        when :class, :module, :sclass
+          nil
+        when :begin
+          node.children.each { |child| each_method_definition(child, direct: direct, &block) }
+        when :def
+          mname, args, mbody = node.children
+          yield mname, (direct ? method_body(args, mbody) : nil)
+          each_method_definition(mbody, direct: false, &block)
+        when :alias
+          new_name, old_name = node.children
+          yield new_name.children[0], nil, (old_name.children[0] if direct && old_name.type == :sym) if new_name.type == :sym
+        when :send
+          receiver, mname, *args = node.children
+          if receiver.nil? && %i[private public protected module_function].include?(mname)
+            args.each { |arg| each_method_definition(arg, direct: direct, &block) }
+          else
+            macro_definitions(mname, args, direct: direct).each { |name, body, aliased| yield name, body, aliased } if receiver.nil?
+            node.children.each { |child| each_method_definition(child, direct: false, &block) }
+          end
+        else
+          node.children.each { |child| each_method_definition(child, direct: false, &block) }
+        end
+      end
+
+      # The methods a receiverless macro call defines, as `[name, body]`
+      # pairs, with a body only when the macro always runs.
+      def macro_definitions(mname, args, direct:)
+        names = args.filter_map { |arg| arg.children[0].to_sym if %i[sym str].include?(arg.type) }
+        definitions =
+          case mname
+          when :alias_method, :define_method
+            names.take(1).map { |name| [name, nil, (names[1] if mname == :alias_method && direct)] }
+          when :attr_reader
+            names.map { |name| [name, attr_reader_body(name)] }
+          when :attr_accessor
+            names.flat_map { |name| [[name, attr_reader_body(name)], [:"#{name}=", attr_writer_body(name)]] }
+          when :attr_writer
+            names.map { |name| [:"#{name}=", attr_writer_body(name)] }
+          else
+            []
+          end
+        direct ? definitions : definitions.map { |name, _| [name, nil] }
+      end
+
+      def attr_reader_body(name)
+        Body.new(
+          bindings: {}, writes: Set[], super_args: nil, self_sends: Set[], exposes_self: false, exposes_self_besides_return: false, returns_self: false, returned_sends: Set[], ivar_uses: {},
+          returns: :"@#{name}",
+          empties: Set[], rebuilds: Set[], handed: Set[], consts: Set[], calls: false, **OutsideReads::NONE
+        )
+      end
+
+      def attr_writer_body(name)
+        ivar = :"@#{name}"
+        Body.new(
+          bindings: { ivar => 0 }, writes: Set[ivar], super_args: nil, self_sends: Set[], exposes_self: false, exposes_self_besides_return: false, returns_self: false, returned_sends: Set[], ivar_uses: {},
+          returns: nil,
+          empties: Set[], rebuilds: Set[], handed: Set[], consts: Set[], calls: false, **OutsideReads::NONE
+        )
+      end
+
+      def method_body(args_node, body, nesting: @lexical_nesting || [], defined_as: nil)
+        writes = Set[] #: Set[Symbol]
+        ivars = Set[] #: Set[Symbol]
+        sends = { self: Set[], other: Set[] } #: Hash[Symbol, Set[Symbol]]
+        consts = Set[] #: Set[String]
+        scopes = Set[].compare_by_identity #: Set[::Parser::AST::Node]
+        calls = false
+        each_node(body) do |node|
+          calls ||= CALLS.include?(node.type)
+          writes << node.children[0] if node.type == :ivasgn
+          ivars << node.children[0] if node.type == :ivar
+          consts.merge(referenced_names(node, nesting)) if node.type == :const && !scopes.include?(node)
+          scopes << node.children[0] if node.type == :const && node.children[0]
+          sends[node.children[0].nil? || node.children[0].type == :self ? :self : :other] << node.children[1] if %i[send csend].include?(node.type) && node.children[0]&.type != :const
+        end
+        Body.new(
+          empties: Empties.of(body),
+          literal_writes: LiteralWrites.of(body, writes),
+          rebuilds: rebuilds_of(body),
+          handed: handed_ivars(body),
+          bindings: ivar_param_bindings(args_node, body),
+          writes: writes,
+          ivars: ivars,
+          super_args: super_args(args_node, body),
+          self_sends: sends[:self],
+          other_sends: sends[:other],
+          exposes_self: !self.class.self_exposures(body).empty?,
+          **SelfReturns.facts(body),
+          iterations: self_iterations(body),
+          ivar_uses: ClassMemoAnalyzer.uses(body, names: ivars).to_h,
+          returns: single_ivar_reader(body),
+          hands_back: HandedBack.calls(body),
+          hands_back_element: HandedBack.element(args_node, body),
+          stores_element: HandedBack.stored_element(args_node, body),
+          block_super: HandedBack.block_super(body),
+          hands_back_elements: HandedBack.elements(body),
+          keyed_memo: HandedBack.keyed_memo(args_node, body),
+          **OutsideReads.of(body) { |const| referenced_names(const, nesting) },
+          memo: defined_as && memo_of(body, nesting, defined_as),
+          memoizes: memoized_ivar(body),
+          memoized_hash: memoized_hash(body),
+          calls: calls,
+          consts: consts
+        )
+      end
+
+      # The nodes through which `self` may reach anything but a call made on
+      # it: a `self` handed on, returned or stored, and a block, which
+      # captures it.
+      def self.self_exposures(node, parent = nil, found = [])
+        return found unless node.is_a?(::Parser::AST::Node)
+        return found << node if %i[block numblock].include?(node.type)
+        return found << node if node.type == :self && !(parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node))
+
+        node.children.each { |child| self_exposures(child, node, found) }
+        found
+      end
+
+      # `[ivar, method]` for each block handed to a method called on an ivar,
+      # where those are the only way `self` may reach anything but a call made
+      # on it.
+      def self_iterations(node, parent = nil, found = [])
+        return found unless node.is_a?(::Parser::AST::Node)
+        return if node.type == :self && !(parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(node))
+
+        if %i[block numblock].include?(node.type)
+          receiver, method_name = node.children[0].children
+          return unless node.children[0].type == :send && receiver&.type == :ivar
+
+          found << [receiver.children[0], method_name]
+        end
+        node.children.each { |child| return unless self_iterations(child, node, found) }
+        found
+      end
+
+      # Where each argument of this method's `super` comes from, by call-site
+      # position. Only a `super` written as a statement of the body itself,
+      # the only one in it, in a body that cannot `return` before it: anything
+      # else may not run, or may run twice.
+      #
+      #   def initialize(name, options)
+      #     super(options, name)        # => [1, 0]
+      #   end
+      #
+      # A bare `super` passes every parameter where it stands, as it holds
+      # at that point: a reassigned one is not the argument it was given.
+      def super_args(args_node, body)
+        calls = [] #: Array[::Parser::AST::Node]
+        each_node(body) { |node| calls << node if node.type == :super || node.type == :zsuper }
+        return nil if calls.empty?
+
+        call = calls.first or raise
+        return :opaque if calls.size > 1 || contains?(body, :return)
+        top_level = false
+        each_stmt(body) { |stmt| top_level ||= stmt.equal?(call) }
+        return :opaque unless top_level
+
+        reassigned = Set[] #: Set[Symbol]
+        each_node(body) { |node| reassigned << node.children[0] if node.type == :lvasgn }
+        positions = call_positions(args_node).reject { |name, _| reassigned.include?(name) }
+
+        if call.type == :zsuper
+          params = args_node.is_a?(::Parser::AST::Node) ? args_node.children.grep(::Parser::AST::Node) : []
+          params.take_while { |param| param.type == :arg || param.type == :optarg }.map { |param| positions[param.children[0]] }
+        else
+          call.children
+            .take_while { |arg| !%i[splat block_pass kwargs forwarded_args forwarded_restarg].include?(arg.type) }
+            .map { |arg| arg.type == :lvar ? positions[arg.children[0]] : nil }
+        end
+      end
+
+      def each_initialize(node, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        case node.type
+        when :def
+          yield node.children[1], node.children[2] if node.children[0] == :initialize
+        when :class, :module, :sclass, :defs
+          nil
+        else
+          node.children.each { |child| each_initialize(child, &block) }
+        end
+      end
+
+      # `@x = param` statements at the top of `initialize`, keyed by ivar,
+      # valued by the positional index of `param` at the call. Only for a
+      # `param` the body never reassigns, an ivar the body writes once, and an
+      # `initialize` that cannot `return` before reaching it: anything else
+      # leaves a value that depends on the flow, which this does not read.
+      def ivar_param_bindings(args_node, body)
+        return {} if contains?(body, :return)
+
+        reassigned = Set[] #: Set[Symbol]
+        each_node(body) { |node| reassigned << node.children[0] if node.type == :lvasgn }
+        param_index = call_positions(args_node).reject { |name, _| reassigned.include?(name) }
+        return {} if param_index.empty?
+
+        writes = Hash.new(0) #: Hash[Symbol, Integer]
+        each_node(body) { |node| writes[node.children[0]] += 1 if node.type == :ivasgn }
+
+        result = {} #: Hash[Symbol, Integer]
+        each_stmt(body) do |stmt|
+          next unless stmt.type == :ivasgn
+          ivar, rhs = stmt.children
+          next unless rhs.is_a?(::Parser::AST::Node) && rhs.type == :lvar && writes[ivar] == 1
+          idx = param_index[rhs.children[0]]
+          result[ivar] = idx if idx
+        end
+        result
+      end
+
+      # The parameters whose slot in the list is the argument's position at
+      # every call: a required one with no optional before it, an optional one
+      # with no required after it, and nothing past a rest. A splat, kwarg or
+      # block shifts or breaks positionality.
+      #
+      #   def initialize(a, b = 1, c)   # only `a`: `P.new(:x, :y)` puts :y in `c`
+      def call_positions(args_node)
+        params = args_node.is_a?(::Parser::AST::Node) ? args_node.children.grep(::Parser::AST::Node) : []
+        positions = {} #: Hash[Symbol, Integer]
+        params.each_with_index do |param, index|
+          break if param.type == :restarg
+
+          stable =
+            case param.type
+            when :arg then params.take(index).none? { |other| other.type == :optarg }
+            when :optarg then params.drop(index + 1).none? { |other| %i[arg mlhs].include?(other.type) }
+            end
+          positions[param.children[0]] = index if stable
+        end
+        positions
+      end
+
+      def contains?(node, type)
+        each_node(node) { |child| return true if child.type == type }
+        false
+      end
+
+      def each_node(node, &block)
+        return unless node.is_a?(::Parser::AST::Node)
+
+        yield node
+        node.children.each { |child| each_node(child, &block) }
+      end
+
+      # The classes `class Foo` defines or reopens: unscoped, the one in the
+      # current nesting; `class Ex::Foo` inside `module Wrap` names `Foo` in
+      # whichever `Ex` resolves from there, `Wrap::Ex` or `::Ex`.
+      def defined_names(const_node, nesting)
+        name = const_to_name(const_node) or return []
+        scope = const_node.children[0]
+        return [name] if scope&.type == :cbase || nesting.empty?
+        return [[*nesting, name].join("::")] unless scope
+
+        nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+      end
+
+      def referenced_names(const_node, nesting)
+        name = const_to_name(const_node) or return []
+        return [name] if const_node.children[0]&.type == :cbase
+
+        nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+      end
+
+      def rebuilds_of(body)
+        targets = Set[].compare_by_identity #: Set[::Parser::AST::Node]
+        each_node(body) { |node| targets << node.children[0] if node.type == :op_asgn && node.children[0].type == :ivasgn && node.children[1] == :+ }
+        written = Hash.new { |hash, key| hash[key] = [] } #: Hash[Symbol, Array[::Parser::AST::Node]]
+        each_node(body) { |node| written[node.children[0]] << node if node.type == :ivasgn }
+        written.filter_map { |ivar, nodes| ivar if nodes.all? { |node| targets.include?(node) } }.to_set
+      end
+
+      def handed_ivars(body, parent = nil, handed = Set[])
+        return handed unless body.is_a?(::Parser::AST::Node)
+
+        if body.type == :ivar
+          receiver = parent && %i[send csend].include?(parent.type) && parent.children[0].equal?(body)
+          handed << body.children[0] unless receiver || parent.nil?
+        end
+        body.children.each { |child| handed_ivars(child, body, handed) }
+        handed
+      end
+
+      def record_body(names, body, nesting)
+        @lexical_nesting = nesting
+        @declared.merge(names)
+        record_births(@born_hashes, names, births(body) { |value| value.type == :hash && value.children.empty? })
+        record_births(@born_objects, names, births(body) { |value| HandedBack.fresh_object?(value) })
+        ClassVariableWrites.record_class_body(@class_body_cvars, names, body)
+        code = body_code(body, nesting) or return
+
+        names.each { |name| code == true ? @class_bodies[name] += 1 : (@mixin_bodies[name] ||= []) << code }
+      end
+
+      def record_births(index, names, born)
+        names.each { |name| (index[name] ||= {}).merge!(born, &JOIN_BIRTHS) } unless born.empty?
+      end
+
+      # The ivars a statement of the body sets to a value the block accepts,
+      # each with how: `:ivasgn` for `@x = value`, `:or_asgn` for
+      # `@x ||= value`.
+      def births(body)
+        born = {} #: Hash[Symbol, Symbol]
+        each_stmt(body) do |stmt|
+          target, value = stmt.type == :or_asgn ? stmt.children : [stmt, stmt.children[1]]
+          next unless target.type == :ivasgn && value && yield(value)
+
+          born.merge!({ target.children[0] => stmt.type }, &JOIN_BIRTHS)
+        end
+        born
+      end
+
+      # `true` for a body that runs code but method and module definitions and
+      # mixing in constants, else the names those constants may resolve to, or
+      # nil. A class written with a superclass runs that superclass's
+      # `inherited`.
+      def body_code(body, nesting)
+        mixins = [] #: Array[String]
+        each_stmt(body) do |stmt|
+          next if %i[def defs].include?(stmt.type)
+
+          names = nested_code(stmt, nesting) || mixed_names(stmt, nesting) or return true
+          mixins.concat(names)
+        end
+        mixins.empty? ? nil : mixins
+      end
+
+      # What a nested `module`, or `class` with no superclass, runs: its own
+      # body's code, which runs as the outer body does.
+      def nested_code(stmt, nesting)
+        return unless stmt.type == :module || (stmt.type == :class && stmt.children[1].nil?)
+
+        name = const_to_name(stmt.children[0]) or return
+        code = body_code(stmt.children.last, nesting + [name])
+        code == true ? nil : code || []
+      end
+
+      def mixed_names(stmt, nesting)
+        return unless stmt.type == :send && (stmt.children[0].nil? || stmt.children[0].type == :self)
+        return unless %i[include extend prepend].include?(stmt.children[1])
+
+        arguments = stmt.children.drop(2)
+        return if arguments.empty? || arguments.any? { |argument| argument.type != :const }
+
+        arguments.flat_map { |argument| referenced_names(argument, nesting) }
+      end
+
+      def memoized_ivar(body)
+        body.children[0].children[0] if body&.type == :or_asgn && body.children[0].type == :ivasgn
+      end
+
+      CALLS = %i[send csend yield].freeze
+
+      def memoized_hash(body)
+        value = body.children[1] if memoized_ivar(body)
+        memoized_ivar(body) if value&.type == :hash && value.children.empty?
+      end
+
+      def memo_of(body, nesting, defined_as)
+        target, value = HandedBack.memo_assignment(body)&.children
+        return unless target
+
+        wrappers = [] #: Array[Symbol]
+        while value.type == :block
+          wrapper = value.children[0]
+          return unless wrapper.type == :send && wrapper.children[0] && wrapper.children.size == 2
+
+          wrappers.unshift(wrapper.children[1])
+          value = wrapper.children[0]
+        end
+        allocated = HandedBack.allocated?(value)
+        return unless allocated || HandedBack.fresh_object?(value)
+        return [target.children[0], [defined_as], wrappers, true, allocated, HandedBack.fallbacks(body)] if HandedBack.built_by_self?(value)
+
+        klass = value.children[0]
+        name = const_to_name(klass) or return
+        names = klass.children[0]&.type == :cbase ? [name] : nesting.size.downto(0).map { |depth| [*nesting.take(depth), name].join("::") }
+        [target.children[0], names, wrappers, false, allocated, HandedBack.fallbacks(body)]
+      end
+
+      # A reader whose body is exactly `@ivar` (normal or endless def) →
+      # returns `:@ivar`, else nil.
+      def single_ivar_reader(body)
+        return nil unless body.is_a?(::Parser::AST::Node)
+        body.type == :ivar ? body.children[0] : nil
+      end
+
+      def each_stmt(body)
+        return unless body.is_a?(::Parser::AST::Node)
+        stmts = body.type == :begin || body.type == :kwbegin ? body.children : [body]
+        stmts.each { |s| yield s if s.is_a?(::Parser::AST::Node) }
+      end
+
+      def const_to_name(node)
+        return nil unless node.is_a?(::Parser::AST::Node) && node.type == :const
+        scope, name = node.children
+        case scope&.type
+        when nil, :cbase
+          name.to_s
+        when :const
+          prefix = const_to_name(scope)
+          prefix ? "#{prefix}::#{name}" : name.to_s
+        end
+      end
+    end
+  end
+end

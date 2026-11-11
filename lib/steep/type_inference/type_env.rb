@@ -5,8 +5,24 @@ module Steep
 
       attr_reader :local_variable_types
       attr_reader :instance_variable_types, :global_types, :constant_types
+      attr_reader :declared_instance_variable_types
       attr_reader :constant_env
       attr_reader :pure_method_calls
+      attr_reader :refined_self_type
+      # felixefelip/steep#68 item 2: { method_sym => { gate_ivar:, type: } }.
+      # A self-method proven non-nil while `gate_ivar` is falsy — registered when
+      # the proving guard (`authenticate_user`) is called, consumed at the
+      # method's own call site once the gate is known falsy.
+      attr_reader :conditional_method_returns
+      # felixefelip/steep#68 item 3: { "Const.attr" => { gate_ivar:, type: } }.
+      attr_reader :conditional_const_returns
+      # felixefelip/steep#68 item 4: facts proven at method entry (unconditional,
+      # since the method only runs if the guard didn't halt). Applied at reads of
+      # these self-methods / `Const.attr` paths, with no gate.
+      attr_reader :unconditional_method_returns, :unconditional_const_returns
+      # `{ class name => { ivar => type } }`: the ivars of a class object whose
+      # state a class body left known (`ObjectStates::ClassStates`).
+      attr_reader :class_states
 
       def to_s
         array = [] #: Array[String]
@@ -39,29 +55,43 @@ module Steep
         "{ #{array.join(", ")} }"
       end
 
-      def initialize(constant_env, local_variable_types: {}, instance_variable_types: {}, global_types: {}, constant_types: {}, pure_method_calls: {})
+      def initialize(constant_env, local_variable_types: {}, instance_variable_types: {}, declared_instance_variable_types: nil, global_types: {}, constant_types: {}, pure_method_calls: {}, refined_self_type: nil, conditional_method_returns: {}, conditional_const_returns: {}, unconditional_method_returns: {}, unconditional_const_returns: {}, class_states: {})
         @constant_env = constant_env
         @local_variable_types = local_variable_types
         @instance_variable_types = instance_variable_types
+        @declared_instance_variable_types = declared_instance_variable_types || instance_variable_types
         @global_types = global_types
         @constant_types = constant_types
         @pure_method_calls = pure_method_calls
+        @refined_self_type = refined_self_type
+        @conditional_method_returns = conditional_method_returns
+        @conditional_const_returns = conditional_const_returns
+        @unconditional_method_returns = unconditional_method_returns
+        @unconditional_const_returns = unconditional_const_returns
+        @class_states = class_states
 
         @pure_node_descendants = {}
       end
 
-      def update(local_variable_types: self.local_variable_types, instance_variable_types: self.instance_variable_types, global_types: self.global_types, constant_types: self.constant_types, pure_method_calls: self.pure_method_calls)
+      def update(local_variable_types: self.local_variable_types, instance_variable_types: self.instance_variable_types, global_types: self.global_types, constant_types: self.constant_types, pure_method_calls: self.pure_method_calls, refined_self_type: self.refined_self_type, conditional_method_returns: self.conditional_method_returns, conditional_const_returns: self.conditional_const_returns, unconditional_method_returns: self.unconditional_method_returns, unconditional_const_returns: self.unconditional_const_returns, class_states: self.class_states)
         TypeEnv.new(
           constant_env,
           local_variable_types: local_variable_types,
           instance_variable_types: instance_variable_types,
+          declared_instance_variable_types: declared_instance_variable_types,
           global_types: global_types,
           constant_types: constant_types,
-          pure_method_calls: pure_method_calls
+          pure_method_calls: pure_method_calls,
+          refined_self_type: refined_self_type,
+          conditional_method_returns: conditional_method_returns,
+          conditional_const_returns: conditional_const_returns,
+          unconditional_method_returns: unconditional_method_returns,
+          unconditional_const_returns: unconditional_const_returns,
+          class_states: class_states
         )
       end
 
-      def merge(local_variable_types: {}, instance_variable_types: {}, global_types: {}, constant_types: {}, pure_method_calls: {})
+      def merge(local_variable_types: {}, instance_variable_types: {}, global_types: {}, constant_types: {}, pure_method_calls: {}, refined_self_type: self.refined_self_type, conditional_method_returns: self.conditional_method_returns, conditional_const_returns: self.conditional_const_returns, unconditional_method_returns: self.unconditional_method_returns, unconditional_const_returns: self.unconditional_const_returns, class_states: self.class_states)
         local_variable_types = self.local_variable_types.merge(local_variable_types)
         instance_variable_types = self.instance_variable_types.merge(instance_variable_types)
         global_types = self.global_types.merge(global_types)
@@ -72,10 +102,46 @@ module Steep
           constant_env,
           local_variable_types: local_variable_types,
           instance_variable_types: instance_variable_types,
+          declared_instance_variable_types: declared_instance_variable_types,
           global_types:  global_types,
           constant_types: constant_types,
-          pure_method_calls: pure_method_calls
+          pure_method_calls: pure_method_calls,
+          refined_self_type: refined_self_type,
+          conditional_method_returns: conditional_method_returns,
+          conditional_const_returns: conditional_const_returns,
+          unconditional_method_returns: unconditional_method_returns,
+          unconditional_const_returns: unconditional_const_returns,
+          class_states: class_states
         )
+      end
+
+      # Overlays a refined type for `self` over `context.self_type` (issue
+      # felixefelip/steep#25). Sister to `refine_types(instance_variable_types: ...)`
+      # but for the receiver of implicit-self calls and `:self` AST nodes.
+      # Cleared on method entry by the env builder; not threaded across
+      # `join` (so a branch refinement doesn't leak past the conditional).
+      def with_refined_self(type)
+        update(refined_self_type: type)
+      end
+
+      def with_instance_variable_declarations(types, merge: true)
+        new_current = merge ? instance_variable_types.merge(types) : types
+        new_declared = merge ? declared_instance_variable_types.merge(types) : types
+
+        TypeEnv.new(
+          constant_env,
+          local_variable_types: local_variable_types,
+          instance_variable_types: new_current,
+          declared_instance_variable_types: new_declared,
+          global_types: global_types,
+          constant_types: constant_types,
+          pure_method_calls: pure_method_calls,
+          class_states: class_states
+        )
+      end
+
+      def declared_instance_variable_type(name)
+        declared_instance_variable_types[name]
       end
 
       def [](name)
@@ -84,7 +150,7 @@ module Steep
           case
           when local_variable_name?(name)
             local_variable_types[name]&.[](0)
-          when instance_variable_name?(name)
+          when instance_variable_name?(name), class_variable_name?(name)
             instance_variable_types[name]
           when global_name?(name)
             global_types[name]
@@ -134,7 +200,7 @@ module Steep
         )
       end
 
-      def refine_types(local_variable_types: {}, pure_call_types: {})
+      def refine_types(local_variable_types: {}, instance_variable_types: {}, pure_call_types: {})
         local_variable_updates = {} #: Hash[Symbol, local_variable_entry]
 
         local_variable_types.each do |name, type|
@@ -143,8 +209,23 @@ module Steep
         end
 
         invalidated_nodes = Set.new(pure_call_types.each_key)
+        # A refined pure call invalidates the calls DERIVED from it, exactly as a
+        # refined local or ivar does below. Refining `source` while leaving
+        # `source.window` at the type it had under the wider receiver keeps a
+        # fact that the refinement just made obsolete — and the stale one wins,
+        # because a cached pure call is read in preference to re-synthesizing.
+        # Bites wherever a derived read was cached BEFORE the receiver narrowed,
+        # which delegation inlining (felixefelip/steep#32) does routinely: typing
+        # `source.windowed?` as `source.window.present?` registers `source.window`
+        # first, and the postcondition narrows `source` after.
+        pure_call_types.each_key do |node|
+          invalidated_nodes.merge(invalidated_pure_nodes(node))
+        end
         local_variable_types.each_key do |name|
           invalidated_nodes.merge(invalidated_pure_nodes(Parser::AST::Node.new(:lvar, [name])))
+        end
+        instance_variable_types.each_key do |name|
+          invalidated_nodes.merge(invalidated_pure_nodes(variable_node(name)))
         end
 
         pure_call_updates = pure_node_invalidation(invalidated_nodes)
@@ -154,7 +235,11 @@ module Steep
           pure_call_updates[node] = [call, type]
         end
 
-        merge(local_variable_types: local_variable_updates, pure_method_calls: pure_call_updates)
+        merge(
+          local_variable_types: local_variable_updates,
+          instance_variable_types: instance_variable_types,
+          pure_method_calls: pure_call_updates
+        )
       end
 
       def constant(arg1, arg2)
@@ -166,6 +251,19 @@ module Steep
           else
             constant_env.resolve(arg1)
           end
+        end
+      end
+
+      # `[type, name]` of the constant `node` names, or nil where it names none,
+      # resolved the way `constant` resolves a name.
+      def constant_of(node)
+        return unless node.is_a?(Parser::AST::Node) && node.type == :const
+
+        parent, name = node.children
+        case parent&.type
+        when nil then constant(name, false)
+        when :cbase then constant(name, true)
+        when :const then (owner = constant_of(parent)&.at(1)) && constant(owner, name)
         end
       end
 
@@ -240,21 +338,54 @@ module Steep
             .transform_values {|types| AST::Types::Union.build(types: types) }
             .reject {|var, type| self[var] == type }
 
+        # Phase 1 of felixefelip/steep#16: union ivar narrowings across branches.
+        # Without this, an assignment that narrows `@x` in one branch (or to
+        # different sub-branches in each) leaves the joined env reflecting
+        # only the pre-branch state.
+        all_ivar_types = envs.each_with_object({}) do |env, hash| #$ Hash[Symbol, Array[AST::Types::t]]
+          env.instance_variable_types.each_key do |name|
+            hash[name] = []
+          end
+        end
+
+        envs.each do |env|
+          all_ivar_types.each_key do |name|
+            type = env.instance_variable_types[name] || env.declared_instance_variable_type(name)
+            all_ivar_types.fetch(name) << type if type
+          end
+        end
+
+        ivar_updates =
+          all_ivar_types
+            .transform_values {|types| AST::Types::Union.build(types: types) }
+            .reject {|name, type| instance_variable_types[name] == type }
+
         common_pure_nodes = envs
           .map {|env| Set.new(env.pure_method_calls.each_key) }
           .inject {|s1, s2| s1.intersection(s2) } || Set[]
 
-        pure_call_updates = common_pure_nodes.each_with_object({}) do |node, hash| #$ Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t]]
+        pure_call_updates = common_pure_nodes.each_with_object({}) do |node, hash| #$ Hash[Parser::AST::Node, [MethodCall::Typed, AST::Types::t?]]
           pairs = envs.map {|env| env.pure_method_calls.fetch(node) }
-          refined_type = AST::Types::Union.build(types: pairs.map {|call, type| type || call.return_type })
 
           # Any *pure_method_call* can be used because it's *pure*
           (call, _ = envs.fetch(0).pure_method_calls[node]) or raise
 
-          hash[node] = [call, refined_type]
+          # An entry a branch invalidated stays invalidated. Its call was made
+          # before the write that invalidated it, and a folded return is the
+          # value the receiver held then: `name.to_s` is `"x"` from a `name`
+          # that has since become `:y`.
+          if pairs.any? {|_, type| type.nil? }
+            hash[node] = [call, nil]
+          else
+            hash[node] = [call, AST::Types::Union.build(types: pairs.map {|_, type| type })]
+          end
         end
 
-        assign_local_variables(assignments).merge(pure_method_calls: pure_call_updates)
+        result = assign_local_variables(assignments).merge(pure_method_calls: pure_call_updates)
+        agreed = envs.empty? ? class_states : envs.first.class_states.select { |name, ivars| envs.all? { |env| env.class_states[name] == ivars } }
+        result = result.update(class_states: agreed)
+        result = result.refine_types(instance_variable_types: ivar_updates) unless ivar_updates.empty?
+        result
       end
 
       def add_pure_call(node, call, type)
@@ -281,6 +412,41 @@ module Steep
 
       def invalidate_pure_node(node)
         merge(pure_method_calls: pure_node_invalidation(invalidated_pure_nodes(node)))
+      end
+
+      # Drops every cached pure self-send (`performed?`, `authenticated?`, …).
+      # felixefelip/steep#68: a pure predicate's return type depends on ivars its
+      # BODY reads, a dependency the pure-node cache — which only tracks
+      # syntactic descendants — cannot see. When something writes an ivar (an
+      # in-frame `@x = …` or a callee's may-write effect), those cached
+      # predicates are stale and must be recomputed. Restricted to self-sends:
+      # `other.foo` cannot read this receiver's ivars.
+      # Registers a conditional-return fact (felixefelip/steep#68 item 2).
+      def with_conditional_method_return(method, gate_ivar:, type:)
+        update(conditional_method_returns: conditional_method_returns.merge(method => { gate_ivar: gate_ivar, type: type }))
+      end
+
+      # felixefelip/steep#68 item 3: registers a constant conditional-return.
+      def with_conditional_const_return(path, gate_ivar:, type:)
+        update(conditional_const_returns: conditional_const_returns.merge(path => { gate_ivar: gate_ivar, type: type }))
+      end
+
+      # felixefelip/steep#68 item 4: seed unconditional method-entry facts.
+      def with_method_entry_facts(self_methods:, consts:)
+        update(
+          unconditional_method_returns: unconditional_method_returns.merge(self_methods),
+          unconditional_const_returns: unconditional_const_returns.merge(consts)
+        )
+      end
+
+      def invalidate_self_pure_calls
+        self_calls = pure_method_calls.keys.select do |node|
+          (node.type == :send || node.type == :csend) &&
+            (node.children[0].nil? || node.children[0].type == :self)
+        end
+        return self if self_calls.empty?
+
+        merge(pure_method_calls: pure_node_invalidation(self_calls))
       end
 
       def pure_node_invalidation(invalidated_nodes)
@@ -314,7 +480,9 @@ module Steep
         # If name start with `@`, it is instance variable or class instance variable.
         # If name start with `$`, it is global variable.
         return false if name.start_with?(/[\p{Uppercase_Letter}\p{Titlecase_Letter}@$]/)
-        return false if TypeConstruction::SPECIAL_LVAR_NAMES.include?(name)
+        # `_` is a local even where it is a cast: nothing then assigns it, so
+        # nothing is stored under it.
+        return false if name == :__any__ || name == :__skip__
 
         true
       end
@@ -325,6 +493,14 @@ module Steep
 
       def instance_variable_name?(name)
         name.start_with?(/@[^@]/)
+      end
+
+      def class_variable_name?(name)
+        name.start_with?("@@")
+      end
+
+      def variable_node(name)
+        Parser::AST::Node.new(class_variable_name?(name) ? :cvar : :ivar, [name])
       end
 
       def global_name?(name)

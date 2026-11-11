@@ -1,0 +1,26 @@
+name: RuboCop
+
+on:
+  push:
+    branches:
+      - rbs_infer
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  rubocop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v7
+    - uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: "4.0"
+        bundler-cache: true
+    # Through the bundle, not a bare `gem install rubocop`: RuboCop parses with
+    # Prism, and a bare install settles for the Ruby's default Prism (rubocop-ast
+    # only asks for `~> 1.7`), which reports offenses the locked version does not.
+    - name: Run RuboCop
+      run: bundle exec rubocop --format github

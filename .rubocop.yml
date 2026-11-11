@@ -1,0 +1,53 @@
+inherit_from: .rubocop_todo.yml
+
+require:
+  - ./.rubocop/length_ceiling.rb
+
+AllCops:
+  TargetRubyVersion: 3.3
+  DisabledByDefault: true
+  SuggestExtensions: false
+  Exclude:
+    - "test/**/*"
+    - "smoke/**/*"
+    - "sample/**/*"
+    - ".gem_rbs_collection/**/*"
+    - "lib/steep/parser.rb"
+    - "coverage/**/*"
+    - "tmp/**/*"
+    - "vendor/**/*"
+
+Metrics/MethodLength:
+  Enabled: true
+  CountAsOne: ["array", "hash", "heredoc", "method_call"]
+  Max: 20
+
+# Replaced by Project/ClassLengthCeiling, which takes the same settings plus a
+# per-file ceiling.
+Project/ClassLengthCeiling:
+  Enabled: true
+  CountAsOne: ["array", "hash", "heredoc", "method_call"]
+  Max: 400
+  Ceilings:
+    "lib/steep/type_construction.rb": 3794
+    "lib/steep/postconditions/inferrer.rb": 1046
+    "lib/steep/subtyping/check.rb": 963
+    "lib/steep/type_inference/logic_type_interpreter.rb": 759
+    "lib/steep/server/master.rb": 731
+    "lib/steep/accumulators.rb": 486
+    "lib/steep/interface/builder.rb": 607
+    "lib/steep/source.rb": 564
+    "lib/steep/postconditions/runner.rb": 526
+    "lib/steep/signature/validator.rb": 489
+    "lib/steep/services/goto_service.rb": 473
+    "lib/steep/services/completion_provider/ruby.rb": 472
+    "lib/steep/drivers/check.rb": 452
+
+# Replaced by Project/ModuleLengthCeiling, which takes the same settings plus a
+# per-file ceiling.
+Project/ModuleLengthCeiling:
+  Enabled: true
+  CountAsOne: ["array", "hash", "heredoc", "method_call"]
+  Max: 400
+  Ceilings:
+    "lib/steep/accumulators.rb": 503

@@ -37,7 +37,21 @@ module Steep
           resolver = ::RBS::Resolver::ConstantResolver.new(builder: subtyping.factory.definition_builder)
           pos = source.buffer.loc_to_pos([line, column])
           [
-            Services::TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: pos),
+            Services::TypeCheckService.type_check(
+              source: source,
+              subtyping: subtyping,
+              constant_resolver: resolver,
+              cursor: pos,
+              contracts: project.contracts,
+              postconditions: project.postconditions,
+              callbacks: project.callbacks,
+              specializations: project.specializations,
+              literal_method_registry: service.literal_method_registry,
+              delegation_registry: project.delegation_registry,
+              constructor_bindings: project.constructor_binding_registry,
+              return_forwarding: project.return_forwarding_registry,
+              return_alias: project.return_alias_registry
+            ),
             subtyping
           ]
         rescue
@@ -103,7 +117,7 @@ module Steep
             when :send, :csend
               result_node =
                 case parents[0]&.type
-                when :block, :numblock
+                when :block, :numblock, :itblock
                   if node == parents.fetch(0).children[0]
                     parents.fetch(0)
                   else
@@ -116,9 +130,35 @@ module Steep
               case call = typing.call_of(node: result_node)
               when TypeInference::MethodCall::Typed, TypeInference::MethodCall::Error
                 unless call.method_decls.empty?
+                  # Look up the narrowed type from the env at the cursor.
+                  # When postconditions / built-in predicate narrowing /
+                  # pure-call invalidation refines a `:send`, the refined
+                  # type lives in `env.pure_method_calls`, not on the
+                  # `MethodCall::Typed`. Without this, hover keeps showing
+                  # the method's declared return type even after the
+                  # branch's narrowing has applied.
+                  narrowed = nil
+                  if (ctx = typing.cursor_context&.context)
+                    narrowed = ctx.type_env[result_node] rescue nil
+                    declared = call.is_a?(TypeInference::MethodCall::Typed) ? call.actual_method_type.type.return_type : nil
+                    narrowed = nil if narrowed == declared
+
+                    # When `MethodCall::Typed#return_type` carries a refined
+                    # type that the cursor's `pure_method_calls` snapshot
+                    # does not yet reflect — for example felixefelip/steep#16
+                    # Phase 2 transparent attr_reader on `self`, where the
+                    # backing ivar's env narrowing was applied before this
+                    # call was even cached as pure — surface that refined
+                    # type so hover matches what `steep check` actually sees.
+                    if narrowed.nil? && call.is_a?(TypeInference::MethodCall::Typed) && call.return_type != declared
+                      narrowed = call.return_type
+                    end
+                  end
+
                   return MethodCallContent.new(
                     node: result_node,
                     method_call: call,
+                    narrowed_type: narrowed,
                     location: node.location.selector # steep:ignore NoMethod
                   )
                 end

@@ -2,7 +2,14 @@ $LOAD_PATH.unshift File.expand_path('../../lib', __FILE__)
 
 # @rbs use Steep::*
 
-Encoding.default_external = Encoding::UTF_8
+# Setting Encoding.default_external prints a warning under `ruby -w`. Silence it because
+# the setting is intentional here.
+begin
+  verbose, $VERBOSE = $VERBOSE, nil
+  Encoding.default_external = Encoding::UTF_8
+ensure
+  $VERBOSE = verbose
+end
 
 require "bundler/setup"
 require 'steep'
@@ -72,7 +79,7 @@ module TestHelper
 
   def assert_any(collection, &block)
     assert collection.any?(&block)
-  end 
+  end
 
   # @rbs [T] (_Each[T], ?size: Integer) { (T) -> void } -> void
   def assert_any!(collection, size: nil, &block)
@@ -464,7 +471,9 @@ end
     @checker or raise "#checker should be used within from #with_checker"
   end
 
-  def with_checker(*files, with_stdlib: false, &block)
+  # `underscore_casts:` is on here: upstream's tests set their scene up with
+  # `x = (_ = …)` casts. A test of this fork's default asks for it off.
+  def with_checker(*files, with_stdlib: false, underscore_casts: true, &block)
     paths = {}
 
     files.each.with_index do |content, index|
@@ -480,7 +489,7 @@ end
     end
 
     with_factory(paths, nostdlib: !with_stdlib) do |factory|
-      builder = Steep::Interface::Builder.new(factory, implicitly_returns_nil: true)
+      builder = Steep::Interface::Builder.new(factory, implicitly_returns_nil: true, underscore_casts: underscore_casts)
       @checker = Steep::Subtyping::Check.new(builder: builder)
       yield @checker
     ensure
@@ -660,8 +669,8 @@ module TypeConstructionHelper
   AST = Steep::AST #: singleton(AST)
   TypeInference = Steep::TypeInference #: singleton(TypeInference)
 
-  # @rbs (Subtyping::Check, Source, ?cursor: untyped) { (TypeConstruction, Typing) -> void } -> void
-  def with_standard_construction(checker, source, cursor: nil)
+  # @rbs (Subtyping::Check, Source, ?cursor: untyped, ?contracts: Steep::Contracts::Store, ?postconditions: Steep::Postconditions::Store, ?callbacks: Steep::Callbacks::Store) { (TypeConstruction, Typing) -> void } -> void
+  def with_standard_construction(checker, source, cursor: nil, contracts: Steep::Contracts::Store.empty, postconditions: Steep::Postconditions::Store.empty, callbacks: Steep::Callbacks::Store.empty, specializations: Steep::Specializations::Store.empty, literal_method_registry: Steep::Project::LiteralMethodRegistry.new, delegation_registry: Steep::Project::DelegationRegistry.new, constructor_bindings: Steep::Project::ConstructorBindingRegistry.new, return_forwarding: Steep::Project::ReturnForwardingRegistry.new, return_alias: Steep::Project::ReturnAliasRegistry.new, record_branch_envs: false)
     annotations = source.annotations(block: source.node, factory: checker.factory, context: nil)
     resolver = RBS::Resolver::ConstantResolver.new(builder: checker.factory.definition_builder)
     const_env = ConstantEnv.new(factory: checker.factory, context: nil, resolver: resolver)
@@ -681,13 +690,34 @@ module TypeConstructionHelper
       instance_type = AST::Builtin::Object.instance_type
     end
 
-    rbs_env = checker.factory.env
+    definition = checker.factory.definition_builder.build_instance(module_name)
     type_env = Steep::TypeInference::TypeEnvBuilder.new(
       Steep::TypeInference::TypeEnvBuilder::Command::ImportGlobalDeclarations.new(checker.factory),
-      Steep::TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations),
+      Steep::TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableDefinition.new(definition, checker.factory),
+      Steep::TypeInference::TypeEnvBuilder::Command::ImportInstanceVariableAnnotations.new(annotations).merge!,
       Steep::TypeInference::TypeEnvBuilder::Command::ImportConstantAnnotations.new(annotations),
       Steep::TypeInference::TypeEnvBuilder::Command::ImportLocalVariableAnnotations.new(annotations)
     ).build(TypeEnv.new(const_env))
+
+    # Mirror TypeCheckService.type_check: apply top-level constant
+    # narrowing for `@type self:` files (felixefelip/rbs_infer#25).
+    unless callbacks.empty?
+      toplevel_updates = callbacks.toplevel_entries(module_name.to_s).each_with_object({}) do |entry, acc|
+        acc.merge!(Steep::Callbacks::ConstantNarrowing.constant_type_updates(entry.applies_constants, factory: checker.factory))
+      end
+      type_env = type_env.merge(constant_types: toplevel_updates) unless toplevel_updates.empty?
+    end
+
+    # Mirror TypeCheckService.type_check: apply method-entry facts to a
+    # top-level body checked with `@type self_method: Klass#method`.
+    if (entry_method = annotations.self_method_name) &&
+        (facts = postconditions.lookup_method_entry_facts(module_name.to_s, entry_method))
+      consts = facts[:consts].transform_values { |rbs_type| checker.factory.type(rbs_type) }
+      self_methods = facts[:self_methods].transform_values { |rbs_type| checker.factory.type(rbs_type) }
+      unless consts.empty? && self_methods.empty?
+        type_env = type_env.with_method_entry_facts(self_methods: self_methods, consts: consts)
+      end
+    end
 
     context = Context.new(
       block_context: nil,
@@ -712,13 +742,22 @@ module TypeConstructionHelper
         source.buffer.loc_to_pos(cursor)
       end
 
-    typing = Typing.new(source: source, root_context: context, cursor: loc)
+    typing = Typing.new(source: source, root_context: context, cursor: loc, record_branch_envs: record_branch_envs)
 
     construction = TypeConstruction.new(checker: checker,
                                         source: source,
                                         annotations: annotations,
                                         context: context,
-                                        typing: typing)
+                                        typing: typing,
+                                        contracts: contracts,
+                                        postconditions: postconditions,
+                                        callbacks: callbacks,
+                                        specializations: specializations,
+                                        literal_method_registry: literal_method_registry,
+                                        delegation_registry: delegation_registry,
+                                        constructor_bindings: constructor_bindings,
+                                        return_forwarding: return_forwarding,
+                                        return_alias: return_alias)
 
     yield construction, typing
   end

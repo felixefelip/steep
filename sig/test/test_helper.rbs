@@ -98,7 +98,9 @@ module SubtypingHelper
 
   def checker: () -> untyped
 
-  def with_checker: (*untyped files, ?with_stdlib: untyped) ?{ (?) -> untyped } -> untyped
+  # `underscore_casts:` is on here: upstream's tests set their scene up with
+  # `x = (_ = …)` casts. A test of this fork's default asks for it off.
+  def with_checker: (*untyped files, ?with_stdlib: untyped, ?underscore_casts: untyped) ?{ (?) -> untyped } -> untyped
 end
 
 module ShellHelper
@@ -174,8 +176,8 @@ module TypeConstructionHelper
 
   TypeInference: singleton(TypeInference)
 
-  # @rbs (Subtyping::Check, Source, ?cursor: untyped) { (TypeConstruction, Typing) -> void } -> void
-  def with_standard_construction: (Subtyping::Check, Source, ?cursor: untyped) { (TypeConstruction, Typing) -> void } -> void
+  # @rbs (Subtyping::Check, Source, ?cursor: untyped, ?contracts: Steep::Contracts::Store, ?postconditions: Steep::Postconditions::Store, ?callbacks: Steep::Callbacks::Store) { (TypeConstruction, Typing) -> void } -> void
+  def with_standard_construction: (Subtyping::Check, Source, ?cursor: untyped, ?contracts: Steep::Contracts::Store, ?postconditions: Steep::Postconditions::Store, ?callbacks: Steep::Callbacks::Store) { (TypeConstruction, Typing) -> void } -> void
 
   def assert_no_error: (untyped typing) -> untyped
 

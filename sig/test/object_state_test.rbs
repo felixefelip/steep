@@ -1,0 +1,61 @@
+# Generated from test/object_state_test.rb with RBS::Inline
+
+# `Klass.new(<fixed values>)` typed as the object it builds, ivars and all
+# (felixefelip/steep#205, stage 1).
+class ObjectStateTest < Minitest::Test
+  include TestHelper
+
+  include TypeErrorAssertions
+
+  include FactoryHelper
+
+  include SubtypingHelper
+
+  include TypeConstructionHelper
+
+  RBS: ::String
+
+  RUBY: ::String
+
+  # The sidecar `steep check` writes for RUBY: each `initialize` writes the ivar
+  # it binds, and nothing else does.
+  SIDECAR: untyped
+
+  def postconditions: (untyped rows) -> untyped
+
+  def check: (untyped source_text, ?sidecar: untyped) -> untyped
+
+  def state: (untyped class_name, untyped ivars) -> untyped
+
+  def test_new_with_a_literal_holds_it: () -> untyped
+
+  def test_a_reader_answers_what_the_object_holds: () -> untyped
+
+  def test_a_def_reader_answers_through_the_constructor_index: () -> untyped
+
+  def test_a_state_nests: () -> untyped
+
+  def test_the_object_is_still_its_class: () -> untyped
+
+  # A String can change under another name (felixefelip/steep#216), and so
+  # can an array.
+  def test_a_value_that_can_change_does_not_make_a_state: () -> untyped
+
+  def test_one_of_several_fixed_values: () -> untyped
+
+  # A `def self.new` answers whatever it likes, and a splat moves what lands
+  # where.
+  def test_a_new_that_is_not_initialize_or_a_splat: () -> untyped
+
+  def test_an_ivar_another_method_writes_does_not_make_a_state: () -> untyped
+
+  # Until `steep check` has written a sidecar, nothing says no other method
+  # writes the ivar.
+  def test_no_postconditions_yet: () -> untyped
+
+  # `may_write` only records ivars the RBS declares.
+  def test_an_undeclared_ivar_does_not_make_a_state: () -> untyped
+
+  # A superclass's methods run on the object too.
+  def test_an_ancestor_that_writes_the_ivar: () -> untyped
+end

@@ -24,4 +24,9 @@ class TypingTest < Minitest::Test
   def test_new_child_check: () -> untyped
 
   def test_new_child_check2: () -> untyped
+
+  # Calls in `a.foo(b.bar)`: the outer send is recorded on the parent, the inner
+  # one on a child. A child reads the parent's, and a saved child hands its own
+  # back, the same way `call_of` does.
+  def test_self_type_of_call_follows_the_parent_and_is_saved_with_the_child: () -> untyped
 end

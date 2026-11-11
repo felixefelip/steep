@@ -1,0 +1,45 @@
+# Generated from test/callbacks_test.rb with RBS::Inline
+
+class CallbacksTest < Minitest::Test
+  Callbacks: untyped
+
+  def test_empty_store: () -> untyped
+
+  def test_parses_single_entry: () -> untyped
+
+  def test_lookup_filters_by_method: () -> untyped
+
+  def test_lookup_strips_leading_colons: () -> untyped
+
+  def test_multiple_entries_for_same_class_aggregate: () -> untyped
+
+  def test_skips_entry_with_missing_fields: () -> untyped
+
+  def test_accepts_symbol_strings_in_runs_before: () -> untyped
+
+  def test_singleton_flag: () -> untyped
+
+  def test_toplevel_entry_needs_no_runs_before: () -> untyped
+
+  def test_toplevel_lookup_strips_leading_colons: () -> untyped
+
+  def test_non_toplevel_entry_excluded_from_toplevel_lookup: () -> untyped
+
+  def test_parses_applies_self_entry: () -> untyped
+
+  def test_handler_entry_has_nil_applies_self: () -> untyped
+
+  def test_entry_may_carry_both_handler_and_applies_self: () -> untyped
+
+  def test_parses_applies_constants_entry: () -> untyped
+
+  def test_applies_constants_drops_malformed_pairs: () -> untyped
+
+  def test_applies_constants_alone_is_a_valid_entry: () -> untyped
+
+  def test_skips_entry_with_neither_handler_nor_applies_self: () -> untyped
+
+  def test_load_reads_all_sidecars_under_sig: () -> untyped
+
+  def test_load_returns_empty_when_no_sidecar: () -> untyped
+end

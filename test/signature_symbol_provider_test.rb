@@ -32,7 +32,7 @@ class SignatureSymbolProviderTest < Minitest::Test
 
       target = project.targets[0] or raise
 
-      service = Services::SignatureService.load_from(target.new_env_loader(), implicitly_returns_nil: true)
+      service = Services::SignatureService.load_from(target.new_env_loader(), implicitly_returns_nil: true, underscore_casts: false)
       service.update(
         {
           Pathname("sig/a.rbs") => [Services::ContentChange.string(<<RBS)],
@@ -106,11 +106,11 @@ RBS
       end
 
       assert_any! provider.query_symbol("class1") do |symbol|
-        assert_equal 'Class1', symbol.name
+        assert_equal "Class1", symbol.name
       end
 
       assert_any! provider.query_symbol("class") do |symbol|
-        assert_equal 'Class1', symbol.name
+        assert_equal "Class1", symbol.name
       end
     end
   end
@@ -128,7 +128,7 @@ RBS
 
       target = project.targets[0] or raise
 
-      service = Services::SignatureService.load_from(target.new_env_loader(), implicitly_returns_nil: true)
+      service = Services::SignatureService.load_from(target.new_env_loader(), implicitly_returns_nil: true, underscore_casts: false)
       service.update(
         {
           Pathname("sig/a.rbs") => [Services::ContentChange.string(<<RBS)],
@@ -250,7 +250,7 @@ target :lib do
 end
 EOF
 
-      service = Services::SignatureService.load_from(project.targets[0].new_env_loader(), implicitly_returns_nil: true)
+      service = Services::SignatureService.load_from(project.targets[0].new_env_loader(), implicitly_returns_nil: true, underscore_casts: false)
       service.update(
         {
           Pathname("sig/a.rbs") => [Services::ContentChange.string(<<RBS)]

@@ -1,0 +1,205 @@
+# Generated from test/source/module_self_types_test.rb with RBS::Inline
+
+class Steep::Source::ModuleSelfTypesTest < Minitest::Test
+  include TestHelper
+
+  include FactoryHelper
+
+  M: untyped
+
+  def with_module_convention: () -> untyped
+
+  def parse_source: (untyped code, path: untyped) -> untyped
+
+  CONCERN: untyped
+
+  # The bug this closes lived behind a test that looked like it covered it:
+  # `test_inject_preserves_the_line_numbers_of_the_body` asserts the lines
+  # BEFORE the insertion are untouched, which they always were. Everything after
+  # shifted, and every position Steep reported for it — diagnostics included —
+  # was one line off per annotation (felixefelip/steep#176).
+  def test_scope_annotations_reach_the_node_without_moving_a_line: () -> untyped
+
+  def test_an_annotation_written_by_hand_wins_over_the_sidecar: () -> untyped
+
+  def test_inject_into_top_level_module_goes_inside_body: () -> untyped
+
+  # End-of-file placement bound to the file's SOLE node, which for a one-module
+  # file is the module itself — and stopped being it the moment the file wrote
+  # anything else at the top level, with no error and no annotation in effect
+  # (felixefelip/steep#155).
+  def test_inject_reaches_a_module_a_second_top_level_module_follows: () -> untyped
+
+  # The annotation is spliced in just above the module's own `end`, so every
+  # line of the body — everything a diagnostic can point at — keeps its number.
+  # A reopen of the same module is the same module: its instance `self` is the
+  # host's as much as the first declaration's. `StringEvalMacroExpander` places
+  # what a `class_eval` string writes in a reopen like this one, and the method
+  # it places — `delegate`'s, here — calls the host's class methods.
+  def test_inject_reaches_every_reopen_of_the_same_module: () -> untyped
+
+  def test_inject_preserves_the_line_numbers_of_the_body: () -> untyped
+
+  def test_inject_into_nested_module_goes_inside_body: () -> untyped
+
+  def test_inject_is_idempotent: () -> untyped
+
+  def test_inject_single_instance_annotation: () -> untyped
+
+  def test_inject_falls_back_to_append_on_unparseable_source: () -> untyped
+
+  TAGGABLE: ::String
+
+  BLOCKS: untyped
+
+  BLOCKS_WITH_SELF: untyped
+
+  # A block replayed onto two classes needs both names, and there is one line to
+  # put them on — a second `# @implements` would land inside the first one's
+  # text. So the entry may carry a LIST, joined into one comment
+  # (felixefelip/steep#149).
+  def test_inject_blocks_joins_a_list_of_implements_into_one_comment: () -> untyped
+
+  # The string form is what every sidecar written before the list said, and it
+  # keeps meaning exactly what it meant.
+  def test_inject_blocks_still_takes_a_single_implements_string: () -> untyped
+
+  def test_inject_blocks_appends_self_on_each_def_line_without_shifting: () -> untyped
+
+  def test_inject_blocks_with_self_is_idempotent: () -> untyped
+
+  # Two blocks of the SAME call name in one file, each replayed onto a different
+  # class. Without a discriminator both entries land on both blocks, so the
+  # generator has to decline and neither block gets checked against its real
+  # definee.
+  TWO_BAZINGADO: ::String
+
+  TWO_BLOCKS: untyped
+
+  def test_inject_blocks_in_picks_the_block_written_in_that_scope: () -> untyped
+
+  # The whole point of a scope over a line: `inject` may have added lines to
+  # this source before `inject_blocks` runs, and the discriminator still holds.
+  def test_inject_blocks_in_survives_lines_added_above_the_call: () -> untyped
+
+  def test_inject_blocks_in_that_matches_no_scope_annotates_nothing: () -> untyped
+
+  # `::A::B` from the sidecar and `A::B` read off the declarations are one scope.
+  def test_inject_blocks_in_matches_regardless_of_the_leading_colons: () -> untyped
+
+  # Every sidecar written before `in` existed omits it, and a single-block DSL
+  # never needs it: no scope still means every call of that name.
+  def test_inject_blocks_without_in_still_matches_every_call: () -> untyped
+
+  def test_inject_blocks_without_self_adds_no_type_self: () -> untyped
+
+  def test_inject_blocks_appends_implements_on_the_opener_line: () -> untyped
+
+  def test_inject_blocks_adds_no_line_and_keeps_every_other_line: () -> untyped
+
+  def test_inject_blocks_skips_inline_block_rather_than_corrupting_it: () -> untyped
+
+  def test_inject_blocks_preserves_lines_before_the_block: () -> untyped
+
+  def test_inject_blocks_is_idempotent: () -> untyped
+
+  def test_inject_blocks_ignores_unmatched_call_name: () -> untyped
+
+  def test_inject_blocks_skips_call_with_receiver: () -> untyped
+
+  def test_inject_blocks_noop_for_empty_blocks: () -> untyped
+
+  def test_inject_blocks_falls_back_on_unparseable_source: () -> untyped
+
+  def test_entry_for_reads_sidecar_keyed_by_path: () -> untyped
+
+  def test_entry_for_matches_absolute_path_by_tail: () -> untyped
+
+  # Prism counts offsets in BYTES. Slicing the String by that number is a
+  # CHARACTER index, so one multi-byte character above the anchor slid the
+  # insertion past the module's own `end` and into its parent's body — where
+  # the annotation binds to the wrong scope and quietly does nothing.
+  def test_inject_places_the_annotation_inside_the_module_with_multibyte_text_above: () -> untyped
+
+  def test_self_types_of_reads_every_module_of_an_entry: () -> untyped
+
+  # A sidecar written before `modules` existed still applies.
+  def test_self_types_of_reads_a_top_level_anchor_as_one_module: () -> untyped
+
+  def test_self_types_of_is_empty_for_a_blocks_only_entry: () -> untyped
+
+  def test_entry_for_nil_without_sidecar: () -> untyped
+
+  def test_entry_for_reloads_after_sidecar_mtime_changes: () -> untyped
+
+  NARROWED: ::String
+
+  def test_inject_defs_annotates_only_the_named_method: () -> untyped
+
+  def test_inject_defs_is_idempotent: () -> untyped
+
+  # The sidecar is the only untrusted input here, so a wrong shape is checked
+  # for by name instead of caught by a blanket rescue — and it is logged, not
+  # swallowed.
+  def test_inject_defs_leaves_the_source_alone_for_a_malformed_sidecar: () -> untyped
+
+  # A bug in this file has to surface, which a blanket rescue would have turned
+  # into "the annotation silently stopped being placed".
+  def test_inject_defs_does_not_swallow_an_unexpected_error: () -> untyped
+
+  def test_inject_defs_ignores_an_unknown_anchor_or_method: () -> untyped
+
+  # A `def self.x`'s self is the module object, which no invoker narrows and
+  # which the module-wide annotation already covers.
+  def test_inject_defs_leaves_a_singleton_method_alone: () -> untyped
+
+  # A def whose body shares the signature line has nowhere to put the comment
+  # without swallowing the body, so it is skipped rather than shifted.
+  def test_inject_defs_skips_a_def_with_an_inline_body: () -> untyped
+
+  # felixefelip/steep#143. Not an annotation: there is no comment that says "when
+  # this parameter is that, `self` is this", which is why it needs a channel of
+  # its own and is read at check time instead of injected.
+  PATHS_ENTRY: ::Hash[::String, ::Array[::Hash[::String, untyped]]]
+
+  def test_paths_of_reads_the_entries_for_one_method: () -> untyped
+
+  def test_paths_of_is_nil_for_another_anchor_or_method: () -> untyped
+
+  def test_paths_of_is_nil_without_a_paths_key: () -> untyped
+
+  # The sidecar is the only untrusted input here, and a shape that is wrong is
+  # answered with nil rather than carried into the checker.
+  def test_paths_of_is_nil_for_a_malformed_entry: () -> untyped
+
+  # A sidecar written before `modules` existed still applies.
+  def test_paths_of_reads_a_top_level_anchor: () -> untyped
+
+  # Ruby's own `included` hook: the block is written inside the hook's body and
+  # `class_eval`ed on the parameter, so the call has a receiver and the module
+  # body has no DSL call at all.
+  HOOK: ::String
+
+  HOOK_BLOCKS: untyped
+
+  def test_inject_blocks_reads_a_block_inside_a_def: () -> untyped
+
+  # `class_eval` names no block. Two of them in one module would both match on
+  # call name and scope alone, and the second one here is replayed nowhere.
+  def test_inject_blocks_annotates_only_the_named_def: () -> untyped
+
+  # Without `method`, a receiver still disqualifies the call — every sidecar
+  # written before this one keeps meaning exactly what it meant.
+  def test_inject_blocks_still_requires_no_receiver_without_method: () -> untyped
+
+  def test_inject_blocks_inside_a_def_is_idempotent: () -> untyped
+
+  # The scope still discriminates: same call, same def name, another module.
+  def test_inject_blocks_inside_a_def_honours_the_scope: () -> untyped
+
+  private
+
+  def with_sidecar: (untyped table) -> untyped
+
+  def dump_sidecar: (untyped table, ?mtime: untyped) -> untyped
+end

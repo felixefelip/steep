@@ -86,8 +86,27 @@ module Steep
       end
 
       class KeywordRestParameter < BaseRestParameter
+        # The record one call's keywords build, where the body is checked for
+        # that call (`Specializations::Arguments#keyword_rest`).
+        attr_reader :record
+
+        def initialize(name:, type:, node:, record: nil)
+          super(name: name, type: type, node: node)
+          @record = record
+        end
+
         def var_type
-          AST::Builtin::Hash.instance_type(AST::Builtin::Symbol.instance_type, type || AST::Builtin.any_type)
+          record || AST::Builtin::Hash.instance_type(AST::Builtin::Symbol.instance_type, type || AST::Builtin.any_type)
+        end
+
+        def ==(other)
+          super && other.record == record
+        end
+
+        alias eql? ==
+
+        def hash
+          super ^ record.hash
         end
       end
 
@@ -225,18 +244,18 @@ module Steep
         params
       end
 
-      def self.build(node:, method_type:)
+      def self.build(node:, method_type:, keyword_rest:)
         # @type var args_node: ::Parser::AST::Node
         args_node =
           case node.type
-          when :def
+          when :def, :block
             node.children[1]
           when :defs
             node.children[2]
           else
             raise
           end
-        original = args_node.children #: Array[Parser::AST::Node]
+        original = DefinedMethods.params_of(args_node) #: Array[Parser::AST::Node]
         args = original.dup
 
         instance = new(args: original, method_type: method_type, forward_arg_type: nil)
@@ -482,7 +501,7 @@ module Steep
 
           type = rest_types.empty? ? nil : AST::Types::Union.build(types: rest_types)
 
-          method_param = KeywordRestParameter.new(name: name, type: type, node: arg)
+          method_param = KeywordRestParameter.new(name: name, type: type, node: arg, record: keyword_rest)
           instance.params[name] = method_param
 
           if has_error

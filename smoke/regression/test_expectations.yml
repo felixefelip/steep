@@ -70,8 +70,7 @@
     message: |-
       Cannot find compatible overloading of method `-` of type `(::Object & ::Issue332::_TimeDurationExtensions & ::Issue332::TimeDurationExtensions)`
       Method types:
-        def -: (::Issue332::Duration) -> ::Time
-             | (::Numeric) -> ::Time
+        def -: (::Numeric) -> ::Time
              | (::Time) -> ::Float
     code: Ruby::UnresolvedOverloading
 - file: lambda.rb
@@ -96,7 +95,7 @@
         line: 2
         character: 10
     severity: ERROR
-    message: Type `::Set[::String]` does not have method `ffffffff`
+    message: Type `::Set[(::String | "2" | "3")]` does not have method `ffffffff`
     code: Ruby::NoMethod
   - range:
       start:

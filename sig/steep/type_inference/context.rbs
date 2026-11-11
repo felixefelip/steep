@@ -33,6 +33,8 @@ module Steep
         #
         attr_reader block_param_name: Symbol?
 
+        attr_reader node: Parser::AST::Node?
+
         def initialize: (
           name: Symbol,
           method: RBS::Definition::Method?,
@@ -40,8 +42,17 @@ module Steep
           return_type: AST::Types::t,
           super_method: RBS::Definition::Method?,
           forward_arg_type: [Params, Block?] | true | nil,
+          node: Parser::AST::Node?,
           ?block_param_name: Symbol?
         ) -> void
+
+        def reassigned_parameters: () -> Set[Symbol]
+
+        def held_locals: () -> HeldLocals
+
+        def held_ivars: () { (Symbol) -> Symbol? } -> HeldIvars
+
+        def value_uses: () -> ValueUses
 
         # Type of the block of the current method type
         def block_type: () -> Interface::Block?
@@ -60,7 +71,11 @@ module Steep
         #
         attr_reader body_type: AST::Types::t?
 
-        def initialize: (body_type: AST::Types::t?) -> void
+        # The module contexts the block body must also be checked under, beyond
+        # the one already entered. Empty unless `@implements` named several.
+        attr_reader reopened_modules: Array[ModuleContext]
+
+        def initialize: (body_type: AST::Types::t?, reopened_modules: Array[ModuleContext]) -> void
 
         def subst: (Interface::Substitution) -> BlockContext
       end
