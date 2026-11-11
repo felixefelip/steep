@@ -410,6 +410,8 @@ class SpecializationsObjectStateTest < Minitest::Test
           def first = build(:a)
           def second = build(:c)
         end
+
+        P12Use.new.build(:a).replace(:c)
       RUBY
       types = specialized_body_types("app/box.rb")
 
@@ -1461,12 +1463,12 @@ class SpecializationsObjectStateTest < Minitest::Test
 
   def test_declines_a_hash_the_initialize_chain_sets_that_something_else_may_change
     {
-      "a method run after initialize sets it" => "def reset = set_entries(nil)",
-      "a method hands it on" => "def share(other) = other.replace(@entries)"
-    }.each do |label, backend|
+      "a method run after initialize sets it" => ["def reset = set_entries(nil)", "P20Map.new.reset"],
+      "a method hands it on" => ["def share(other) = other.replace(@entries)", "P20Map.new.share({})"]
+    }.each do |label, (backend, call)|
       in_tmpdir do
         write("sig/map.rbs", P20_RBS)
-        write("app/map.rb", p20_source(backend: backend))
+        write("app/map.rb", p20_source(backend: backend) + call)
         types = specialized_body_types("app/map.rb")
 
         assert_equal ":x", types.fetch("direct"), label
