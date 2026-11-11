@@ -64,6 +64,19 @@ class UnrolledEachTest < Minitest::Test
     assert_equal '"categories"', after("[].each { |rule| result.sub!(rule, '') }")
   end
 
+  def test_an_empty_block_is_typed_as_the_call_it_hands_a_block_to
+    with_checker({}, with_stdlib: true) do |checker|
+      source = parse_ruby("[1, 2].each { |x| }\n")
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal "::Array[::Integer]", typing.call_of(node: source.node).return_type.to_s
+      end
+    end
+  end
+
   def test_declines_what_a_pass_cannot_decide
     {
       "an open condition" => '[[/s\z/, ""]].each { |(rule, replacement)| result.sub!(rule, replacement); break if flag }',
