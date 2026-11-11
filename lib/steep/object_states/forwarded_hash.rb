@@ -72,11 +72,13 @@ module Steep
       # `nested`.
       def store_names(constr, instance, nested)
         registry = constr.constructor_bindings
-        constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.flat_map do |ancestor|
-          registry.method_bodies(ancestor.name.to_s).keys.select { |name| store(constr, instance, nested, name) }
-        end.to_set
-      rescue RBS::BaseError
-        Set[]
+        constr.specializations.keep([:store_names, constr.checker, registry, constr.postconditions, instance, nested]) do
+          constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.flat_map do |ancestor|
+            registry.method_bodies(ancestor.name.to_s).keys.select { |name| store(constr, instance, nested, name) }
+          end.to_set.freeze
+        rescue RBS::BaseError
+          Set[].freeze
+        end
       end
     end
   end
