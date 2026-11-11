@@ -592,7 +592,7 @@ module Steep
       return unless intrinsic&.collect == :each
 
       param = block_params.params.first
-      return unless block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
+      return unless block_body && block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
 
       collection = iterated_collection(node.children[0], receiver_type)&.tap { |known| typing.expand(node) if known.types.empty? } or return
 
@@ -607,7 +607,7 @@ module Steep
       #
       # Only the locals the body is entered with carry over. One born in the
       # body is bound anew on every pass, and the parameter is the next element.
-      env = UnrolledEach.starting_env(self, entry, (block_body && typing.unwidened_of(node: block_body)) || {})
+      env = UnrolledEach.starting_env(self, entry, typing.unwidened_of(node: block_body) || {})
       carried = env.local_variable_types.keys
 
       passes = collection.types.map do |element|
