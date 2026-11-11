@@ -69,6 +69,22 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
     assert_equal [:made], registry.singleton_method_bodies("Late").keys
   end
 
+  def test_a_parameter_a_value_is_handed_to_is_followed_once_however_many_paths_reach_it
+    hands = (1..8).map { |n| "  def self.m#{n}(x) = (m#{n + 1}(x); m#{n + 1}(x))\n" }.join
+    source = "class Holder\n  def self.rules = @rules ||= {}\n  def self.go = m1(rules)\n#{hands}  def self.m9(x) = x.size\nend\n"
+    followed = Hash.new(0)
+    counting = Module.new do
+      define_method(:parameter_uses) { |def_node, index| super(def_node, index).tap { followed[def_node.children[1]] += 1 } }
+    end
+    Steep::TypeInference::ClassMemoAnalyzer.singleton_class.prepend(counting)
+
+    registry = ConstructorBindingRegistry.new
+    registry.ingest_source(source, path_name: "app.rb")
+    registry.uses_of(:rules)
+
+    assert_equal 1, followed[:m9]
+  end
+
   def class_bodies_of(source, name)
     registry = ConstructorBindingRegistry.new
     registry.ingest_source(source, path_name: "app.rb")
