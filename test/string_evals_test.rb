@@ -832,6 +832,8 @@ class StringEvalsTest < Minitest::Test
           has_stored :posts
           has_stored :comments
         end
+
+        Reflection.new(:tags).rename(:labels)
       RUBY
 
       write_postconditions(setup_project)

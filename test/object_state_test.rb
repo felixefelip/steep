@@ -94,6 +94,7 @@ class ObjectStateTest < Minitest::Test
         @name = name
       end
     end
+    Renamable.new(:posts).name = :comments
   RUBY
 
   # The sidecar `steep check` writes for RUBY: each `initialize` writes the ivar

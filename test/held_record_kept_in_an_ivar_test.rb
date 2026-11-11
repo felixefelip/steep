@@ -89,11 +89,11 @@ class HeldRecordKeptInAnIvarTest < Minitest::Test
   end
 
   def test_a_write_through_the_ivar_in_another_method_widens_the_record
-    refute_equal({ "({  })" => "nil" }, create_after("@options = normalize(options)", "def mark = @options[:through] = :posts"))
+    refute_equal({ "({  })" => "nil" }, create_after("@options = normalize(options)", "def mark = @options[:through] = :posts", "", "Macro.new({}).mark"))
   end
 
   def test_a_write_through_the_ivar_in_a_subclass_widens_the_record
-    refute_equal({ "({  })" => "nil" }, create_after("@options = normalize(options)", "", "def remark = @options[:through] = :posts"))
+    refute_equal({ "({  })" => "nil" }, create_after("@options = normalize(options)", "", "def remark = @options[:through] = :posts", "Assoc.new({}).remark"))
   end
 
   def test_a_write_through_the_ivar_in_an_initializer_widens_the_record

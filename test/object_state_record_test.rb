@@ -153,6 +153,10 @@ class ObjectStateRecordTest < Minitest::Test
         Kernel.puts(leaked)
       end
     end
+    Autosaved.new({}).autosave!
+    Handed.new({}).share
+    Pruned.new({}).prune!
+    Rekeyed.new({}).set(:as, :tags)
   RUBY
 
   SIDECAR = [
