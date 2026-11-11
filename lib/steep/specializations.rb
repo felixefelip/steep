@@ -278,6 +278,7 @@ module Steep
         if type.is_a?(AST::Types::Name::Instance) && previous.is_a?(AST::Types::Name::Instance) && type.name == previous.name && type.args.size == previous.args.size && !type.args.empty?
           return type.args.zip(previous.args).all? { |member, other| refines?(member, other) }
         end
+        return type.back_type == previous if type.is_a?(AST::Types::Literal)
         return false unless type.is_a?(AST::Types::ObjectState)
         return type.back_type == previous unless previous.is_a?(AST::Types::ObjectState)
 

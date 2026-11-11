@@ -624,10 +624,10 @@ class AccumulatedIvarStateTest < Minitest::Test
     assert_equal [[nil], [nil]], yielded(inflections: "def self.inflections = [1].each { yield rules }")
   end
 
-  def test_a_block_given_the_project_replaces_is_not_decided
+  def test_a_block_given_the_project_replaces_answers_what_the_replacement_returns
     replaced = "module ::Kernel\n  def block_given? = false\nend\n"
 
-    assert_equal [[nil], [nil]], chunks(replaced + source(body: "def self.inflections\n  yield rules if block_given?\nend\n#{YIELD_BLOCK}"), rbs: YIELD_RBS)
+    assert_equal [["def post_ids; []; end"], ["def category_ids; []; end"]], chunks(replaced + source(body: "def self.inflections\n  yield rules if block_given?\nend\n#{YIELD_BLOCK}"), rbs: YIELD_RBS)
   end
 
   def test_declines_a_yielded_memo_whose_block_is_not_followed
