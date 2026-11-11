@@ -1007,15 +1007,22 @@ end
     end
   end
 
+  def check_expressions(*expressions)
+    in_tmpdir do
+      (current_dir + "Steepfile").write("target :app do\n  check \"lib\"\nend\n")
+      sh(*steep, "check", *expressions.flat_map { |expression| ["-e", expression] })
+    end
+  end
+
   def test_check_expression_success
-    stdout, status = sh(*steep, "check", "-e", "1 + 2")
+    stdout, status = check_expressions("1 + 2")
 
     assert_predicate status, :success?, stdout
     assert_match(/No type error detected\./, stdout)
   end
 
   def test_check_expression_failure
-    stdout, status = sh(*steep, "check", "-e", '123 + "ABC"')
+    stdout, status = check_expressions('123 + "ABC"')
 
     refute_predicate status, :success?, stdout
     assert_match(/Ruby::UnresolvedOverloading/, stdout)
@@ -1023,8 +1030,7 @@ end
   end
 
   def test_check_multiple_expressions
-
-    stdout, status = sh(*steep, "check", "-e", '123 + "ABC"', "-e", "1 + 2", "-e", '"hello" + 3')
+    stdout, status = check_expressions('123 + "ABC"', "1 + 2", '"hello" + 3')
 
     refute_predicate status, :success?, stdout
     assert_match(/Detected 2 problems from 3 expressions/, stdout)
