@@ -427,9 +427,13 @@ module Steep
         # `Class`'s, or of a protocol declared as a top-level interface
         # (`_ToA`, `_ToInt`, `_Each`, ...).
         def called_implicitly?(constr, names)
+          overrides_class_method?(constr, names) || names.any? { |name| protocol_methods(constr).include?(name) }
+        end
+
+        def protocol_methods(constr)
           builder = constr.checker.factory.definition_builder
-          overrides_class_method?(constr, names) || builder.env.interface_decls.each_key.any? do |name|
-            name.namespace.empty? && builder.build_interface(name).methods.each_key.any? { |method| names.include?(method) }
+          constr.specializations.keep([:protocol_methods, constr.checker]) do
+            builder.env.interface_decls.each_key.select { |name| name.namespace.empty? }.flat_map { |name| builder.build_interface(name).methods.keys }.to_set.freeze
           end
         end
 

@@ -200,6 +200,10 @@ module Steep
         @uses.keys.to_set | @calls.keys
       end
 
+      def used_name?(name) = indexed_uses.key?(name) || @calls.key?(name)
+
+      def indexed_uses = @uses || index_uses.then { @uses }
+
       # Where a hash keeps a keyed memo (`Body#keyed_memo`), what builds its
       # objects, and its class's methods, whose callers decide when what the
       # memo stores may change.

@@ -108,7 +108,7 @@ module Steep
       # Every use of the reader `name` reads only. One whose uses were never
       # indexed has none to show, which says nothing.
       def indexed_reads?(constr, instance, name)
-        constr.constructor_bindings.used_names.include?(name) &&
+        constr.constructor_bindings.used_name?(name) &&
           Specializations::Receivers.uses_on(constr, name, instance).all? { |use| reading_use?(constr, use) }
       end
 
