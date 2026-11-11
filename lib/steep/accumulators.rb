@@ -149,7 +149,7 @@ module Steep
     # was — unless the body changes an element in place, which nothing here
     # follows. So one of these is the LAST thing that may read the local: a
     # mention after it takes the local away.
-    BLOCK_READS = %i[map collect filter_map flat_map].freeze
+    BLOCK_READS = %i[each map collect filter_map flat_map].freeze
 
     # Calls that answer with a value holding none of the receiver's elements.
     # `parameters.map(&:first)` shares the elements it picks; read by one of
@@ -722,7 +722,7 @@ module Steep
         if handed && (arguments = handed_arguments(statement, found)).any?
           names = arguments.map { |argument| argument.children[0] }
           kept = names.to_h { |name| [name, found[name]] }
-          strike(statement, found)
+          consume(statement, found, handed)
           kept.each { |name, elements| found[name] = elements }
           handed.merge(names)
           return
