@@ -127,6 +127,57 @@ module Steep
           factory.instance_type(name) if factory.definition_builder.env.module_class_entry(name)
         end
       end
+
+      # What a run recorded of the receivers: the whole-file checks', and the
+      # specialized checks' of each body. `receivers` is what a store reads: the
+      # whole-file record, with a site it left unknown or `untyped` filled in
+      # from the specialized checks of its body, when a tuple covers every call
+      # of the body and every one of them typed the site. Where some call fixes
+      # nothing (`untupled`), the declaration is all that types the body's
+      # parameters; where a check left the site untyped (a branch its tuple
+      # does not take, a receiver typed relative to the caller), it says
+      # nothing the whole file did not.
+      class Record
+        UNTYPED = ["untyped"].freeze
+
+        attr_reader :receivers
+
+        def initialize
+          @receivers = {} #: Hash[String, Array[String]]
+          @whole = {} #: Hash[String, Array[String]]
+          @unknown = Set[] #: Set[String]
+          @received = {} #: Hash[String, Array[Hash[String, String?]]]
+          @untupled = Set[] #: Set[String]
+        end
+
+        def untupled(key) = @untupled << key
+
+        def record(found)
+          Receivers.record(@whole, @unknown, found)
+          adopt({})
+        end
+
+        # `received`: what a generation's specialized checks found in each
+        # body, one per tuple. Whether `receivers` moved.
+        def adopt(received)
+          @received.merge!(received)
+          receivers = @whole.transform_values(&:dup)
+          @received.each do |key, founds|
+            next if @untupled.include?(key)
+
+            founds.flat_map(&:keys).uniq.each do |site|
+              next unless receivers.fetch(site, UNTYPED) == UNTYPED
+
+              types = founds.map { |found| found[site] }
+              receivers[site] = types.uniq unless types.include?(nil)
+            end
+          end
+          return false if receivers == @receivers
+
+          @receivers.replace(receivers)
+          true
+        end
+      end
     end
   end
 end
