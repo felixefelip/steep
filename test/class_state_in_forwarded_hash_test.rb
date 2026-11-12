@@ -139,6 +139,16 @@ class ClassStateInForwardedHashTest < Minitest::Test
     end
   end
 
+  def test_a_call_at_the_top_level_of_a_file_runs_as_it_loads
+    ["Other.add", "Other.send(:add)"].each do |call|
+      assert_equal ["def post_ids; []; end"], chunks(writer: READER, ruby: "#{RUBY}#{call}\n"), call
+    end
+  end
+
+  def test_declines_a_call_at_the_top_level_in_a_block_a_proc_keeps
+    assert_equal [nil], chunks(writer: READER, ruby: "#{RUBY}KEPT = proc { Other.add }\n")
+  end
+
   def test_declines_a_method_named_as_a_value
     assert_equal [nil], chunks(writer: READER, ruby: "#{RUBY}class Z\n  Other.method(:add)\nend\n")
   end
