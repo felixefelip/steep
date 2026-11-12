@@ -33,6 +33,8 @@ module Steep
         @entries = {} #: Hash[untyped, Entry]
       end
 
+      def clear = @entries.clear
+
       def value(key, store, class_exits)
         previous = @entries[key]
         if previous&.reads&.same?(store)
@@ -52,14 +54,18 @@ module Steep
     # A generation whose store answers every question a check asked as it was
     # answered then is handed that check's outcome instead of checking again.
     class Checks
-      Outcome = Struct.new(:reads, :returns, :exits, :sites, :class_exits, keyword_init: true)
+      Outcome = Struct.new(:reads, :returns, :exits, :sites, :class_exits, :receivers, keyword_init: true)
 
       # `returned`: the type a body returns in a typing, given its key and node.
-      def initialize(overrides:, returned:)
+      # `names`: the readers whose receivers an outcome records (`Receivers`).
+      def initialize(overrides:, returned:, names:)
         @overrides = overrides
         @returned = returned
+        @names = names
         @outcomes = {} #: Hash[untyped, Outcome]
       end
+
+      def clear = @outcomes.clear
 
       # `bodies`: `{ key => [def_node, arguments, node_key, checked_arguments] }`
       # for the bodies of one file this check substitutes. The block checks the
@@ -76,7 +82,7 @@ module Steep
       private
 
       def outcome_of(typing, bodies, reads)
-        return Outcome.new(reads: reads, returns: {}, exits: {}, sites: {}, class_exits: {}) unless typing
+        return Outcome.new(reads: reads, returns: {}, exits: {}, sites: {}, class_exits: {}, receivers: {}) unless typing
 
         Outcome.new(
           reads: reads,
@@ -86,7 +92,8 @@ module Steep
             [key, exit] if ObjectStates::KeptSelf.exit_kept?(arguments, exit)
           end.to_h,
           sites: Collector.call_sites(typing, overrides: @overrides),
-          class_exits: typing.class_exits
+          class_exits: typing.class_exits,
+          receivers: bodies.to_h { |key, (def_node, _)| [key, Receivers.collect(typing, def_node, @names)] }
         )
       end
     end

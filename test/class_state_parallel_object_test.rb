@@ -220,4 +220,65 @@ class ClassStateParallelObjectTest < Minitest::Test
 
     assert_equal [nil], chunks(":posts", ruby: ruby, rbs: rbs)
   end
+
+  SUBSTITUTING = "def self.lookup(word) = word.to_s.gsub(/x/) { |match| instance(:en).uncountables.uncountable?(match) ? match : match }"
+  UNTYPED_OVERLOAD = "class Holder\n  def self.lookup: (untyped word) -> untyped\nend\n"
+
+  def with_lookup_called(argument, signature)
+    ruby, rbs = with_holder_method(SUBSTITUTING)
+    ruby = ruby.sub("class Post\n", "class Post\n  def self.look(word) = Holder.lookup(#{argument})\n")
+    rbs = rbs.sub("  def self.lookup: (String word) -> untyped\n", "  def self.lookup: (String word) -> untyped | ...\n").sub("class Post\n", "class Post\n  def self.look: (#{signature} word) -> untyped\n") + UNTYPED_OVERLOAD
+    assert_includes ruby, "Holder.lookup(#{argument})"
+    assert_includes rbs, "-> untyped | ...\n"
+    assert_includes rbs, "def self.look: (#{signature} word)"
+    [ruby, rbs]
+  end
+
+  def test_the_memo_read_in_a_block_keeps_its_state_when_an_overload_leaves_its_sender_untyped
+    ruby, rbs = with_lookup_called("word", "String")
+
+    assert_equal ["def post_ids; []; end"], chunks(":posts", ruby: ruby, rbs: rbs)
+  end
+
+  def test_declines_the_memo_read_in_a_block_whose_sender_a_call_leaves_untyped
+    ruby, rbs = with_lookup_called("word", "untyped")
+
+    assert_equal [nil], chunks(":posts", ruby: ruby, rbs: rbs)
+  end
+
+  LOOKER = <<~RUBY
+    class Looker
+      def lookup(word) = word.to_s.gsub(/x/) { |match| Holder.instance(:en).uncountables.uncountable?(match) ? match : match }
+    end
+
+  RUBY
+
+  LOOKER_RBS = <<~RBS
+    class Looker
+      def lookup: (String word) -> untyped | ...
+    end
+    class Looker
+      def lookup: (untyped word) -> untyped
+    end
+  RBS
+
+  def with_looker_called(*calls)
+    ruby = RUBY.sub("class Post\n", "#{LOOKER}class Post\n#{calls.each_with_index.map { |(argument, _), index| "  def self.look#{index}(word) = Looker.new.lookup(#{argument})\n" }.join}")
+    rbs = RBS.sub("class Post\n", "#{LOOKER_RBS}class Post\n#{calls.each_with_index.map { |(_, signature), index| "  def self.look#{index}: (#{signature} word) -> untyped\n" }.join}")
+    refute_equal RUBY, ruby
+    refute_equal RBS, rbs
+    [ruby, rbs]
+  end
+
+  def test_the_memo_read_in_a_block_of_an_instance_method_keeps_its_state_through_its_calls
+    ruby, rbs = with_looker_called(['"posts"', "String"])
+
+    assert_equal ["def post_ids; []; end"], chunks(":posts", ruby: ruby, rbs: rbs)
+  end
+
+  def test_declines_the_memo_read_in_a_block_of_an_instance_method_a_call_fixes_nothing_of
+    ruby, rbs = with_looker_called(['"posts"', "String"], %w[word untyped])
+
+    assert_equal [nil], chunks(":posts", ruby: ruby, rbs: rbs)
+  end
 end

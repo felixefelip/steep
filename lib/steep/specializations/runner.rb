@@ -73,8 +73,8 @@ module Steep
         @declarations = {} #: Hash[String, String]
         @defined_methods = {} #: Hash[String, Hash[String, String]]
         @overrides = nil
-        @receivers = {} #: Hash[String, Array[String]]
-        @unknown_receivers = Set[] #: Set[String]
+        @record = Receivers::Record.new
+        @receivers = @record.receivers
         @pruned = {} #: Hash[[Pathname, Array[Integer]], Source]
       end
 
@@ -99,8 +99,8 @@ module Steep
         @file_states = FileStates.new
         @declarations = {}
         @defined_methods = {}
-        @receivers = {}
-        @unknown_receivers = Set[]
+        @record = Receivers::Record.new
+        @receivers = @record.receivers
         @project.targets.each { |target| specialize_target(target, methods) }
         methods
       end
@@ -134,7 +134,7 @@ module Steep
         @definers = code_writers(context, defines: true)
         @factory = context.subtyping.factory
         @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry)
-        @checks = Checks.new(overrides: @overrides, returned: method(:returned_type))
+        @checks = Checks.new(overrides: @overrides, returned: method(:returned_type), names: @project.constructor_binding_registry.used_names)
         @harvested = HarvestedMethods.new(@project.base_dir)
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
@@ -165,7 +165,8 @@ module Steep
           exits = @exits.transform_values(&:dup)
           @demanded_exits&.each { |key, argument_key| @exits[key]&.delete(argument_key) }
           class_exits = @class_exits.dup
-          discovered, revealed = specialize(context, store(found), baselines, tuples, definitions)
+          discovered, revealed, received = specialize(context, store(found), baselines, tuples, definitions)
+          moved = adopt_receivers(received)
           @harvested.adopt(harvest_defines(context, store(found), locations, definitions), definitions, revealed, context.sources)
           discovered = settle(found, discovered, baselines, widened)
           grown = grow(tuples, revealed, generation)
@@ -173,12 +174,12 @@ module Steep
           # new return can still fix a tuple inside a body it re-checked, and that
           # tuple is what the next generation specializes. So do the exits, which
           # the caller one frame out reads only in the generation after.
-          break if discovered == found && grown == tuples && @exits == exits && @class_exits == class_exits && @file_states.stale_paths.empty?
+          break if !moved && discovered == found && grown == tuples && @exits == exits && @class_exits == class_exits && @file_states.stale_paths.empty?
           # A state seen before cannot lead anywhere a later generation has not
           # already been. Widening bounds an entry's literals; this bounds the one
           # shape it says nothing about — a return alternating between two
           # CLASSES, which no amount of widening settles.
-          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup), @class_exits.dup, @file_states.entering])
+          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup), @class_exits.dup, @file_states.entering, @receivers.dup])
 
           paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits)) | @file_states.stale_paths
           found = discovered
@@ -240,6 +241,7 @@ module Steep
       def specialize(context, store, baselines, tuples, definitions)
         found = {} #: Hash[String, Hash[String, AST::Types::t]]
         revealed = {} #: Hash[String, Set[Arguments]]
+        received = {} #: Hash[String, Array[Hash[String, String?]]]
 
         rounds(tuples).each do |active|
           outcomes = specialized_checks(context, store, active, definitions)
@@ -254,11 +256,18 @@ module Steep
           end
 
           outcomes.each_value { |outcome| @harvested.remember(outcome.sites, definitions) }
+          outcomes.each_value { |outcome| outcome.receivers.each { |key, sites| (received[key] ||= []) << sites } }
           [*outcomes.each_value.map(&:sites), @demanded_sites || {}].each { |sites| sites.each { |key, arguments| (revealed[key] ||= Set.new).merge(arguments) if definitions.key?(key) } }
           @demanded_sites = nil
         end
 
-        [found, revealed]
+        [found, revealed, received]
+      end
+
+      # Whether the receivers moved (`Receivers::Record#adopt`): every check
+      # read under the ones before is stale then, kept or not.
+      def adopt_receivers(received)
+        @record.adopt(received).tap { |moved| [@kept, @checks, @demands].each(&:clear) if moved }
       end
 
       # What each call site of a code-writing method writes there, read off one
@@ -510,7 +519,7 @@ module Steep
 
           union = reader.union(key) or next
           union = Specializations.rbs_writable(union)
-          answer = body_type(typings[path], def_node)
+          answer = Returns.body_type(typings[path], def_node)
           [key, union.to_s] unless union.to_s == baselines[key] && answer && union.to_s == Specializations.rbs_writable(answer).to_s
         end.to_h
       end
@@ -586,11 +595,12 @@ module Steep
 
           Collector.definitions(source).each do |key, def_node|
             definitions[key] = [path, def_node]
-            type = body_type(typing, def_node)
+            type = Returns.body_type(typing, def_node)
             baselines[key] = Specializations.rbs_writable(type).to_s if type
           end
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
+            @record.untupled(key) if Collector.tuples(key, arguments).empty?
             (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
@@ -607,7 +617,7 @@ module Steep
       def record_receivers(typing, source)
         return unless typing && source.node
 
-        Receivers.record(@receivers, @unknown_receivers, Receivers.collect(typing, source.node, @project.constructor_binding_registry.used_names))
+        @record.record(Receivers.collect(typing, source.node, @project.constructor_binding_registry.used_names))
       end
 
       # One round per tuple position, so a method with two tuples costs two
@@ -700,20 +710,7 @@ module Steep
       end
 
       def returned_type(typing, def_node, key)
-        Collector.constructor?(key, def_node) ? ObjectStates::Constructed.state(typing, def_node, key) : body_type(typing, def_node)
-      end
-
-      def body_type(typing, def_node)
-        return nil unless typing
-
-        body = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
-        return nil unless body && typing.has_type?(body)
-
-        values = Returns.values(typing, body) or return nil
-        types = [typing.type_of(node: body), *values].reject { |type| type.is_a?(AST::Types::Bot) }
-        return nil if types.empty? || types.any? { |type| type.is_a?(AST::Types::Any) }
-
-        AST::Types::Union.build(types: types.reject { |type| type.is_a?(AST::Types::ObjectState) && types.include?(type.back_type) })
+        Collector.constructor?(key, def_node) ? ObjectStates::Constructed.state(typing, def_node, key) : Returns.body_type(typing, def_node)
       end
     end
   end
