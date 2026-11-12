@@ -765,7 +765,7 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
 
     class Other
-      def self.ids_of: (Array[Symbol] names) -> Array[String]
+      def self.ids_of: () -> ^(Symbol) -> String
       def self.id_name: (Symbol name) -> String
       def self.untyped_of: (Symbol name) -> untyped
     end
@@ -774,7 +774,7 @@ class AccumulatedIvarStateTest < Minitest::Test
   def named_elsewhere(call)
     keyed(body: "def self.singularize(word) = instance(:en).singulars.empty? ? word : word.dup") + <<~RUBY
       class Other
-        def self.ids_of(names) = names.map { |name| id_name(name) }
+        def self.ids_of = proc { |name| id_name(name) }
         def self.id_name(name) = "\#{#{call}}_ids"
         def self.untyped_of(name) = name
       end
