@@ -125,6 +125,24 @@ class ClassStateInForwardedHashTest < Minitest::Test
     assert_equal [nil], chunks(writer: writer)
   end
 
+  READER = "class Other\n  def self.add = Inf.inflections(:en)\nend\n"
+
+  def test_a_send_by_a_literal_name_calls_the_method_where_it_is_made
+    {
+      "send" => "Other.send(:add)",
+      "public_send" => "Other.public_send(:add)",
+      "__send__" => "Other.__send__(:add)",
+      "a string name" => 'Other.send("add")',
+      "in a method" => "def self.z = Other.send(:add)"
+    }.each do |label, call|
+      assert_equal ["def post_ids; []; end"], chunks(writer: READER, ruby: "#{RUBY}class Z\n  #{call}\nend\n"), label
+    end
+  end
+
+  def test_declines_a_method_named_as_a_value
+    assert_equal [nil], chunks(writer: READER, ruby: "#{RUBY}class Z\n  Other.method(:add)\nend\n")
+  end
+
   def test_a_rule_written_through_a_helper_folds_once_the_helper_does
     ruby = RUBY
       .sub("      @singulars.prepend([rule, replacement])\n", "      @singulars.prepend([rule, tail(replacement)])\n")

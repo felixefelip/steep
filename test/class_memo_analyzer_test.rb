@@ -259,6 +259,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
     RUBY
     found = Steep::TypeInference::ClassMemoAnalyzer.calls(parse(source), names: Set[:register]).fetch(:register)
 
-    assert_equal [[:statement, nil], [:call, nil], [:call, :refit], [:escape, nil]], found.map { |use| [use.kind, use.within] }
+    assert_equal [[:statement, nil], [:call, nil], [:call, :refit], [:call, nil]], found.map { |use| [use.kind, use.within] }
+    assert_equal :fit, found.last.enclosing
   end
 end
