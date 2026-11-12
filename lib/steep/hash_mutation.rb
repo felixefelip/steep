@@ -303,6 +303,7 @@ module Steep
       def stored_in_memo(constr, receiver, record, ivar, arguments, type)
         object, stored = ObjectStates::HashElements.stored(constr, receiver, record, ivar, arguments)
         stored ||= stored(constr, record, arguments) || declared_hash(constr, ivar)
+        constr = constr.update_type_env(&:invalidate_self_pure_calls) if receiver&.type == :ivar
         [object || type, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, stored)]
       end
 
