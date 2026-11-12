@@ -126,7 +126,7 @@ class CallsThatCannotReachAValueTest < Minitest::Test
         end
 
         Filled.new.fill({ k: K.new })
-        Passing.new.pass(1, K.new)
+        Passing.new.pass(HoldVarLocals.locals, K.new)
       RUBY
       project = setup_project
       postconditions = Steep::Postconditions::Runner.new(project)
