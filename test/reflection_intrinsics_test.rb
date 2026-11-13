@@ -270,17 +270,34 @@ class ReflectionIntrinsicsTest < Minitest::Test
     assert_nil const_get_fold("::Object", "Lookup::LIMIT::X")
   end
 
+  def test_to_s_answers_the_name_of_a_module
+    with_probe_factory do |factory|
+      assert_equal Steep::AST::Types::Literal.new(value: "ProbeSub"), fold("::Module#to_s", singleton("::ProbeSub"), Registry.new, factory)
+    end
+  end
+
+  def test_to_s_declines_a_singleton_class_and_a_to_s_the_project_writes
+    with_probe_factory do |factory|
+      meta = Steep::AST::Types::MetaClass.new(name: RBS::TypeName.parse("::ProbeBase"))
+      registry = registry_for("class ProbeBase\n  def self.to_s = \"base\"\nend\n")
+
+      assert_nil fold("::Module#to_s", meta, Registry.new, factory)
+      assert_nil fold("::Module#to_s", singleton("::ProbeSub"), registry, factory)
+    end
+  end
+
   def test_watched_keys_and_dispatched_names
     assert_equal(
       ["::Class#allocate", "::Kernel#method", "::Kernel#respond_to?", "::Kernel#singleton_class", "::Method#parameters",
        "::Module#const_get", "::Module#const_set", "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::Module#singleton_class?",
+       "::Module#to_s",
        "::UnboundMethod#parameters"],
       Steep::ReflectionIntrinsics.watched_keys.to_a.sort
     )
     assert_equal ["::Method#parameters"], Steep::ReflectionIntrinsics.method_keys_for("Method")
     assert_equal(
       [:allocate, :const_get, :const_set, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
-       :singleton_class, :singleton_class?],
+       :singleton_class, :singleton_class?, :to_s],
       Steep::ReflectionIntrinsics.dispatched_names.to_a.sort
     )
   end

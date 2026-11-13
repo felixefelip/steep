@@ -714,6 +714,9 @@ module Steep
       "::Module#name" => Entry.new(
         method: ::Module.instance_method(:name), handler: NAME
       ),
+      "::Module#to_s" => Entry.new(
+        method: ::Module.instance_method(:to_s), handler: NAME
+      ),
       "::Module#const_set" => Entry.new(
         method: ::Module.instance_method(:const_set), handler: CONST_SET
       ),
