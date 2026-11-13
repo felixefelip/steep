@@ -26,7 +26,14 @@ module Steep
     # what the program runs instead. And it is reached through `Array`: a
     # `filter_map` the project writes on `Array` — reopened, or from a module
     # it includes — is found first and still resolves, by its RBS, here.
-    Entry = _ = Struct.new(:collect, :depends_on, :writes_elements, keyword_init: true)
+    #
+    # `over: :matches` for one whose passes are the matches of a pattern in the
+    # receiver rather than its elements (`passes`).
+    Entry = _ = Struct.new(:collect, :depends_on, :writes_elements, :over, keyword_init: true)
+
+    # One pass of a block call: the element the block is handed, and the
+    # globals the call sets before handing it (`{ :"$`" => type, … }`).
+    Pass = Struct.new(:element, :globals)
 
     ENTRIES = {
       "::Array#each" => Entry.new(collect: :each),
@@ -43,7 +50,9 @@ module Steep
       # `flat_map` asks of it through `to_ary`.
       "::Enumerable#flat_map" => Entry.new(
         collect: :flat_map, depends_on: ["::Array#each", "::Array#flat_map", *LiteralIntrinsics::ARRAY_CONVERSION_METHODS]
-      )
+      ),
+      # Active Record's `compute_type`: `name.scan(/::|$/) { candidates.unshift "#{$`}::#{type_name}" }`.
+      "::String#scan" => Entry.new(collect: :each, over: :matches)
     }.freeze
 
     # What `map(&:first)` leans on to call `first` at all.
@@ -139,6 +148,39 @@ module Steep
         when AST::Types::Literal then type.value == false ? :falsy : :truthy
         when AST::Types::Tuple, AST::Types::FiniteSet, AST::Types::RegexpLiteral, AST::Types::ObjectState then :truthy
         end
+      end
+
+      # The passes of a block call over a collection the checker knows, or nil.
+      # The collection is the receiver's elements, or, for `over: :matches`,
+      # the matches of a literal pattern in a literal string, each setting the
+      # globals a match sets.
+      def passes(constr, send_node, receiver_type, entry)
+        return matches(constr, send_node, receiver_type) if entry.over == :matches
+
+        constr.iterated_collection(send_node, receiver_type)&.types&.map { |element| Pass.new(element, {}) }
+      end
+
+      def matches(constr, send_node, receiver_type)
+        receiver, _, pattern_node, *rest = send_node.children
+        return unless rest.empty? && pattern_node && constr.typing.has_type?(pattern_node)
+
+        string = constr.literal_operand_type(receiver, receiver_type)
+        pattern = constr.literal_operand_type(pattern_node, constr.typing.type_of(node: pattern_node))
+        return unless string.is_a?(AST::Types::Literal) && string.value.is_a?(String)
+        return unless pattern.is_a?(AST::Types::RegexpLiteral) || (pattern.is_a?(AST::Types::Literal) && pattern.value.is_a?(String))
+
+        found = [] #: Array[Pass]
+        string.value.scan(pattern.value) { found << match_pass(Regexp.last_match || raise) }
+        found unless found.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
+      end
+
+      # What one match hands the block, and the globals it sets.
+      def match_pass(match)
+        value = ->(string) { string ? AST::Types::Literal.new(value: string) : AST::Builtin.nil_type }
+        captures = match.captures.map(&value)
+        globals = { :"$`" => value[match.pre_match], :"$'" => value[match.post_match], :"$&" => value[match[0]] }
+        captures.each_with_index { |capture, index| globals[:"$#{index + 1}"] = capture }
+        Pass.new(captures.empty? ? value[match[0]] : AST::Types::Tuple.new(types: captures), globals)
       end
 
       # The block's parameters bound to one element, the way `yield element`

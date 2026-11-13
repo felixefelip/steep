@@ -905,13 +905,12 @@ module Steep
       # expand leaves the local without contents rather than with wrong ones.
       def loop_onto(statement, found)
         collection = each_collection(statement) or return nil
-        _, args, body = statement.children
-        param = block_param(args) or return nil
-
+        call, args, body = statement.children
+        param = block_param(args)
         watched = found.select { |_, pushes| pushes }.keys
         # Inside the block the parameter IS that name, so a push onto it is a
         # push onto the element.
-        return nil if watched.include?(param)
+        return nil if (!param && !args.children.empty?) || watched.include?(param)
         # The collection may be a local this vouches for — that is a READ, and
         # its contents are the count. Named any other way it is a mention.
         over = looped_local(statement, found)
@@ -923,7 +922,7 @@ module Steep
         pushes, mentioned = pushes_in(lines, found, watched)
         return nil if pushes.empty? && !over
 
-        mentioned.merge(LocalReach.names_in(collection, watched)) unless over
+        mentioned.merge(LocalReach.names_in(call, watched)) unless over
         # Pushing onto the array being run over: one more pass per push, which
         # is no count at all.
         return nil if over && pushes.key?(over)
@@ -935,16 +934,17 @@ module Steep
       # The name of the watched local an `each` statement runs over, or nil.
       def looped_local(statement, found)
         collection = each_collection(statement)
-        name = collection.children[0] if collection&.type == :lvar
+        name = collection.children[0] if collection&.type == :lvar && statement.children[0].children[1] == :each
         name if name && found[name]
       end
 
-      # What a `recv.each { … }` statement runs over, or nil for any other.
+      # What a `recv.each { … }` or `recv.scan(pattern) { … }` statement runs
+      # over, or nil for any other.
       def each_collection(statement)
         return nil unless statement.is_a?(Parser::AST::Node) && statement.type == :block
 
         call = statement.children[0]
-        call.children[0] if call.type == :send && call.children[1] == :each && call.children.size == 2
+        call.children[0] if call.type == :send && [[:each, 2], [:scan, 3]].include?([call.children[1], call.children.size])
       end
 
       # The parameters of `def_node` that hold an array a call handed in: the

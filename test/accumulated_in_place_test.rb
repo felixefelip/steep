@@ -30,6 +30,26 @@ class AccumulatedInPlaceTest < Minitest::Test
     assert_equal "[:fr, :en]", types.fetch("returned")
   end
 
+  def test_scan_with_a_block_runs_once_per_match_with_the_match_globals_set
+    types = types_of({
+      "pre_match" => "result = []\n\"Example::Post\".scan(/::|$/) { result << \"\#{$`}::Comment\" }\nresult",
+      "post_match" => "result = []\n\"a-b\".scan(/\\w/) { |m| result << \"\#{m}\#{$'}\" }\nresult",
+      "groups" => "result = []\n\"a1b2\".scan(/(\\w)(\\d)/) { |pair| result << \"\#{$1}\#{$2}\#{$&}\" }\nresult",
+      "not_literal" => "result = []\n\"\#{rand}\".scan(/./) { result << $` }\nresult"
+    })
+
+    assert_equal '["Example::Comment", "Example::Post::Comment"]', types.fetch("pre_match")
+    assert_equal '["a-b", "b"]', types.fetch("post_match")
+    assert_equal '["a1a1", "b2b2"]', types.fetch("groups")
+    assert_equal "::Array[untyped]", types.fetch("not_literal")
+  end
+
+  def test_a_scan_the_project_replaces_is_not_expanded
+    types = types_of({ "scan" => "result = []\n\"ab\".scan(/./) { |m| result << m }\nresult" }, reopen: "class String\n  def scan(pattern) = super\nend\n")
+
+    assert_equal "::Array[untyped]", types.fetch("scan")
+  end
+
   def test_uniq_and_compact_in_place_reshape_what_the_local_holds
     types = types_of({
       "uniq" => "result = []\nresult << locale\nresult += [:en, locale]\nresult.uniq!\nresult",
