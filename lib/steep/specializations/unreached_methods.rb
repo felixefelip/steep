@@ -7,7 +7,8 @@ module Steep
     # itself unreached. A call in a class body, a block or a method no type
     # names runs, and so does one in the method being checked, which the check
     # takes to run; a name `index_uses` did not look for may be called
-    # anywhere; a cycle of methods is taken as reached.
+    # anywhere. A cycle of methods runs only where a call from outside it
+    # does.
     module UnreachedMethods
       class << self
         def unreached?(constr, target, name, visiting = Set[])
@@ -25,7 +26,7 @@ module Steep
           return false if call.owner.to_s.empty? || initializing?(constr, method) || checked_here?(constr, call)
 
           key = [call.owner, method, call.singleton]
-          return false if visiting.include?(key)
+          return true if visiting.include?(key)
 
           name = RBS::TypeName.parse("::#{call.owner}")
           return false unless constr.checker.factory.definition_builder.env.module_class_entry(name)

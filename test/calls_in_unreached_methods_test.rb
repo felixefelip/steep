@@ -40,6 +40,27 @@ class CallsInUnreachedMethodsTest < Minitest::Test
       def self.outer: () -> K
       def self.inner: () -> K
     end
+    class CycleLocals
+      @locals: Hash[Symbol, K]?
+      def get_cycle: (Symbol key) -> K?
+      def put_cycle: (Symbol key, K value) -> K
+    end
+    class EnteredLocals
+      @locals: Hash[Symbol, K]?
+      def get_entered: (Symbol key) -> K?
+      def put_entered: (Symbol key, K value) -> K
+    end
+    module Cycle
+      @@locals: CycleLocals?
+      def self.locals: () -> CycleLocals
+      def self.wipe: (?bool all) -> K
+    end
+    module Entered
+      @@locals: EnteredLocals?
+      def self.locals: () -> EnteredLocals
+      def self.ping: (Integer n) -> K
+      def self.pong: (Integer n) -> K
+    end
     class HereLocals
       @locals: Hash[Symbol, K]?
       def get_here: (Symbol key) -> K?
@@ -54,6 +75,8 @@ class CallsInUnreachedMethodsTest < Minitest::Test
       def uncalled: () -> untyped
       def called: () -> untyped
       def through: () -> untyped
+      def cycle: () -> untyped
+      def entered: () -> untyped
       def calls: () -> untyped
     end
   RBS
@@ -95,6 +118,28 @@ class CallsInUnreachedMethodsTest < Minitest::Test
       end
     end
 
+    class CycleLocals
+      def get_cycle(key)
+        locals = @locals
+        locals ? locals[key] : nil
+      end
+
+      def put_cycle(key, value)
+        (@locals ||= {})[key] = value
+      end
+    end
+
+    class EnteredLocals
+      def get_entered(key)
+        locals = @locals
+        locals ? locals[key] : nil
+      end
+
+      def put_entered(key, value)
+        (@locals ||= {})[key] = value
+      end
+    end
+
     class HereLocals
       def get_here(key)
         locals = @locals
@@ -126,6 +171,17 @@ class CallsInUnreachedMethodsTest < Minitest::Test
       def self.inner = locals.put_through(:k, K.new)
     end
 
+    module Cycle
+      def self.locals = @@locals ||= CycleLocals.allocate
+      def self.wipe(all = true) = all ? wipe(false) : locals.put_cycle(:k, K.new)
+    end
+
+    module Entered
+      def self.locals = @@locals ||= EnteredLocals.allocate
+      def self.ping(n) = n > 0 ? pong(n - 1) : locals.put_entered(:k, K.new)
+      def self.pong(n) = ping(n)
+    end
+
     class P
       def here
         Here.locals.put_here(:k, K.new)
@@ -135,10 +191,13 @@ class CallsInUnreachedMethodsTest < Minitest::Test
       def uncalled = Uncalled.locals.get_uncalled(:k)
       def called = Called.locals.get_called(:k)
       def through = Through.locals.get_through(:k)
+      def cycle = Cycle.locals.get_cycle(:k)
+      def entered = Entered.locals.get_entered(:k)
 
       def calls
         Called.reset
         Through.outer
+        Entered.ping(1)
       end
     end
 
@@ -162,6 +221,14 @@ class CallsInUnreachedMethodsTest < Minitest::Test
 
   def test_a_call_made_only_inside_a_method_no_code_runs_writes_nothing
     assert_equal "nil", types.fetch("uncalled")
+  end
+
+  def test_a_call_made_only_inside_methods_that_call_each_other_writes_nothing
+    assert_equal "nil", types.fetch("cycle")
+  end
+
+  def test_a_call_inside_methods_that_call_each_other_writes_once_a_running_call_enters_them
+    assert_equal "(::K | nil)", types.fetch("entered")
   end
 
   def test_a_call_inside_a_method_a_running_call_reaches_still_writes
