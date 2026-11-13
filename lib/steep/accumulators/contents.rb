@@ -29,6 +29,7 @@ module Steep
         when Reshaped then concat(types, types(constr, element.elements, pass)&.then { |before| reshaped(constr, element, before) })
         when Mapped then concat(types, mapped(constr, element))
         when Branch then branch(constr, element, pass, types)
+        when Prepended then types(constr, element.values, pass)&.then { |front| types.unshift(*front) }
         when Taken then nil
         else
           type = pass ? pass[element] : element_type(constr, element)
@@ -44,6 +45,7 @@ module Steep
         when Branch then record[value.node] = pass.typing.arm_of(node: value.node)
         when Loop then record[value] = pass.typing.iterations_of(node: value.block)
         when Spliced then record[value] = spliced_type(pass, value.node)
+        when Prepended then nil
         else record[value] = element_type(pass, value)
         end
       end

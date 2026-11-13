@@ -311,7 +311,7 @@ module Steep
           when Branch
             each_entry(entry.then_values, &block)
             each_entry(entry.else_values, &block)
-          when Loop
+          when Loop, Prepended
             each_entry(entry.values, &block)
           when Reshaped, Mapped
             each_entry(entry.elements, &block)
@@ -603,7 +603,7 @@ module Steep
         # it is written — all in this body and not at the call, so a caller has
         # nothing to answer them with, and a summary that left them out would
         # miscount.
-        return nil if found.each_value.any? { |pushes| pushes && enum_for(:each_entry, pushes).any? { |entry| entry.is_a?(Loop) || entry.is_a?(Branch) || entry.is_a?(Spliced) } }
+        return nil if found.each_value.any? { |pushes| pushes && enum_for(:each_entry, pushes).any? { |entry| entry.is_a?(Loop) || entry.is_a?(Branch) || entry.is_a?(Spliced) || entry.is_a?(Prepended) } }
 
         summary = names.map { |name| found[name]&.any? ? found[name] : nil }
         summary.any? ? summary : nil
@@ -1035,7 +1035,7 @@ module Steep
         lines.each do |line|
           if (push = Appends.push_onto(line, found))
             name, values = push
-            values.each { |value| mentioned.merge(CollectionReaders.names_beyond_copies(value.is_a?(Spliced) ? value.node : value, watched)) }
+            values.flat_map { |value| value.is_a?(Prepended) ? value.values : [value] }.each { |value| mentioned.merge(CollectionReaders.names_beyond_copies(value.is_a?(Spliced) ? value.node : value, watched)) }
 
             (pushes[name] ||= []).concat(values)
           elsif (nested = branch_in(line, found, watched) || loop_onto(line, found))
