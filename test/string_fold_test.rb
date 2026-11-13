@@ -193,6 +193,84 @@ class StringFoldTest < Minitest::Test
     end
   end
 
+  def test_rindex_of_a_string_folds
+    check(<<~'RUBY') do |pair|
+      # @type var path: "Example::Post"
+      path = _ = "Example::Post"
+      x = path.rindex("::")
+      y = path.rindex("::", 3)
+      z = path.rindex("Comment")
+    RUBY
+      assert_equal parse_type("7"), pair.context.type_env[:x]
+      assert_equal parse_type("nil"), pair.context.type_env[:y]
+      assert_equal parse_type("nil"), pair.context.type_env[:z]
+    end
+  end
+
+  def test_rindex_of_a_regexp_does_not_fold
+    check(<<~'RUBY') do |pair|
+      # @type var path: "Example::Post"
+      path = _ = "Example::Post"
+      x = path.rindex(/::/)
+    RUBY
+      assert_equal parse_type("::Integer?"), pair.context.type_env[:x]
+    end
+  end
+
+  def test_demodulize_folds
+    ["Example::Post", "Post"].each do |name|
+      check_deciding_a_branch(<<~RUBY) do |pair|
+        # @type var path: "#{name}"
+        path = _ = "#{name}"
+        x = if i = path.rindex("::")
+          path[(i + 2), path.length]
+        else
+          path
+        end
+      RUBY
+        assert_equal parse_type('"Post"'), pair.context.type_env[:x]
+      end
+    end
+  end
+
+  def check_deciding_a_branch(source_text)
+    with_checker(with_stdlib: true) do |checker|
+      source = parse_ruby(source_text)
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        unreachable, others = typing.errors.partition { _1.is_a?(Steep::Diagnostic::Ruby::UnreachableBranch) }
+        dead = unreachable.map { _1.node.loc.expression }
+        assert_equal 1, unreachable.size
+        assert(others.all? { |error| dead.any? { _1.begin_pos <= error.node.loc.expression.begin_pos && error.node.loc.expression.end_pos <= _1.end_pos } })
+        yield pair
+      end
+    end
+  end
+
+  def test_start_with_strings_folds
+    check(<<~'RUBY') do |pair|
+      # @type var name: "Comment"
+      name = _ = "Comment"
+      x = name.start_with?("::")
+      y = name.start_with?("::", "Com")
+    RUBY
+      assert_equal parse_type("false"), pair.context.type_env[:x]
+      assert_equal parse_type("true"), pair.context.type_env[:y]
+    end
+  end
+
+  def test_start_with_a_regexp_does_not_fold
+    check(<<~'RUBY') do |pair|
+      # @type var name: "Comment"
+      name = _ = "Comment"
+      x = name.start_with?(/C/)
+    RUBY
+      assert_equal parse_type("bool"), pair.context.type_env[:x]
+    end
+  end
+
   def test_split_without_a_separator_does_not_fold
     check(<<~'RUBY') do |pair|
       # @type var tag: "en US"
