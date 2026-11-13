@@ -169,9 +169,13 @@ module Steep
         return unless string.is_a?(AST::Types::Literal) && string.value.is_a?(String)
         return unless pattern.is_a?(AST::Types::RegexpLiteral) || (pattern.is_a?(AST::Types::Literal) && pattern.value.is_a?(String))
 
+        # Rebuilt, as the literal table does, so the match runs under a timeout.
+        value = pattern.is_a?(AST::Types::RegexpLiteral) ? ::Regexp.new(pattern.value.source, pattern.value.options, timeout: LiteralIntrinsics::REGEXP_TIMEOUT) : pattern.value
         found = [] #: Array[Pass]
-        string.value.scan(pattern.value) { found << match_pass(Regexp.last_match || raise) }
+        string.value.scan(value) { found << match_pass(Regexp.last_match || raise) }
         found unless found.size > LiteralIntrinsics::MAX_COLLECTION_SIZE
+      rescue Regexp::TimeoutError
+        nil
       end
 
       # What one match hands the block, and the globals it sets.
