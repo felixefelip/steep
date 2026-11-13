@@ -15,6 +15,10 @@ module Steep
 
     MAPS = %i[map! collect!].freeze
 
+    # `values` put in front of everything the local holds so far:
+    # `parts.unshift(a, b)`.
+    Prepended = Struct.new(:values)
+
     # The statements that add to a watched local, or run one of `RESHAPES` on
     # it, read off their shape alone. Which elements those add is the
     # checker's to say (`Contents`).
@@ -59,6 +63,8 @@ module Steep
           arguments.map { |argument| argument.type == :splat ? Spliced.new(argument.children[0], "::Array#push") : argument }
         when :concat
           arguments.map { |argument| Spliced.new(argument, "::Array#concat") } unless arguments.any? { |argument| argument.type == :splat }
+        when :unshift, :prepend
+          [Prepended.new(arguments)] unless arguments.empty? || arguments.any? { |argument| argument.type == :splat }
         end
       end
 

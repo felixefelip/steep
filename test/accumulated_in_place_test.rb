@@ -30,6 +30,20 @@ class AccumulatedInPlaceTest < Minitest::Test
     assert_equal "[:fr, :en]", types.fetch("returned")
   end
 
+  def test_unshift_and_prepend_put_elements_in_front
+    types = types_of({
+      "unshift" => "result = [:x]\nresult.unshift(locale, :en)\nresult << :y\nresult",
+      "prepend" => "result = []\nresult << :y\nresult.prepend(locale).unshift(:a)\nresult.join(\",\")",
+      "loop" => "result = []\n[:a, :b].each { |tag| result.unshift(tag) }\nresult << locale\nresult",
+      "splat" => "result = [:x]\nresult.unshift(*[locale])\nresult"
+    })
+
+    assert_equal "[:fr, :en, :x, :y]", types.fetch("unshift")
+    assert_equal '"a,fr,y"', types.fetch("prepend")
+    assert_equal "[:b, :a, :fr]", types.fetch("loop")
+    assert_equal "::Array[::Symbol]", types.fetch("splat")
+  end
+
   def test_uniq_and_compact_in_place_reshape_what_the_local_holds
     types = types_of({
       "uniq" => "result = []\nresult << locale\nresult += [:en, locale]\nresult.uniq!\nresult",
