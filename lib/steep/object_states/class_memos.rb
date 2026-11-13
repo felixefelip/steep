@@ -328,7 +328,7 @@ module Steep
 
           exit ||= (call.is_a?(TypeInference::MethodCall::Typed) && ObjectStates.exit_of(constr, call.node, under: :stateful?)&.classes&.[](singleton.name)) || {}
           constr.update_type_env do |env|
-            env.refine_types(instance_variable_types: moved.to_h { |ivar, _| [ivar, exit.fetch(ivar) { ObjectStates.declared_ivar(constr, ivar) }] })
+            env.invalidate_self_pure_calls.refine_types(instance_variable_types: moved.to_h { |ivar, _| [ivar, exit.fetch(ivar) { ObjectStates.declared_ivar(constr, ivar) }] })
           end
         end
 

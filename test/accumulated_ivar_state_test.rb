@@ -1814,6 +1814,19 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
+  def test_a_memo_answers_the_object_a_replaced_entry_holds
+    unset = "def self.instances = @instances ||= {}\ndef self.instance(locale = :en) = (instances[locale] ||= Rules.new)"
+    {
+      "assigned in the body" => [BORN_MEMO, "@instances[:en] = Rules.new", BORN_RBS],
+      "assigned by a method" => ["#{BORN_MEMO}\ndef self.reset = (@instances[:en] = Rules.new)", "reset", BORN_RBS],
+      "stored by a method" => ["#{BORN_MEMO}\ndef self.reset = @instances.store(:en, Rules.new)", "reset", BORN_RBS],
+      "a memo still unset" => ["#{unset}\ndef self.reset = (instances[:en] = Rules.new)", "reset", CALLED_RBS.sub("def self.noop:", "def self.reset: () -> Rules\n  def self.noop:")]
+    }.each do |label, (memo, call, rbs)|
+      ruby = called_before("instance(:en).singular(/s\\z/, \"\")\n#{call}", memo)
+      assert_equal [["def posts_ids; []; end"], ["def category_ids; []; end"]], chunks(ruby, rbs: rbs), label
+    end
+  end
+
   def test_a_hash_the_class_body_sets_is_not_followed_past_a_call_that_stores_by_no_name
     memo = "#{BORN_MEMO}\ndef self.reset = (@instances[:en] = Rules.new)"
     written = chunks(called_before("instance(:en).singular(/s\\z/, \"\")\nsend(:reset)", memo), rbs: BORN_RBS).flatten
