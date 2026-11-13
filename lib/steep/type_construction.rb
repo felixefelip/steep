@@ -589,12 +589,9 @@ module Steep
       typing.add_iterations(node, nil) if entries
 
       intrinsic = iteration_intrinsic(decls)
-      return unless intrinsic&.collect == :each
+      return unless intrinsic&.collect == :each && block_body
 
-      param = block_params.params.first
-      return unless block_body && block_params.params.size == 1 && param.is_a?(TypeInference::BlockParams::Param)
-
-      collection = iterated_collection(node.children[0], receiver_type)&.tap { |known| typing.expand(node) if known.types.empty? } or return
+      runs = IterationIntrinsics.passes(self, node.children[0], receiver_type, intrinsic)&.tap { |known| typing.expand(node) if known.empty? } or return
 
       # Each pass starts where the one before it left off, as it does when the
       # loop runs: a local of the method written in the body, or an ivar, is
@@ -610,10 +607,11 @@ module Steep
       env = UnrolledEach.starting_env(self, entry, typing.unwidened_of(node: block_body) || {})
       carried = env.local_variable_types.keys
 
-      passes = collection.types.map do |element|
+      passes = runs.map do |run|
+        bindings = IterationIntrinsics.element_bindings(block_params, run.element) or return
         pass = entry
           .with_new_typing(typing.new_child)
-          .update_type_env { env.refine_types(local_variable_types: { param.var => element }) }
+          .update_type_env { env.refine_types(local_variable_types: bindings).update(global_types: env.global_types.merge(run.globals)) }
         body_type, pass_context = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
         # A pass that cannot finish is the last one that runs, and the count
         # is of every element.
@@ -3051,10 +3049,10 @@ module Steep
           add_typing(node, type: AST::Builtin.any_type)
 
         when :nth_ref
-          add_typing(node, type: union_type(AST::Builtin::String.instance_type, AST::Builtin.nil_type))
+          add_typing(node, type: context.type_env[:"$#{node.children[0]}"] || union_type(AST::Builtin::String.instance_type, AST::Builtin.nil_type))
 
         when :back_ref
-          synthesize(node.updated(:gvar), hint: hint)
+          synthesize(node.updated(:gvar), hint: hint).then { |pair| pair.constr.add_typing(node, type: pair.type) }
 
         when :or_asgn, :and_asgn
           yield_self do

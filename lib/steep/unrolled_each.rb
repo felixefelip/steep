@@ -47,13 +47,13 @@ module Steep
       return if jumps_other_than_break?(block_body)
 
       jumps = breaks_in(block_body, []) or return
-      collection = constr.iterated_collection(node.children[0], receiver_type) or return
+      runs = IterationIntrinsics.passes(constr, node.children[0], receiver_type, constr.iteration_intrinsic(decls)) or return
       env = starting_env(constr, entry, unwidened)
       carried = env.local_variable_types.keys
 
-      collection.types.each do |element|
-        bindings = IterationIntrinsics.element_bindings(block_params, element) or return
-        pass = entry.with_new_typing(constr.typing.new_child).update_type_env { env.refine_types(local_variable_types: bindings) }
+      runs.each do |run|
+        bindings = IterationIntrinsics.element_bindings(block_params, run.element) or return
+        pass = entry.with_new_typing(constr.typing.new_child).update_type_env { env.refine_types(local_variable_types: bindings).update(global_types: env.global_types.merge(run.globals)) }
         body_type, context = pass.synthesize_block_body(node: node, block_body: block_body, block_type_hint: block_type_hint)
 
         taken = taken_break(pass.typing, jumps)
