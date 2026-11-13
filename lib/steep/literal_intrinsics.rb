@@ -364,6 +364,12 @@ module Steep
     STRING_SUB_BANG = ->(receiver, arguments) { receiver.dup.sub!(*arguments) }
     STRING_AFFIX = ->(_receiver, arguments) { arguments.first.is_a?(String) }
     STRING_TR = ->(_receiver, arguments) { arguments.all?(String) }
+    # A regexp searches too, but leaves its `MatchData` in `$~`.
+    STRING_SEARCH = lambda do |_receiver, arguments|
+      pattern, position = arguments
+      pattern.is_a?(String) && (arguments.size == 1 || position.is_a?(Integer))
+    end
+    STRING_PREFIXES = ->(_receiver, arguments) { arguments.all?(String) }
     # Without a separator `split` reads `$;`, a global this cannot see.
     STRING_SPLIT = ->(_receiver, arguments) { arguments.first.is_a?(String) }
     ARRAY_FLATTEN = lambda do |receiver, arguments|
@@ -507,6 +513,9 @@ module Steep
       "::Array#length" => Entry.new(method: Array.instance_method(:length), arity: 0, preflight: ALWAYS),
       "::Array#size" => Entry.new(method: Array.instance_method(:size), arity: 0, preflight: ALWAYS),
       "::String#split" => Entry.new(method: String.instance_method(:split), arity: 1, preflight: STRING_SPLIT),
+      # `demodulize` and `compute_type`, which `reflection.klass` runs.
+      "::String#rindex" => Entry.new(method: String.instance_method(:rindex), arity: 1..2, preflight: STRING_SEARCH),
+      "::String#start_with?" => Entry.new(method: String.instance_method(:start_with?), arity: 1.., preflight: STRING_PREFIXES),
       # A String literal is a `String` itself, never a subclass, so `to_s` is
       # the receiver unchanged. `Delegation.generate` writes it once the name
       # is already a string — `method_name.to_s` under `prefix:`.
