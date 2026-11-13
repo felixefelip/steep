@@ -105,12 +105,14 @@ module Steep
       # it. A module this cannot build is a question, not an absence.
       def raises_name_error?(call:, receiver_type:, argument_types:, factory:, override_registry:)
         key = MethodIdentity.key(call) or return false
-        public_only = RAISING_KEYS[key]
-        return false if public_only.nil?
+        return false unless RAISING_KEYS.key?(key)
 
         entry = ENTRIES.fetch(key)
         return false if override_registry.blocked?(key)
         return false if shadowed?(receiver_type, key, entry, factory, override_registry)
+        return missing_constant?(receiver_type, argument_types, factory, override_registry) if key == CONST_GET_KEY
+
+        public_only = RAISING_KEYS.fetch(key)
 
         type_name, singleton = reflected_target(receiver_type)
         return false unless type_name
@@ -125,6 +127,15 @@ module Steep
       rescue StandardError => exn
         Steep.logger.warn { "[reflection_intrinsics] unexpected failure in raises_name_error?: #{exn.class}: #{exn.message}" }
         false
+      end
+
+      # Whether `type` is what a reflection answers when it found what it looks
+      # for, and so raised nothing: a method object, or the module a constant
+      # lookup named.
+      def resolved?(call, type)
+        return true if type.is_a?(AST::Types::MethodObject)
+
+        type.is_a?(AST::Types::Name::Singleton) && call.is_a?(TypeInference::MethodCall::Typed) && MethodIdentity.key(call) == CONST_GET_KEY
       end
 
       # Every method key whose redefinition matters, for the override registry
@@ -398,6 +409,40 @@ module Steep
           type = factory.type(constant.type)
         end
         type
+      end
+
+      # A literal path whose segments all resolve to modules but one, which
+      # nothing declares where Ruby looks for it: `Object.const_get("Post::Comment")`
+      # with no `Post::Comment`, since past the first segment Ruby does not
+      # fall back to `Object`. A `const_missing` the project writes on the
+      # owner's chain answers in its place.
+      def missing_constant?(receiver, argument_types, factory, override_registry)
+        return false unless receiver.is_a?(AST::Types::Name::Singleton)
+
+        name, inherit_type = argument_types
+        return false unless argument_types.size.between?(1, 2) && name.is_a?(AST::Types::Literal)
+
+        inherit = inherit_type ? literal_truthiness(inherit_type) : true
+        owner, segments = constant_path(receiver.name, name.value)
+        return false if inherit == :unknown || segments.nil?
+
+        segments.each_with_index do |segment, index|
+          constant = child_constant(owner, segment, inherit, factory, toplevel: index.zero?)
+          return const_missing_core?(owner, factory, override_registry) unless constant
+
+          type = factory.type(constant.type)
+          return false unless type.is_a?(AST::Types::Name::Singleton)
+
+          owner = type.name
+        end
+        false
+      end
+
+      def const_missing_core?(owner, factory, override_registry)
+        return false if override_registry.name_blocked?(:const_missing)
+
+        chain = dispatch_chain(AST::Types::Name::Singleton.new(name: owner), :const_missing, factory) or return false
+        !overridden_before?(chain, "::Module#const_missing", override_registry)
       end
 
       # `[module the lookup starts at, segments]`, or nil for a name Ruby
@@ -675,13 +720,17 @@ module Steep
     # Names a reflection does not dispatch under but CONSULTS, so that a
     # redefinition of one changes its answer: `respond_to?` asks
     # `respond_to_missing?` for a method it does not find.
-    CONSULTED_NAMES = %i[respond_to_missing?].freeze
+    # `const_get` calls `const_missing` for a constant it does not find.
+    CONSULTED_NAMES = %i[respond_to_missing? const_missing].freeze
+
+    CONST_GET_KEY = "::Module#const_get"
 
     # The reflections that raise `NameError` for a missing method, with whether
-    # a private one counts as missing.
+    # a private one counts as missing, and `const_get`, for a missing constant.
     RAISING_KEYS = {
       "::Module#instance_method" => false,
-      "::Module#public_instance_method" => true
+      "::Module#public_instance_method" => true,
+      CONST_GET_KEY => nil
     }.freeze
 
     ENTRIES = {
