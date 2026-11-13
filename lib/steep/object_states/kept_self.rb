@@ -97,7 +97,7 @@ module Steep
       # what its receiver or the records it was handed hold, or that it kept
       # `self`.
       def exit_kept?(arguments, exit)
-        arguments.stateful? || arguments.hands_records? || exit&.keeps_self == true
+        arguments.stateful? || arguments.hands_records? || exit&.keeps_self == true || !exit&.name_error.nil?
       end
 
       def self_call?(node)
