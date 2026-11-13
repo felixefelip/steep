@@ -734,7 +734,7 @@ module Steep
     # can raise from `foo.bar` — a `NoMethodError` is a `NameError` — and the
     # rescue would run for it.
     def resolved_reflection?(node, type)
-      return false unless node.type == :send && type.is_a?(AST::Types::MethodObject)
+      return false unless node.type == :send && ReflectionIntrinsics.resolved?(typing.call_of(node: node), type)
 
       receiver, _method_name, *arguments = node.children
       [receiver, *arguments].all? { |operand| operand.nil? || READ_OPERANDS.include?(operand.type) }

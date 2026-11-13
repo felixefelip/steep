@@ -1976,6 +1976,80 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  def test_a_rescue_around_a_constant_lookup_runs_only_where_the_constant_is_missing
+    run_type_check_test(
+      signatures: {
+        "rescued.rbs" => <<~RBS
+          class Comment
+          end
+
+          class Post
+          end
+
+          class Guarded
+            def self.const_missing: (Symbol name) -> nil
+          end
+
+          class Rescued
+            def found: () -> singleton(Comment)?
+            def missing: () -> singleton(Comment)?
+            def guarded: () -> singleton(Comment)?
+            def ordinary: () -> singleton(Comment)?
+          end
+        RBS
+      },
+      code: {
+        "rescued.rb" => <<~'RUBY'
+          class Guarded
+            def self.const_missing(name) = nil
+          end
+
+          class Rescued
+            def found
+              begin
+                Object.const_get("Comment")
+              rescue NameError
+                nil
+              end
+            end
+
+            # Ruby does not fall back to `Object` past the first segment.
+            def missing
+              begin
+                Object.const_get("Post::Comment")
+              rescue NameError
+                nil
+              end
+            end
+
+            def guarded
+              begin
+                Object.const_get("Guarded::Comment")
+              rescue NameError
+                nil
+              end
+            end
+
+            def ordinary
+              begin
+                Comment.itself
+              rescue NameError
+                nil
+              end
+            end
+          end
+        RUBY
+      }
+    ) do |typings|
+      actual = def_body_types(typings.fetch("rescued.rb"))
+
+      assert_equal "singleton(::Comment)", actual.fetch("found")
+      assert_equal "nil", actual.fetch("missing")
+      assert_equal "untyped", actual.fetch("guarded")
+      assert_equal "(singleton(::Comment) | nil)", actual.fetch("ordinary")
+    end
+  end
+
   # Which clause catches the `NameError` a missing method raises is asked of
   # the classes the checker resolved, not of how they are spelled.
   def test_a_rescue_catches_name_error_by_the_class_it_resolves_to

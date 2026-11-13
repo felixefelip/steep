@@ -296,7 +296,7 @@ class ReflectionIntrinsicsTest < Minitest::Test
     )
     assert_equal ["::Method#parameters"], Steep::ReflectionIntrinsics.method_keys_for("Method")
     assert_equal(
-      [:allocate, :const_get, :const_set, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
+      [:allocate, :const_get, :const_missing, :const_set, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
        :singleton_class, :singleton_class?, :to_s],
       Steep::ReflectionIntrinsics.dispatched_names.to_a.sort
     )
