@@ -26,6 +26,19 @@ module Steep
         pair.with(constr: constr.update_type_env { |env| env.refine_types(instance_variable_types: { ivar => operand }) })
       end
 
+      # `@a, @b = x, y` leaves each ivar holding what `@a = x` would.
+      def self.assigned_together(constr, node)
+        targets = node.children[0].children
+        values = node.children[1]
+        return constr unless values.type == :array && values.children.size == targets.size && (targets + values.children).none? { _1.type == :splat }
+
+        targets.zip(values.children).reduce(constr) do |current, (target, value)|
+          next current unless target.type == :ivasgn
+
+          assigned(TypeConstruction::Pair.new(type: current.typing.type_of(node: value), constr: current), target.children[0], value).constr
+        end
+      end
+
       # What a local held where a statement of the method's own straight line
       # assigned it to the ivar, where nothing names it afterwards: the ivar
       # holds that array, and nothing is left to change it through the local.

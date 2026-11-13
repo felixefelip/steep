@@ -3658,7 +3658,7 @@ module Steep
         end
       end
 
-      constr.add_typing(node, type: truthy_rhs_type)
+      ObjectStates::EnteredSelf.assigned_together(constr, node).add_typing(node, type: truthy_rhs_type)
     end
 
     def synthesize_constant_decl(node, parent_node, constant_name, &block)
