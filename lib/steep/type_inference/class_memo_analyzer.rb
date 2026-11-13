@@ -67,6 +67,8 @@ module Steep
       # Calls that run a string as code where the class's `self` may be.
       STRING_EVALS = %i[eval instance_eval class_eval module_eval class_exec].freeze
 
+      SENDS_BY_NAME = %i[send __send__ public_send].freeze
+
       OP_ASSIGNS = %i[op_asgn or_asgn and_asgn].freeze
 
       LOCAL_SCOPES = %i[def defs class module sclass].freeze
@@ -218,7 +220,7 @@ module Steep
 
       def record_call(node, statement)
         _, name, *arguments = node.children
-        record_named(node, name, arguments)
+        record_named(node, name, sent_by_name(node, name, arguments, statement))
         [name, (:"#{name}=" if op_assigned?(node))].compact.each { |called| record_called(node, called, statement) }
       end
 
@@ -238,6 +240,15 @@ module Steep
             use.on_ivar = receiver.children[0] if receiver&.type == :ivar
           end
         end
+      end
+
+      # A send by a literal name calls that method here; the arguments left.
+      def sent_by_name(node, name, arguments, statement)
+        first = arguments.first
+        return arguments unless SENDS_BY_NAME.include?(name) && first && %i[sym str].include?(first.type)
+
+        record_called(node, first.children[0].to_sym, statement)
+        arguments.drop(1)
       end
 
       def record_named(node, name, arguments)

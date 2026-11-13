@@ -1827,10 +1827,10 @@ class AccumulatedIvarStateTest < Minitest::Test
     end
   end
 
-  def test_a_hash_the_class_body_sets_is_not_followed_past_a_call_that_stores_by_no_name
+  def test_a_hash_the_class_body_sets_is_followed_past_a_call_by_a_literal_name
     memo = "#{BORN_MEMO}\ndef self.reset = (@instances[:en] = Rules.new)"
-    written = chunks(called_before("instance(:en).singular(/s\\z/, \"\")\nsend(:reset)", memo), rbs: BORN_RBS).flatten
-    refute_includes written, "def post_ids; []; end"
+
+    assert_equal [["def posts_ids; []; end"], ["def category_ids; []; end"]], chunks(called_before("instance(:en).singular(/s\\z/, \"\")\nsend(:reset)", memo), rbs: BORN_RBS)
   end
 
   def test_an_unset_memo_is_not_followed_past_a_call_whose_hook_runs_it
