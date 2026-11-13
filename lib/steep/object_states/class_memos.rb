@@ -247,7 +247,8 @@ module Steep
 
         # `[ivar, owner, method name]` for each `def self.m = @ivar ||= value`
         # on the class's ancestors, and `[ivar, nil, ivar]` for each hash or
-        # object the class body sets an ivar to (`born_hash`, `born_object`).
+        # object the class body (`born_hash`, `born_object`), or an
+        # `inherited` hook of its ancestors, sets an ivar to.
         # One whose `Klass.new` they follow holds no object state only while it
         # is `nil`.
         def value_memos(constr, singleton)
@@ -256,7 +257,7 @@ module Steep
               [body.memoizes, owner, method_name] if body&.memoizes
             end
             registry = constr.constructor_bindings
-            born = registry.born_hashes(singleton.name).keys | registry.born_objects(singleton.name).keys
+            born = registry.born_hashes(singleton.name).keys | registry.born_objects(singleton.name).keys | Inherited.births(constr, singleton)
             memos + born.map { |ivar| [ivar, nil, ivar] }
           end
         end

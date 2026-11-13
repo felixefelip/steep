@@ -68,7 +68,7 @@ module Steep
           singleton = constr.self_type
           if singleton.is_a?(AST::Types::Name::Singleton)
             own = held(constr, singleton).merge(ClassMemos.memo_values(constr))
-            known = known.merge(singleton.name => own) unless own.empty?
+            known = known.merge(singleton.name => own) unless own.empty? && !Inherited.hook_call?(constr, call.node)
           end
           return known if known.empty? && constr.method_context
 
