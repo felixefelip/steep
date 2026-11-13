@@ -234,7 +234,7 @@ module Steep
             use.enclosing, use.singleton = defined_in(node)
             use.blocks = blocks_to_method(node) unless use.enclosing
             use.owner = owner_of(node)
-            use.in_class_body = in_class_body
+            use.in_class_body = in_class_body || at_top_level?(node)
             use.on_self = on_self
             use.self_at = ClassMemoAnalyzer.site(node) if on_self
             use.on_ivar = receiver.children[0] if receiver&.type == :ivar
@@ -462,6 +462,17 @@ module Steep
           names.unshift(node.children[0].loc.expression.source) if %i[class module].include?(node.type)
         end
         names.join("::")
+      end
+
+      # Outside any class, method or block, a call runs as its file loads.
+      def at_top_level?(node)
+        child = node
+        while (node = @parents[node])
+          return false if LOCAL_SCOPES.include?(node.type) || (Accumulators::LAMBDA_BODIES.include?(node.type) && !node.children[0].equal?(child))
+
+          child = node
+        end
+        true
       end
 
       def in_class_statement?(node)
