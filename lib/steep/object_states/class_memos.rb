@@ -185,8 +185,9 @@ module Steep
         end
 
         # The memos' ivars start `nil` in the one class body that runs code,
-        # where no `inherited` of the project's has run on the class first.
-        def entered_class(constr)
+        # where no `inherited` of the project's has run on the class first,
+        # unless that hook is checked ahead of the body (`Inherited`).
+        def entered_class(constr, inherited_runs: false)
           singleton = constr.self_type
           return constr unless singleton.is_a?(AST::Types::Name::Singleton)
 
@@ -195,7 +196,7 @@ module Steep
 
           definition = constr.checker.factory.definition_builder.build_singleton(singleton.name)
           ancestors = definition.ancestors.ancestors.map { |ancestor| ancestor.name.to_s }
-          return constr if ancestors.any? { |name| registry.defines?(name, :inherited, singleton: true) }
+          return constr if !inherited_runs && ancestors.any? { |name| registry.defines?(name, :inherited, singleton: true) }
 
           memos = ObjectStates.class_side_bodies(constr, singleton).filter_map { |_, _, body| body&.memoizes }
           memos += [registry.born_hashes(singleton.name), registry.born_objects(singleton.name)].flat_map { |born| born.filter_map { |ivar, how| ivar if how == :or_asgn } }

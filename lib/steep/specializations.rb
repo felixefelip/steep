@@ -346,7 +346,7 @@ module Steep
         _receiver, name, *args = node.type == :super ? [nil, nil, *node.children] : node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
         # and the arguments are the rest (`TypeConstruction::SendDispatch`).
-        args = args.drop(1) if TypeConstruction::SEND_SPELLINGS.key?(name) && dispatched?(node, typing)
+        args = args.drop(1) if TypeConstruction::SEND_SPELLINGS.key?(name) && call.respond_to?(:method_name) && call.method_name != name
 
         if args.last&.type == :block_pass
           passed = passed_block(args.pop, typing)

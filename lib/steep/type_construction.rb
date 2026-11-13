@@ -2235,7 +2235,7 @@ module Steep
               constructor.typing.cursor_context.set_node_context(node, constructor.context)
               constructor.typing.cursor_context.set_body_context(node, constructor.context)
 
-              exit = ObjectStates::ClassStates.entered(constructor, self).synthesize(node.children[2]).constr if node.children[2]
+              exit = ObjectStates::Inherited.body_exit(constructor, self, node)
 
               if constructor.module_context&.implement_name && !namespace_module?(node)
                 constructor.validate_method_definitions(node, constructor.module_context.implement_name || raise)

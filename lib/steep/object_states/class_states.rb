@@ -18,6 +18,8 @@ module Steep
     # the states its call site knew (`of_call`), not the ones around its
     # definition.
     module ClassStates
+      EMPTY_HOOK = "::Class#inherited"
+
       # A value computed the first time it is asked for.
       class Lazy
         def initialize(&block)
@@ -34,11 +36,11 @@ module Steep
       class << self
         # A `class`/`module` body entered from `outer`, knowing what `outer`
         # knew of other classes. Its own state is `self`'s ivars there.
-        def entered(constr, outer)
+        def entered(constr, outer, inherited_runs: false)
           states = outer.context.type_env.class_states
           states = states.except(constr.self_type.name) if constr.self_type.is_a?(AST::Types::Name::Singleton)
           constr = constr.update_type_env { |env| env.update(class_states: states) } unless states.empty?
-          ClassMemos.entered_class(constr)
+          ClassMemos.entered_class(constr, inherited_runs: inherited_runs)
         end
 
         # `outer` once a body that ended as `exit` has run.
@@ -175,6 +177,8 @@ module Steep
           return constr unless states.any? { |name, ivars| name == receiver || handed.include?(name) || ivars.each_value.any? { |type| type.is_a?(AST::Types::Record) || type.is_a?(AST::Types::Nil) || ObjectStates.state_in(type) } }
 
           call = ObjectStates.recorded_call(constr, node)
+          return constr if empty_hook?(constr, call)
+
           exit = Lazy.new { ObjectStates.exit_of(constr, node, under: :stateful?) }
           carried = Lazy.new { call.is_a?(TypeInference::MethodCall::Typed) ? of_call(constr, call).keys : [] }
           left = states.to_h do |name, ivars|
@@ -187,6 +191,12 @@ module Steep
           return constr if left == states
 
           constr.update_type_env { |env| env.update(class_states: left.reject { |_, ivars| ivars.empty? }) }
+        end
+
+        # A hook the core defines empty, such as the `Class#inherited` a
+        # project's `inherited` reaches through `super`.
+        def empty_hook?(constr, call)
+          call.is_a?(TypeInference::MethodCall::Typed) && (key = MethodIdentity.key(call)) == EMPTY_HOOK && !constr.literal_method_registry.blocked?(key)
         end
 
         # What a call's body may reach on its receiver, following the calls it
