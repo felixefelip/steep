@@ -164,7 +164,7 @@ module Steep
         receiver, _, pattern_node, *rest = send_node.children
         return unless rest.empty? && pattern_node && constr.typing.has_type?(pattern_node)
 
-        string = constr.literal_operand_type(receiver, receiver_type)
+        string = constr.literal_operand_type(receiver, constr.typing.recorded_type_of(node: receiver) || receiver_type)
         pattern = constr.literal_operand_type(pattern_node, constr.typing.type_of(node: pattern_node))
         return unless string.is_a?(AST::Types::Literal) && string.value.is_a?(String)
         return unless pattern.is_a?(AST::Types::RegexpLiteral) || (pattern.is_a?(AST::Types::Literal) && pattern.value.is_a?(String))

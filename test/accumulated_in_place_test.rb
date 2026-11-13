@@ -35,12 +35,14 @@ class AccumulatedInPlaceTest < Minitest::Test
       "pre_match" => "result = []\n\"Example::Post\".scan(/::|$/) { result << \"\#{$`}::Comment\" }\nresult",
       "post_match" => "result = []\n\"a-b\".scan(/\\w/) { |m| result << \"\#{m}\#{$'}\" }\nresult",
       "groups" => "result = []\n\"a1b2\".scan(/(\\w)(\\d)/) { |pair| result << \"\#{$1}\#{$2}\#{$&}\" }\nresult",
+      "named" => "result = []\nself.class.name.scan(/::|$/) { result << $` }\nresult",
       "not_literal" => "result = []\n\"\#{rand}\".scan(/./) { result << $` }\nresult"
     })
 
     assert_equal '["Example::Comment", "Example::Post::Comment"]', types.fetch("pre_match")
     assert_equal '["a-b", "b"]', types.fetch("post_match")
     assert_equal '["a1a1", "b2b2"]', types.fetch("groups")
+    assert_equal '["P"]', types.fetch("named")
     assert_equal "::Array[untyped]", types.fetch("not_literal")
   end
 
