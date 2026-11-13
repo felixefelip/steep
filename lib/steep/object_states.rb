@@ -22,7 +22,9 @@ module Steep
     # was handed the state of (`classes`), each record it was handed, by
     # position or keyword (`params`), and whether it kept `self` where its
     # text may hand it on (`keeps_self`, `KeptSelf`).
-    Exit = Struct.new(:ivars, :classes, :params, :keeps_self, keyword_init: true)
+    # `name_error`: whether the body raises `NameError` for these arguments
+    # (`NameErrors`), which a stateless body leaves alone.
+    Exit = Struct.new(:ivars, :classes, :params, :keeps_self, :name_error, keyword_init: true)
 
     class << self
       # The locals handed on are settled here, ahead of the callee's
@@ -47,6 +49,7 @@ module Steep
         env = pair.context.type_env
         params = HashMutation.param_exits(constr, def_node, arguments, env)
         if Constructed.constructor?(constr, def_node) ? arguments.class_states.empty? : !arguments.stateful? && params.empty?
+          return NameErrors.record(constr, def_node, pair) if jumps.empty? && !Constructed.constructor?(constr, def_node) && NameErrors.of_body(constr, pair_body(def_node), pair.type)
           return jumps.empty? ? Constructed.record(constr, def_node, pair, params: params) : nil
         end
         return unless jumps.empty? || params.empty?
@@ -56,7 +59,7 @@ module Steep
         classes = arguments.class_states.keys.to_h { |name| [name, Exits.common(envs.map { |left| left.class_states.fetch(name, {}) })] }
         root = constr.typing
         root = root.parent while root.parent
-        root.add_exit_ivars(def_node, Exit.new(ivars: ivars, classes: classes, params: params, keeps_self: KeptSelf.kept?(constr, def_node)))
+        root.add_exit_ivars(def_node, Exit.new(ivars: ivars, classes: classes, params: params, keeps_self: KeptSelf.kept?(constr, def_node), name_error: NameErrors.of_body(constr, pair_body(def_node), pair.type)))
       end
 
       def pair_body(def_node)

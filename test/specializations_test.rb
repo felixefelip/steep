@@ -257,6 +257,48 @@ class SpecializationsTest < Minitest::Test
     end
   end
 
+  def test_a_rescue_around_a_call_reads_whether_the_body_it_reaches_raises
+    in_tmpdir do
+      write("sig/lookup.rbs", <<~RBS)
+        class Comment
+        end
+        class Post
+        end
+        class Lookup
+          def self.constantize: (String name) -> untyped
+          def self.safe_constantize: (String name) -> untyped
+          def self.computed: (String name) -> untyped
+        end
+      RBS
+      write("app/lookup.rb", <<~RUBY)
+        class Lookup
+          def self.constantize(name) = Object.const_get(name)
+
+          def self.safe_constantize(name)
+            constantize(name)
+          rescue NameError
+            nil
+          end
+
+          def self.computed(name)
+            constantize(name.to_s)
+          rescue NameError
+            nil
+          end
+        end
+
+        Lookup.safe_constantize("Comment")
+        Lookup.safe_constantize("Post::Comment")
+        Lookup.computed("Comment")
+      RUBY
+
+      methods = Specializations::Runner.run(setup_project)
+
+      assert_equal({ '("Comment")' => "singleton(::Comment)", '("Post::Comment")' => "nil" }, methods.fetch("Lookup.safe_constantize"))
+      assert_equal({ '("Comment")' => "(singleton(::Comment) | nil)" }, methods.fetch("Lookup.computed"))
+    end
+  end
+
   def test_runner_specializes_on_the_keywords_a_keyword_rest_collects
     in_tmpdir do
       write("sig/pick.rbs", <<~RBS)

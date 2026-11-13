@@ -727,19 +727,6 @@ module Steep
       node.children.any? { |child| jumps_out?(child) }
     end
 
-    # A single reflection call the checker answered with the method it found.
-    #
-    # Only where nothing else in the call can raise: its receiver and
-    # arguments are read, not called. `foo.bar.public_instance_method(:x)`
-    # can raise from `foo.bar` — a `NoMethodError` is a `NameError` — and the
-    # rescue would run for it.
-    def resolved_reflection?(node, type)
-      return false unless node.type == :send && ReflectionIntrinsics.resolved?(typing.call_of(node: node), type)
-
-      receiver, _method_name, *arguments = node.children
-      [receiver, *arguments].all? { |operand| operand.nil? || READ_OPERANDS.include?(operand.type) }
-    end
-
     # Operands evaluated by reading: a variable, a constant the checker
     # resolved, `self`, a literal.
     READ_OPERANDS = %i[lvar ivar cvar gvar const self sym str int float nil true false].freeze
@@ -2826,12 +2813,12 @@ module Steep
             #
             # which is how `ActiveSupport::Delegation.generate` reads a target's
             # parameter list.
-            resbody_pairs = [] if body_pair && resolved_reflection?(node.children[0], body_pair.type)
+            resbody_pairs = [] if body_pair && NameErrors.of_call(self, node.children[0], body_pair.type) == :resolves
 
             # …and the other half: a reflection on a method the module does not
             # have raises, so only the rescue runs. `Delegation.generate`'s
             # fallback to `"..."`, for a target that has no such method.
-            raises = body_pair && raising_reflection?(node.children[0]) && rescues_name_error?(resbodies)
+            raises = body_pair && NameErrors.of_call(self, node.children[0], body_pair.type) == :raises && rescues_name_error?(resbodies)
 
             resbody_types = resbody_pairs.map(&:type)
             resbody_envs = resbody_pairs.map {|pair| pair.context.type_env }

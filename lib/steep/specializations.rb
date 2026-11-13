@@ -18,6 +18,7 @@ module Steep
   module Specializations
     DEFAULT_SIDECAR_PATH = "sig/generated/.steep_specializations.yml".freeze
     SCHEMA_VERSION = 1
+    NAME_ERROR_OUTCOMES = %i[resolves raises].freeze
 
     class << self
       def load(base_dir, path: DEFAULT_SIDECAR_PATH)
@@ -248,6 +249,7 @@ module Steep
         written["classes"] = exit.classes.to_h { |name, values| [name.to_s, ivars.(values)] } unless exit.classes.empty?
         written["params"] = ivars.(exit.params) unless exit.params.empty?
         written["keeps_self"] = true if exit.keeps_self
+        written["name_error"] = exit.name_error.to_s if exit.name_error
         written
       end
 
@@ -1202,7 +1204,7 @@ module Steep
         params = values.(raw["params"]) or return nil
         ObjectStates::Exit.new(
           ivars: ivars, classes: classes, params: params.transform_keys { |slot| slot.match?(/\A\d+\z/) ? slot.to_s.to_i : slot },
-          keeps_self: raw["keeps_self"] == true || nil
+          keeps_self: raw["keeps_self"] == true || nil, name_error: NAME_ERROR_OUTCOMES.find { |outcome| outcome.to_s == raw["name_error"] }
         )
       end
 
