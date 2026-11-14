@@ -95,7 +95,48 @@ module Steep
           type = type.subst(Interface::Substitution.build([], [], self_type: receiver))
         end
 
-        call.with_return_type(type)
+        call.with_return_type(instantiated(constr, call, key, type))
+      end
+
+      # An answer spelled in the type parameters of the class the body is
+      # defined in, read as the receiver instantiates them.
+      def instantiated(constr, call, key, type)
+        factory = constr.checker.factory
+        params = owner_type_params(factory, key)
+        return type unless params.intersect?(type.free_variables.to_a)
+
+        receiver = ObjectStates.state_in(call.receiver_type)&.back_type || call.receiver_type
+        type.subst(Interface::Substitution.build(params, owner_args(factory, receiver, method_key_parts(key).first, params.size)))
+      end
+
+      # The type parameters of the class an instance method `key` is defined in.
+      def owner_type_params(factory, key)
+        owner, _, singleton = method_key_parts(key)
+        singleton ? [] : type_params_of(factory, owner)
+      end
+
+      def type_params_of(factory, name)
+        entry = factory.env.module_class_entry(name)
+        entry.respond_to?(:type_params) ? entry.type_params.map(&:name) : []
+      end
+
+      # The arguments `receiver` gives `owner`'s type parameters, through the
+      # ancestor it inherits `owner` as; `untyped` for a receiver that names
+      # none.
+      def owner_args(factory, receiver, owner, size)
+        untyped = Array.new(size) { AST::Builtin.any_type }
+        return untyped unless receiver.is_a?(AST::Types::Name::Instance)
+
+        ancestor = factory.definition_builder.ancestor_builder.instance_ancestors(receiver.name).ancestors.find { |entry| entry.name == owner }
+        return untyped unless ancestor.is_a?(RBS::Definition::Ancestor::Instance) && ancestor.args.size == size
+
+        own = type_params_of(factory, receiver.name)
+        return untyped unless receiver.args.empty? || receiver.args.size == own.size
+
+        bound = Interface::Substitution.build(own, receiver.args.empty? ? Array.new(own.size) { AST::Builtin.any_type } : receiver.args)
+        ancestor.args.map { |arg| factory.type(arg).subst(bound) }
+      rescue RBS::BaseError
+        untyped
       end
 
       # A tuple with contents is checked on demand where no generation has
@@ -1224,7 +1265,8 @@ module Steep
         return parse_state(method_key, raw, factory: factory) if raw.is_a?(Hash)
         return AST::Types::Tuple.new(types: raw.map { |element| parse(method_key, element, factory: factory) || (return nil) }) if raw.is_a?(Array)
 
-        factory.type(RBS::Parser.parse_type(raw).map_type_name { |name, _, _| name.absolute! })
+        type = RBS::Parser.parse_type(raw, variables: Specializations.owner_type_params(factory, method_key))
+        factory.type(type.map_type_name { |name, _, _| name.absolute! })
       rescue RBS::ParsingError, RBS::BaseError => exn
         Steep.logger.warn { "[specializations] unparsable type #{raw.inspect} for #{method_key}: #{exn.message}" }
         nil
