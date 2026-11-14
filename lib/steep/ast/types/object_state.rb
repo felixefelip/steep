@@ -25,29 +25,36 @@ module Steep
         # `{ :@name => :posts }`, by ivar name.
         attr_reader :ivars
 
-        def initialize(back_type:, ivars:)
+        # For a hash, the `Record` of what it holds under each key, where that
+        # is known; nil where it is not.
+        attr_reader :contents
+
+        def initialize(back_type:, ivars:, contents: nil)
           @back_type = back_type
           @ivars = ivars.sort_by { |name, _| name }.to_h
+          @contents = contents
         end
 
         def ==(other)
-          other.is_a?(ObjectState) && other.back_type == back_type && other.ivars == ivars
+          other.is_a?(ObjectState) && other.back_type == back_type && other.ivars == ivars && other.contents == contents
         end
 
         def hash
-          self.class.hash ^ back_type.hash ^ ivars.hash
+          self.class.hash ^ back_type.hash ^ ivars.hash ^ contents.hash
         end
 
         alias eql? ==
 
         def subst(s)
-          self.class.new(back_type: back_type.subst(s), ivars: ivars.transform_values { |type| type.subst(s) })
+          self.class.new(back_type: back_type.subst(s), ivars: ivars.transform_values { |type| type.subst(s) }, contents: contents&.subst(s))
         end
+
+        def with_contents(contents) = self.class.new(back_type: back_type, ivars: ivars, contents: contents)
 
         # Unlike any RBS type, so a reader can tell the values are the answer and
         # not a declaration: the class, then what it holds.
         def to_s
-          "#{back_type}{#{ivars.map { |name, type| "#{name}: #{type}" }.join(", ")}}"
+          "#{back_type}{#{[*ivars.map { |name, type| "#{name}: #{type}" }, *(contents && "[]: #{contents}")].join(", ")}}"
         end
 
         def free_variables
@@ -59,7 +66,7 @@ module Steep
         include Helper::ChildrenLevel
 
         def each_child(&block)
-          types = [back_type, *ivars.values]
+          types = [back_type, *ivars.values, *contents]
           if block
             types.each(&block)
           else
@@ -68,11 +75,11 @@ module Steep
         end
 
         def map_type(&block)
-          self.class.new(back_type: yield(back_type), ivars: ivars.transform_values(&block))
+          self.class.new(back_type: yield(back_type), ivars: ivars.transform_values(&block), contents: contents && yield(contents))
         end
 
         def level
-          [0] + level_of_children([back_type, *ivars.values])
+          [0] + level_of_children([back_type, *ivars.values, *contents])
         end
 
         def with_location(new_location)

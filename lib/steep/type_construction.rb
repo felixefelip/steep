@@ -4144,7 +4144,7 @@ module Steep
               # holds, and what its readers answer.
               call, constr = ObjectStates.answered(constr, call, node: node, receiver_type: receiver_type, arguments: arguments)
             end
-            call = ObjectStates::Tap.answered(constr, call, node: node, receiver_type: receiver_type) if block_params
+            call = HashMutation.built(constr, block_params ? ObjectStates::Tap.answered(constr, call, node: node, receiver_type: receiver_type) : call, node)
             record_built_value(node, call, declared_return_type) unless call.equal?(nominal)
 
             constr.check_precondition_at_call_site(node, receiver, receiver_type, method_name, call: call)

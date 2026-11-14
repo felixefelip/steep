@@ -48,7 +48,7 @@ module Steep
     ELEMENT_METHODS = (KEY_READ | KEY_QUERY | STORES | ["::Hash#fetch", "::Hash#size", "::Hash#length", "::Hash#empty?"]).freeze
 
     class << self
-      def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
+      def widen_record(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
         keys = hash_method_keys(constr, method_name, private: private)
         block = block_params || block_body
         receiver_type, constr = consumed(constr, receiver, receiver_type, keys, block: block) || [receiver_type, constr]
@@ -69,7 +69,7 @@ module Steep
         [declared, ObjectStates::ClassMemos.remembered_as(constr, receiver, ivar, declared)]
       end
 
-      def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
+      def fold_record(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         keys = hash_method_keys(constr, method_name, private: private)
         receiver_type = left_by_arguments(constr, receiver) || receiver_type
         answer = queried(constr, node, receiver_type, keys, arguments) and return answer
@@ -464,6 +464,8 @@ module Steep
 
       def refined(constr, receiver, type)
         name = receiver.children[0] #: Symbol
+        current = receiver.type == :lvar ? constr.context.type_env[name] : constr.context.type_env.instance_variable_types[name]
+        type = rewrapped(type, current) if contents_state?(current)
         return ObjectStates.refine_local(constr, name, type) if receiver.type == :lvar
 
         constr.update_type_env { |env| env.refine_types(instance_variable_types: { name => type }) }
