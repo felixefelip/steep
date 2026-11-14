@@ -201,14 +201,7 @@ module Steep
         # struck because what follows could read the array the callee changed.
         returned = returned_local(lines.last)
 
-        ends = {} #: Hash[Symbol, Integer?]
-        lines.each_with_index do |statement, index|
-          next if index == lines.size - 1 && returned
-
-          live = found.select { |_, pushes| pushes }.keys
-          read(statement, found, builders, handed)
-          live.each { |name| ends[name] ||= index if found[name].nil? }
-        end
+        ends = read_lines(returned ? lines[0...-1] : lines, found, builders, handed)
 
         # Handed back after being handed on: what leaves is what the callee
         # left in it.
@@ -227,10 +220,18 @@ module Steep
       # end`), which is a second name for the array, and is struck like one.
       def in_lines(def_node, lines, builders)
         found = {} #: Hash[Symbol, Array[untyped]?]
-        handed = Set.new #: Set[Symbol]
-        lines.each { |statement| read(statement, found, builders, handed) }
+        ends = read_lines(lines, found, builders, Set.new)
 
-        found.select { |name, pushes| pushes && local_to?(def_node, lines, name) }
+        found.filter_map { |name, pushes| [name, ends[name]] if (pushes || ends.key?(name)) && local_to?(def_node, lines, name) }.to_h
+      end
+
+      # Where each local stops being readable: the statement that strikes it.
+      def read_lines(lines, found, builders, handed)
+        lines.each_with_index.with_object({}) do |(statement, index), ends|
+          live = found.select { |_, pushes| pushes }.keys
+          read(statement, found, builders, handed)
+          live.each { |name| ends[name] ||= index if found[name].nil? }
+        end
       end
 
       # The method's own straight line, then every nested one in it. A `begin`
@@ -413,7 +414,7 @@ module Steep
       # the `parts` it actually reads is whatever else that name holds there, a
       # method argument included.
       def replay(def_node, lines, top, builders, reach)
-        readable = (top ? in_body(def_node, builders) : in_lines(def_node, lines, builders).transform_values { nil }).reject { |name, _| reach.include?(name) }
+        readable = (top ? in_body(def_node, builders) : in_lines(def_node, lines, builders)).reject { |name, _| reach.include?(name) }
         return if readable.empty?
 
         contents = {} #: Hash[Symbol, Array[untyped]]

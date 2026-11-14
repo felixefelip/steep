@@ -66,6 +66,41 @@ class AccumulatedInPlaceTest < Minitest::Test
     assert_equal "::Array[::Symbol]", types.fetch("splat")
   end
 
+  def test_a_local_born_in_an_arm_is_read_up_to_where_it_is_handed_on
+    types = types_of({
+      "handed" => "if locale == :en\n  \"\"\nelse\n  result = [:a]\n  result << locale\n  joined = result.join(\",\")\n  copy = result\n  joined\nend",
+      "after" => "if locale == :en\n  \"\"\nelse\n  result = [:a]\n  p(result)\n  result.join(\",\")\nend"
+    })
+
+    assert_equal '"a,fr"', types.fetch("handed")
+    assert_equal "::String", types.fetch("after")
+  end
+
+  def test_a_loop_over_a_local_born_in_an_arm_runs_before_the_local_is_read_again
+    in_tmpdir do
+      write("sig/p.rbs", "class P\n  def self.first: (Symbol locale) -> untyped\nend\n")
+      write("app/p.rb", <<~RUBY)
+        class P
+          def self.first(locale)
+            if locale == :en
+              nil
+            else
+              result = []
+              result << "a"
+              result << locale.to_s
+              result.each { |tag| return tag if tag == "fr" }
+              raise NameError.new("missing \#{result.first}", result.first)
+            end
+          end
+        end
+
+        P.first(:fr)
+      RUBY
+
+      assert_equal '"fr"', Steep::Specializations::Runner.run(setup_project).fetch("P.first").fetch("(:fr)")
+    end
+  end
+
   def test_uniq_and_compact_in_place_reshape_what_the_local_holds
     types = types_of({
       "uniq" => "result = []\nresult << locale\nresult += [:en, locale]\nresult.uniq!\nresult",
