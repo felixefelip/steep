@@ -866,7 +866,7 @@ module Steep
       end
 
       def fixes_a_value?
-        @narrows_classes || self_type.is_a?(AST::Types::Literal) || (block_return && !block_return.is_a?(AST::Types::Any)) || !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
+        @narrows_classes || self_type.is_a?(AST::Types::Literal) || (block_return && !block_return.is_a?(AST::Types::Any)) || closed_block? || !keyword_rest.nil? || positionals.any? { |type| literal_type?(type) } || keywords.each_value.any? { |type| literal_type?(type) }
       end
 
       def empty?

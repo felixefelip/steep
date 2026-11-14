@@ -21,7 +21,13 @@ class SpecializationsClosedProcTest < Minitest::Test
       def keep: (^(Symbol) -> String proc) -> void
       def get: (Symbol key) -> String
     end
+    class Loose
+      @proc: ^(untyped) -> untyped
+      def initialize: () { (untyped) -> untyped } -> void
+      def get: (Symbol key) -> untyped
+    end
     class Caller
+      def loose: () -> untyped
       def boxed: () -> String
       def handed: () -> String
       def lambda_literal: () -> String
@@ -56,6 +62,14 @@ class SpecializationsClosedProcTest < Minitest::Test
 
           def keep(proc)
             @proc = proc
+          end
+
+          def get(key) = @proc.call(key)
+        end
+
+        class Loose
+          def initialize(&block)
+            @proc = block
           end
 
           def get(key) = @proc.call(key)
@@ -98,6 +112,10 @@ class SpecializationsClosedProcTest < Minitest::Test
 
     assert_equal '"missing"', types.fetch("boxed")
     assert_equal({ "proc" => "^(::Symbol) -> ::String", "block" => "{ |key| key.to_s }" }, entries.values.first.dig("ivars", "@proc"))
+  end
+
+  def test_a_closed_block_returning_untyped_is_kept_as_the_block
+    assert_equal '"missing"', caller_types("def loose = Loose.new { |key| key.to_s }.get(:missing)").fetch("loose")
   end
 
   def test_a_node_a_check_rewrote_is_closed_only_where_its_source_is
