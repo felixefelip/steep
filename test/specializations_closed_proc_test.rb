@@ -26,8 +26,14 @@ class SpecializationsClosedProcTest < Minitest::Test
       def initialize: () { (untyped) -> untyped } -> void
       def get: (Symbol key) -> untyped
     end
+    class Shelf[V]
+      @proc: ^(Symbol) -> V
+      def initialize: () { (Symbol) -> V } -> void
+      def get: (Symbol key) -> V
+    end
     class Caller
       def loose: () -> untyped
+      def shelved: () -> untyped
       def boxed: () -> String
       def handed: () -> String
       def lambda_literal: () -> String
@@ -68,6 +74,14 @@ class SpecializationsClosedProcTest < Minitest::Test
         end
 
         class Loose
+          def initialize(&block)
+            @proc = block
+          end
+
+          def get(key) = @proc.call(key)
+        end
+
+        class Shelf
           def initialize(&block)
             @proc = block
           end
@@ -116,6 +130,10 @@ class SpecializationsClosedProcTest < Minitest::Test
 
   def test_a_closed_block_returning_untyped_is_kept_as_the_block
     assert_equal '"missing"', caller_types("def loose = Loose.new { |key| key.to_s }.get(:missing)").fetch("loose")
+  end
+
+  def test_a_closed_block_kept_by_a_generic_class_answers_what_it_returns
+    assert_equal '"missing"', caller_types("def shelved = Shelf.new { |key| key.to_s }.get(:missing)").fetch("shelved")
   end
 
   def test_a_node_a_check_rewrote_is_closed_only_where_its_source_is
