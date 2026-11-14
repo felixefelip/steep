@@ -4543,6 +4543,7 @@ module Steep
         arguments = dispatch.arguments
         private = dispatch.reaches_private?
       end
+      ivar_set = block_body ? nil : ObjectStates::IvarSet.typed(constr, node, receiver_type, method_name, arguments) and return ivar_set
 
       # felixefelip/steep#207. A call that may change a String in place — this
       # one, or one inside its block on a variable from out here — widens the

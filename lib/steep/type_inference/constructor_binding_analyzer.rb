@@ -132,7 +132,7 @@ module Steep
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
         :empties, :literal_writes, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
-        :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, :other_sends, keyword_init: true
+        :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, :other_sends, :param_births, keyword_init: true
       ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
 
       def self.analyze(node)
@@ -385,6 +385,7 @@ module Steep
           empties: Empties.of(body),
           literal_writes: LiteralWrites.of(body, writes),
           rebuilds: rebuilds_of(body),
+          param_births: ObjectStates::Inherited.param_births(args_node, body),
           handed: handed_ivars(body),
           bindings: ivar_param_bindings(args_node, body),
           writes: writes,
