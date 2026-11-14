@@ -15,7 +15,14 @@ class SpecializationsClosedProcTest < Minitest::Test
       def self.yielding: (Symbol key) { (Symbol) -> String } -> String
       def self.forwarding: (Symbol key) { (Symbol) -> String } -> String
     end
+    class Box
+      @proc: ^(Symbol) -> String
+      def initialize: () { (Symbol) -> String } -> void
+      def keep: (^(Symbol) -> String proc) -> void
+      def get: (Symbol key) -> String
+    end
     class Caller
+      def boxed: () -> String
       def handed: () -> String
       def lambda_literal: () -> String
       def forwarded: () -> String
@@ -40,6 +47,18 @@ class SpecializationsClosedProcTest < Minitest::Test
           def self.outer(key, &block) = inner(block, key)
           def self.yielding(key) = yield(key)
           def self.forwarding(key, &block) = yielding(key, &block)
+        end
+
+        class Box
+          def initialize(&block)
+            keep(block)
+          end
+
+          def keep(proc)
+            @proc = proc
+          end
+
+          def get(key) = @proc.call(key)
         end
 
         class Caller
@@ -69,6 +88,24 @@ class SpecializationsClosedProcTest < Minitest::Test
 
   def test_a_block_forwarded_with_an_ampersand_is_yielded_as_the_block
     assert_equal '"missing"', caller_types("def forwarded = Keys.forwarding(:missing) { |key| key.to_s }").fetch("forwarded")
+  end
+
+  def test_a_proc_kept_in_an_ivar_is_called_as_the_block_from_another_method
+    entries = nil
+    types = caller_types("def boxed = Box.new { |key| key.to_s }.get(:missing)") do |project|
+      entries = Specializations::Runner.new(project).run.fetch("Box.new")
+    end
+
+    assert_equal '"missing"', types.fetch("boxed")
+    assert_equal({ "proc" => "^(::Symbol) -> ::String", "block" => "{ |key| key.to_s }" }, entries.values.first.dig("ivars", "@proc"))
+  end
+
+  def test_a_node_a_check_rewrote_is_closed_only_where_its_source_is
+    written = Steep::Source.new_parser.parse(::Parser::Source::Buffer.new("(test)", source: "proc { |key| upcased(key) }"))
+    rewritten = written.updated(nil, [written.children[0], written.children[1], ::Parser::AST::Node.new(:lvar, [:key])])
+
+    assert_nil Steep::ObjectStates::Yields.closed_params(written)
+    assert_nil Steep::ObjectStates::Yields.closed_params(rewritten)
   end
 
   def test_a_lambda_reading_a_local_of_its_scope_answers_the_declaration

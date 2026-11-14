@@ -225,15 +225,20 @@ module Steep
       def sidecar_writable(type)
         case type
         when AST::Types::ObjectState, AST::Types::Tuple then type.map_type { |child| sidecar_writable(child) }
+        when AST::Types::ClosedProc then AST::Types::ClosedProc.of(rbs_writable(type.plain), type.source)
         else rbs_writable(type)
         end
       end
 
       # How the sidecar writes a return: as RBS, or, for an object whose ivars
       # are known, which RBS cannot spell, as its class and the value of each,
-      # and for a tuple holding one, as the list of its elements.
+      # for a tuple holding one, as the list of its elements, and for a proc
+      # made from a closed block, as the proc and the block's source, which
+      # says all it does.
       def sidecar_value(type)
         case type
+        when AST::Types::ClosedProc
+          { "proc" => type.plain.to_s, "block" => ObjectStates::Yields.source(type.source) }
         when AST::Types::ObjectState
           { "class" => type.back_type.to_s, "ivars" => type.ivars.to_h { |name, value| [name.to_s, sidecar_value(value)] } }
         when AST::Types::Tuple
@@ -1237,11 +1242,19 @@ module Steep
       end
 
       def parse_state(method_key, raw, factory:)
+        return parse_closed_proc(method_key, raw, factory: factory) if raw.key?("proc")
+
         back_type = parse(method_key, raw["class"], factory: factory)
         ivars = (raw["ivars"] || {}).to_h { |name, value| [name.to_sym, parse(method_key, value, factory: factory)] }
         return nil unless back_type.is_a?(AST::Types::Name::Instance) && ivars.each_value.all?
 
         AST::Types::ObjectState.new(back_type: back_type, ivars: ivars)
+      end
+
+      def parse_closed_proc(method_key, raw, factory:)
+        proc = parse(method_key, raw["proc"], factory: factory)
+        block = ObjectStates::Yields.parsed_block(raw["block"].to_s)
+        AST::Types::ClosedProc.of(proc, block) if proc.instance_of?(AST::Types::Proc) && block
       end
 
       # The argument types a specialization pass is currently checking one BODY
