@@ -178,10 +178,11 @@ module Steep
       end
 
       # The arguments what `call` returns is recorded under: a block it writes
-      # by the value it returns (`Arguments#yielded`).
+      # by the value it returns (`Arguments#yielded`), unless the block is
+      # closed, which its source keys.
       def returned_arguments(constr, node, call, block)
         arguments = call_site_arguments(constr, node, call)
-        block ? arguments&.yielded : arguments
+        block && !arguments&.closed_block? ? arguments&.yielded : arguments
       end
 
       # What a block written at a call returns, as its body was typed; nil
@@ -714,7 +715,7 @@ module Steep
       # the callee would read the caller's `self` as its own.
       def tuples
         keyed = self_type && !hands_self?
-        [(self if keyed), without_self].compact.flat_map { |arguments| [arguments, arguments.yielded] }.compact.select(&:literal?)
+        [(self if keyed), without_self].compact.flat_map { |arguments| [arguments, (arguments.yielded unless closed_block?)] }.compact.select(&:literal?)
       end
 
       def yielded
@@ -814,13 +815,25 @@ module Steep
 
       BLOCK_RETURN_MARKER = " &-> "
 
+      # A block keyed by where it is written, which the next run may move.
+      POSITIONED_BLOCK = /#{BLOCK_MARKER}[^\s{]+:\d+(?=\s|\z)/
+
       def self.persistable_key?(key)
-        !key.gsub(BLOCK_RETURN_MARKER, "").include?(BLOCK_MARKER)
+        !key.match?(POSITIONED_BLOCK)
       end
 
+      # A closed block (`ObjectStates::Yields.closed_params`) computes the same
+      # wherever it runs, so its source says all it does, and a digest of it
+      # names it.
       def block_key
+        return "{#{Digest::SHA256.hexdigest(block.loc.begin.join(block.loc.end).source.gsub(/\s+/, " "))[0, 16]}}" if closed_block?
+
         expression = block.loc.expression
         "#{expression.source_buffer.name}:#{expression.begin_pos}"
+      end
+
+      def closed_block?
+        !!block && !ObjectStates::Yields.closed_params(block).nil?
       end
 
       def stateful?
@@ -944,14 +957,19 @@ module Steep
 
       def ==(other)
         other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords && other.keyword_rest == keyword_rest &&
-          other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states && other.block.equal?(block) &&
+          other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states && other.block_identity == block_identity &&
           other.block_return == block_return
       end
 
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash ^ block.object_id.hash ^ block_return.hash
+        positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash ^ block_identity.hash ^ block_return.hash
+      end
+
+      # Two closed blocks written alike are the same block.
+      def block_identity
+        closed_block? ? block_key : block.object_id
       end
 
       private

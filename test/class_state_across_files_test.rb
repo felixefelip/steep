@@ -170,7 +170,7 @@ class ClassStateAcrossFilesTest < Minitest::Test
     end
 
     assert_equal ["def post_ids; []; end"], chunks({ "a.rb" => BACKED + RULES, "z.rb" => MACRO }, BACKED_RBS, counting)
-    assert_equal 1, checks['(/s\z/, "") with {@singulars: []}']
+    assert_equal 2, checks['(/s\z/, "") with {@singulars: []}']
   end
 
   def test_the_classes_a_method_names_are_walked_once_per_method_and_store
