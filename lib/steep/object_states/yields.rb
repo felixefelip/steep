@@ -138,7 +138,18 @@ module Steep
         end
 
         def fitted(constr, type, declared)
-          constr.check_relation(sub_type: type, super_type: declared).success? ? type : declared
+          constr.check_relation(sub_type: type, super_type: bounded(constr, declared)).success? ? type : declared
+        end
+
+        # `declared` with each type parameter of the body read as its bound: the
+        # body is checked for any instantiation, and the call the block was
+        # written at has already checked it against its own.
+        def bounded(constr, declared)
+          table = constr.context.variable_context.table
+          vars = declared.free_variables.select { |var| var.is_a?(Symbol) && table.key?(var) }.to_a
+          return declared if vars.empty?
+
+          declared.subst(Interface::Substitution.build(vars, vars.map { |var| table.fetch(var).upper_bound || AST::Builtin.any_type }))
         end
 
         def own?(node, locals)
