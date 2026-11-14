@@ -118,4 +118,56 @@ class HashNewContentsTest < Minitest::Test
     assert_equal "bool", specialized("h = Hash.new(0)\nh.probe_after_store(:b)")
     assert_equal "bool", specialized("h = Hash.new(0)\nh.probe_after_yield(:b) { h[:b] = 1 }")
   end
+
+  TRANSCRIBED = <<~RUBY
+    class Hash
+      def initialize(ifnone = (ifnone_unset = true), capacity: 0, &block)
+        if block
+          raise ArgumentError unless ifnone_unset
+
+          @__rbs_infer__default_proc = block
+        else
+          @__rbs_infer__ifnone = ifnone
+        end
+      end
+
+      def default(key = (key_unset = true))
+        default_proc = @__rbs_infer__default_proc
+        if default_proc
+          return nil if key_unset
+
+          return default_proc.call(self, key)
+        end
+
+        @__rbs_infer__ifnone
+      end
+    end
+  RUBY
+
+  def defaulted(lines)
+    in_tmpdir do
+      write("sig/hash.rbs", <<~RBS)
+        class Hash[unchecked out K, unchecked out V]
+          @__rbs_infer__default_proc: ^(instance, Hash::_Key) -> untyped
+        end
+        class Probe
+          def probe: () -> untyped
+        end
+      RBS
+      write("app/hash.rb", TRANSCRIBED)
+      write("app/app.rb", "class Probe\n  def probe\n#{lines}\n  end\nend\n")
+      project = setup_project
+      2.times do
+        runner = Steep::Specializations::Runner.new(project)
+        runner.write(runner.run)
+        project.reload_specializations!
+      end
+      body_types(project, current_dir + "app/app.rb").fetch("probe")
+    end
+  end
+
+  def test_a_key_the_hash_does_not_hold_reads_what_default_answers
+    assert_equal '"missing"', defaulted("h = Hash.new { |_hash, key| key.to_s }\nh[:missing]")
+    assert_equal "1", defaulted("h = Hash.new { |_hash, key| key.to_s }\nh[:a] = 1\nh[:a]")
+  end
 end
