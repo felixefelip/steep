@@ -68,39 +68,35 @@ module Steep
           names if !Tap.jumps?(body) && own?(body, locals)
         end
 
+        # A closed block's name, from its normalized source: what it does.
+        def digest(block)
+          Digest::SHA256.hexdigest(block.loc.begin.join(block.loc.end).source.gsub(/\s+/, " "))[0, 16]
+        end
+
         # What a `yield` answers, and the env it leaves, in a body checked
         # under a call that wrote a closed block: the block's body checked
         # with its parameters holding what is yielded, once, where that is
         # what the block may return.
         def at_yield(constr, node, declared)
           left, value = replayed(constr, node)
-          { type: value ? fitted(constr, value, declared) : replayed_value(constr, node.children, declared), constr: left }
+          block = (def_node = constr.method_context&.node) && constr.specialization_arguments(def_node)&.block
+          { type: value ? fitted(constr, value, declared) : replayed_value(constr, block, node.children, declared), constr: left }
         end
 
-        # `block.call(…)` on the block parameter, which is a `yield` by name.
+        # `proc.call(…)` on a proc made from a closed block, a `yield` to it.
         def called(constr, call, node)
           return call unless call.is_a?(TypeInference::MethodCall::Typed) && node.type == :send && node.children[1] == :call
-          return call unless calls_block?(constr.method_context&.node, node.children[0])
+          return call unless (receiver = node.children[0]) && constr.typing.has_type?(receiver)
 
-          type = replayed_value(constr, node.children.drop(2), call.return_type)
+          proc = constr.typing.type_of(node: receiver)
+          return call unless proc.is_a?(AST::Types::ClosedProc)
+
+          type = replayed_value(constr, proc.source, node.children.drop(2), call.return_type)
           type.equal?(call.return_type) ? call : call.with_return_type(type)
         end
 
-        def calls_block?(def_node, receiver)
-          return false unless def_node && receiver&.type == :lvar
-
-          args = def_node.type == :defs ? def_node.children[2] : def_node.children[1]
-          name = args.children.find { |arg| arg.type == :blockarg }&.children&.first or return false
-          return false unless receiver.children[0] == name
-
-          LocalReach.each_node(ObjectStates.pair_body(def_node)) { |node| return false if node.type == :lvasgn && node.children[0] == name }
-          true
-        end
-
-        def replayed_value(constr, values, declared)
-          def_node = constr.method_context&.node or return declared
-          block = constr.specialization_arguments(def_node)&.block or return declared
-          names = closed_params(block) or return declared
+        def replayed_value(constr, block, values, declared)
+          names = block && closed_params(block) or return declared
           return declared unless values.size == names.size && values.all? { |value| !%i[splat block_pass].include?(value.type) && constr.typing.has_type?(value) }
 
           body = block.children[2] or return AST::Builtin.nil_type

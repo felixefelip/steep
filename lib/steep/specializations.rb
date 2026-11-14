@@ -215,6 +215,7 @@ module Steep
       # boundary is here, where a type becomes the text of a record.
       def rbs_writable(type)
         return rbs_writable(type.back_type) if type.is_a?(AST::Types::NotInRBS)
+        return rbs_writable(type.plain) if type.is_a?(AST::Types::ClosedProc)
 
         type.map_type { |child| rbs_writable(child) }
       end
@@ -316,7 +317,8 @@ module Steep
         return AST::Builtin.nil_type unless arguments.block || arguments.block_return
         return param.var_type unless param.type
 
-        AST::Types::Proc.new(type: param.type, block: nil, self_type: param.self_type)
+        proc = AST::Types::Proc.new(type: param.type, block: nil, self_type: param.self_type)
+        arguments.closed_block? ? AST::Types::ClosedProc.of(proc, arguments.block) : proc
       end
     end
 
@@ -353,7 +355,7 @@ module Steep
           passed = passed_block(args.pop, typing)
           return nil if passed.nil?
 
-          block = passed if passed
+          block = passed && closed_source(passed, typing) || passed if passed
         end
 
         keywords = args.last&.type == :kwargs ? keyword_types(args.pop, typing, exact_self) : {}
@@ -426,6 +428,13 @@ module Steep
 
           keywords[key.children[0]] = argument_type(value, typing, exact_self)
         end
+      end
+
+      # The closed block a `&proc` hands on, which keys the call as the block
+      # written where the proc was made would.
+      def self.closed_source(block_pass, typing)
+        type = typing.type_of(node: block_pass)
+        type.source if type.is_a?(AST::Types::ClosedProc)
       end
 
       # What a `&value` hands the callee, when the call fixes it: `false` for
@@ -609,6 +618,7 @@ module Steep
         written = written_literal(arg, typing) || written_record(arg, typing, exact_self) and return written
         type = typing.type_of(node: arg)
         return AST::Types::ObjectState.new(back_type: exact_self, ivars: {}) if arg.type == :self && exact_self.is_a?(AST::Types::Name::Instance)
+        return AST::Types::ClosedProc.of(type, arg) if type.instance_of?(AST::Types::Proc) && ObjectStates::Yields.closed_params(arg)
 
         type = type.subst(Interface::Substitution.build([], self_type: exact_self)) if exact_self
         vouched = typing.vouched_of(node: arg)
@@ -826,7 +836,7 @@ module Steep
       # wherever it runs, so its source says all it does, and a digest of it
       # names it.
       def block_key
-        return "{#{Digest::SHA256.hexdigest(block.loc.begin.join(block.loc.end).source.gsub(/\s+/, " "))[0, 16]}}" if closed_block?
+        return "{#{ObjectStates::Yields.digest(block)}}" if closed_block?
 
         expression = block.loc.expression
         "#{expression.source_buffer.name}:#{expression.begin_pos}"
@@ -978,7 +988,7 @@ module Steep
       # as surely as a literal does — it is only ever one whose contents are
       # known (`argument_type`).
       def literal_type?(type)
-        [AST::Types::Literal, AST::Types::Tuple, AST::Types::Record, AST::Types::ObjectState].any? { |klass| type.is_a?(klass) }
+        [AST::Types::Literal, AST::Types::Tuple, AST::Types::Record, AST::Types::ObjectState, AST::Types::ClosedProc].any? { |klass| type.is_a?(klass) }
       end
 
       # A positional index names one parameter only up to the first rest
