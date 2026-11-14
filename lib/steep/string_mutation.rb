@@ -54,7 +54,7 @@ module Steep
             constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
           )
         end
-        if receiver_type.is_a?(AST::Types::Record)
+        if receiver_type.is_a?(AST::Types::Record) || HashMutation.contents_state?(receiver_type)
           return HashMutation.widen_receiver(
             constr, receiver, receiver_type, method_name, private: private, block_params: block_params, block_body: block_body
           )
@@ -141,7 +141,7 @@ module Steep
         if receiver_type.is_a?(AST::Types::Tuple)
           return ArrayMutation.fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type: type, private: private)
         end
-        if receiver_type.is_a?(AST::Types::Record) || HashMutation.record_union?(receiver_type)
+        if receiver_type.is_a?(AST::Types::Record) || HashMutation.record_union?(receiver_type) || HashMutation.contents_state?(receiver_type)
           return HashMutation.fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type: type, private: private)
         end
 
