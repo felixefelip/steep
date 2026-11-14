@@ -20,6 +20,14 @@ class InheritedHookTest < Minitest::Test
   def cached(hook)
     in_tmpdir do
       write("sig/app.rbs", RBS)
+      write("app/class.rb", <<~RUBY)
+        class Class
+          private
+
+          def inherited(subclass)
+          end
+        end
+      RUBY
       write("app/app.rb", <<~RUBY)
         class Model
           def self.inherited(subclass)

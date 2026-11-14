@@ -1750,8 +1750,8 @@ module Steep
                             Pair.new(type: AST::Builtin.nil_type, constr: new)
                           end
 
+              ObjectStates.record_exit(new, node, body_pair)
               if body_node
-                ObjectStates.record_exit(new, node, body_pair)
                 # Add context to ranges from the end of the method body to the beginning of the `end` keyword
                 if node.loc.end
                   # Skip end-less def
@@ -1815,10 +1815,8 @@ module Steep
               new.synthesize(arg)
             end
 
-            if node.children[3]
-              body_pair = MethodBody.check(new, node, node.children[3], setters: false)
-              ObjectStates.record_exit(new, node, body_pair)
-            end
+            body_pair = node.children[3] ? MethodBody.check(new, node, node.children[3], setters: false) : Pair.new(type: AST::Builtin.nil_type, constr: new)
+            ObjectStates.record_exit(new, node, body_pair)
           end
 
           if node.children[0].type == :self
