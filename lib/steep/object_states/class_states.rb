@@ -34,11 +34,11 @@ module Steep
       class << self
         # A `class`/`module` body entered from `outer`, knowing what `outer`
         # knew of other classes. Its own state is `self`'s ivars there.
-        def entered(constr, outer)
+        def entered(constr, outer, inherited_runs: false)
           states = outer.context.type_env.class_states
           states = states.except(constr.self_type.name) if constr.self_type.is_a?(AST::Types::Name::Singleton)
           constr = constr.update_type_env { |env| env.update(class_states: states) } unless states.empty?
-          ClassMemos.entered_class(constr)
+          ClassMemos.entered_class(constr, inherited_runs: inherited_runs)
         end
 
         # `outer` once a body that ended as `exit` has run.
