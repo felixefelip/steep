@@ -36,16 +36,30 @@ module Steep
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         record, state = unwrapped(receiver_type)
         keys = hash_method_keys(constr, method_name, private: private)
-        return held_entry(constr, node, record, arguments, type) if state && CollectionMutation.only?(constr, keys, KEY_READ)
+        if state && CollectionMutation.only?(constr, keys, KEY_READ)
+          return missed(constr, node, receiver, record, arguments, type) || held_entry(constr, node, record, arguments, type)
+        end
 
         type = unknown_contents(constr, receiver) if state && !reads?(constr.literal_method_registry, keys) && ObjectStates.state_in(type) == state
 
         fold_record(constr, node, receiver, record, method_name, arguments, type: type, private: private)
       end
 
+      # `[]` on a hash's state under a literal key its record does not hold:
+      # what `default(key)` answers, as `rb_hash_aref` does, where that says
+      # more than `[]`'s declaration.
+      def missed(constr, node, receiver, record, arguments, type)
+        key, = CollectionMutation.operand_types(constr, arguments)
+        return unless receiver && arguments.size == 1 && literal_key?(key) && !record.elements.key?(key.value)
+
+        default = constr.synthesize(node.updated(:send, [receiver, :default, *arguments])).type
+        return unless constr.check_relation(sub_type: default, super_type: type).success?
+
+        [default, constr.add_typing(node, type: default).constr]
+      end
+
       # `[]` on a hash's state: what the record holds under a literal key it
-      # holds. A key it does not hold is left to the call, since the state may
-      # keep a default for it.
+      # holds. Any other key is left to the call.
       def held_entry(constr, node, record, arguments, type)
         key, = CollectionMutation.operand_types(constr, arguments)
         return [type, constr] unless arguments.size == 1 && literal_key?(key) && record.required_keys.include?(key.value)
