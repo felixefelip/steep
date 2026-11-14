@@ -11,7 +11,7 @@ module Steep
         return call unless send.type == :send && send.children[1] == :new && call.is_a?(TypeInference::MethodCall::Typed) && ObjectStates.initialize_call?(call)
         return call unless call.receiver_type.is_a?(AST::Types::Name::Singleton) && call.receiver_type.name == AST::Builtin::Hash.module_name
         held = constr.method_context&.held_locals&.held_value?(node) || ObjectStates::HeldIvar.held_ivars(constr)&.held_value?(node)
-        return call unless held && constr.constructor_bindings.initializers_for("::Hash").all? { |body| body.self_sends.empty? }
+        return call unless held && constr.constructor_bindings.initializers_for("::Hash").all? { |body| !body.exposes_self && body.self_sends.none? { |name| writes_entries?(constr, name) } }
 
         state = ObjectStates.state_in(call.return_type)
         return call unless state.nil? || state.equal?(call.return_type)
@@ -106,6 +106,12 @@ module Steep
           [*(receiver unless on_self), *args].any? { |child| touches_self?(child) }
         else node.children.any? { |child| touches_self?(child) }
         end
+      end
+
+      # Whether a call of `name` on a hash may run one of `Hash`'s methods
+      # that is not a read.
+      def writes_entries?(constr, name)
+        hash_method_keys(constr, name, private: true).any? { |key| key.start_with?("::Hash#") && !READS.include?(key) }
       end
 
       def contents_state?(type) = type.is_a?(AST::Types::ObjectState) && !type.contents.nil?
