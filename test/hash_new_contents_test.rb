@@ -60,4 +60,62 @@ class HashNewContentsTest < Minitest::Test
     assert_equal "bool", probe("h = Hash.new(0)\nfill(h)\nh.key?(:a)")
     assert_equal "bool", probe("h = Hash.new(0)\n[1].each { h[:a] = 1 }\nh.key?(:a)")
   end
+
+  def specialized_types_of(body)
+    in_tmpdir do
+      write("sig/app.rbs", <<~RBS)
+        class Hash[unchecked out K, unchecked out V]
+          def probe_key: (untyped key) -> bool
+          def probe_read: (untyped key) -> untyped
+          def probe_after_store: (untyped key) -> bool
+          def probe_after_yield: (untyped key) { () -> void } -> bool
+        end
+        class Probe
+          def probe: () -> untyped
+        end
+      RBS
+      write("app/hash.rb", <<~RUBY)
+        class Hash
+          def probe_key(key) = key?(key)
+
+          def probe_read(key) = self[key]
+
+          def probe_after_store(key)
+            store(key, 1)
+            key?(key)
+          end
+
+          def probe_after_yield(key)
+            yield
+            key?(key)
+          end
+        end
+      RUBY
+      write("app/app.rb", <<~RUBY)
+        class Probe
+          #{body}
+        end
+      RUBY
+      project = setup_project
+      2.times do
+        runner = Steep::Specializations::Runner.new(project)
+        runner.write(runner.run)
+        project.reload_specializations!
+      end
+      body_types(project, current_dir + "app/app.rb")
+    end
+  end
+
+  def specialized(lines) = specialized_types_of("def probe\n#{lines}\nend").fetch("probe")
+
+  def test_a_body_checked_for_the_hash_reads_what_it_holds
+    assert_equal "true", specialized("h = Hash.new(0)\nh[:a] = 1\nh.probe_key(:a)")
+    assert_equal "false", specialized("h = Hash.new(0)\nh[:a] = 1\nh.probe_key(:b)")
+    assert_equal "1", specialized("h = Hash.new(0)\nh[:a] = 1\nh.probe_read(:a)")
+  end
+
+  def test_a_body_reads_what_it_holds_only_up_to_what_may_change_it
+    assert_equal "bool", specialized("h = Hash.new(0)\nh.probe_after_store(:b)")
+    assert_equal "bool", specialized("h = Hash.new(0)\nh.probe_after_yield(:b) { h[:b] = 1 }")
+  end
 end
