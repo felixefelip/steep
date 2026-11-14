@@ -69,7 +69,7 @@ module Steep
       # A value a state may hold: one nothing can change, or the contents of an
       # array, kept only where nothing else reaches it (`collection_confined?`).
       def state_value?(type)
-        fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton) ||
+        fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton) || type.is_a?(AST::Types::ClosedProc) ||
           (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| HashMutation.held_value?(value) || state_in(value) })
       end
 

@@ -52,7 +52,16 @@ module Steep
           closed = (@closed ||= ObjectSpace::WeakMap.new)
           return closed[block] if closed.key?(block)
 
-          closed[block] = closed_params_of(block)
+          names = closed_params_of(block)
+          closed[block] = (names if names && written_closed?(block, names))
+        end
+
+        # Whether the block's source is the closed block the node is: a node a
+        # check rewrites keeps the location of the block it was made from, and
+        # the source is what keys and the sidecar keep.
+        def written_closed?(block, names)
+          written = parsed(source(block))
+          !!written && closed_params_of(written) == names
         end
 
         def closed_params_of(block)
@@ -68,9 +77,31 @@ module Steep
           names if !Tap.jumps?(body) && own?(body, locals)
         end
 
+        # The closed block `source` spells, read on its own: it reads nothing
+        # of where it was written.
+        def parsed_block(source)
+          node = parsed(source)
+          node if node && closed_params(node)
+        end
+
+        def parsed(source)
+          text = source.start_with?("->") ? source : "proc #{source}"
+          node = Source.new_parser.parse(::Parser::Source::Buffer.new("(closed block)", source: text))
+          node if node&.type == :block
+        rescue ::Parser::SyntaxError
+          nil
+        end
+
+        # What a block is written as: from its opening to its end, and for a
+        # `->` lambda, whose parameters come before, from the arrow.
+        def source(block)
+          range = block.children[0].type == :lambda ? block.loc.expression : block.loc.begin.join(block.loc.end)
+          range.source
+        end
+
         # A closed block's name, from its normalized source: what it does.
         def digest(block)
-          Digest::SHA256.hexdigest(block.loc.begin.join(block.loc.end).source.gsub(/\s+/, " "))[0, 16]
+          Digest::SHA256.hexdigest(source(block).gsub(/\s+/, " "))[0, 16]
         end
 
         # What a `yield` answers, and the env it leaves, in a body checked
