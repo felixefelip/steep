@@ -35,7 +35,10 @@ class SpecializationsBlockReturnTest < Minitest::Test
         end
 
         class Caller
-          def call = Bag.new.twice { |n| 3 }
+          def call
+            three = 3
+            Bag.new.twice { |n| three }
+          end
         end
       RUBY
       project = setup_project
