@@ -2043,7 +2043,7 @@ module Steep
                 type, constr = synthesize(rhs)
               end
 
-              constr.add_typing(node, type: type)
+              DefaultLocals.settled(constr, node).add_typing(node, type: type)
             end
           end
 
