@@ -26,14 +26,19 @@ module Steep
       def widen_receiver(constr, receiver, receiver_type, method_name, private:, block_params:, block_body:)
         record, state = unwrapped(receiver_type)
         type, constr = widen_record(constr, receiver, record, method_name, private: private, block_params: block_params, block_body: block_body)
-        [state && type.equal?(record) ? receiver_type : type, constr]
+        kept = state && (type.equal?(record) || !(block_params || block_body || CollectionMutation.only?(constr, hash_method_keys(constr, method_name, private: private), WRITES)))
+        [kept ? receiver_type : type, constr]
       end
 
+      # A call dispatched against a hash's state reads what it holds in its
+      # body (`Arguments#self_contents`); one that answers the state answers a
+      # hash whose contents it may have changed.
       def fold_in_place(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         record, state = unwrapped(receiver_type)
-        if state && CollectionMutation.only?(constr, hash_method_keys(constr, method_name, private: private), KEY_READ)
-          return held_entry(constr, node, record, arguments, type)
-        end
+        keys = hash_method_keys(constr, method_name, private: private)
+        return held_entry(constr, node, record, arguments, type) if state && CollectionMutation.only?(constr, keys, KEY_READ)
+
+        type = unknown_contents(constr, receiver) if state && !reads?(constr.literal_method_registry, keys) && ObjectStates.state_in(type) == state
 
         fold_record(constr, node, receiver, record, method_name, arguments, type: type, private: private)
       end
@@ -47,6 +52,60 @@ module Steep
 
         entry = record.elements.fetch(key.value)
         [entry, constr.add_typing(node, type: entry).constr]
+      end
+
+      # A read on `self` in a body checked for a hash's contents
+      # (`Arguments#self_contents`), answered off them.
+      def entered_read(constr, call, node)
+        return call unless call.is_a?(TypeInference::MethodCall::Typed) && node.type == :send && (node.children[0].nil? || node.children[0].type == :self)
+
+        record = entered_contents(constr, node) or return call
+        keys = hash_method_keys(constr, node.children[1], private: true)
+        arguments = node.children.drop(2)
+        answer, = queried(constr, node, record, keys, arguments)
+        answer ||= held_entry(constr, node, record, arguments, nil).first if CollectionMutation.only?(constr, keys, KEY_READ)
+        answer ? call.with_return_type(answer) : call
+      end
+
+      # The contents the body was entered with, where nothing it ran before
+      # `node` may have changed them.
+      def entered_contents(constr, node)
+        def_node = constr.method_context&.node or return
+        record = constr.specialization_arguments(def_node)&.self_contents or return
+        body = def_node.type == :defs ? def_node.children[3] : def_node.children[2]
+        record if body && untouched_before?(body, node, node.loc.expression.begin_pos)
+      end
+
+      # Code that runs again, or may jump back, after `node` has run.
+      REPEATING = %i[while until while_post until_post for block numblock rescue ensure].freeze
+
+      def untouched_before?(scope, node, start)
+        return true if scope.equal?(node)
+        return false if REPEATING.include?(scope.type)
+
+        scope.children.each do |child|
+          range = child.is_a?(Parser::AST::Node) && child.loc.expression or next
+          return untouched_before?(child, node, start) if range.begin_pos <= start && start < range.end_pos
+          return false if range.end_pos <= start && touches_self?(child)
+        end
+        true
+      end
+
+      # Whether `node` may change what `self` holds: a call on it that is not a
+      # read, `self` handed on, or code the caller wrote.
+      def touches_self?(node)
+        return false unless node.is_a?(Parser::AST::Node)
+
+        case node.type
+        when :yield, :super, :zsuper, :block_pass, :self then true
+        when :send, :csend
+          receiver, name, *args = node.children
+          on_self = receiver.nil? || receiver.type == :self
+          return true if on_self && !READS.include?("::Hash##{name}")
+
+          [*(receiver unless on_self), *args].any? { |child| touches_self?(child) }
+        else node.children.any? { |child| touches_self?(child) }
+        end
       end
 
       def contents_state?(type) = type.is_a?(AST::Types::ObjectState) && !type.contents.nil?

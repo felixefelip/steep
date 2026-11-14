@@ -349,7 +349,7 @@ module Steep
       # `receiver_ivars`: what the receiver's contents are known to be
       # (`receiver_ivars`), read off the call where it is recorded already and
       # off the checker where it is being typed.
-      def self.from_send(node, typing, call:, receiver_ivars:, class_states:, self_type:, exact_self:)
+      def self.from_send(node, typing, call:, receiver_ivars:, receiver_contents:, class_states:, self_type:, exact_self:)
         block, node = node, node.children[0] if Accumulators::LAMBDA_BODIES.include?(node.type)
         _receiver, name, *args = node.type == :super ? [nil, nil, *node.children] : node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
@@ -375,8 +375,8 @@ module Steep
         end
 
         new(
-          positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, class_states: class_states, self_type: self_type,
-          block: block, block_return: block && Specializations.block_return(typing, block),
+          positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, self_contents: receiver_contents, class_states: class_states,
+          self_type: self_type, block: block, block_return: block && Specializations.block_return(typing, block),
           narrows_classes: narrows_classes?(call, positionals, keywords)
         )
       end
@@ -576,6 +576,7 @@ module Steep
         from_send(
           node, typing, call: call,
           receiver_ivars: receiver_ivars(receiver_of(node, call), self_ivars, class_states),
+          receiver_contents: ObjectStates.state_in(receiver_of(node, call))&.contents,
           class_states: callee_class_states(call, class_states),
           self_type: keyed_self, exact_self: exact_self
         )
@@ -589,6 +590,7 @@ module Steep
         from_send(
           node, typing, call: call,
           receiver_ivars: recorded_receiver_ivars(node, typing),
+          receiver_contents: ObjectStates.state_in(receiver_of(node, call))&.contents,
           class_states: callee_class_states(call, typing.class_states_of_call(node: node)),
           self_type: typing.keyed_self_of_call(node: node), exact_self: typing.exact_self_of_call(node: node)
         )
@@ -667,7 +669,7 @@ module Steep
         AST::Types::Record.new(elements: elements, required_keys: elements.keys.to_set)
       end
 
-      def initialize(positionals:, keywords:, self_ivars:, class_states:, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil, block_return: nil, narrows_classes: false)
+      def initialize(positionals:, keywords:, self_ivars:, class_states:, self_contents: nil, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil, block_return: nil, narrows_classes: false)
         @positionals = positionals
         @narrows_classes = narrows_classes
         @block = block
@@ -678,6 +680,7 @@ module Steep
         @keyword_defaults = keyword_defaults
         @self_type = self_type
         @self_ivars = self_ivars
+        @self_contents = self_contents
         @class_states = class_states
       end
 
@@ -703,6 +706,10 @@ module Steep
       # are part of `key`, so only a caller that knows the same contents reads
       # back what was recorded under them.
       attr_reader :self_ivars
+
+      # What the receiver, a hash, holds under each key, where the caller knew
+      # (`ObjectState#contents`): part of `key` alike.
+      attr_reader :self_contents
 
       # The states of class objects the caller knew and the body may read
       # (`ObjectStates::ClassStates`): part of `key` for the same reason.
@@ -760,7 +767,7 @@ module Steep
         Arguments.new(
           positionals: @positionals, keywords: @keywords, keyword_rest: @keyword_rest,
           positional_defaults: @positional_defaults, keyword_defaults: @keyword_defaults,
-          self_type: @self_type, self_ivars: @self_ivars, class_states: @class_states,
+          self_type: @self_type, self_ivars: @self_ivars, self_contents: @self_contents, class_states: @class_states,
           block: @block, block_return: @block_return, narrows_classes: @narrows_classes,
           **changes
         )
@@ -798,7 +805,7 @@ module Steep
         key += block ? "#{BLOCK_MARKER}#{block_key}" : "#{BLOCK_RETURN_MARKER}#{block_return}" if block || block_return
         return key unless stateful?
 
-        "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key].join(", ")}}"
+        "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key, *("[]: #{self_contents}" if self_contents)].join(", ")}}"
       end
 
       def argument_types
@@ -852,7 +859,7 @@ module Steep
       end
 
       def stateful?
-        !self_ivars.empty? || !class_states.empty?
+        !self_ivars.empty? || !class_states.empty? || !self_contents.nil?
       end
 
       # Whether the call hands the body a record, whose exit says what the
@@ -972,14 +979,14 @@ module Steep
 
       def ==(other)
         other.is_a?(Arguments) && other.positionals == positionals && other.keywords == keywords && other.keyword_rest == keyword_rest &&
-          other.self_type == self_type && other.self_ivars == self_ivars && other.class_states == class_states && other.block_identity == block_identity &&
+          other.self_type == self_type && other.self_ivars == self_ivars && other.self_contents == self_contents && other.class_states == class_states && other.block_identity == block_identity &&
           other.block_return == block_return
       end
 
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ class_states.hash ^ block_identity.hash ^ block_return.hash
+        positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ self_contents.hash ^ class_states.hash ^ block_identity.hash ^ block_return.hash
       end
 
       # Two closed blocks written alike are the same block.
