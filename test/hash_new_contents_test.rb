@@ -189,6 +189,14 @@ class HashNewContentsTest < Minitest::Test
           def backend: () -> Hash[untyped, untyped]
           def []: (untyped key) -> untyped
         end
+        class Forwarding
+          @backend: Hash[untyped, untyped]
+          def initialize: () ?{ (untyped, untyped) -> untyped } -> void
+          def put: () -> untyped
+          def []: (untyped key) -> untyped
+          private
+          def set_backend: (untyped default_proc) -> untyped
+        end
         class Probe
           def probe: () -> untyped
         end
@@ -213,6 +221,22 @@ class HashNewContentsTest < Minitest::Test
           def backend = @backend
 
           def [](key) = @backend[key]
+        end
+
+        class Forwarding
+          def initialize(&default_proc)
+            set_backend(default_proc)
+          end
+
+          def put = @backend[:a] = 1
+
+          def [](key) = @backend[key]
+
+          private
+
+          def set_backend(default_proc)
+            @backend = Hash.new { |_hash, key| default_proc.call(self, key) }
+          end
         end
       RUBY
       write("app/app.rb", "class Probe\n  def probe\n#{lines}\n  end\nend\n")
@@ -240,5 +264,13 @@ class HashNewContentsTest < Minitest::Test
 
   def test_a_hash_kept_in_an_ivar_and_written_through_a_reader_holds_what_it_may
     assert_equal "untyped", kept_in_ivar("exposed = Exposed.new\nexposed.backend[:a] = 1\nexposed[:a]")
+  end
+
+  def test_a_hash_whose_default_hands_self_to_a_block_that_never_reads_it_holds_what_it_holds
+    assert_equal '"missing"', kept_in_ivar("Forwarding.new { |_map, key| key.to_s }[:missing]")
+  end
+
+  def test_a_hash_whose_default_hands_self_to_a_block_that_reads_it_holds_what_it_may
+    assert_equal "untyped", kept_in_ivar("Forwarding.new { |map, key| map.put }[:missing]")
   end
 end
