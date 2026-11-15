@@ -40,19 +40,41 @@ module Steep
       # keeps nothing, so only what its own body hands on counts.
       def exposures(constr, node)
         TypeInference::ConstructorBindingAnalyzer.self_exposures(node).flat_map do |exposure|
-          next [] if %i[block numblock].include?(exposure.type) && !reaches_self?(exposure.children[2])
+          next [] if %i[block numblock].include?(exposure.type) && !reaches_self?(exposure.children[2], constr)
 
           in_place?(constr, exposure) ? exposures(constr, exposure.children[2]) : [exposure]
         end
       end
 
       # Whether a block's body may reach `self`: name it, call a method on it
-      # with no receiver, or reach one of its ivars.
-      def reaches_self?(node)
+      # with no receiver, or reach one of its ivars. Not by handing it to a
+      # closed block that never reads the parameter it lands in.
+      def reaches_self?(node, constr = nil)
         return false unless node.is_a?(::Parser::AST::Node)
         return true if %i[self ivar ivasgn super zsuper].include?(node.type) || (%i[send csend].include?(node.type) && node.children[0].nil?)
 
-        node.children.any? { |child| reaches_self?(child) }
+        unread = constr && node.type == :send && node.children[1] == :call && unread_params(constr, node.children[0])
+        node.children.each_with_index.any? do |child, index|
+          !(unread && child.is_a?(::Parser::AST::Node) && child.type == :self && unread.include?(index - 2)) && reaches_self?(child, constr)
+        end
+      end
+
+      # The positions of the parameters no closed block `receiver` may hold
+      # reads, wherever the check reached it.
+      def unread_params(constr, receiver)
+        return unless receiver&.type == :lvar
+
+        typings_reaching(constr.typing, receiver).map do |typing|
+          proc = typing.has_type?(receiver) && typing.type_of(node: receiver)
+          proc.is_a?(AST::Types::ClosedProc) ? unread_of(proc) : (return nil)
+        end.reduce(:&)
+      end
+
+      def unread_of(proc)
+        names = Yields.params_under(proc.source, proc.captures) or return Set[]
+        read = Set[] #: Set[Symbol]
+        LocalReach.each_node(proc.source.children[2]) { |node| read << node.children[0] if node.type == :lvar } if proc.source.children[2]
+        names.each_index.reject { |index| read.include?(names[index]) }.to_set
       end
 
       def in_place?(constr, node)
