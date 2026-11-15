@@ -87,7 +87,7 @@ module Steep
         # `locals`: the outer locals the block reads, declared ahead of it so
         # that it reads them as locals.
         def parsed(source, locals = [])
-          text = locals.map { |name| "#{name} = nil; " }.join + (source.start_with?("->") ? source : "proc #{source}")
+          text = (locals - [:self]).map { |name| "#{name} = nil; " }.join + (source.start_with?("->") ? source : "proc #{source}")
           node = Source.new_parser.parse(::Parser::Source::Buffer.new("(closed block)", source: text))
           node = node.children.last if node&.type == :begin
           node if node&.type == :block
@@ -134,8 +134,10 @@ module Steep
           return declared unless values.size == names.size && values.all? { |value| !%i[splat block_pass].include?(value.type) && constr.typing.has_type?(value) }
 
           body = block.children[2] or return AST::Builtin.nil_type
-          inner = constr.with_new_typing(constr.typing.new_child).update_type_env do |env|
-            seeded = captures.reduce(env) { |left, (name, type)| left.assign_local_variable(name, type, nil) }
+          inner = constr.with_new_typing(constr.typing.new_child)
+          inner = inner.with(context: inner.context.with(self_type: captures.fetch(:self))) if captures.key?(:self)
+          inner = inner.update_type_env do |env|
+            seeded = captures.except(:self).reduce(env) { |left, (name, type)| left.assign_local_variable(name, type, nil) }
             names.zip(values).reduce(seeded) { |left, (name, value)| left.assign_local_variable(name, constr.typing.type_of(node: value), nil) }
           end
           fitted(constr, inner.synthesize(body).type, declared)
@@ -158,11 +160,12 @@ module Steep
 
         def own?(node, locals, outer = nil)
           return true unless node.is_a?(Parser::AST::Node)
+          return !outer.nil? && !!outer.add(:self) if node.type == :self
           return false if FOREIGN.include?(node.type)
           return locals.include?(node.children[0]) || (!outer.nil? && !!outer.add(node.children[0])) if node.type == :lvar
           return false if OPERATOR_WRITES.include?(node.type) && node.children[0].type == :lvasgn && !locals.include?(node.children[0].children[0])
           return absolute?(node) if node.type == :const
-          return false if node.type == :send && node.children[0].nil?
+          return false if %i[send csend].include?(node.type) && (node.children[0].nil? || node.children[0].type == :self)
 
           node.children.all? { |child| own?(child, locals, outer) }
         end

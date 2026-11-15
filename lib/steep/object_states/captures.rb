@@ -11,7 +11,9 @@ module Steep
     # held where it was written, which the call site's typing says. Only where
     # each holds a value that cannot change (`ObjectStates.state_value?`) and
     # nothing assigns it after the block is written: a block may run long
-    # after, as a hash's default does.
+    # after, as a hash's default does. `self` is captured too, as what the body
+    # it is written in runs with, only where the block hands it on as a value:
+    # a call on it could change what the caller's object holds.
     module Yields
       class << self
         # `[params, outer]`: the block's plain parameters, and the outer locals
@@ -57,13 +59,15 @@ module Steep
 
         # What each outer local `block` reads holds where it is written, or
         # `{}` where one of them holds what may change.
-        def captures(block, typing)
+        def captures(block, typing, block_self)
           _, outer = captured(block)
           return {} if outer.nil? || outer.empty?
 
           reads = {} #: Hash[Symbol, Parser::AST::Node]
           LocalReach.each_node(block.children[2]) { |node| reads[node.children[0]] ||= node if node.type == :lvar && outer.include?(node.children[0]) }
           outer.to_h do |name|
+            next self_value?(block_self) ? [name, block_self] : (return {}) if name == :self
+
             read = reads[name]
             type = read && typing.has_type?(read) && typing.type_of(node: read)
             return {} unless type && ObjectStates.state_value?(type) && !assigned_after?(typing.source.node, block, name)
@@ -94,6 +98,8 @@ module Steep
         end
 
         def scope_body(scope) = scope.type == :defs ? scope.children[3] : scope.children[2]
+
+        def self_value?(type) = type.is_a?(AST::Types::Name::Instance) || type.is_a?(AST::Types::ObjectState)
 
         def captures_key(captures)
           captures.sort_by(&:first).map { |name, type| "#{name}: #{type}" }.join(", ")

@@ -214,7 +214,7 @@ module Steep
         Arguments.at_call(
           node, constr.typing, call,
           self_ivars: ObjectStates.call_ivars(constr, call), class_states: ObjectStates::ClassStates.of_call(constr, call),
-          keyed_self: keyed_self(constr, call), exact_self: exact_self(constr)
+          keyed_self: keyed_self(constr, call), exact_self: exact_self(constr), block_self: exact_self(constr) || constr.self_type
         )
       end
 
@@ -391,7 +391,7 @@ module Steep
       # `receiver_ivars`: what the receiver's contents are known to be
       # (`receiver_ivars`), read off the call where it is recorded already and
       # off the checker where it is being typed.
-      def self.from_send(node, typing, call:, receiver_ivars:, receiver_contents:, class_states:, self_type:, exact_self:)
+      def self.from_send(node, typing, call:, receiver_ivars:, receiver_contents:, class_states:, self_type:, exact_self:, block_self:)
         block, node = node, node.children[0] if Accumulators::LAMBDA_BODIES.include?(node.type)
         _receiver, name, *args = node.type == :super ? [nil, nil, *node.children] : node.children
         # `send(:name, …)` resolved to `name`: the literal names the method,
@@ -420,7 +420,7 @@ module Steep
         new(
           positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, self_contents: receiver_contents, class_states: class_states,
           self_type: self_type, block: block, block_return: block && Specializations.block_return(typing, block),
-          captures: closed&.captures || (block ? ObjectStates::Yields.captures(block, typing) : {}),
+          captures: closed&.captures || (block ? ObjectStates::Yields.captures(block, typing, block_self) : {}),
           narrows_classes: narrows_classes?(call, positionals, keywords)
         )
       end
@@ -616,13 +616,13 @@ module Steep
 
       # The arguments of `call`, being typed at `node`, keyed under what the
       # checker knows there.
-      def self.at_call(node, typing, call, self_ivars:, class_states:, keyed_self:, exact_self:)
+      def self.at_call(node, typing, call, self_ivars:, class_states:, keyed_self:, exact_self:, block_self:)
         from_send(
           node, typing, call: call,
           receiver_ivars: receiver_ivars(receiver_of(node, call), self_ivars, class_states),
           receiver_contents: ObjectStates.state_in(receiver_of(node, call))&.contents,
           class_states: callee_class_states(call, class_states),
-          self_type: keyed_self, exact_self: exact_self
+          self_type: keyed_self, exact_self: exact_self, block_self: block_self
         )
       end
 
@@ -636,7 +636,8 @@ module Steep
           receiver_ivars: recorded_receiver_ivars(node, typing),
           receiver_contents: ObjectStates.state_in(receiver_of(node, call))&.contents,
           class_states: callee_class_states(call, typing.class_states_of_call(node: node)),
-          self_type: typing.keyed_self_of_call(node: node), exact_self: typing.exact_self_of_call(node: node)
+          self_type: typing.keyed_self_of_call(node: node), exact_self: typing.exact_self_of_call(node: node),
+          block_self: typing.exact_self_of_call(node: node) || typing.self_type_of_call(node: node)
         )
       rescue Typing::UnknownNodeError
         nil
@@ -670,7 +671,7 @@ module Steep
         type = typing.type_of(node: arg)
         return AST::Types::ObjectState.new(back_type: exact_self, ivars: {}) if arg.type == :self && exact_self.is_a?(AST::Types::Name::Instance)
         if type.instance_of?(AST::Types::Proc) && arg.type == :block
-          captures = ObjectStates::Yields.captures(arg, typing)
+          captures = ObjectStates::Yields.captures(arg, typing, exact_self)
           return AST::Types::ClosedProc.of(type, arg, captures) if ObjectStates::Yields.params_under(arg, captures)
         end
 
