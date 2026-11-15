@@ -6404,7 +6404,7 @@ module Steep
               block_constr = constr.for_block(
                 block_body,
                 block_params: block_params_,
-                block_param_hint: method_type.block.type.params,
+                block_param_hint: HashMutation.default_block_params(constr, node, receiver_type, method_type.block.type.params),
                 block_next_type: method_type.block.type.return_type,
                 block_block_hint: nil,
                 block_annotations: block_annotations,
