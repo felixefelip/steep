@@ -28,7 +28,7 @@ module Steep
         end
 
         def held_ivars(constr)
-          constr.method_context&.held_ivars { |name| reader_ivar(constr, constr.self_type, name) }
+          constr.method_context&.held_ivars(taken: constr.constructor_bindings.method(:answer_taken?)) { |name| reader_ivar(constr, constr.self_type, name) }
         end
 
         # The ivar `name`, called with no arguments on `instance`, an

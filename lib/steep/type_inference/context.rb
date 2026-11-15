@@ -35,9 +35,10 @@ module Steep
         end
 
         # `reader`: the ivar a method of `self` called with no arguments
-        # answers (`HeldIvars`).
-        def held_ivars(&reader)
-          @held_ivars ||= HeldIvars.new(node, reader)
+        # answers; `taken`, whether a caller may take what a method of that
+        # name answers (`HeldIvars`).
+        def held_ivars(taken:, &reader)
+          @held_ivars ||= HeldIvars.new(node, reader, taken)
         end
 
         def value_uses

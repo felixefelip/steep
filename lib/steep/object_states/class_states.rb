@@ -89,7 +89,7 @@ module Steep
 
           ivars = arguments.self_ivars
           if self_type.is_a?(AST::Types::Name::Instance)
-            held = method_context.held_ivars { |name| ObjectStates::HeldIvar.reader_ivar(constr, self_type, name) }
+            held = method_context.held_ivars(taken: constr.constructor_bindings.method(:answer_taken?)) { |name| ObjectStates::HeldIvar.reader_ivar(constr, self_type, name) }
             ivars = ivars.to_h { |ivar, type| [ivar, held.escapes?(ivar) ? HashMutation.flatten(ObjectStates.settled(constr, type)) : type] }
           end
           env.refine_types(instance_variable_types: ivars).update(class_states: arguments.class_states)

@@ -69,10 +69,35 @@ class HeldIvarsTest < Minitest::Test
     refute reader(def_node).held_value?(new_call(def_node)), "last statement"
   end
 
+  def test_an_assignment_in_a_branch_of_a_statement_is_held
+    def_node = parse("def run\n  if ready?\n    @foo = Foo.new({})\n  else\n    @foo = {}\n  end\n  foo.my_hash\nend\n")
+
+    assert reader(def_node).held_value?(new_call(def_node))
+  end
+
+  def test_a_value_an_if_stores_is_held_through_its_branches
+    def_node = parse("def run\n  @foo = if ready? then Foo.new({}) else {} end\n  foo.my_hash\nend\n")
+
+    assert reader(def_node).held_value?(new_call(def_node))
+  end
+
+  def test_an_assignment_in_a_condition_is_not_held
+    def_node = parse("def run\n  if (@foo = Foo.new({}))\n    foo.my_hash\n  end\n  nil\nend\n")
+
+    refute reader(def_node).held_value?(new_call(def_node))
+  end
+
+  def test_the_last_statement_is_held_where_no_call_takes_the_answer
+    def_node = parse("def run\n  foo.my_hash\n  @foo = Foo.new({})\nend\n")
+
+    assert reader(def_node, taken: false).held_value?(new_call(def_node))
+    refute reader(def_node, taken: true).held_value?(new_call(def_node))
+  end
+
   private
 
-  def reader(def_node)
-    Steep::TypeInference::HeldIvars.new(def_node, ->(name) { :@foo if name == :foo })
+  def reader(def_node, taken: true)
+    Steep::TypeInference::HeldIvars.new(def_node, ->(name) { :@foo if name == :foo }, ->(_name) { taken })
   end
 
   def held_ivars(source)
