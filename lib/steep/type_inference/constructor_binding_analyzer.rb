@@ -396,7 +396,7 @@ module Steep
           exposes_self: !self.class.self_exposures(body).empty?,
           **SelfReturns.facts(body),
           iterations: self_iterations(body),
-          ivar_uses: ClassMemoAnalyzer.uses(body, names: ivars).to_h,
+          ivar_uses: KeyParams.placed(ClassMemoAnalyzer.uses(body, names: ivars).to_h, args_node, body),
           returns: single_ivar_reader(body),
           hands_back: HandedBack.calls(body),
           hands_back_element: HandedBack.element(args_node, body),

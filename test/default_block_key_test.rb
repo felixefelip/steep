@@ -67,4 +67,47 @@ class DefaultBlockKeyTest < Minitest::Test
   def test_a_block_whose_type_declares_no_parameters_is_left_alone
     assert_empty diagnostics_of("def label_for(key) = proc { key }")
   end
+
+  def ivar_diagnostics_of(body)
+    in_tmpdir do
+      write("sig/app.rbs", <<~RBS)
+        class Backend
+          @backend: Hash[untyped, untyped]
+          def initialize: () -> void
+          def []: (:missing key) -> untyped
+          def backend: () -> untyped
+        end
+      RBS
+      write("app/app.rb", <<~RUBY)
+        class Backend
+          def initialize
+            @backend = Hash.new { |_hash, missing| missing.to_s }
+          end
+
+          def [](key) = @backend[key]
+
+          #{body}
+        end
+      RUBY
+      project = setup_project
+      checked(project, current_dir + "app/app.rb").errors.map { |error| error.class.name.split("::").last }
+    end
+  end
+
+  def test_the_key_a_default_block_an_ivar_holds_receives_is_the_key_its_reads_pass
+    assert_empty ivar_diagnostics_of("def backend = nil")
+  end
+
+  def test_a_hash_an_ivar_holds_and_a_reader_lets_out_keeps_the_declared_key
+    assert_includes ivar_diagnostics_of("def backend = @backend"), "NoMethod"
+  end
+
+  def test_a_block_reading_its_own_hash_keeps_the_declared_key
+    assert_includes diagnostics_of(<<~RUBY), "NoMethod"
+      def label_for(key)
+        labels = Hash.new { |labels, missing| labels.size; missing.to_s }
+        labels[key]
+      end
+    RUBY
+  end
 end

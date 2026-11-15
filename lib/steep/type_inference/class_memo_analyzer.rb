@@ -47,7 +47,7 @@ module Steep
       # `blocks`: of a call made inside blocks of a method's body, where no
       # `enclosing` is, `[[name, singleton], [[site, method], ...]]`: that
       # method, and each call whose block holds it, innermost first.
-      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed, :self_at, :on_ivar, :blocks) do
+      Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed, :self_at, :on_ivar, :blocks, :key_local, :key_param) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
           value&.each { |use| use.each_forwarder(&block) }
@@ -335,6 +335,7 @@ module Steep
         direct &&= !op_assigned && @parents.fetch(call, nil)&.type != :mlhs
         key = call.children[2]&.type == :sym ? call.children[2].children[0] : nil
         use = Use.new(in_statement && on_self ? :statement : :receiver, call.children[1], element_calls, within, nil, nil, direct, key)
+        use.key_local = KeyParams.local(call, @parents)
         use.value = element_uses(op_assigned ? @parents[call] : call) if KEY_READS.include?(use.called)
         op_assigned ? [Use.new(use.kind, :"#{use.called}=", Set[], within, nil, nil, nil, key), use] : [use]
       end
