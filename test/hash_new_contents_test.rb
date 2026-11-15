@@ -170,4 +170,71 @@ class HashNewContentsTest < Minitest::Test
     assert_equal '"missing"', defaulted("h = Hash.new { |_hash, key| key.to_s }\nh[:missing]")
     assert_equal "1", defaulted("h = Hash.new { |_hash, key| key.to_s }\nh[:a] = 1\nh[:a]")
   end
+
+  def kept_in_ivar(lines)
+    in_tmpdir do
+      write("sig/hash.rbs", <<~RBS)
+        class Hash[unchecked out K, unchecked out V]
+          @__rbs_infer__default_proc: ^(instance, Hash::_Key) -> untyped
+        end
+        class Labels
+          @backend: Hash[untyped, untyped]
+          def initialize: () -> void
+          def put: () -> untyped
+          def []: (untyped key) -> untyped
+        end
+        class Exposed
+          @backend: Hash[untyped, untyped]
+          def initialize: () -> void
+          def backend: () -> Hash[untyped, untyped]
+          def []: (untyped key) -> untyped
+        end
+        class Probe
+          def probe: () -> untyped
+        end
+      RBS
+      write("app/hash.rb", TRANSCRIBED)
+      write("app/labels.rb", <<~RUBY)
+        class Labels
+          def initialize
+            @backend = Hash.new { |_hash, key| key.to_s }
+          end
+
+          def put = @backend[:a] = 1
+
+          def [](key) = @backend[key]
+        end
+
+        class Exposed
+          def initialize
+            @backend = Hash.new { |_hash, key| key.to_s }
+          end
+
+          def backend = @backend
+
+          def [](key) = @backend[key]
+        end
+      RUBY
+      write("app/app.rb", "class Probe\n  def probe\n#{lines}\n  end\nend\n")
+      project = setup_project
+      postconditions = Steep::Postconditions::Runner.new(project)
+      postconditions.write(postconditions.run)
+      project.reload_postconditions!
+      3.times do
+        runner = Steep::Specializations::Runner.new(project)
+        runner.write(runner.run)
+        project.reload_specializations!
+      end
+      body_types(project, current_dir + "app/app.rb").fetch("probe")
+    end
+  end
+
+  def test_a_hash_kept_in_an_ivar_is_read_by_what_it_holds_from_another_method
+    assert_equal '"missing"', kept_in_ivar("Labels.new[:missing]")
+    assert_equal "1", kept_in_ivar("labels = Labels.new\nlabels.put\nlabels[:a]")
+  end
+
+  def test_a_hash_kept_in_an_ivar_and_written_through_a_reader_holds_what_it_may
+    assert_equal "untyped", kept_in_ivar("exposed = Exposed.new\nexposed.backend[:a] = 1\nexposed[:a]")
+  end
 end

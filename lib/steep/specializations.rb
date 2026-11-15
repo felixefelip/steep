@@ -281,7 +281,7 @@ module Steep
         when AST::Types::ClosedProc
           { "proc" => type.plain.to_s, "block" => ObjectStates::Yields.source(type.source) }
         when AST::Types::ObjectState
-          { "class" => type.back_type.to_s, "ivars" => type.ivars.to_h { |name, value| [name.to_s, sidecar_value(value)] } }
+          { "class" => type.back_type.to_s, "ivars" => type.ivars.to_h { |name, value| [name.to_s, sidecar_value(value)] }, **(type.contents ? { "contents" => sidecar_value(type.contents) } : {}) }
         when AST::Types::Tuple
           values = type.types.map { |element| sidecar_value(element) }
           values.all?(String) ? type.to_s : values
@@ -1297,7 +1297,8 @@ module Steep
         ivars = (raw["ivars"] || {}).to_h { |name, value| [name.to_sym, parse(method_key, value, factory: factory)] }
         return nil unless back_type.is_a?(AST::Types::Name::Instance) && ivars.each_value.all?
 
-        AST::Types::ObjectState.new(back_type: back_type, ivars: ivars)
+        contents = parse(method_key, raw["contents"], factory: factory) if raw["contents"]
+        AST::Types::ObjectState.new(back_type: back_type, ivars: ivars, contents: contents.is_a?(AST::Types::Record) ? contents : nil)
       end
 
       def parse_closed_proc(method_key, raw, factory:)
