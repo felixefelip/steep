@@ -13,9 +13,11 @@ module Steep
     # (`held_value?`) as a local's is.
     class HeldIvars < HeldLocals
       # `reader`: the ivar a method of `self` called with no arguments answers,
-      # or nil.
-      def initialize(def_node, reader)
+      # or nil. `taken`: whether a caller may take what a method of a name
+      # answers.
+      def initialize(def_node, reader, taken)
         @reader = reader
+        @answer_dropped = !!def_node && def_node.type == :def && !taken.call(def_node.children[0])
         @initializer = def_node&.type == :def && def_node.children[0] == :initialize
         @names = Set[] #: Set[Symbol]
         @escaped = Set[] #: Set[Symbol]
@@ -43,7 +45,7 @@ module Steep
         end
 
         @names.merge(mentioned - @escaped)
-        @assigned.each { |name, value| @values[value] = name if @names.include?(name) }
+        @assigned.each { |name, value| branch_values(value).each { |leaf| @values[leaf] = name } if @names.include?(name) }
       end
 
       def visit_ivar(node, name, parents, detached)
@@ -57,13 +59,29 @@ module Steep
         end
       end
 
-      # A statement of the body whose value nothing takes: not its last one,
-      # which the method answers, unless the method is an `initialize`, whose
-      # value `new` drops.
+      # A statement of the body whose value nothing takes, or a branch of one:
+      # not the body's last one, which the method answers, unless the method
+      # is an `initialize`, whose value `new` drops, or one no call takes the
+      # answer of.
       def statement?(node, parents)
-        return parents.empty? || (parents.size == 1 && parents[0].type == :begin) if @initializer
+        parent = parents.last
+        return @initializer || @answer_dropped if parent.nil?
 
-        parents.size == 1 && parents[0].type == :begin && !parents[0].children.last.equal?(node)
+        case parent.type
+        when :begin then !parent.children.last.equal?(node) || statement?(parent, parents[0...-1])
+        when :if then !parent.children[0].equal?(node) && statement?(parent, parents[0...-1])
+        else false
+        end
+      end
+
+      # The values an assignment of `node` may store: each branch's, through
+      # an `if` and the last statement of a `begin`.
+      def branch_values(node)
+        case node&.type
+        when :if then node.children.drop(1).compact.flat_map { |branch| branch_values(branch) }
+        when :begin then branch_values(node.children.last)
+        else [node]
+        end
       end
 
       # The value `@a, @b = x, y` assigns `node`, the target at its index.

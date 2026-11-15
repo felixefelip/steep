@@ -328,7 +328,7 @@ module Steep
         end
         ingest_methods(scan)
         ingest_constants(node, content)
-        @nodes << node
+        keep_node(node)
         @uses = nil
         @defs_by_name = @handed_by_parameter = nil
         @defined_names = nil
