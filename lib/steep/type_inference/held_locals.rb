@@ -53,6 +53,9 @@ module Steep
         @names.include?(@values[node])
       end
 
+      # The local nothing else names that `node` is the value of.
+      def held_name(node) = (@values[node] if held_value?(node))
+
       # Whether `name` is held but for the calls `calls_on_it` lists, made on
       # it inside an argument of a call it is handed to, before that call runs:
       #
