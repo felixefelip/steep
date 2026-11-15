@@ -439,7 +439,7 @@ module Steep
       def index_uses
         names = Set[] #: Set[Symbol]
         @singleton_methods.each_value do |methods|
-          methods.each { |name, bodies| bodies.each { |body| names << name << body.memo[0] if body&.memo } }
+          methods.each { |name, bodies| bodies.compact.each { |body| names.merge(body.memo ? [name, body.memo[0]] : []).merge(name == :inherited ? body.param_births || [] : []) } }
         end
         hashes = hash_memos
         hashes.each { |name, ivar| names << name << ivar }

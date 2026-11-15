@@ -17,7 +17,7 @@ module Steep
         ivar = ivar_node.children[0]
         type, constr = constr.synthesize(value)
         operand = Specializations::Arguments.written_record(value, constr.typing, nil) || Specializations::Arguments.written_array(value, constr.typing) ||
-                  constr.literal_operand_type(value, type)
+                  ClassMemos.born_state(constr, AST::Types::Name::Singleton.new(name: name), ivar, value, type) || constr.literal_operand_type(value, type)
         constr = constr.update_type_env do |env|
           ivars = env.class_states.fetch(name, {}).except(ivar)
           ivars = ivars.merge(ivar => operand) if ObjectStates.state_value?(operand) || ObjectStates.state_in(operand)
