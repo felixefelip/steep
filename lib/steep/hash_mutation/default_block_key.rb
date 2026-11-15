@@ -17,7 +17,9 @@ module Steep
         return params unless params && params.required.size == 2 && params.optional.empty? && !params.rest && !params.has_keywords?
         return params unless node.type == :block && fresh_hash_call?(node.children[0], receiver_type)
 
-        keys = default_block_keys(constr, node) or return params
+        return params if reads_own_hash?(node)
+
+        keys = default_block_keys(constr, node) || IvarReadKeys.of(constr, node) or return params
         key = AST::Types::Union.build(types: keys)
         return params unless constr.check_relation(sub_type: key, super_type: params.required[1]).success?
 
@@ -36,6 +38,13 @@ module Steep
           keys << (read_key_type(constr, def_node, parent.children[2..]) || (return))
         end
         keys unless keys.empty?
+      end
+
+      def reads_own_hash?(block)
+        hash = block.children[1].children[0]&.children&.first
+        found = false
+        each_mention(block.children[2], hash, nil) { found = true } if hash
+        found
       end
 
       def fresh_hash_call?(send, receiver_type)
