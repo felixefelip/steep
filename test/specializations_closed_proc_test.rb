@@ -34,7 +34,14 @@ class SpecializationsClosedProcTest < Minitest::Test
       def initialize: () { (Symbol) -> V } -> void
       def get: (Symbol key) -> V
     end
+    class Handing
+      def hand: (Symbol key) { (Handing, Symbol) -> String } -> String
+      def calling: (Symbol key) { (String, Symbol) -> String } -> String
+      def name: () -> String
+    end
     class Caller
+      def handed_self: () -> String
+      def called_on_self: () -> String
       def loose: () -> untyped
       def shelved: () -> untyped
       def boxed: () -> String
@@ -105,6 +112,14 @@ class SpecializationsClosedProcTest < Minitest::Test
           def get(key) = @proc.call(key)
         end
 
+        class Handing
+          def hand(key, &block) = Keys.yielding(key) { |k| block.call(self, k) }
+
+          def calling(key, &block) = Keys.yielding(key) { |k| block.call(name, k) }
+
+          def name = "handing"
+        end
+
         class Caller
           #{body}
         end
@@ -162,6 +177,14 @@ class SpecializationsClosedProcTest < Minitest::Test
 
   def test_a_lambda_assigning_a_local_of_its_scope_answers_the_declaration
     assert_equal "::String", caller_types("def assigned = Keys.assigning(:missing) { |key| key.to_s }").fetch("assigned")
+  end
+
+  def test_a_block_handing_self_on_is_called_as_its_body
+    assert_equal '"missing"', caller_types("def handed_self = Handing.new.hand(:missing) { |_owner, key| key.to_s }").fetch("handed_self")
+  end
+
+  def test_a_block_calling_a_method_on_self_answers_the_declaration
+    assert_equal "::String", caller_types("def called_on_self = Handing.new.calling(:missing) { |_name, key| key.to_s }").fetch("called_on_self")
   end
 
   def test_a_node_a_check_rewrote_is_closed_only_where_its_source_is
