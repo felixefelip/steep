@@ -266,7 +266,7 @@ module Steep
       def sidecar_writable(type)
         case type
         when AST::Types::ObjectState, AST::Types::Tuple then type.map_type { |child| sidecar_writable(child) }
-        when AST::Types::ClosedProc then AST::Types::ClosedProc.of(rbs_writable(type.plain), type.source)
+        when AST::Types::ClosedProc then AST::Types::ClosedProc.of(rbs_writable(type.plain), type.source, type.captures)
         else rbs_writable(type)
         end
       end
@@ -279,7 +279,8 @@ module Steep
       def sidecar_value(type)
         case type
         when AST::Types::ClosedProc
-          { "proc" => type.plain.to_s, "block" => ObjectStates::Yields.source(type.source) }
+          captures = type.captures.to_h { |name, value| [name.to_s, sidecar_value(value)] }
+          { "proc" => type.plain.to_s, "block" => ObjectStates::Yields.source(type.source), **(captures.empty? ? {} : { "captures" => captures }) }
         when AST::Types::ObjectState
           { "class" => type.back_type.to_s, "ivars" => type.ivars.to_h { |name, value| [name.to_s, sidecar_value(value)] } }
         when AST::Types::Tuple
@@ -364,7 +365,7 @@ module Steep
         return param.var_type unless param.type
 
         proc = AST::Types::Proc.new(type: param.type, block: nil, self_type: param.self_type)
-        arguments.closed_block? ? AST::Types::ClosedProc.of(proc, arguments.block) : proc
+        arguments.closed_block? ? AST::Types::ClosedProc.of(proc, arguments.block, arguments.captures) : proc
       end
     end
 
@@ -401,7 +402,8 @@ module Steep
           passed = passed_block(args.pop, typing)
           return nil if passed.nil?
 
-          block = passed && closed_source(passed, typing) || passed if passed
+          closed = closed_proc(passed, typing) if passed
+          block = closed ? closed.source : passed if passed
         end
 
         keywords = args.last&.type == :kwargs ? keyword_types(args.pop, typing, exact_self) : {}
@@ -418,6 +420,7 @@ module Steep
         new(
           positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, self_contents: receiver_contents, class_states: class_states,
           self_type: self_type, block: block, block_return: block && Specializations.block_return(typing, block),
+          captures: closed&.captures || (block ? ObjectStates::Yields.captures(block, typing) : {}),
           narrows_classes: narrows_classes?(call, positionals, keywords)
         )
       end
@@ -478,9 +481,9 @@ module Steep
 
       # The closed block a `&proc` hands on, which keys the call as the block
       # written where the proc was made would.
-      def self.closed_source(block_pass, typing)
+      def self.closed_proc(block_pass, typing)
         type = typing.type_of(node: block_pass)
-        type.source if type.is_a?(AST::Types::ClosedProc)
+        type if type.is_a?(AST::Types::ClosedProc)
       end
 
       # What a `&value` hands the callee, when the call fixes it: `false` for
@@ -666,7 +669,10 @@ module Steep
         written = written_literal(arg, typing) || written_record(arg, typing, exact_self) and return written
         type = typing.type_of(node: arg)
         return AST::Types::ObjectState.new(back_type: exact_self, ivars: {}) if arg.type == :self && exact_self.is_a?(AST::Types::Name::Instance)
-        return AST::Types::ClosedProc.of(type, arg) if type.instance_of?(AST::Types::Proc) && ObjectStates::Yields.closed_params(arg)
+        if type.instance_of?(AST::Types::Proc) && arg.type == :block
+          captures = ObjectStates::Yields.captures(arg, typing)
+          return AST::Types::ClosedProc.of(type, arg, captures) if ObjectStates::Yields.params_under(arg, captures)
+        end
 
         type = type.subst(Interface::Substitution.build([], self_type: exact_self)) if exact_self
         vouched = typing.vouched_of(node: arg)
@@ -710,11 +716,12 @@ module Steep
         AST::Types::Record.new(elements: elements, required_keys: elements.keys.to_set)
       end
 
-      def initialize(positionals:, keywords:, self_ivars:, class_states:, self_contents: nil, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil, block_return: nil, narrows_classes: false)
+      def initialize(positionals:, keywords:, self_ivars:, class_states:, self_contents: nil, keyword_rest: nil, positional_defaults: {}, keyword_defaults: {}, self_type: nil, block: nil, block_return: nil, narrows_classes: false, captures: {})
         @positionals = positionals
         @narrows_classes = narrows_classes
         @block = block
         @block_return = block_return
+        @captures = captures
         @keywords = keywords
         @keyword_rest = keyword_rest
         @positional_defaults = positional_defaults
@@ -766,6 +773,10 @@ module Steep
       # block, as a value two calls can share (`yielded`).
       attr_reader :block_return
 
+      # What each outer local the block reads held at the call
+      # (`ObjectStates::Yields.captures`): part of what names it.
+      attr_reader :captures
+
       # Whether a `self` is handed on as the body wrote it: the self of a body
       # checked under its declaration, which each frame reaching the call
       # decides (`resolve_self`).
@@ -809,7 +820,7 @@ module Steep
           positionals: @positionals, keywords: @keywords, keyword_rest: @keyword_rest,
           positional_defaults: @positional_defaults, keyword_defaults: @keyword_defaults,
           self_type: @self_type, self_ivars: @self_ivars, self_contents: @self_contents, class_states: @class_states,
-          block: @block, block_return: @block_return, narrows_classes: @narrows_classes,
+          block: @block, block_return: @block_return, narrows_classes: @narrows_classes, captures: @captures,
           **changes
         )
       end
@@ -889,14 +900,14 @@ module Steep
       # wherever it runs, so its source says all it does, and a digest of it
       # names it.
       def block_key
-        return "{#{ObjectStates::Yields.digest(block)}}" if closed_block?
+        return "{#{ObjectStates::Yields.digest(block, captures)}}" if closed_block?
 
         expression = block.loc.expression
         "#{expression.source_buffer.name}:#{expression.begin_pos}"
       end
 
       def closed_block?
-        !!block && !ObjectStates::Yields.closed_params(block).nil?
+        !!block && !ObjectStates::Yields.params_under(block, captures).nil?
       end
 
       def stateful?
@@ -1302,8 +1313,9 @@ module Steep
 
       def parse_closed_proc(method_key, raw, factory:)
         proc = parse(method_key, raw["proc"], factory: factory)
-        block = ObjectStates::Yields.parsed_block(raw["block"].to_s)
-        AST::Types::ClosedProc.of(proc, block) if proc.instance_of?(AST::Types::Proc) && block
+        captures = (raw["captures"] || {}).to_h { |name, value| [name.to_sym, parse(method_key, value, factory: factory) || (return nil)] }
+        block = ObjectStates::Yields.parsed_block(raw["block"].to_s, captures)
+        AST::Types::ClosedProc.of(proc, block, captures) if proc.instance_of?(AST::Types::Proc) && block
       end
 
       # The argument types a specialization pass is currently checking one BODY

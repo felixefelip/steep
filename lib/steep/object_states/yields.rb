@@ -79,14 +79,17 @@ module Steep
 
         # The closed block `source` spells, read on its own: it reads nothing
         # of where it was written.
-        def parsed_block(source)
-          node = parsed(source)
-          node if node && closed_params(node)
+        def parsed_block(source, captures = {})
+          node = parsed(source, captures.keys)
+          node if node && params_under(node, captures)
         end
 
-        def parsed(source)
-          text = source.start_with?("->") ? source : "proc #{source}"
+        # `locals`: the outer locals the block reads, declared ahead of it so
+        # that it reads them as locals.
+        def parsed(source, locals = [])
+          text = locals.map { |name| "#{name} = nil; " }.join + (source.start_with?("->") ? source : "proc #{source}")
           node = Source.new_parser.parse(::Parser::Source::Buffer.new("(closed block)", source: text))
+          node = node.children.last if node&.type == :begin
           node if node&.type == :block
         rescue ::Parser::SyntaxError
           nil
@@ -100,8 +103,8 @@ module Steep
         end
 
         # A closed block's name, from its normalized source: what it does.
-        def digest(block)
-          Digest::SHA256.hexdigest(source(block).gsub(/\s+/, " "))[0, 16]
+        def digest(block, captures = {})
+          Digest::SHA256.hexdigest([source(block).gsub(/\s+/, " "), *(captures_key(captures) unless captures.empty?)].join(" with "))[0, 16]
         end
 
         # What a `yield` answers, and the env it leaves, in a body checked
@@ -110,8 +113,8 @@ module Steep
         # what the block may return.
         def at_yield(constr, node, declared)
           left, value = replayed(constr, node)
-          block = (def_node = constr.method_context&.node) && constr.specialization_arguments(def_node)&.block
-          { type: value ? fitted(constr, value, declared) : replayed_value(constr, block, node.children, declared), constr: left }
+          arguments = (def_node = constr.method_context&.node) && constr.specialization_arguments(def_node)
+          { type: value ? fitted(constr, value, declared) : replayed_value(constr, arguments&.block, node.children, declared, arguments&.captures || {}), constr: left }
         end
 
         # `proc.call(…)` on a proc made from a closed block, a `yield` to it.
@@ -122,17 +125,18 @@ module Steep
           proc = constr.typing.type_of(node: receiver)
           return call unless proc.is_a?(AST::Types::ClosedProc)
 
-          type = replayed_value(constr, proc.source, node.children.drop(2), call.return_type)
+          type = replayed_value(constr, proc.source, node.children.drop(2), call.return_type, proc.captures)
           type.equal?(call.return_type) ? call : call.with_return_type(type)
         end
 
-        def replayed_value(constr, block, values, declared)
-          names = block && closed_params(block) or return declared
+        def replayed_value(constr, block, values, declared, captures)
+          names = block && params_under(block, captures) or return declared
           return declared unless values.size == names.size && values.all? { |value| !%i[splat block_pass].include?(value.type) && constr.typing.has_type?(value) }
 
           body = block.children[2] or return AST::Builtin.nil_type
           inner = constr.with_new_typing(constr.typing.new_child).update_type_env do |env|
-            names.zip(values).reduce(env) { |left, (name, value)| left.assign_local_variable(name, constr.typing.type_of(node: value), nil) }
+            seeded = captures.reduce(env) { |left, (name, type)| left.assign_local_variable(name, type, nil) }
+            names.zip(values).reduce(seeded) { |left, (name, value)| left.assign_local_variable(name, constr.typing.type_of(node: value), nil) }
           end
           fitted(constr, inner.synthesize(body).type, declared)
         end
@@ -152,15 +156,15 @@ module Steep
           declared.subst(Interface::Substitution.build(vars, vars.map { |var| table.fetch(var).upper_bound || AST::Builtin.any_type }))
         end
 
-        def own?(node, locals)
+        def own?(node, locals, outer = nil)
           return true unless node.is_a?(Parser::AST::Node)
           return false if FOREIGN.include?(node.type)
-          return locals.include?(node.children[0]) if node.type == :lvar
+          return locals.include?(node.children[0]) || (!outer.nil? && !!outer.add(node.children[0])) if node.type == :lvar
           return false if OPERATOR_WRITES.include?(node.type) && node.children[0].type == :lvasgn && !locals.include?(node.children[0].children[0])
           return absolute?(node) if node.type == :const
           return false if node.type == :send && node.children[0].nil?
 
-          node.children.all? { |child| own?(child, locals) }
+          node.children.all? { |child| own?(child, locals, outer) }
         end
 
         def absolute?(node)
