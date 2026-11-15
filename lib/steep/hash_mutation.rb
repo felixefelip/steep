@@ -198,13 +198,14 @@ module Steep
       # moves its state; under any name, `record` with whatever every such
       # write the project makes may have left (`widened_by`).
       def held(constr, instance, ivar, record, followed:)
+        record, state = unwrapped(record)
         return unless record.is_a?(AST::Types::Record) && record.elements.each_value.all? { |value| record_value?(value) }
 
         writes = writes_to(constr, instance, ivar, kept: false) or return
-        return record if followed
+        return rewrapped(record, state) if followed
 
         value = declared_value(constr, instance, ivar)
-        writes.reduce(record) { |held, use| widened_by(held, use, value) or return }
+        rewrapped(writes.reduce(record) { |held, use| widened_by(held, use, value) or return }, state)
       end
 
       # The writes made to `ivar`'s hash, by the methods of `instance` and on

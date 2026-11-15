@@ -1435,7 +1435,7 @@ class SpecializationsObjectStateTest < Minitest::Test
       assert_equal "nil", types.fetch("missing")
       assert_equal "(::String | nil)", types.fetch("label")
       assert_equal "nil", types.fetch("fallback")
-      assert_equal "(::Symbol | nil)", types.fetch("defaulted")
+      assert_equal ":x", types.fetch("defaulted")
     end
   end
 

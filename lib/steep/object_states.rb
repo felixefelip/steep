@@ -69,7 +69,7 @@ module Steep
       # A value a state may hold: one nothing can change, or the contents of an
       # array, kept only where nothing else reaches it (`collection_confined?`).
       def state_value?(type)
-        fixed?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton) || type.is_a?(AST::Types::ClosedProc) ||
+        fixed?(type) || HashMutation.contents_state?(type) || type.is_a?(AST::Types::Tuple) || type.is_a?(AST::Types::RegexpLiteral) || type.is_a?(AST::Types::Name::Singleton) || type.is_a?(AST::Types::ClosedProc) ||
           (type.is_a?(AST::Types::Record) && type.elements.each_value.all? { |value| HashMutation.held_value?(value) || state_in(value) })
       end
 
@@ -115,13 +115,13 @@ module Steep
 
         call = call.with_return_type(instance) if constructed
         chain = initialize_chain(constr, instance) or return call
-        held = held_value?(constr, node) && KeptSelf.fresh_chain?(constr, instance, chain, Specializations.call_site_arguments(constr, node, call)&.key)
+        held = (fresh = contents_kept?(constr, node, instance, chain, Specializations.call_site_arguments(constr, node, call)&.key)) && held_value?(constr, node)
         rewritten = chain.flat_map { |_, body| body ? callee_writes(constr, instance, body, [:initialize]).to_a : [] }
         bindings = compose(chain).select do |ivar, _|
           held ? declared?(constr, instance, ivar) && !rewritten.include?(ivar) : never_rewritten?(constr, instance, ivar)
         end
         bound = arguments.all? { |argument| plain_argument?(argument) } ? bound_values(constr, instance, bindings, arguments, followed: held) : {}
-        ivars = bound.merge(Constructed.kept(constr, constructed, held: held))
+        ivars = bound.merge(Constructed.kept(constr, constructed, held: held, contents: fresh))
         return call.with_return_type(Specializations.overrides(constr).exact(instance)) if ivars.empty?
 
         call.with_return_type(AST::Types::ObjectState.new(back_type: instance, ivars: ivars))
@@ -491,7 +491,7 @@ module Steep
       def fixed?(type)
         case type
         when AST::Types::Literal then !type.value.is_a?(::String)
-        when AST::Types::Nil, AST::Types::ObjectState then true
+        when AST::Types::Nil, AST::Types::ObjectState then !HashMutation.contents_state?(type)
         when AST::Types::Union then type.types.all? { |member| fixed?(member) }
         else false
         end
