@@ -13,13 +13,18 @@ module Steep
       class ClosedProc < Proc
         attr_reader :source
 
-        def initialize(type:, block:, self_type:, source:)
+        # What each outer local the block reads held where it was written
+        # (`ObjectStates::Yields.captures`).
+        attr_reader :captures
+
+        def initialize(type:, block:, self_type:, source:, captures: {})
           super(type: type, block: block, self_type: self_type)
           @source = source
+          @captures = captures
         end
 
-        def self.of(proc, source)
-          new(type: proc.type, block: proc.block, self_type: proc.self_type, source: source)
+        def self.of(proc, source, captures = {})
+          new(type: proc.type, block: proc.block, self_type: proc.self_type, source: source, captures: captures)
         end
 
         def ==(other)
@@ -33,15 +38,15 @@ module Steep
         end
 
         def subst(s)
-          ClosedProc.of(plain.subst(s), source)
+          ClosedProc.of(plain.subst(s), source, captures)
         end
 
         def map_type(&block)
-          ClosedProc.of(plain.map_type(&block), source)
+          ClosedProc.of(plain.map_type(&block), source, captures)
         end
 
         def digest
-          @digest ||= ObjectStates::Yields.digest(source)
+          @digest ||= ObjectStates::Yields.digest(source, captures)
         end
 
         def to_s

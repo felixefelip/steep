@@ -14,6 +14,9 @@ class SpecializationsClosedProcTest < Minitest::Test
       def self.outer: (Symbol key) { (Symbol) -> String } -> String
       def self.yielding: (Symbol key) { (Symbol) -> String } -> String
       def self.forwarding: (Symbol key) { (Symbol) -> String } -> String
+      def self.capturing: (Symbol key) { (Symbol) -> String } -> String
+      def self.reassigning: (Symbol key) { (Symbol) -> String } -> String
+      def self.assigning: (Symbol key) { (Symbol) -> String } -> String
     end
     class Box
       @proc: ^(Symbol) -> String
@@ -38,6 +41,9 @@ class SpecializationsClosedProcTest < Minitest::Test
       def handed: () -> String
       def lambda_literal: () -> String
       def forwarded: () -> String
+      def captured: () -> String
+      def reassigned: () -> String
+      def assigned: () -> String
       def reading_its_scope: () -> String
     end
   RBS
@@ -59,6 +65,16 @@ class SpecializationsClosedProcTest < Minitest::Test
           def self.outer(key, &block) = inner(block, key)
           def self.yielding(key) = yield(key)
           def self.forwarding(key, &block) = yielding(key, &block)
+
+          def self.capturing(key, &block) = inner(->(k) { block.call(k) }, key)
+
+          def self.reassigning(key, &block)
+            wrapped = ->(k) { block.call(k) }
+            block = ->(k) { k.to_s.upcase }
+            inner(wrapped, key)
+          end
+
+          def self.assigning(key, &block) = inner(->(k) { block = nil }, key)
         end
 
         class Box
@@ -111,7 +127,7 @@ class SpecializationsClosedProcTest < Minitest::Test
     end
 
     assert_equal '"missing"', types.fetch("lambda_literal")
-    assert_match(/\A\(proc\(&\{\h{16}\}\), :missing\)\z/, entries.keys.first)
+    assert(entries.keys.any? { |key| key.match?(/\A\(proc\(&\{\h{16}\}\), :missing\)\z/) }, entries.keys.inspect)
   end
 
   def test_a_block_forwarded_with_an_ampersand_is_yielded_as_the_block
@@ -134,6 +150,18 @@ class SpecializationsClosedProcTest < Minitest::Test
 
   def test_a_closed_block_kept_by_a_generic_class_answers_what_it_returns
     assert_equal '"missing"', caller_types("def shelved = Shelf.new { |key| key.to_s }.get(:missing)").fetch("shelved")
+  end
+
+  def test_a_lambda_reading_a_closed_proc_of_its_scope_is_called_as_its_body
+    assert_equal '"missing"', caller_types("def captured = Keys.capturing(:missing) { |key| key.to_s }").fetch("captured")
+  end
+
+  def test_a_lambda_reading_a_local_assigned_after_it_answers_the_declaration
+    assert_equal "::String", caller_types("def reassigned = Keys.reassigning(:missing) { |key| key.to_s }").fetch("reassigned")
+  end
+
+  def test_a_lambda_assigning_a_local_of_its_scope_answers_the_declaration
+    assert_equal "::String", caller_types("def assigned = Keys.assigning(:missing) { |key| key.to_s }").fetch("assigned")
   end
 
   def test_a_node_a_check_rewrote_is_closed_only_where_its_source_is
