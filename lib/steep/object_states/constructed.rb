@@ -47,9 +47,18 @@ module Steep
       # object it answers: under any name, what `ObjectStates.settled` keeps;
       # held by a local nothing else names, any value nothing changes and an
       # array or a hash the checker follows.
-      def self.kept(constr, state, held:)
+      # `contents`: whether nothing but the call names the object, so what
+      # the hashes it holds hold may be kept, where nothing else writes them.
+      def self.kept(constr, state, held:, contents:)
         return {} unless state
-        return ObjectStates.state_in(ObjectStates.settled(constr, state))&.ivars || {} unless held
+
+        state = ObjectStates.without_contents(state) unless contents
+        unless held
+          settled = ObjectStates.state_in(ObjectStates.settled(constr, state))&.ivars || {}
+          return settled unless contents
+
+          return settled.merge(state.ivars.select { |ivar, value| HashMutation.contents_state?(value) && HashMutation.held(constr, state.back_type, ivar, value, followed: true) })
+        end
 
         state.ivars.select do |ivar, value|
           ObjectStates.fixed?(value) || value.is_a?(AST::Types::Tuple) || HashMutation.held(constr, state.back_type, ivar, value, followed: true)

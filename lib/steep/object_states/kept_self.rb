@@ -40,8 +40,19 @@ module Steep
       # keeps nothing, so only what its own body hands on counts.
       def exposures(constr, node)
         TypeInference::ConstructorBindingAnalyzer.self_exposures(node).flat_map do |exposure|
+          next [] if %i[block numblock].include?(exposure.type) && !reaches_self?(exposure.children[2])
+
           in_place?(constr, exposure) ? exposures(constr, exposure.children[2]) : [exposure]
         end
+      end
+
+      # Whether a block's body may reach `self`: name it, call a method on it
+      # with no receiver, or reach one of its ivars.
+      def reaches_self?(node)
+        return false unless node.is_a?(::Parser::AST::Node)
+        return true if %i[self ivar ivasgn super zsuper].include?(node.type) || (%i[send csend].include?(node.type) && node.children[0].nil?)
+
+        node.children.any? { |child| reaches_self?(child) }
       end
 
       def in_place?(constr, node)

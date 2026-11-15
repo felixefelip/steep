@@ -89,7 +89,7 @@ module Steep
         arguments = returned_arguments(constr, node, call, block) or return call
         type = recorded_return(constr, key, arguments) or return call
 
-        return call.with_return_type(constructed(type, call.return_type)) if ObjectStates.initialize_call?(call)
+        return call.with_return_type(constructed(constructed_contents(constr, node, type, arguments), call.return_type)) if ObjectStates.initialize_call?(call)
 
         if answers_self?(type) && (receiver = receiver_left(constr, call, key, arguments))
           type = type.subst(Interface::Substitution.build([], [], self_type: receiver))
@@ -137,6 +137,14 @@ module Steep
         ancestor.args.map { |arg| factory.type(arg).subst(bound) }
       rescue RBS::BaseError
         untyped
+      end
+
+      # A constructor's recorded answer, without what its hashes hold where
+      # that cannot be kept (`ObjectStates.contents_kept?`).
+      def constructed_contents(constr, node, type, arguments)
+        instance = ObjectStates.state_in(type)&.back_type
+        chain = instance.is_a?(AST::Types::Name::Instance) && ObjectStates.initialize_chain(constr, instance)
+        chain && ObjectStates.contents_kept?(constr, node, instance, chain, arguments.key) ? type : ObjectStates.without_contents(type)
       end
 
       # A tuple with contents is checked on demand where no generation has

@@ -234,6 +234,10 @@ class HashNewContentsTest < Minitest::Test
     assert_equal "1", kept_in_ivar("labels = Labels.new\nlabels.put\nlabels[:a]")
   end
 
+  def test_a_hash_kept_in_an_ivar_of_an_object_another_name_reaches_holds_what_it_may
+    assert_equal "untyped", kept_in_ivar("labels = Labels.new\nother = labels\nother.put\nlabels[:a]")
+  end
+
   def test_a_hash_kept_in_an_ivar_and_written_through_a_reader_holds_what_it_may
     assert_equal "untyped", kept_in_ivar("exposed = Exposed.new\nexposed.backend[:a] = 1\nexposed[:a]")
   end
