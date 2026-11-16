@@ -132,7 +132,7 @@ module Steep
         # `tracked` keeps a memo's; or, where it forwards to a hash it keeps
         # (`ForwardedHash`), on the terms `born_hash` keeps a hash's.
         def born_object(constr, singleton, ivar, instance)
-          return unless instance.is_a?(AST::Types::Name::Instance) && constr.constructor_bindings.born_objects(singleton.name).key?(ivar)
+          return unless instance.is_a?(AST::Types::Name::Instance) && (constr.constructor_bindings.born_objects(singleton.name).key?(ivar) || Inherited.births(constr, singleton).include?(ivar))
           return unless fresh?(constr, instance) && MemoSlots.written_only_by?(constr, singleton, ivar, nil, nil)
 
           nested = ForwardedHash.nested(constr, instance)

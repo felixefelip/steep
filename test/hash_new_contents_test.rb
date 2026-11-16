@@ -171,7 +171,7 @@ class HashNewContentsTest < Minitest::Test
     assert_equal "1", defaulted("h = Hash.new { |_hash, key| key.to_s }\nh[:a] = 1\nh[:a]")
   end
 
-  def kept_in_ivar(lines)
+  def kept_in_ivar(lines, sigs: "", classes: "", diagnose: nil)
     in_tmpdir do
       write("sig/hash.rbs", <<~RBS)
         class Hash[unchecked out K, unchecked out V]
@@ -200,8 +200,10 @@ class HashNewContentsTest < Minitest::Test
         class Probe
           def probe: () -> untyped
         end
+        #{sigs}
       RBS
       write("app/hash.rb", TRANSCRIBED)
+      write("app/classes.rb", classes)
       write("app/labels.rb", <<~RUBY)
         class Labels
           def initialize
@@ -249,6 +251,8 @@ class HashNewContentsTest < Minitest::Test
         runner.write(runner.run)
         project.reload_specializations!
       end
+      next checked(project, current_dir + diagnose).errors.map { |error| error.header_line } if diagnose
+
       body_types(project, current_dir + "app/app.rb").fetch("probe")
     end
   end
@@ -272,5 +276,63 @@ class HashNewContentsTest < Minitest::Test
 
   def test_a_hash_whose_default_hands_self_to_a_block_that_reads_it_holds_what_it_may
     assert_equal "untyped", kept_in_ivar("Forwarding.new { |map, key| map.put }[:missing]")
+  end
+
+  CLASS_HELD_SIGS = <<~RBS
+    class Held
+      self.@cache: Labels
+      def self.cached: (untyped name) -> untyped
+      def self.put: () -> untyped
+      def self.cache: () -> Labels
+      def self.inherited: (untyped subclass) -> untyped
+      def self.reveal: (bot value) -> untyped
+    end
+    class HeldChild < Held
+    end
+  RBS
+
+  def class_held(lines, set:, also: "", load: "", diagnose: nil)
+    kept_in_ivar(lines, sigs: CLASS_HELD_SIGS, diagnose: diagnose, classes: <<~RUBY)
+      class Held
+        #{set}
+
+        def self.cached(name) = @cache[name]
+
+        #{also}
+
+        def self.reveal(value) = value
+      end
+
+      class HeldChild < Held
+      end
+
+      #{load}
+    RUBY
+  end
+
+  HOOK = "def self.inherited(subclass)\n  super\n  subclass.instance_variable_set(:@cache, Labels.new)\nend".freeze
+
+  def revealed(set:, load:, also: "")
+    class_held("nil", set: set, also: also, load: load, diagnose: "app/classes.rb").grep(/as an argument of type `bot`/)
+  end
+
+  def test_a_hash_an_object_a_class_ivar_holds_is_read_by_what_it_holds
+    assert_equal ["Cannot pass a value of type `\"missing\"` as an argument of type `bot`"], revealed(set: "@cache = Labels.new", load: "Held.reveal(Held.cached(:missing))")
+  end
+
+  def test_a_hash_an_object_an_inherited_hook_sets_on_a_subclass_is_read_by_what_it_holds
+    assert_equal ["Cannot pass a value of type `\"missing\"` as an argument of type `bot`"], revealed(set: HOOK, load: "HeldChild.reveal(HeldChild.cached(:missing))")
+  end
+
+  def test_a_hash_an_object_an_inherited_hook_sets_is_read_after_a_write_through_it
+    assert_empty revealed(set: HOOK, also: "def self.put = @cache.put", load: "HeldChild.put\nHeldChild.reveal(HeldChild.cached(:a))")
+  end
+
+  def test_a_hash_an_object_an_inherited_hook_sets_and_lets_out_holds_what_it_may
+    assert_empty revealed(set: HOOK, also: "def self.cache = @cache", load: "HeldChild.cache.put\nHeldChild.reveal(HeldChild.cached(:a))")
+  end
+
+  def test_a_hash_an_object_a_class_ivar_lets_out_holds_what_it_may
+    assert_empty revealed(set: "@cache = Labels.new", also: "def self.cache = @cache", load: "Held.cache.put\nHeld.reveal(Held.cached(:a))")
   end
 end
