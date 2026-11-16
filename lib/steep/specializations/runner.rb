@@ -489,7 +489,7 @@ module Steep
         # Calls made with a block are not harvested yet (felixefelip/steep#272).
         return unless node.type == :send
 
-        expression = node.loc.expression or return
+        expression = node.loc&.expression or return
         site = "#{@project.relative_path(path)}:#{expression.line}:#{expression.column}"
         arguments = arguments.with_self(CalleeSelf.of(typing, node))
 
