@@ -270,6 +270,14 @@ class ReflectionIntrinsicsTest < Minitest::Test
     assert_nil const_get_fold("::Object", "Lookup::LIMIT::X")
   end
 
+  def test_equal_answers_whether_two_classes_are_one
+    with_probe_factory do |factory|
+      assert_equal "false", fold("::Module#equal?", singleton("::ProbeBase"), Registry.new, factory, argument_types: [singleton("::ProbeSub")]).to_s
+      assert_equal "true", fold("::Module#equal?", singleton("::ProbeSub"), Registry.new, factory, argument_types: [singleton("::ProbeSub")]).to_s
+      assert_nil fold("::Module#equal?", singleton("::ProbeBase"), Registry.new, factory, argument_types: [Steep::AST::Builtin.any_type])
+    end
+  end
+
   def test_to_s_answers_the_name_of_a_module
     with_probe_factory do |factory|
       assert_equal Steep::AST::Types::Literal.new(value: "ProbeSub"), fold("::Module#to_s", singleton("::ProbeSub"), Registry.new, factory)
@@ -289,14 +297,14 @@ class ReflectionIntrinsicsTest < Minitest::Test
   def test_watched_keys_and_dispatched_names
     assert_equal(
       ["::Class#allocate", "::Kernel#method", "::Kernel#respond_to?", "::Kernel#singleton_class", "::Method#parameters",
-       "::Module#const_get", "::Module#const_set", "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::Module#singleton_class?",
+       "::Module#const_get", "::Module#const_set", "::Module#equal?", "::Module#instance_method", "::Module#name", "::Module#public_instance_method", "::Module#singleton_class?",
        "::Module#to_s",
        "::UnboundMethod#parameters"],
       Steep::ReflectionIntrinsics.watched_keys.to_a.sort
     )
     assert_equal ["::Method#parameters"], Steep::ReflectionIntrinsics.method_keys_for("Method")
     assert_equal(
-      [:allocate, :const_get, :const_missing, :const_set, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
+      [:allocate, :const_get, :const_missing, :const_set, :equal?, :instance_method, :method, :name, :parameters, :public_instance_method, :respond_to?, :respond_to_missing?,
        :singleton_class, :singleton_class?, :to_s],
       Steep::ReflectionIntrinsics.dispatched_names.to_a.sort
     )
