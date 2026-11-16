@@ -385,6 +385,22 @@ class HarvestedMethodsTest < Minitest::Test
     end
   end
 
+  def test_a_store_a_subclass_declares_but_has_not_defined_yet_runs_the_one_it_inherits
+    in_tmpdir do
+      write("sig/gadget.rbs", "class Gadget < Base\n  def self.read: () -> untyped\n  def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped\nend\n")
+      write("app/gadget.rb", "class Gadget < Base\n  self.store = \"x\"\n  def self.read = __store\nend\nGadget.read\n")
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped\n  def self.store=: (untyped) -> untyped",
+        attr_ruby: CLASS_ATTRIBUTE,
+        base_ruby: "def self.pluralize = 1\n  def self.store=(value)\n    self.__store = value\n  end\n  Attr.redefine(self, :__store, 1)"
+      )
+      runner = Steep::Specializations::Runner.new(project)
+      runner.run
+
+      assert_equal ["Base.__store", "Base.__store=", "Gadget.__store", "Gadget.__store="], runner.defined_methods.keys.sort
+    end
+  end
+
   def test_a_name_that_turns_literal_in_a_later_generation_defines_the_method
     in_tmpdir do
       base_ruby = "def self.pluralize = 1\n  def self.store_name(name) = name\n  def self.def_store(name) = define_method(store_name(name)) { 1 }\n  def_store(:__store)"

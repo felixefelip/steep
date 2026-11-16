@@ -189,7 +189,7 @@ module Steep
       # is the call that wrote it.
       Walk = Struct.new(:definitions, :definers, :overrides, :check, :frames) do
         def defined_in(typing, def_node, arguments, chain, found)
-          Evals.effects(typing, def_node, definers, overrides: overrides, defines: true).each do |effect|
+          Evals.effects(typing, def_node, definers, overrides: overrides, defines: true, defined: definitions.method(:key?)).each do |effect|
             next unless effect.certain
 
             if effect.kind == :define
