@@ -167,21 +167,22 @@ module Steep
           class_exits = @class_exits.dup
           discovered, revealed, received = specialize(context, store(found), baselines, tuples, definitions)
           moved = adopt_receivers(received)
-          @harvested.adopt(harvest_defines(context, store(found), locations, definitions), definitions, revealed, context.sources)
+          defining = @harvested.adopt(harvest_defines(context, store(found), locations, definitions), definitions, revealed, context.sources).definers(@definers)
+          @definers.merge(defining)
           discovered = settle(found, discovered, baselines, widened)
           grown = grow(tuples, revealed, generation)
           # Both have to settle, not just the returns: a generation that finds no
           # new return can still fix a tuple inside a body it re-checked, and that
           # tuple is what the next generation specializes. So do the exits, which
           # the caller one frame out reads only in the generation after.
-          break if !moved && discovered == found && grown == tuples && @exits == exits && @class_exits == class_exits && @file_states.stale_paths.empty?
+          break if !moved && defining.empty? && discovered == found && grown == tuples && @exits == exits && @class_exits == class_exits && @file_states.stale_paths.empty?
           # A state seen before cannot lead anywhere a later generation has not
           # already been. Widening bounds an entry's literals; this bounds the one
           # shape it says nothing about — a return alternating between two
           # CLASSES, which no amount of widening settles.
-          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup), @class_exits.dup, @file_states.entering, @receivers.dup])
+          break unless seen.add?([discovered, grown, @exits.transform_values(&:dup), @class_exits.dup, @file_states.entering, @receivers.dup, @definers.dup])
 
-          paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits)) | @file_states.stale_paths
+          paths = affected_paths(callees, changed_keys(found, discovered) | changed_keys(exits, @exits) | defining) | @file_states.stale_paths
           found = discovered
           @demanded.clear
           tuples = grow(grown, call_sites(context, store(found), definitions, paths, locations, writers | @definers), generation)

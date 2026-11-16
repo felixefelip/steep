@@ -106,6 +106,18 @@ module Steep
         self
       end
 
+      # The methods found whose blocks define methods in turn, by calling one
+      # of `definers` or one another: a block is a body like a `def`'s.
+      def definers(definers)
+        grown = definers.dup
+        loop do
+          added = @nodes.filter_map { |key, block| key if !grown.include?(key) && Evals.writes_code?(block, grown, defines: true) }
+          return grown - definers if added.empty?
+
+          grown.merge(added)
+        end
+      end
+
       # `round` split so that a block is checked as one method at a time, with
       # the frame that wrote it checked under the arguments of the call that
       # defined the method: the locals it closes over hold what they hold in

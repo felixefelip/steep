@@ -333,6 +333,42 @@ class HarvestedMethodsTest < Minitest::Test
     end
   end
 
+  CLASS_ATTRIBUTE = <<~RUBY
+    module Attr
+      def self.redefine(owner, name, value)
+        redefine_method(owner.singleton_class, name) { value }
+        redefine_method(owner.singleton_class, :"\#{name}=") do |new_value|
+          if owner.equal?(self)
+            value = new_value
+          else
+            Attr.redefine(self, name, new_value)
+          end
+        end
+      end
+
+      def self.redefine_method(owner, name, &block)
+        owner.define_method(name, &block)
+      end
+    end
+  RUBY
+
+  def test_a_store_written_on_a_subclass_defines_the_subclass_s_own
+    in_tmpdir do
+      write("sig/gadget.rbs", "class Gadget < Base\n  def self.read: () -> untyped\n  def self.__store: () -> untyped\nend\n")
+      write("app/gadget.rb", "class Gadget < Base\n  self.__store = \"x\"\n  def self.read = __store\nend\nGadget.read\n")
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped",
+        attr_ruby: CLASS_ATTRIBUTE,
+        base_ruby: "def self.pluralize = 1\n  Attr.redefine(self, :__store, 1)"
+      )
+      runner = Steep::Specializations::Runner.new(project)
+      methods = runner.run
+
+      assert_equal ["Base.__store", "Base.__store=", "Gadget.__store", "Gadget.__store="], runner.defined_methods.keys.sort
+      assert_equal ["::String"], methods.fetch("Gadget.read").values.uniq
+    end
+  end
+
   def test_a_name_that_turns_literal_in_a_later_generation_defines_the_method
     in_tmpdir do
       base_ruby = "def self.pluralize = 1\n  def self.store_name(name) = name\n  def self.def_store(name) = define_method(store_name(name)) { 1 }\n  def_store(:__store)"
