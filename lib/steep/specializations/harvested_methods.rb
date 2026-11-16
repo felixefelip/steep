@@ -106,12 +106,12 @@ module Steep
         self
       end
 
-      # The methods found whose blocks define methods in turn, by calling one
-      # of `definers` or one another: a block is a body like a `def`'s.
+      # The methods that define methods once the blocks found are bodies too:
+      # a found block that calls one of `definers`, and a method calling it.
       def definers(definers)
         grown = definers.dup
         loop do
-          added = @nodes.filter_map { |key, block| key if !grown.include?(key) && Evals.writes_code?(block, grown, defines: true) }
+          added = @definitions.filter_map { |key, (_, body)| key if !grown.include?(key) && Evals.writes_code?(body, grown, defines: true) }
           return grown - definers if added.empty?
 
           grown.merge(added)
@@ -160,7 +160,7 @@ module Steep
         rounds.call(defining.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
           defined = @rounds.value([active, definitions.size], store, class_exits) do |logged, left|
             checked = ->(substituted) { check.call(logged, substituted).tap { |typings| left.concat(typings.values.compact.map(&:class_exits)) } }
-            defined_in_round(active, definitions, Walk.new(definitions, definers, overrides, checked), checked.call(active))
+            defined_in_round(active, definitions, Walk.new(definitions, definers, overrides, checked, @frames), checked.call(active))
           end
           defined.each do |key, (block, writers)|
             found[key] ||= block
@@ -187,7 +187,7 @@ module Steep
       # `chain` is the frames the walk entered, outermost first, as
       # `[key, def_node, arguments]`; the one whose `def` holds a defined block
       # is the call that wrote it.
-      Walk = Struct.new(:definitions, :definers, :overrides, :check) do
+      Walk = Struct.new(:definitions, :definers, :overrides, :check, :frames) do
         def defined_in(typing, def_node, arguments, chain, found)
           Evals.effects(typing, def_node, definers, overrides: overrides, defines: true).each do |effect|
             next unless effect.certain
@@ -222,7 +222,7 @@ module Steep
           frame_self = typing.self_type_of_call(node: effect.node) or return
           callee = callee.resolve_self(frame_self)
           callee = callee.with_self(frame_self) if Evals.on_self?(effect.node.type == :block ? effect.node.children[0] : effect.node)
-          inner = check.call({ effect.callee => callee })[path] or return
+          inner = check.call({ effect.callee => callee }.merge(frames[effect.callee].then { |frame| frame ? [frame].to_h : {} }))[path] or return
           defined_in(inner, callee_node, callee, chain + [[effect.callee, callee_node, callee]], found)
         end
       end
