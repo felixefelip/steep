@@ -332,6 +332,20 @@ class HashNewContentsTest < Minitest::Test
     assert_empty revealed(set: HOOK, also: "def self.cache = @cache", load: "HeldChild.cache.put\nHeldChild.reveal(HeldChild.cached(:a))")
   end
 
+  def test_a_hash_an_object_an_inherited_hook_sets_and_writes_through_the_set_s_value_holds_what_it_may
+    hook = "def self.inherited(subclass)\n  super\n  cache = subclass.instance_variable_set(:@cache, Labels.new)\n  cache.put\nend"
+    assert_empty revealed(set: hook, load: "HeldChild.reveal(HeldChild.cached(:a))")
+  end
+
+  def test_a_hash_an_object_an_inherited_hook_sets_is_read_by_what_it_holds_when_a_send_runs_the_hook
+    also = "def self.notify\n  Held.send(:inherited, HeldChild)\n  nil\nend"
+    assert_equal ["Cannot pass a value of type `\"missing\"` as an argument of type `bot`"], revealed(set: HOOK, also: also, load: "HeldChild.reveal(HeldChild.cached(:missing))")
+  end
+
+  def test_a_hash_an_object_a_class_ivar_lets_out_through_a_send_holds_what_it_may
+    assert_empty revealed(set: "@cache = Labels.new", also: "def self.cache = @cache", load: "Held.send(:cache).put\nHeld.reveal(Held.cached(:a))")
+  end
+
   def test_a_hash_an_object_a_class_ivar_lets_out_holds_what_it_may
     assert_empty revealed(set: "@cache = Labels.new", also: "def self.cache = @cache", load: "Held.cache.put\nHeld.reveal(Held.cached(:a))")
   end
