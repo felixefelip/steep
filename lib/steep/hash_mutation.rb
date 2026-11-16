@@ -72,7 +72,7 @@ module Steep
       def fold_record(constr, node, receiver, receiver_type, method_name, arguments, type:, private:)
         keys = hash_method_keys(constr, method_name, private: private)
         receiver_type = left_by_arguments(constr, receiver) || receiver_type
-        answer = queried(constr, node, receiver_type, keys, arguments) and return answer
+        answer = queried(constr, node, receiver_type, keys, arguments) || combined(constr, node, receiver, receiver_type, keys, arguments) and return answer
         return read_union(constr, node, receiver_type, keys, arguments, type: type) if record_union?(receiver_type)
         memo = held_ivar(constr, receiver, receiver_type)
         if (receiver&.type == :lvar || (!memo && CollectionMutation.entered_with?(constr, receiver))) && CollectionMutation.only?(constr, keys, WRITES)
