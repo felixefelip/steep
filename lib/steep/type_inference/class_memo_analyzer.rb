@@ -253,7 +253,7 @@ module Steep
 
       def record_named(node, name, arguments)
         if REFLECTIVE.include?(name)
-          return if name == :instance_variable_set && fresh_value?(arguments[1])
+          return record_fresh_set(node, arguments[0]) if name == :instance_variable_set && fresh_value?(arguments[1])
 
           use = name == :alias_method && on_self?(node) ? alias_use(node) : ESCAPE
           arguments.each { |argument| @uses[argument.children[0].to_sym] << use if named?(argument) }
@@ -267,6 +267,15 @@ module Steep
       # held.
       def fresh_value?(value)
         !value.nil? && ((value.type == :hash && value.children.empty?) || ConstructorBindingAnalyzer::HandedBack.fresh_object?(value))
+      end
+
+      # `instance_variable_set` returns the value it sets: what the call's
+      # value goes on to is a use of the ivar.
+      def record_fresh_set(node, ivar)
+        return unless named?(ivar)
+
+        parent = @parents[node]
+        @uses[ivar.children[0].to_sym].concat(value_uses(node, parent, @statements.include?(parent)) || [ESCAPE])
       end
 
       # A statement of a class body aliases a method of that class: only a
