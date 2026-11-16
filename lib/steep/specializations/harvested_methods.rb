@@ -66,6 +66,7 @@ module Steep
         @enclosing = {} #: Hash[[String, Integer], Parser::AST::Node]
         @definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @nodes = {} #: Hash[String, Parser::AST::Node]
+        @frames = {} #: Hash[String, [String, Arguments]?]
         @rounds = Kept.new
       end
 
@@ -105,15 +106,17 @@ module Steep
         self
       end
 
-      # `round` split so that a block is checked as one method at a time, and
-      # never with the frame that wrote it specialized: the locals it closes
-      # over hold what that frame holds under its declaration, not under
-      # whichever of its call sites shares the check.
+      # `round` split so that a block is checked as one method at a time, with
+      # the frame that wrote it checked under the arguments of the call that
+      # defined the method: the locals it closes over hold what they hold in
+      # that call. Where calls under different arguments define the method, the
+      # frame is checked under its declaration.
       def separate(round)
         rounds = [{}] #: Array[Hash[String, Arguments]]
         round.each do |key, arguments|
-          target = rounds.find { |candidate| candidate.each_key.none? { |other| apart?(key, other) } }
-          (target || (rounds << {}).last)[key] = arguments
+          entries = { key => arguments }.merge(@frames[key].then { |frame| frame ? [frame].to_h : {} })
+          target = rounds.find { |candidate| fits?(candidate, entries) }
+          (target || (rounds << {}).last).merge!(entries)
         end
         rounds
       end
@@ -137,6 +140,7 @@ module Steep
       # `store` answers what it asked differently from when it was last checked.
       def harvest(locations, definitions, definers, overrides:, rounds:, check:, store:, class_exits:)
         found = {} #: Hash[String, Parser::AST::Node]
+        frames = {} #: Hash[String, Set[[String, Arguments]]]
         defining = locations.filter_map do |key, by_arguments|
           handed = by_arguments.reject { |arguments, _| arguments.hands_self? }
           [key, handed] if definitions.key?(key) && definers.include?(key) && !handed.empty?
@@ -144,36 +148,62 @@ module Steep
         rounds.call(defining.transform_values { |by_arguments| by_arguments.keys.to_set }).each do |active|
           defined = @rounds.value([active, definitions.size], store, class_exits) do |logged, left|
             checked = ->(substituted) { check.call(logged, substituted).tap { |typings| left.concat(typings.values.compact.map(&:class_exits)) } }
-            found_in_round = {} #: Hash[String, Parser::AST::Node]
-            typings = checked.call(active)
-            active.each do |key, arguments|
-              path, def_node = definitions.fetch(key)
-              typing = typings[path] or next
-
-              Walk.new(definitions, definers, overrides, checked).defined_in(typing, def_node, arguments, Set[key], found_in_round)
-            end
-            found_in_round
+            defined_in_round(active, definitions, Walk.new(definitions, definers, overrides, checked), checked.call(active))
           end
-          defined.each { |key, block| found[key] ||= block }
+          defined.each do |key, (block, writers)|
+            found[key] ||= block
+            (frames[key] ||= Set[]).merge(writers)
+          end
+        end
+        frames.each { |key, writers| @frames[key] = writers.size == 1 ? writers.first : nil }
+        found
+      end
+
+      # `{ key => [block, writers] }` for the methods `active`'s bodies define,
+      # each with the calls that wrote its block (`Walk#record`).
+      def defined_in_round(active, definitions, walk, typings)
+        found = {} #: Hash[String, [Parser::AST::Node, Set[[String, Arguments]]]]
+        active.each do |key, arguments|
+          path, def_node = definitions.fetch(key)
+          typing = typings[path] or next
+
+          walk.defined_in(typing, def_node, arguments, [[key, def_node, arguments]], found)
         end
         found
       end
 
+      # `chain` is the frames the walk entered, outermost first, as
+      # `[key, def_node, arguments]`; the one whose `def` holds a defined block
+      # is the call that wrote it.
       Walk = Struct.new(:definitions, :definers, :overrides, :check) do
-        def defined_in(typing, def_node, arguments, reading, found)
+        def defined_in(typing, def_node, arguments, chain, found)
           Evals.effects(typing, def_node, definers, overrides: overrides, defines: true).each do |effect|
             next unless effect.certain
 
             if effect.kind == :define
               key, block = DefinedMethods.definition(effect.typing, effect.node, def_node, arguments)
-              found[key] ||= block if key
-            elsif effect.kind == :frame && !reading.include?(effect.callee)
-              entered(effect.typing, effect, reading, found)
+              record(found, key, block, chain) if key
+            elsif effect.kind == :frame && chain.none? { |entered, _, _| entered == effect.callee }
+              entered(effect.typing, effect, chain, found)
             end
           end
         end
 
-        def entered(typing, effect, reading, found)
+        def record(found, key, block, chain)
+          block_node, writers = found[key] ||= [block, Set[]]
+          return unless block_node.equal?(block)
+
+          writer = chain.reverse.find { |_, frame_def, _| holds?(frame_def, block) }
+          writers << [writer[0], writer[2]] if writer
+        end
+
+        def holds?(frame_def, block)
+          frame_range = frame_def.loc.expression
+          block_range = block.loc.expression
+          frame_range.source_buffer.name == block_range.source_buffer.name && frame_range.begin_pos <= block_range.begin_pos && block_range.end_pos <= frame_range.end_pos
+        end
+
+        def entered(typing, effect, chain, found)
           path, callee_node = definitions[effect.callee]
           return unless path
           callee = Arguments.recorded(effect.node, typing) or return
@@ -181,7 +211,7 @@ module Steep
           callee = callee.resolve_self(frame_self)
           callee = callee.with_self(frame_self) if Evals.on_self?(effect.node.type == :block ? effect.node.children[0] : effect.node)
           inner = check.call({ effect.callee => callee })[path] or return
-          defined_in(inner, callee_node, callee, reading | [effect.callee], found)
+          defined_in(inner, callee_node, callee, chain + [[effect.callee, callee_node, callee]], found)
         end
       end
 
@@ -210,6 +240,24 @@ module Steep
 
       def relative_site(block)
         Pathname(site(block)).relative_path_from(Pathname(@base_dir).expand_path).to_s
+      end
+
+      # Whether `entries` (a method and the frame that wrote its block) can be
+      # checked in `round`: a key in both under the same arguments, and no two
+      # keys apart unless one is the other's frame under its call's arguments.
+      def fits?(round, entries)
+        merged = round.merge(entries)
+        entries.all? do |key, arguments|
+          round.all? do |other, other_arguments|
+            next other_arguments == arguments if other == key
+
+            !apart?(key, other) || framed?(key, other, merged) || framed?(other, key, merged)
+          end
+        end
+      end
+
+      def framed?(key, frame, round)
+        @frames[key] == [frame, round[frame]]
       end
 
       def apart?(key, other)

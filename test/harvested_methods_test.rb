@@ -98,7 +98,7 @@ class HarvestedMethodsTest < Minitest::Test
       )
       methods = Steep::Specializations::Runner.new(project).run
 
-      assert_equal ["(1 | 2)"], methods.fetch("Base.__store").values.uniq
+      assert_equal ["1"], methods.fetch("Base.__store").values.uniq
     end
   end
 
@@ -128,7 +128,7 @@ class HarvestedMethodsTest < Minitest::Test
     end
   end
 
-  def test_one_block_defining_two_methods_closes_over_neither_call_s_value
+  def test_one_block_defining_two_methods_closes_over_each_call_s_value
     in_tmpdir do
       project = store_project(
         store_rbs: "def self.__a: () -> untyped\n  def self.__b: () -> untyped",
@@ -137,8 +137,21 @@ class HarvestedMethodsTest < Minitest::Test
       )
       methods = Steep::Specializations::Runner.new(project).run
 
+      assert_equal ["1"], methods.fetch("Base.__a").values.uniq
+      assert_equal ["2"], methods.fetch("Base.__b").values.uniq
+    end
+  end
+
+  def test_one_method_two_calls_define_closes_over_the_frame_s_declaration
+    in_tmpdir do
+      project = store_project(
+        store_rbs: "def self.__a: () -> untyped",
+        attr_ruby: FORWARDED,
+        base_ruby: "def self.pluralize = __a\n  Attr.redefine(self, :__a, 1)\n  Attr.redefine(self, :__a, 2)"
+      )
+      methods = Steep::Specializations::Runner.new(project).run
+
       assert_equal ["(1 | 2)"], methods.fetch("Base.__a").values.uniq
-      assert_equal ["(1 | 2)"], methods.fetch("Base.__b").values.uniq
     end
   end
 
@@ -168,7 +181,7 @@ class HarvestedMethodsTest < Minitest::Test
       runner = Steep::Specializations::Runner.new(project)
       runner.run
 
-      assert_equal({ "Base.__store" => { "params" => "()", "returns" => "(1 | 2)", "block" => "app/attr.rb:3:4" } }, runner.defined_methods)
+      assert_equal({ "Base.__store" => { "params" => "()", "returns" => "1", "block" => "app/attr.rb:3:4" } }, runner.defined_methods)
     end
   end
 
@@ -278,7 +291,7 @@ class HarvestedMethodsTest < Minitest::Test
       )
       methods = Steep::Specializations::Runner.new(project).run
 
-      assert_equal ["(1 | 2)"], methods.fetch("Base.__store").values.uniq
+      assert_equal ["1"], methods.fetch("Base.__store").values.uniq
     end
   end
 
