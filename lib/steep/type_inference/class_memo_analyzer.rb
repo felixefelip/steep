@@ -215,7 +215,7 @@ module Steep
       def record_send(node, parent, in_statement)
         _, name, *arguments = node.children
         record(name, node, parent, in_statement)
-        record_named(node, name, arguments)
+        record_named(node, name, SENDS_BY_NAME.include?(name) ? record_sent(node, parent, in_statement, arguments) : arguments)
       end
 
       def record_call(node, statement)
@@ -276,6 +276,15 @@ module Steep
 
         parent = @parents[node]
         @uses[ivar.children[0].to_sym].concat(value_uses(node, parent, @statements.include?(parent)) || [ESCAPE])
+      end
+
+      # `send(:m, ...)` is the call `m(...)`: its value goes where the send's does.
+      def record_sent(node, parent, in_statement, arguments)
+        first = arguments.first
+        return arguments unless first && %i[sym str].include?(first.type)
+
+        record(first.children[0].to_sym, node, parent, in_statement)
+        arguments.drop(1)
       end
 
       # A statement of a class body aliases a method of that class: only a

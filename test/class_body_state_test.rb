@@ -107,7 +107,7 @@ class ClassBodyStateTest < Minitest::Test
       "a change made inside a block" => ["", "[1].each { settings.name = :other }"],
       "a second write to the ivar" => ["def self.reset = @settings = Settings.new", ""],
       "the object handed on" => ["def self.keep = Kernel.p(settings)", ""],
-      "its name as a value" => ["def self.peek = send(:settings)", ""]
+      "its name as a value" => ["def self.peek = method(:settings)", ""]
     }.each do |label, (extra_base, extra_article)|
       article = "settings.name = :posts\n#{extra_article}\ndefine_named"
       assert_equal [[nil]], chunks(RBS, source(extra_base: extra_base, article: article)).values, label
