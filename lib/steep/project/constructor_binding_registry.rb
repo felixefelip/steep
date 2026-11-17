@@ -11,9 +11,9 @@ module Steep
     # classes have no Ruby body to analyze and are simply absent — `bindings_for`
     # returns nil and the caller falls through.
     class ConstructorBindingRegistry
-      def self.build(project)
-        new.tap { |r| r.build(project) }
-      end
+      attr_reader :folded_evals
+
+      def self.build(project) = new.tap { |r| r.build(project) }
 
       def self.from_paths(paths)
         new.tap { |registry| paths.each { |path| registry.ingest(Pathname(path)) } }

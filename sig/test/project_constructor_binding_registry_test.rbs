@@ -22,5 +22,7 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
 
   def test_builds_and_looks_up_bindings_from_sources: () -> untyped
 
+  def test_exposes_the_evals_the_sidecar_lists_as_folded: () -> untyped
+
   def test_rebuilt_after_invalidation: () -> untyped
 end
