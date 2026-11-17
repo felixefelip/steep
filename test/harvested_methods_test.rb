@@ -401,7 +401,7 @@ class HarvestedMethodsTest < Minitest::Test
     end
   end
 
-  def test_a_subclass_s_store_holds_the_hash_written_from_the_one_it_inherits
+  def inherited_store_methods
     in_tmpdir do
       write("sig/gadget.rbs", "class Reflection\nend\nclass Gadget < Base\n  def self.read: () -> untyped\n  def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped\nend\n")
       write("app/gadget.rb", "class Reflection\nend\nclass Gadget < Base\n  add :comments\n  def self.read = __store\nend\nGadget.read\n")
@@ -421,10 +421,18 @@ class HarvestedMethodsTest < Minitest::Test
         RUBY
         value_rbs: "untyped"
       )
-      methods = Steep::Specializations::Runner.new(project).run
-
-      assert_equal ["{ :comments => ::Reflection }"], methods.fetch("Gadget.__store").values.uniq
+      Steep::Specializations::Runner.new(project).run
     end
+  end
+
+  def test_a_subclass_s_store_holds_the_hash_written_from_the_one_it_inherits
+    assert_equal ["{ :comments => ::Reflection }"], inherited_store_methods.fetch("Gadget.__store").values.uniq
+  end
+
+  def test_a_found_writer_is_checked_with_the_frame_that_defined_it
+    writes = inherited_store_methods.fetch("Gadget.__store=")
+
+    assert_equal ["({ :comments => ::Reflection })"], writes.keys.map { _1.sub(/ with .*/, "") }.uniq
   end
 
   def test_a_name_that_turns_literal_in_a_later_generation_defines_the_method

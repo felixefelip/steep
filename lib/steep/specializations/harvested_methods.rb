@@ -126,11 +126,17 @@ module Steep
       def separate(round)
         rounds = [{}] #: Array[Hash[String, Arguments]]
         round.each do |key, arguments|
-          entries = { key => arguments }.merge(@frames[key].then { |frame| frame ? [frame].to_h : {} })
+          entries = framed(key, arguments)
           target = rounds.find { |candidate| fits?(candidate, entries) }
           (target || (rounds << {}).last).merge!(entries)
         end
         rounds
+      end
+
+      # `{ key => arguments }` with the frame that wrote `key`'s block, under
+      # the arguments of the call that defined it, where there is one.
+      def framed(key, arguments)
+        { key => arguments }.merge(@frames[key].then { |frame| frame ? [frame].to_h : {} })
       end
 
       # Each method found, with the parameters its block takes and what every

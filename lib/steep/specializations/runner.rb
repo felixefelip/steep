@@ -421,8 +421,8 @@ module Steep
 
         begin
           path, def_node = definitions.fetch(key)
-          active = { node_key(path, def_node, key) => with_defaults(key, arguments, def_node) }
-          checked, exit, returned, sites = @demands.value(memo, store.with_reads(nil).with_active(active), {}) do |reading, _|
+          active = by_node(@harvested.framed(key, arguments), definitions)
+          checked, exit, returned, sites = @demands.value([memo, active.transform_values(&:key)], store.with_reads(nil).with_active(active), {}) do |reading, _|
             typing = type_check(context, reading, context.sources.fetch(path), active)
             typing ? [true, typing.exit_ivars_of(node: def_node), returned_type(typing, def_node, key), Collector.call_sites(typing, overrides: @overrides)] : [false, nil, nil, {}]
           end
@@ -650,14 +650,12 @@ module Steep
 
       def check_definitions(context, store, active, definitions)
         paths = active.keys.filter_map { |key| definitions[key]&.first }.uniq
-        by_node = active.to_h do |key, arguments|
-          path, def_node = definitions.fetch(key)
-          [node_key(path, def_node, key), with_defaults(key, arguments, def_node)]
-        end
+        nodes = by_node(active, definitions)
+        paths.to_h { |path| [path, file_check(context, store, context.sources.fetch(path), nodes)] }
+      end
 
-        paths.to_h do |path|
-          [path, file_check(context, store, context.sources.fetch(path), by_node)]
-        end
+      def by_node(active, definitions)
+        active.to_h { |key, arguments| definitions.fetch(key).then { |path, def_node| [node_key(path, def_node, key), with_defaults(key, arguments, def_node)] } }
       end
 
       # What the checker matches a body by, since the name it would derive from
