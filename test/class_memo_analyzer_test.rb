@@ -6,12 +6,12 @@ class ClassMemoAnalyzerTest < Minitest::Test
   end
 
   def uses(source, name)
-    Steep::TypeInference::ClassMemoAnalyzer.uses(parse(source), names: Set[:settings, :@settings])
+    Steep::TypeInference::ClassMemoAnalyzer.uses(parse(source), names: Set[:settings, :@settings], folded_evals: Set[])
       .fetch(name, []).map { |use| [use.kind, use.called] }
   end
 
   def test_a_memo_built_with_new_is_a_body_s_memo
-    methods = Steep::TypeInference::ConstructorBindingAnalyzer.scan(parse(<<~RUBY)).singleton_methods.fetch("Wrap::Base")
+    methods = Steep::TypeInference::ConstructorBindingAnalyzer.scan(parse(<<~RUBY), folded_evals: Set[]).singleton_methods.fetch("Wrap::Base")
       module Wrap
         class Base
           def self.settings = @settings ||= Settings.new
@@ -77,7 +77,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
   end
 
   def test_a_method_that_returns_the_use_forwards_it
-    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings)
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings], folded_evals: Set[]).fetch(:settings)
       class Article < Base
         def source_settings = source.settings
         def self.picked(flag)
@@ -93,7 +93,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
   end
 
   def test_a_read_by_key_carries_the_uses_of_the_element_it_answers
-    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:instances]).fetch(:instances)
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:instances], folded_evals: Set[]).fetch(:instances)
       class Inflector
         def self.instance(locale) = (instances[locale] ||= Rules.new)
         instances[:en].singular(1)
@@ -108,7 +108,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
   end
 
   def test_a_call_in_a_statement_of_a_class_body_is_made_by_the_class_body
-    found = Steep::TypeInference::ClassMemoAnalyzer.calls(parse(<<~RUBY), names: Set[:instance]).fetch(:instance)
+    found = Steep::TypeInference::ClassMemoAnalyzer.calls(parse(<<~RUBY), names: Set[:instance], folded_evals: Set[]).fetch(:instance)
       class Inflector
         instance(:en).singular(1)
         def self.read = instance(:en).singulars.each { |rule| rule }
@@ -120,7 +120,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
   end
 
   def test_an_element_yielded_alone_is_yielded
-    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:instances]).fetch(:instances)
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:instances], folded_evals: Set[]).fetch(:instances)
       class Inflector
         def self.inflections(locale)
           yield instances[locale]
@@ -132,7 +132,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
   end
 
   def test_a_value_parentheses_a_conditional_or_an_or_pass_on_is_used_where_it_lands
-    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings)
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings], folded_evals: Set[]).fetch(:settings)
       class Article < Base
         (settings).name
         (flag ? other : settings).name
@@ -148,7 +148,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
   end
 
   def test_a_value_left_unused_is_no_use
-    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings, [])
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings], folded_evals: Set[]).fetch(:settings, [])
       class Article < Base
         settings { |value| value }
         def self.wrapped
@@ -162,7 +162,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
   end
 
   def test_a_call_on_the_value_as_written_is_direct
-    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings]).fetch(:settings)
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~RUBY), names: Set[:settings], folded_evals: Set[]).fetch(:settings)
       class Article < Base
         def self.write(source)
           source.settings[:a] = 1
@@ -215,8 +215,19 @@ class ClassMemoAnalyzerTest < Minitest::Test
     RUBY
   end
 
+  def test_a_string_eval_placed_as_checked_source_is_not_read_for_names
+    source = <<~'RUBY'
+      class Base
+        def self.run = class_eval("settings.name = :x")
+      end
+    RUBY
+    folded = Set["#{File.expand_path("a.rb")}:2:17"]
+
+    assert_empty Steep::TypeInference::ClassMemoAnalyzer.uses(parse(source), names: Set[:settings], folded_evals: folded).fetch(:settings, [])
+  end
+
   def test_an_iteration_counts_only_while_its_block_reads_the_elements
-    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~'RUBY'), names: Set[:singulars])
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(<<~'RUBY'), names: Set[:singulars], folded_evals: Set[])
       class Base
         def self.a = rules.singulars.each { |(rule, replacement)| break if result.sub!(rule, replacement) }
         def self.b = rules.singulars.map { |(rule, _)| "#{rule}" }
@@ -243,7 +254,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
         end
       end
     RUBY
-    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(source), names: Set[:settings]).fetch(:settings)
+    found = Steep::TypeInference::ClassMemoAnalyzer.uses(parse(source), names: Set[:settings], folded_evals: Set[]).fetch(:settings)
 
     assert_equal [[:[]=, :register], [:[]=, nil], [:[]=, nil], [:store, :nested]], found.map { |use| [use.called, use.within] }
   end
@@ -257,7 +268,7 @@ class ClassMemoAnalyzerTest < Minitest::Test
         def fit = self.class.send(:register, :seat, 1)
       end
     RUBY
-    found = Steep::TypeInference::ClassMemoAnalyzer.calls(parse(source), names: Set[:register]).fetch(:register)
+    found = Steep::TypeInference::ClassMemoAnalyzer.calls(parse(source), names: Set[:register], folded_evals: Set[]).fetch(:register)
 
     assert_equal [[:statement, nil], [:call, nil], [:call, :refit], [:call, nil]], found.map { |use| [use.kind, use.within] }
     assert_equal :fit, found.last.enclosing

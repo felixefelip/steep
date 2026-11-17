@@ -74,21 +74,21 @@ module Steep
       LOCAL_SCOPES = %i[def defs class module sclass].freeze
 
 
-      def self.uses(node, names:)
-        new(names).uses(node)
+      def self.uses(node, names:, folded_evals:)
+        new(names, folded_evals: folded_evals).uses(node)
       end
 
-      def self.calls(node, names:)
-        new(names, calls: true).uses(node)
+      def self.calls(node, names:, folded_evals:)
+        new(names, folded_evals: folded_evals, calls: true).uses(node)
       end
 
       # Adds to `index` the calls in `nodes` of each of `names` it does not
       # hold yet (`calls`); with `callers`, those of each method that makes
       # one of them, and so on, so a reader can follow who runs a call.
-      def self.index_calls(nodes, names, index, callers: false)
+      def self.index_calls(nodes, names, index, folded_evals:, callers: false)
         until (unscanned = names.to_set - index.keys).empty?
           unscanned.each { |name| index[name] = [] }
-          nodes.each { |node| calls(node, names: unscanned).each { |name, found| index[name].concat(found) } }
+          nodes.each { |node| calls(node, names: unscanned, folded_evals: folded_evals).each { |name, found| index[name].concat(found) } }
           names = callers ? unscanned.flat_map { |name| index[name].filter_map { |call| call.enclosing || call.blocks&.dig(0, 0) } } : []
         end
       end
@@ -127,17 +127,20 @@ module Steep
 
       # `element_calls` for a block given by its parameters and body.
       def self.element_calls_in(params, body)
-        new(Set[]).element_calls_in(params, body)
+        new(Set[], folded_evals: Set[]).element_calls_in(params, body)
       end
 
       # What the body of `def_node` does with its positional parameter
       # `index`. Nil where the parameters do not say which one it is.
       def self.parameter_uses(def_node, index)
-        new(Set[]).parameter_uses(def_node, index)
+        new(Set[], folded_evals: Set[]).parameter_uses(def_node, index)
       end
 
-      def initialize(names, calls: false)
+      # `folded_evals`: the sites of the string evals whose source is placed in
+      # the program as checked Ruby (`Specializations::Evals::Folds`).
+      def initialize(names, folded_evals:, calls: false)
         @names = names
+        @folded_evals = folded_evals
         @calls = calls
         @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[Use]]
         @parents = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node?]
@@ -257,7 +260,7 @@ module Steep
 
           use = name == :alias_method && on_self?(node) ? alias_use(node) : ESCAPE
           arguments.each { |argument| @uses[argument.children[0].to_sym] << use if named?(argument) }
-        elsif STRING_EVALS.include?(name)
+        elsif STRING_EVALS.include?(name) && !@folded_evals.include?(self.class.site(node))
           arguments.each { |argument| each_string(argument) { |text| escape_mentioned(text) } }
         end
       end

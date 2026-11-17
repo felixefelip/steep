@@ -135,15 +135,16 @@ module Steep
         :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, :other_sends, :param_births, keyword_init: true
       ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
 
-      def self.analyze(node)
-        scan(node).readers
+      def self.analyze(node, folded_evals:)
+        scan(node, folded_evals: folded_evals).readers
       end
 
-      def self.scan(node)
-        new.scan(node)
+      def self.scan(node, folded_evals:)
+        new(folded_evals: folded_evals).scan(node)
       end
 
-      def initialize
+      def initialize(folded_evals:)
+        @folded_evals = folded_evals
         @result = {} #: Hash[String, Hash[Symbol, Integer]]
         @initializers = {} #: Hash[String, Array[Body?]]
         @methods = {} #: Hash[String, Hash[Symbol, Array[Body?]]]
@@ -396,7 +397,7 @@ module Steep
           exposes_self: !self.class.self_exposures(body).empty?,
           **SelfReturns.facts(body),
           iterations: self_iterations(body),
-          ivar_uses: KeyParams.placed(ClassMemoAnalyzer.uses(body, names: ivars).to_h, args_node, body),
+          ivar_uses: KeyParams.placed(ClassMemoAnalyzer.uses(body, names: ivars, folded_evals: @folded_evals).to_h, args_node, body),
           returns: single_ivar_reader(body),
           hands_back: HandedBack.calls(body),
           hands_back_element: HandedBack.element(args_node, body),
