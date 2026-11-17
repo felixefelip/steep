@@ -676,6 +676,9 @@ module Steep
       when AST::Types::MetaClass then AST::Types::Literal.new(value: true)
       end
     end
+    # Two class objects are one object exactly when they are one class.
+    EQUAL = ->(receiver, (other, *rest), _factory, _registry) { AST::Types::Literal.new(value: receiver.name == other.name) if rest.empty? && [receiver, other].all?(AST::Types::Name::Singleton) }
+
     INSTANCE_METHOD = lambda do |receiver, argument_types, factory, _override_registry|
       unbound_method_object(receiver, argument_types, factory, public_only: false)
     end
@@ -739,6 +742,7 @@ module Steep
       "::Class#allocate" => Entry.new(
         method: ::Class.instance_method(:allocate), handler: ALLOCATE
       ),
+      "::Module#equal?" => Entry.new(method: ::Module.instance_method(:equal?), handler: EQUAL),
       "::Kernel#singleton_class" => Entry.new(
         method: ::Kernel.instance_method(:singleton_class), handler: SINGLETON_CLASS
       ),

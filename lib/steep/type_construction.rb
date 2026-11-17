@@ -5672,7 +5672,7 @@ module Steep
       argument_types = arguments.map do |argument|
         return call unless typing.has_type?(argument)
 
-        literal_operand_type(argument, typing.type_of(node: argument))
+        ReflectionIntrinsics.receiver_of(self, call, literal_operand_type(argument, typing.type_of(node: argument)))
       end
 
       type = ReflectionIntrinsics.fold(

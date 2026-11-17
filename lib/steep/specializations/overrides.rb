@@ -51,6 +51,20 @@ module Steep
         run_keys(call, key, node, exact_self, self_type)
       end
 
+      # The key of the nearest ancestor's `name` that `defined` holds a body for,
+      # for a method declared on a class whose own body is not defined yet.
+      def inherited_body(key, &defined)
+        owner, name, singleton = Specializations.method_key_parts(key)
+        definition = singleton ? @factory.definition_builder.build_singleton(owner) : @factory.definition_builder.build_instance(owner)
+        definition.ancestors.ancestors.drop(1).each do |ancestor|
+          candidate = "#{ancestor.name.to_s.delete_prefix("::")}#{singleton ? "." : "#"}#{name}"
+          return candidate if defined.call(candidate)
+        end
+        nil
+      rescue RBS::BaseError
+        nil
+      end
+
       # Whether an instance typed `name` may run a body the source writes on
       # one of its subclasses rather than `name`'s own.
       def overridden?(name)
