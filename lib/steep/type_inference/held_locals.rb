@@ -26,6 +26,38 @@ module Steep
         new(def_node, reassigned: reassigned)
       end
 
+      # The same, over `def_node` without the branch of each `if` whose
+      # condition `typing` already answered with a literal: a mention there
+      # never runs.
+      def self.decided(def_node, typing, reassigned:)
+        pruned = without_decided_branches(def_node, typing)
+        new(pruned, reassigned: reassigned) unless pruned.equal?(def_node)
+      end
+
+      def self.without_decided_branches(node, typing)
+        return node unless node.is_a?(::Parser::AST::Node)
+
+        if node.type == :if && (index = decided_branch(node, typing))
+          taken = node.children[index]
+          return taken ? without_decided_branches(taken, typing) : ::Parser::AST::Node.new(:nil)
+        end
+
+        children = node.children.map { |child| without_decided_branches(child, typing) }
+        children.zip(node.children).all? { |pruned, child| pruned.equal?(child) } ? node : node.updated(nil, children)
+      end
+
+      # The index of the branch an `if` takes among its children, where its
+      # condition was typed as a literal.
+      def self.decided_branch(node, typing)
+        condition = node.children[0]
+        return unless typing.has_type?(condition)
+
+        type = typing.type_of(node: condition)
+        return unless type.is_a?(AST::Types::Literal) && [true, false].include?(type.value) || type.is_a?(AST::Types::Nil)
+
+        type.is_a?(AST::Types::Literal) && type.value ? 1 : 2
+      end
+
       def initialize(def_node, reassigned:)
         @names = Set[] #: Set[Symbol]
         @reading = Set[] #: Set[Symbol]
@@ -39,6 +71,11 @@ module Steep
 
       def held?(name)
         @names.include?(name)
+      end
+
+      # `HeldLocals.decided` over this body.
+      def decided(typing)
+        HeldLocals.decided(@def_node, typing, reassigned: @reassigned) if @def_node
       end
 
       # `held?`, but for a parameter that is also a value the body returns, as

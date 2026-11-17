@@ -509,7 +509,7 @@ module Steep
       # `fold_in_place` reads the local's record after.
       def held_local?(constr, name)
         held = constr.method_context&.held_locals or return false
-        return true if held.held_up_to_its_return?(name)
+        return true if held.held_up_to_its_return?(name) || held.decided(constr.typing)&.held_up_to_its_return?(name)
 
         held.held_but_for_calls_on_it?(name) && held.calls_on_it(name).all? do |node|
           entry?(constr, node, READS) || (held.before_a_call_on_it?(node) && entry?(constr, node, WRITES))

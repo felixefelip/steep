@@ -65,6 +65,6 @@ class HeldRecordReadInArgumentTest < Minitest::Test
   end
 
   def test_a_local_handed_to_a_call_on_itself_hands_on_a_hash
-    assert_nil through("options.merge!(options) if ext")
+    assert_nil through("options.merge!(options)")
   end
 end
