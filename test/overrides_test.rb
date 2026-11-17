@@ -106,7 +106,7 @@ class OverridesTest < Minitest::Test
       class Child < Base
       end
     RBS
-      overrides = Steep::Specializations::Overrides.new(checker: checker, registry: Steep::Project::ConstructorBindingRegistry.new)
+      overrides = Steep::Specializations::Overrides.new(checker: checker, registry: Steep::Project::ConstructorBindingRegistry.new, harvested: ->(_key) { false })
       overrides.overridden?(RBS::TypeName.parse("::Base"))
       kept = Steep::Specializations::Overrides::SUBCLASSES[checker.factory.env]
 

@@ -126,11 +126,17 @@ module Steep
       def separate(round)
         rounds = [{}] #: Array[Hash[String, Arguments]]
         round.each do |key, arguments|
-          entries = { key => arguments }.merge(@frames[key].then { |frame| frame ? [frame].to_h : {} })
+          entries = framed(key, arguments)
           target = rounds.find { |candidate| fits?(candidate, entries) }
           (target || (rounds << {}).last).merge!(entries)
         end
         rounds
+      end
+
+      # `{ key => arguments }` with the frame that wrote `key`'s block, under
+      # the arguments of the call that defined it, where there is one.
+      def framed(key, arguments)
+        { key => arguments }.merge(@frames[key].then { |frame| frame ? [frame].to_h : {} })
       end
 
       # Each method found, with the parameters its block takes and what every
@@ -189,7 +195,7 @@ module Steep
       # is the call that wrote it.
       Walk = Struct.new(:definitions, :definers, :overrides, :check, :frames) do
         def defined_in(typing, def_node, arguments, chain, found)
-          Evals.effects(typing, def_node, definers, overrides: overrides, defines: true, defined: definitions.method(:key?)).each do |effect|
+          Evals.effects(typing, def_node, definers, overrides: overrides, defines: true).each do |effect|
             next unless effect.certain
 
             if effect.kind == :define

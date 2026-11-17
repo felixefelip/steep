@@ -24,7 +24,7 @@ module Steep
       # `[key, def_node]` for the innermost of `definitions` (`[key, def_node]`
       # pairs of one file) whose range holds `node`.
       def self.enclosing(definitions, node)
-        range = node.loc.expression or return nil
+        range = node.loc&.expression or return nil
         enclosing = definitions.select do |_, def_node|
           def_range = def_node.loc.expression
           def_range.begin_pos <= range.begin_pos && range.end_pos <= def_range.end_pos
@@ -38,9 +38,10 @@ module Steep
 
       # The tuples a call site specializes `key` under. A constructor called
       # with no arguments fixes nothing, but its body alone decides the object
-      # it answers (`ObjectStates::Constructed`).
-      def self.tuples(key, arguments)
-        key.end_with?(".new") && arguments.empty? && arguments.block.nil? ? [arguments] : arguments.tuples
+      # it answers (`ObjectStates::Constructed`), and so does the frame that
+      # defined a method a block was found to define (`harvested`).
+      def self.tuples(key, arguments, harvested:)
+        (key.end_with?(".new") || harvested) && arguments.empty? && arguments.block.nil? ? [arguments] : arguments.tuples
       end
 
       def self.constructor?(key, def_node)
@@ -56,7 +57,7 @@ module Steep
         each_call_site(typing, overrides: overrides) do |key, arguments, _node|
           # A tuple fixing no value specializes nothing: the body would be
           # re-checked under the declaration it already has.
-          (result[key] ||= Set.new).merge(tuples(key, arguments))
+          (result[key] ||= Set.new).merge(tuples(key, arguments, harvested: overrides.harvested?(key)))
         end
 
         result
@@ -84,6 +85,16 @@ module Steep
 
           call.method_decls.map { |decl| decl.method_name.to_s.delete_prefix("::") }.uniq.each { |called| yield called, nil, node }
         end
+      end
+
+      # The keys of the bodies the call `node` runs in `typing`, as
+      # `each_call_site` names it, or nil where that is not known.
+      def self.runs_at(typing, node, overrides:)
+        node = typing.explicit_super_of(node: node) || node if node.type == :zsuper
+        call = typing.call_of(node: node)
+        overrides.runs(call, node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node))&.keys
+      rescue Typing::UnknownNodeError
+        nil
       end
 
       def self.each_call(typing, every_call)

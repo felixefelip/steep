@@ -74,7 +74,7 @@ module Steep
         # `defines`: a walk for the methods a body defines with `define_method`
         # (`:define`), which also follows a writer called with a block — the
         # block is what the method may be defined from.
-        Walk = Struct.new(:writers, :typing, :overrides, :method_name, :defines, :defined, keyword_init: true)
+        Walk = Struct.new(:writers, :typing, :overrides, :method_name, :defines, keyword_init: true)
 
         # Whether the method writes code, directly or through a method it calls.
         # The gate that keeps a project without the idiom from paying for a
@@ -110,13 +110,10 @@ module Steep
         # each carrying the flow's verdict. A macro that evals once and then
         # calls a writer writes both, and the class gets them in the order it is
         # written.
-        #
-        # `defined`, where given, says which methods have a body in the run: a
-        # call to one that has none yet runs the body it inherits.
-        def effects(typing, def_node, writers, overrides:, defines: false, defined: nil)
+        def effects(typing, def_node, writers, overrides:, defines: false)
           flow = Flow.new(typing)
           result = [] #: Array[Effect]
-          walk = Walk.new(writers: writers, typing: typing, overrides: overrides, method_name: method_name(def_node), defines: defines, defined: defined)
+          walk = Walk.new(writers: writers, typing: typing, overrides: overrides, method_name: method_name(def_node), defines: defines)
 
           each_effect(body_of(def_node), flow, true, walk) do |effect|
             result << effect
@@ -185,7 +182,7 @@ module Steep
 
         def resolved_send_key(node, walk)
           typing = walk.typing
-          walk.overrides.body_key(
+          walk.overrides.defining_key(
             typing.call_of(node: node), node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node)
           )
         rescue Typing::UnknownNodeError
@@ -302,7 +299,6 @@ module Steep
           return named_writers(send_node, walk).first unless walk.typing
 
           key = send_node.type == :send ? resolved_send_key(node, walk) : super_key(node, walk.typing)
-          key = walk.overrides.inherited_body(key, &walk.defined) if key && walk.defined && !walk.defined.call(key) && named_writers(send_node, walk).any?
           key if key && walk.writers.include?(key)
         end
 

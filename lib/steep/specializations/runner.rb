@@ -133,7 +133,7 @@ module Steep
         writers = code_writers(context)
         @definers = code_writers(context, defines: true)
         @factory = context.subtyping.factory
-        @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry)
+        @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry, harvested: ->(key) { @harvested.harvested?(key) })
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type), names: @project.constructor_binding_registry.used_names)
         @harvested = HarvestedMethods.new(@project.base_dir)
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
@@ -421,8 +421,8 @@ module Steep
 
         begin
           path, def_node = definitions.fetch(key)
-          active = { node_key(path, def_node, key) => with_defaults(key, arguments, def_node) }
-          checked, exit, returned, sites = @demands.value(memo, store.with_reads(nil).with_active(active), {}) do |reading, _|
+          active = by_node(@harvested.framed(key, arguments), definitions)
+          checked, exit, returned, sites = @demands.value([memo, active.transform_values(&:key)], store.with_reads(nil).with_active(active), {}) do |reading, _|
             typing = type_check(context, reading, context.sources.fetch(path), active)
             typing ? [true, typing.exit_ivars_of(node: def_node), returned_type(typing, def_node, key), Collector.call_sites(typing, overrides: @overrides)] : [false, nil, nil, {}]
           end
@@ -473,9 +473,9 @@ module Steep
           typing = file_check(context, store, source, {})
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
-            next @harvested.remember({ key => Collector.tuples(key, arguments) }, definitions) unless definitions.key?(key)
+            next @harvested.remember({ key => Collector.tuples(key, arguments, harvested: true) }, definitions) unless definitions.key?(key)
 
-            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments))
+            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
         end
@@ -511,7 +511,8 @@ module Steep
         typings = Hash.new { |hash, path| hash[path] = type_check(context, store, context.sources.fetch(path), {}) }
         reader = CallSiteUnions::Reader.new(
           store: store, factory: context.subtyping.factory, definitions: definitions,
-          sites: call_site_reader(typings, callees), check: body_checker(context, store, definitions)
+          sites: call_site_reader(typings, callees), check: body_checker(context, store, definitions),
+          runs: ->(typing, node) { Collector.runs_at(typing, node, overrides: @overrides) }
         )
 
         found.each_key.filter_map do |key|
@@ -601,8 +602,8 @@ module Steep
           end
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
-            @record.untupled(key) if Collector.tuples(key, arguments).empty?
-            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments))
+            @record.untupled(key) if Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)).empty?
+            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
 
@@ -650,14 +651,12 @@ module Steep
 
       def check_definitions(context, store, active, definitions)
         paths = active.keys.filter_map { |key| definitions[key]&.first }.uniq
-        by_node = active.to_h do |key, arguments|
-          path, def_node = definitions.fetch(key)
-          [node_key(path, def_node, key), with_defaults(key, arguments, def_node)]
-        end
+        nodes = by_node(active, definitions)
+        paths.to_h { |path| [path, file_check(context, store, context.sources.fetch(path), nodes)] }
+      end
 
-        paths.to_h do |path|
-          [path, file_check(context, store, context.sources.fetch(path), by_node)]
-        end
+      def by_node(active, definitions)
+        active.to_h { |key, arguments| definitions.fetch(key).then { |path, def_node| [node_key(path, def_node, key), with_defaults(key, arguments, def_node)] } }
       end
 
       # What the checker matches a body by, since the name it would derive from

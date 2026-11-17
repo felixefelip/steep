@@ -211,4 +211,20 @@ class HeldLocalsTest < Minitest::Test
     assert locals.held_value?(first)
     refute locals.held_value?(second)
   end
+
+  DecidedTyping = Struct.new(:types) do
+    def has_type?(node) = types.key?(node)
+    def type_of(node:) = types.fetch(node)
+  end
+
+  def test_a_mention_in_a_branch_the_check_decided_against_names_nothing
+    def_node = parse("def m(flag, h)\n  if flag\n    other = h\n  end\n  keep(h)\nend\n")
+    condition = def_node.children[2].children[0].children[0]
+    typing = DecidedTyping.new({ condition => Steep::AST::Types::Literal.new(value: false) })
+    reassigned = Steep::TypeInference::ArgumentFacts.reassigned_parameters(def_node)
+
+    refute held_locals(def_node).held?(:h)
+    assert Steep::TypeInference::HeldLocals.decided(def_node, typing, reassigned: reassigned).held?(:h)
+    assert_nil Steep::TypeInference::HeldLocals.decided(def_node, DecidedTyping.new({}), reassigned: reassigned)
+  end
 end

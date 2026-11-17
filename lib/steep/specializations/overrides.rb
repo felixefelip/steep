@@ -23,10 +23,13 @@ module Steep
     class Overrides
       SUBCLASSES = ObjectSpace::WeakKeyMap.new
 
-      def initialize(checker:, registry:)
+      # `harvested`: whether a key is a method a block was found to define
+      # (`HarvestedMethods`).
+      def initialize(checker:, registry:, harvested:)
         @checker = checker
         @factory = checker.factory
         @registry = registry
+        @harvested = harvested
       end
 
       # The key the call's body is recorded under, or nil where the call does
@@ -37,6 +40,16 @@ module Steep
       def body_key(call, node:, exact_self:, self_type:)
         runs = runs(call, node: node, exact_self: exact_self, self_type: self_type) or return nil
         runs.keys.first if runs.size == 1
+      end
+
+      # `body_key`, or, for a call that may run a method a block defines or
+      # the ancestor's body it overrides (`before_defined`), the ancestor's:
+      # the one the call that defines the method runs.
+      def defining_key(call, node:, exact_self:, self_type:)
+        runs = runs(call, node: node, exact_self: exact_self, self_type: self_type) or return nil
+        return runs.keys.first if runs.size == 1
+
+        runs.keys.last if runs.size == 2 && before_defined(runs.keys.first) == runs.keys
       end
 
       # The bodies the call may run, keyed as `body_key` keys one, each with the
@@ -63,6 +76,16 @@ module Steep
         nil
       rescue RBS::BaseError
         nil
+      end
+
+      def harvested?(key) = @harvested.call(key)
+
+      # A method a block defines may be called before the `define_method`
+      # runs, which runs the nearest ancestor's body; one no block of the run
+      # defines yet runs only that.
+      def before_defined(ran)
+        inherited = !source_body?(ran) && inherited_body(ran, &@harvested) or return [ran]
+        @harvested.call(ran) ? [ran, inherited] : [inherited]
       end
 
       # Whether an instance typed `name` may run a body the source writes on
@@ -106,8 +129,16 @@ module Steep
           next unless type.equal?(receiver) || admits?(receiver, type)
 
           ran = ran_key(name, singleton, call.method_decls.first, key) or return nil
-          runs[ran] ||= type
+          before_defined(ran).each { |each_key| runs[each_key] ||= type }
         end
+      end
+
+      def source_body?(key)
+        owner, name, singleton = Specializations.method_key_parts(key)
+        definition = singleton ? @factory.definition_builder.build_singleton(owner) : @factory.definition_builder.build_instance(owner)
+        source_key(definition, name) == key
+      rescue RBS::BaseError
+        false
       end
 
       # Whether a receiver of type `receiver` may hold an instance of the

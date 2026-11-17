@@ -191,6 +191,7 @@ module Steep
 
         store = constr.specializations
         arguments = returned_arguments(constr, node, call, block) unless store.empty?
+        runs = answered_first(constr, runs, arguments)
         own, *others = runs.map.with_index do |(key, receiver), index|
           recorded = arguments && recorded_return(constr, key, arguments)
           recorded = nil if recorded && answers_self?(recorded)
@@ -199,6 +200,16 @@ module Steep
         others.reject! { |type| constr.check_relation(sub_type: type, super_type: own).success? }
 
         call.with_return_type(AST::Types::Union.build(types: [own, *others]))
+      end
+
+      # Of a method a block defines and the body it overrides
+      # (`Overrides#before_defined`), the method once the run has an answer
+      # for it, and the overridden body until then.
+      def answered_first(constr, runs, arguments)
+        return runs unless runs.size == 2 && overrides(constr).before_defined(runs.keys.first) == runs.keys
+
+        own, inherited = runs.to_a
+        [arguments && recorded_return(constr, own[0], arguments) ? own : inherited].to_h
       end
 
       def declared_return(constr, receiver, method_name)
@@ -214,7 +225,7 @@ module Steep
       end
 
       def overrides(constr)
-        Overrides.new(checker: constr.checker, registry: constr.constructor_bindings)
+        Overrides.new(checker: constr.checker, registry: constr.constructor_bindings, harvested: constr.specializations.method(:harvested?))
       end
 
       # The arguments `call`, being typed at `node`, is specialized under.
@@ -1229,6 +1240,10 @@ module Steep
 
       def body_methods(site)
         read(:body_methods, site) { @bodies[site] }
+      end
+
+      def harvested?(key)
+        read(:harvested?, key) { (@harvested_keys ||= @bodies.each_value.flat_map(&:itself).to_set).include?(key) }
       end
 
       def class_exit(name, ivar)

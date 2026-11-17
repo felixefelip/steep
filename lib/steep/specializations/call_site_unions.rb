@@ -31,13 +31,16 @@ module Steep
         # `sites`: every call of a method, as `[path, node, arguments]`, read
         # under the declarations (`Collector.each_call_site`, `every_call:`).
         # `check`: the typing of a method's file with its body checked under
-        # one set of arguments.
-        def initialize(store:, factory:, definitions:, sites:, check:)
+        # one set of arguments. `runs`: the keys of the bodies a call node
+        # runs in a typing, or nil where that is not known (`Overrides#runs`).
+        def initialize(store:, factory:, definitions:, sites:, check:, runs:)
           @store = store
           @factory = factory
           @sites = sites
           @check = check
+          @runs = runs
           @arguments = {} #: Hash[String, Array[Arguments]?]
+          @namesakes = definitions.keys.group_by { |key| key.rpartition(/[.#]/).drop(1) }
           @definitions_by_path = definitions.each_with_object(Hash.new { |hash, path| hash[path] = [] }) do |(key, (path, def_node)), result|
             result[path] << [key, def_node]
           end
@@ -59,28 +62,44 @@ module Steep
         # nil while `key` is being read: a call reached again through itself is
         # read under the declarations instead. So is a call inside a method
         # nothing in the source calls, which the framework may call by name.
+        #
+        # Under the arguments of the method it is in, a call may run another
+        # class's body of the same name than under the declarations, and it
+        # counts for the bodies it runs there.
         def arguments_of(key)
           return @arguments[key] if @arguments.key?(key)
 
           @arguments[key] = nil
-          sites = sites_of(key)
-          return nil if sites.empty?
-
-          @arguments[key] = sites.flat_map do |path, node, arguments|
+          read = namesake_sites(key).flat_map do |path, node, arguments, own|
             enclosing = enclosing_key(path, node)
             outer = enclosing && arguments_of(enclosing)
-            next [arguments || (return nil)] unless outer
+            next(own ? [arguments || (return nil)] : []) unless outer
 
-            outer.map { |each| Arguments.recorded(node, @check.call(enclosing, each)) || (return nil) }
+            outer.filter_map do |each|
+              typing = @check.call(enclosing, each)
+              ran = @runs.call(typing, node)
+              next unless ran ? ran.intersect?(names_of(key)) : own
+
+              Arguments.recorded(node, typing) || (return nil)
+            end
           end.uniq
+          @arguments[key] = read unless read.empty?
+        end
+
+        def namesake_sites(key)
+          (@namesakes[key.rpartition(/[.#]/).drop(1)] || [key]).flat_map do |namesake|
+            sites_of(namesake).map { |site| [*site, namesake == key] }
+          end
         end
 
         # An `initialize` runs where its class is built, as well as where a
         # `super` reaches it.
         def sites_of(key)
-          return @sites.call(key) unless key.end_with?("#initialize")
+          names_of(key).flat_map { |name| @sites.call(name) }
+        end
 
-          @sites.call(key) + @sites.call(Collector.constructor_key(key))
+        def names_of(key)
+          key.end_with?("#initialize") ? [key, Collector.constructor_key(key)] : [key]
         end
 
         def enclosing_key(path, node)
