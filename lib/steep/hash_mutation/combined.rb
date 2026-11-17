@@ -19,7 +19,10 @@ module Steep
           elsif keys.first == "::Hash#merge" || built_by_combine?(constr, receiver)
             arguments.reduce(record) { |merged, argument| with_written(constr, merged, argument) or return nil }
           end
-        type and [type, constr.add_typing(node, type: type).constr]
+        return unless type
+
+        constr.typing.add_vouched(node, type)
+        [type, constr.add_typing(node, type: type).constr]
       end
 
       private
