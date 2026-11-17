@@ -84,6 +84,8 @@ module Steep
       # runs, which runs the nearest ancestor's body; one no block of the run
       # defines yet runs only that.
       def before_defined(ran)
+        return [ran] unless Specializations.method_key_parts(ran)[0].class?
+
         inherited = !source_body?(ran) && inherited_body(ran, &@harvested) or return [ran]
         @harvested.call(ran) ? [ran, inherited] : [inherited]
       end
