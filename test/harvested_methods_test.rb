@@ -6,7 +6,7 @@ class HarvestedMethodsTest < Minitest::Test
   include ShellHelper
   include SpecializationsProjectHelper
 
-  def store_project(store_rbs:, attr_ruby:, base_ruby:, block_return: "untyped")
+  def store_project(store_rbs:, attr_ruby:, base_ruby:, block_return: "untyped", value_rbs: "1 | 2")
     write("sig/base.rbs", <<~RBS)
       class Base
         self.@generated_methods: Module?
@@ -18,7 +18,7 @@ class HarvestedMethodsTest < Minitest::Test
       class Widget < Base
       end
       module Attr
-        def self.redefine: (untyped owner, Symbol name, 1 | 2 value) -> void
+        def self.redefine: (untyped owner, Symbol name, #{value_rbs} value) -> void
         def self.redefine_method: (untyped owner, Symbol | String name) { (?) -> #{block_return} } -> void
       end
     RBS
@@ -398,6 +398,32 @@ class HarvestedMethodsTest < Minitest::Test
       runner.run
 
       assert_equal ["Base.__store", "Base.__store=", "Gadget.__store", "Gadget.__store="], runner.defined_methods.keys.sort
+    end
+  end
+
+  def test_a_subclass_s_store_holds_the_hash_written_from_the_one_it_inherits
+    in_tmpdir do
+      write("sig/gadget.rbs", "class Reflection\nend\nclass Gadget < Base\n  def self.read: () -> untyped\n  def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped\nend\n")
+      write("app/gadget.rb", "class Reflection\nend\nclass Gadget < Base\n  add :comments\n  def self.read = __store\nend\nGadget.read\n")
+      project = store_project(
+        store_rbs: "def self.__store: () -> untyped\n  def self.__store=: (untyped) -> untyped\n  def self.store: () -> untyped\n  def self.store=: (untyped) -> untyped\n  def self.add: (Symbol) -> untyped",
+        attr_ruby: CLASS_ATTRIBUTE,
+        base_ruby: <<~RUBY.gsub("\n", "\n  "),
+          def self.pluralize = 1
+          def self.store = __store
+          def self.store=(value)
+            self.__store = value
+          end
+          def self.add(name)
+            self.store = store.except(name).merge!(name => Reflection.new)
+          end
+          Attr.redefine(self, :__store, {})
+        RUBY
+        value_rbs: "untyped"
+      )
+      methods = Steep::Specializations::Runner.new(project).run
+
+      assert_equal ["{ :comments => ::Reflection }"], methods.fetch("Gadget.__store").values.uniq
     end
   end
 

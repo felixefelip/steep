@@ -133,7 +133,7 @@ module Steep
         writers = code_writers(context)
         @definers = code_writers(context, defines: true)
         @factory = context.subtyping.factory
-        @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry)
+        @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry, harvested: ->(key) { @harvested.harvested?(key) })
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type), names: @project.constructor_binding_registry.used_names)
         @harvested = HarvestedMethods.new(@project.base_dir)
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]

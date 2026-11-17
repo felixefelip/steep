@@ -182,7 +182,7 @@ module Steep
 
         def resolved_send_key(node, walk)
           typing = walk.typing
-          walk.overrides.body_key(
+          walk.overrides.defining_key(
             typing.call_of(node: node), node: node, exact_self: typing.exact_self_of_call(node: node), self_type: typing.self_type_of_call(node: node)
           )
         rescue Typing::UnknownNodeError
