@@ -54,6 +54,16 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
     end
   end
 
+  def test_exposes_the_evals_the_sidecar_lists_as_folded
+    in_tmpdir do
+      write("app/base.rb", "class Base\nend\n")
+      write(Steep::Specializations::Evals::DEFAULT_OUTPUT_PATH.to_s, "folded:\n- app/base.rb:3:4\n")
+      registry = ConstructorBindingRegistry.build(setup_project(steepfile: FIXTURE_STEEPFILE))
+
+      assert_equal Set[(current_dir + "app/base.rb").to_s + ":3:4"], registry.folded_evals
+    end
+  end
+
   def test_a_body_ingested_after_a_lookup_is_found_by_the_next_one
     registry = ConstructorBindingRegistry.new
     assert_empty registry.method_bodies("Late")
