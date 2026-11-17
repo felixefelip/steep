@@ -15,7 +15,7 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
   end
 
   def analyze(source)
-    ConstructorBindingAnalyzer.analyze(parse(source))
+    ConstructorBindingAnalyzer.analyze(parse(source), folded_evals: Set[])
   end
 
   def test_maps_reader_to_its_constructor_parameter_index
@@ -115,7 +115,7 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
   end
 
   def bodies(source)
-    ConstructorBindingAnalyzer.scan(parse(source)).methods.fetch("Fallbacks").transform_values(&:first)
+    ConstructorBindingAnalyzer.scan(parse(source), folded_evals: Set[]).methods.fetch("Fallbacks").transform_values(&:first)
   end
 
   def test_a_hash_method_ending_in_super_or_a_store_under_its_key_is_a_keyed_memo
@@ -212,7 +212,7 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
   end
 
   def test_an_instance_method_names_a_constant_under_its_nesting
-    scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY))
+    scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY), folded_evals: Set[])
       module Inf
         class Holder
         end
@@ -227,7 +227,7 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
   end
 
   def test_a_scoped_constant_names_the_class_it_reaches_not_its_scopes
-    scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY))
+    scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY), folded_evals: Set[])
       class Fallbacks
         def compute(tag) = I18n::Locale::Tag.tag(tag)
       end
@@ -237,7 +237,7 @@ class ConstructorBindingAnalyzerTest < Minitest::Test
   end
 
   def test_a_method_lists_what_it_calls_on_other_receivers_apart_from_self_and_constants
-    scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY))
+    scan = ConstructorBindingAnalyzer.scan(parse(<<~RUBY), folded_evals: Set[])
       class Post
         def self.m(name) = [name.to_s.sing, helper, self.other, Holder.instance]
       end

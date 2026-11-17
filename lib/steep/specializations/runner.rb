@@ -94,6 +94,7 @@ module Steep
       def run
         methods = {} #: Hash[String, Hash[String, String]]
         @evals = {}
+        @folds = Evals::Folds.new
         @exits = {}
         @class_exits = {}
         @file_states = FileStates.new
@@ -120,7 +121,7 @@ module Steep
         if @evals.empty?
           evals_output_path.delete if evals_output_path.file?
         else
-          Evals::Writer.write(evals_output_path, @evals)
+          Evals::Writer.write(evals_output_path, @evals, @folds.sites(@project.base_dir.expand_path))
         end
         HarvestedMethods.write(@project.absolute_path(HarvestedMethods::DEFAULT_OUTPUT_PATH), @defined_methods)
       end
@@ -307,10 +308,10 @@ module Steep
       # writer that reaches itself is read once.
       def eval_sources(context, store, typing, def_node, definitions, writers, reading, self_target = nil)
         Evals.effects(typing, def_node, writers, overrides: @overrides).flat_map do |effect|
-          next [Evals.chunk_of(effect.typing, effect, context.subtyping.factory.env, self_target)] unless effect.kind == :frame
+          next [@folds.record(effect, Evals.chunk_of(effect.typing, effect, context.subtyping.factory.env, self_target))] unless effect.kind == :frame
           # Code is written there and this call site does not decide what: a
           # hole, the same answer an eval it cannot fold gets.
-          next [nil] unless effect.certain
+          next [@folds.unread(definitions[effect.callee]&.last)] unless effect.certain
           next [] if reading.include?(effect.callee)
 
           frame_sources(context, store, effect.typing, effect, definitions, writers, reading, self_target)
@@ -325,15 +326,15 @@ module Steep
       def frame_sources(context, store, typing, effect, definitions, writers, reading, self_target)
         entry = definitions[effect.callee] or return [nil]
         path, callee_node = entry
-        arguments = Specializations::Arguments.recorded(effect.node, typing) or return [nil]
-        frame_self = typing.self_type_of_call(node: effect.node) or return [nil]
+        arguments = Specializations::Arguments.recorded(effect.node, typing) or return [@folds.unread(callee_node)]
+        frame_self = typing.self_type_of_call(node: effect.node) or return [@folds.unread(callee_node)]
         arguments = arguments.resolve_self(frame_self)
         if Evals.on_self?(effect.node)
           arguments = arguments.with_self(frame_self)
         else
           self_target = Evals.eval_target(typing, effect.node) || Evals::UNNAMED_SELF
         end
-        inner = check_definitions(context, store, { effect.callee => arguments }, definitions)[path] or return [nil]
+        inner = check_definitions(context, store, { effect.callee => arguments }, definitions)[path] or return [@folds.unread(callee_node)]
         eval_sources(context, store, inner, callee_node, definitions, writers, reading | [effect.callee], self_target)
       end
 

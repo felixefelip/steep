@@ -16,9 +16,7 @@ module Steep
       end
 
       def self.from_paths(paths)
-        new.tap do |registry|
-          paths.each { |path| registry.ingest(Pathname(path)) }
-        end
+        new.tap { |registry| paths.each { |path| registry.ingest(Pathname(path)) } }
       end
 
       def initialize
@@ -33,27 +31,21 @@ module Steep
         @born_objects = {} #: Hash[String, Hash[Symbol, Symbol]]
         @class_body_cvars = {} #: Hash[String, Set[Symbol]]
         @class_body_ivars = {} #: Hash[String, Hash[Symbol, bool]]
-        @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
-        @block_calls = {} #: Hash[Symbol, Array[Symbol]]
-        @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
-        @hash_memos = Set[] #: Set[[Symbol, Symbol]]
-        @forwarded_stores = Set[] #: Set[Symbol]
-        @initializing = Set[] #: Set[Symbol]
+        start_memo_tables
         @constant_literals = {} #: Hash[Symbol, [::Parser::AST::Node, String]]
         @constant_writes = Hash.new(0) #: Hash[Symbol, Integer]
         @postconditions = nil #: (^() -> Postconditions::Store)?
+        @folded_evals = Set[] #: Set[String]
       end
 
       # @return self
       def build(project)
         @postconditions = -> { project.postconditions }
+        @folded_evals = Specializations::Evals::Folds.read(project.base_dir)
         loader = Services::FileLoader.new(base_dir: project.base_dir)
         paths = project.targets.flat_map { |target| loader.each_path_in_target(target).to_a }.uniq
         paths.each { |relative_path| ingest(project.absolute_path(relative_path)) }
-        @entries.freeze
-        @initializers.freeze
-        @methods.freeze
-        @singleton_methods.freeze
+        [@entries, @initializers, @methods, @singleton_methods].each(&:freeze)
         index_uses
         @uses.freeze
         @nodes.clear
@@ -317,7 +309,7 @@ module Steep
       def ingest_source(content, path_name:)
         node = parse(content, path_name)
         return unless node
-        scan = TypeInference::ConstructorBindingAnalyzer.scan(node)
+        scan = TypeInference::ConstructorBindingAnalyzer.scan(node, folded_evals: @folded_evals)
         scan.readers.each { |class_name, readers| (@entries[class_name] ||= {}).merge!(readers) }
         scan.initializers.each { |class_name, initializers| (@initializers[class_name] ||= []).concat(initializers) }
         scan.class_bodies.each { |class_name, count| @class_bodies[class_name] += count }
@@ -347,7 +339,7 @@ module Steep
         until names.empty?
           indexed.merge(names)
           @nodes.each do |node|
-            TypeInference::ClassMemoAnalyzer.uses(node, names: names).each { |name, uses| (found[name] ||= []).concat(uses) }
+            TypeInference::ClassMemoAnalyzer.uses(node, names: names, folded_evals: @folded_evals).each { |name, uses| (found[name] ||= []).concat(uses) }
           end
           found.each_value { |uses| hand_on(uses) }
           names = found.each_value.flat_map { |uses| uses.flat_map { |use| use.enum_for(:each_forwarder).to_a } }.to_set - indexed
@@ -408,6 +400,15 @@ module Steep
       end
 
       # The tables `ingest_methods` merges each scan's methods into.
+      def start_memo_tables
+        @uses = nil #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]?
+        @block_calls = {} #: Hash[Symbol, Array[Symbol]]
+        @calls = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
+        @hash_memos = Set[] #: Set[[Symbol, Symbol]]
+        @forwarded_stores = Set[] #: Set[Symbol]
+        @initializing = Set[] #: Set[Symbol]
+      end
+
       def start_method_tables
         @methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
         @singleton_methods = {} #: Hash[String, Hash[Symbol, Array[TypeInference::ConstructorBindingAnalyzer::Body?]]]
@@ -448,7 +449,7 @@ module Steep
         names.merge(keyed_memo_names).merge(cvar_writes_of.filter_map { |_, name, _| name })
         @uses = uses_by_name(names)
         @reader_uses = uses_by_name(reader_names - names)
-        TypeInference::ClassMemoAnalyzer.index_calls(@nodes, keyed_memo_names | ivar_using_names, @calls, callers: true)
+        TypeInference::ClassMemoAnalyzer.index_calls(@nodes, keyed_memo_names | ivar_using_names, @calls, folded_evals: @folded_evals, callers: true)
         @hash_memos = hashes.to_set
         @forwarded_stores = forwarded_stores
         scan_closures(hashes)
@@ -526,7 +527,7 @@ module Steep
       # Every call the project makes of one of `names`, each name looked for
       # in the sources once.
       def calls_named(names)
-        TypeInference::ClassMemoAnalyzer.index_calls(@nodes, names, @calls)
+        TypeInference::ClassMemoAnalyzer.index_calls(@nodes, names, @calls, folded_evals: @folded_evals)
         names.flat_map { |name| @calls[name] }
       end
 

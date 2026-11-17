@@ -16,14 +16,19 @@ module Steep
       #         def content
       #           rich_text_content || build_rich_text_content
       #         end
+      #     folded:
+      #     - app/models/concerns/rich_text.rb:3:4
+      #
+      # `folded` lists the evals placed at every call site (`Folds`).
       class Writer
-        def self.write(path, call_sites)
-          new(path, call_sites).write
+        def self.write(path, call_sites, folded)
+          new(path, call_sites, folded).write
         end
 
-        def initialize(path, call_sites)
+        def initialize(path, call_sites, folded)
           @path = path
           @call_sites = call_sites
+          @folded = folded
         end
 
         def write
@@ -37,7 +42,8 @@ module Steep
         def payload
           {
             "version" => SCHEMA_VERSION,
-            "call_sites" => @call_sites.keys.sort.to_h { |key| [key, @call_sites[key].map { |chunk| entry(chunk) }] }
+            "call_sites" => @call_sites.keys.sort.to_h { |key| [key, @call_sites[key].map { |chunk| entry(chunk) }] },
+            "folded" => @folded.sort
           }
         end
 

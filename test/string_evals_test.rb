@@ -1876,6 +1876,93 @@ class StringEvalsTest < Minitest::Test
     end
   end
 
+  def folded_of(project)
+    runner = Specializations::Runner.new(project)
+    runner.write(runner.run)
+    Specializations::Evals::Folds.read(current_dir).map { |site| Pathname(site).relative_path_from(current_dir.expand_path).to_s }
+  end
+
+  def test_an_eval_folded_at_every_call_site_is_listed_as_folded
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        class Base
+          def self.has_rich_text: (Symbol name) -> untyped
+          def self.suffix: () -> String
+        end
+
+        class Article < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        class Base
+          def self.has_rich_text(name)
+            class_eval "def \#{name}; end"
+            class_eval "def \#{name}_\#{suffix}; end"
+          end
+
+          def self.suffix
+            "ro"
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content
+        end
+      RUBY
+
+      assert_equal ["app/base.rb:3:4"], folded_of(setup_project)
+    end
+  end
+
+  def test_an_eval_in_a_frame_one_call_site_does_not_read_is_not_folded
+    in_tmpdir do
+      write("sig/base.rbs", <<~RBS)
+        module Writer
+          def self.generate: (untyped owner, Symbol name) -> void
+          def self.other: (untyped owner, Symbol name) -> void
+        end
+
+        class Base
+          def self.has_rich_text: (Symbol name, ?enabled: bool) -> untyped
+        end
+
+        class Article < Base
+        end
+
+        class Photo < Base
+        end
+      RBS
+      write("app/base.rb", <<~RUBY)
+        module Writer
+          def self.generate(owner, name)
+            owner.module_eval "def \#{name}; end"
+          end
+
+          def self.other(owner, name)
+            owner.module_eval "def \#{name}?; end"
+          end
+        end
+
+        class Base
+          def self.has_rich_text(name, enabled: true)
+            Writer.generate(self, name) if enabled
+            Writer.other(self, name)
+          end
+        end
+
+        class Article < Base
+          has_rich_text :content, enabled: rand > 0.5
+        end
+
+        class Photo < Base
+          has_rich_text :caption
+        end
+      RUBY
+
+      assert_equal ["app/base.rb:7:10"], folded_of(setup_project)
+    end
+  end
+
   def test_an_eval_and_a_delegation_are_kept_in_source_order
     in_tmpdir do
       write("sig/base.rbs", <<~RBS)
@@ -2521,7 +2608,7 @@ class StringEvalsTest < Minitest::Test
       runner.write(runner.run)
 
       assert_equal(
-        { "version" => 3, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] } },
+        { "version" => 3, "call_sites" => { "app/base.rb:8:2" => ["def content; end"] }, "folded" => ["app/base.rb:3:4"] },
         YAML.safe_load(runner.evals_output_path.read)
       )
     end
