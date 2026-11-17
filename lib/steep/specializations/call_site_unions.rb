@@ -78,7 +78,7 @@ module Steep
             outer.filter_map do |each|
               typing = @check.call(enclosing, each)
               ran = @runs.call(typing, node)
-              next unless ran ? ran.include?(key) : own
+              next unless ran ? ran.intersect?(names_of(key)) : own
 
               Arguments.recorded(node, typing) || (return nil)
             end
@@ -95,9 +95,11 @@ module Steep
         # An `initialize` runs where its class is built, as well as where a
         # `super` reaches it.
         def sites_of(key)
-          return @sites.call(key) unless key.end_with?("#initialize")
+          names_of(key).flat_map { |name| @sites.call(name) }
+        end
 
-          @sites.call(key) + @sites.call(Collector.constructor_key(key))
+        def names_of(key)
+          key.end_with?("#initialize") ? [key, Collector.constructor_key(key)] : [key]
         end
 
         def enclosing_key(path, node)
