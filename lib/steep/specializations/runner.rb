@@ -473,9 +473,9 @@ module Steep
           typing = file_check(context, store, source, {})
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
-            next @harvested.remember({ key => Collector.tuples(key, arguments) }, definitions) unless definitions.key?(key)
+            next @harvested.remember({ key => Collector.tuples(key, arguments, harvested: true) }, definitions) unless definitions.key?(key)
 
-            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments))
+            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
         end
@@ -511,7 +511,8 @@ module Steep
         typings = Hash.new { |hash, path| hash[path] = type_check(context, store, context.sources.fetch(path), {}) }
         reader = CallSiteUnions::Reader.new(
           store: store, factory: context.subtyping.factory, definitions: definitions,
-          sites: call_site_reader(typings, callees), check: body_checker(context, store, definitions)
+          sites: call_site_reader(typings, callees), check: body_checker(context, store, definitions),
+          runs: ->(typing, node) { Collector.runs_at(typing, node, overrides: @overrides) }
         )
 
         found.each_key.filter_map do |key|
@@ -601,8 +602,8 @@ module Steep
           end
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
-            @record.untupled(key) if Collector.tuples(key, arguments).empty?
-            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments))
+            @record.untupled(key) if Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)).empty?
+            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
 

@@ -421,16 +421,21 @@ class HarvestedMethodsTest < Minitest::Test
         RUBY
         value_rbs: "untyped"
       )
-      Steep::Specializations::Runner.new(project).run
+      runner = Steep::Specializations::Runner.new(project)
+      [runner.run, runner.defined_methods]
     end
   end
 
   def test_a_subclass_s_store_holds_the_hash_written_from_the_one_it_inherits
-    assert_equal ["{ :comments => ::Reflection }"], inherited_store_methods.fetch("Gadget.__store").values.uniq
+    assert_equal ["{ :comments => ::Reflection }"], inherited_store_methods[0].fetch("Gadget.__store").values.uniq
+  end
+
+  def test_a_found_reader_returns_what_its_calls_under_the_subclass_return
+    assert_equal "{ :comments => ::Reflection }", inherited_store_methods[1].fetch("Gadget.__store").fetch("returns")
   end
 
   def test_a_found_writer_is_checked_with_the_frame_that_defined_it
-    writes = inherited_store_methods.fetch("Gadget.__store=")
+    writes = inherited_store_methods[0].fetch("Gadget.__store=")
 
     assert_equal ["({ :comments => ::Reflection })"], writes.keys.map { _1.sub(/ with .*/, "") }.uniq
   end

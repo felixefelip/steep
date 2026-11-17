@@ -78,6 +78,8 @@ module Steep
         nil
       end
 
+      def harvested?(key) = @harvested.call(key)
+
       # A method a block defines may be called before the `define_method`
       # runs, which runs the nearest ancestor's body; one no block of the run
       # defines yet runs only that.
