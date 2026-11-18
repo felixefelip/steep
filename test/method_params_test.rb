@@ -347,6 +347,27 @@ class MethodParamsTest < Minitest::Test
     end
   end
 
+  def test_rest_keyword_arg_is_the_record_of_the_declared_keywords
+    with_factory do
+      node = def_node("def foo(**foo); end")
+
+      MethodParams.build(node: node, method_type: parse_method_type("(bar: Integer, ?baz: String) -> void"), keyword_rest: nil).tap do |params|
+        assert_equal parse_type("{ bar: Integer, ?baz: String }"), params[:foo].var_type
+      end
+    end
+  end
+
+  def test_rest_keyword_arg_is_what_the_call_passes_less_the_named_keywords
+    with_factory do
+      node = def_node("def foo(bar:, **foo); end")
+      passed = parse_type("{ bar: 1, baz: :x }")
+
+      MethodParams.build(node: node, method_type: parse_method_type("(bar: Integer, ?baz: Symbol) -> void"), keyword_rest: passed).tap do |params|
+        assert_equal parse_type("{ baz: :x }"), params[:foo].var_type
+      end
+    end
+  end
+
   def test_rest_keyword_arg
     with_factory do
       node = def_node("def foo(**foo); end")
@@ -377,7 +398,8 @@ class MethodParamsTest < Minitest::Test
           MethodParams::KeywordRestParameter.new(
             name: :foo,
             type: parse_type("String"),
-            node: params.args[0]
+            node: params.args[0],
+            record: parse_type("{ ?foo: String }")
           ),
           params[:foo]
         )
@@ -408,11 +430,11 @@ class MethodParamsTest < Minitest::Test
         assert_equal 1, params.size
 
         assert_equal(
-          MethodParams::KeywordRestParameter.new(name: :foo, type: nil, node: params.args[0]),
+          MethodParams::KeywordRestParameter.new(name: :foo, type: nil, node: params.args[0], record: parse_type("{ }")),
           params[:foo]
         )
 
-        assert_equal parse_type("::Hash[::Symbol, untyped]"), params[:foo].var_type
+        assert_equal parse_type("{ }"), params[:foo].var_type
 
         assert_any!(params.errors, size: 1) do |error|
           assert_instance_of DifferentMethodParameterKind, error

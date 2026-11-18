@@ -398,6 +398,14 @@ module Steep
       # the method takes no keyword rest.
       attr_reader :keyword_rest
 
+      # Every keyword this call passes, as the record they build: what a
+      # keyword rest collects, once the keywords the body names are taken out
+      # (`MethodParams.build`).
+      def passed_keywords
+        elements = keywords.merge(keyword_rest&.elements || {})
+        AST::Types::Record.new(elements: elements, required_keys: elements.keys.to_set)
+      end
+
       # The argument types of `node`, or nil when the call has a shape no tuple
       # describes: a splat, a block pass that may or may not be a block, a
       # non-symbol keyword.

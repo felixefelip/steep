@@ -12679,4 +12679,56 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+
+  def test_safe_navigation_on_nil_calls_nothing
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class SafeNavigationOnNil
+            def name: ({ } options) -> nil
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class SafeNavigationOnNil
+            def name(options)
+              options[:class_name]&.to_s
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_splatting_a_record_adds_its_keys
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class SplatRecord
+            def all: ({ ?as: String } options) -> Hash[:as, String]
+            def none: ({ } options) -> Hash[bot, bot]
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class SplatRecord
+            def all(options) = { **options }
+            def none(options) = { **options }
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
 end

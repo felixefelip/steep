@@ -383,7 +383,7 @@ module Steep
 
       method_params =
         if method_type
-          TypeInference::MethodParams.build(node: node, method_type: method_type, keyword_rest: arguments&.keyword_rest)
+          TypeInference::MethodParams.build(node: node, method_type: method_type, keyword_rest: arguments&.passed_keywords)
         else
           TypeInference::MethodParams.empty(node: node)
         end
@@ -4603,7 +4603,7 @@ module Steep
         when nil
           raise
 
-        when AST::Types::Any
+        when AST::Types::Any, AST::Types::Bot
           case node.type
           when :block, :numblock, :itblock
             # @type var node: Parser::AST::Node & Parser::AST::_BlockNode
@@ -4625,7 +4625,7 @@ module Steep
           end
 
           constr.add_call(
-            TypeInference::MethodCall::Untyped.new(
+            (receiver_type.is_a?(AST::Types::Bot) ? TypeInference::MethodCall::Unreachable : TypeInference::MethodCall::Untyped).new(
               node: node,
               context: context.call_context,
               method_name: method_name
@@ -7833,10 +7833,9 @@ module Steep
           when :kwsplat
             bypass_splat(elem) do |elem_|
               constr.synthesize(elem_, hint: hint_hash).tap do |(type, _)|
-                if AST::Builtin::Hash.instance_type?(type)
-                  # @type var type: AST::Types::Name::Instance
-                  key_types << type.args.fetch(0)
-                  value_types << type.args.fetch(1)
+                if (pair = TypeInference::HashSplat.key_value(type))
+                  key_types << pair[0]
+                  value_types << pair[1]
                 end
               end
             end

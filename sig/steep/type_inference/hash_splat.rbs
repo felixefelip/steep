@@ -1,0 +1,7 @@
+module Steep
+  module TypeInference
+    module HashSplat
+      def self.key_value: (AST::Types::t) -> [AST::Types::t, AST::Types::t]?
+    end
+  end
+end

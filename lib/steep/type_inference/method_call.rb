@@ -176,6 +176,14 @@ module Steep
         end
       end
 
+      # A call on a receiver that is never evaluated, `bot`: nothing is called,
+      # and nothing returns.
+      class Unreachable < Base
+        def initialize(node:, context:, method_name:)
+          super(node: node, context: context, method_name: method_name, receiver_type: AST::Types::Bot.instance, return_type: AST::Types::Bot.instance)
+        end
+      end
+
       class NoMethodError < Base
         attr_reader :error
 
