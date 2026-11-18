@@ -104,6 +104,10 @@ module Steep
         def initialize: (node: Parser::AST::Node, context: context, method_name: Symbol) -> void
       end
 
+      class Unreachable < Base
+        def initialize: (node: Parser::AST::Node, context: context, method_name: Symbol) -> void
+      end
+
       # `UnresolvedSend` (felixefelip/steep#137) is the same situation reached through a
       # literal-name `send`: the name does not resolve on the receiver, reported under its
       # own ID.

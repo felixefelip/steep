@@ -357,6 +357,17 @@ class MethodParamsTest < Minitest::Test
     end
   end
 
+  def test_rest_keyword_arg_is_what_the_call_passes_less_the_named_keywords
+    with_factory do
+      node = def_node("def foo(bar:, **foo); end")
+      passed = parse_type("{ bar: 1, baz: :x }")
+
+      MethodParams.build(node: node, method_type: parse_method_type("(bar: Integer, ?baz: Symbol) -> void"), keyword_rest: passed).tap do |params|
+        assert_equal parse_type("{ baz: :x }"), params[:foo].var_type
+      end
+    end
+  end
+
   def test_rest_keyword_arg
     with_factory do
       node = def_node("def foo(**foo); end")

@@ -490,7 +490,13 @@ module Steep
           absorbed = keywords.to_h { |keyword| [keyword, keyword_params.requireds[keyword] || keyword_params.optionals.fetch(keyword)] }
           rest_types.concat(absorbed.values)
           has_error = !absorbed.empty?
+          named = keyword_params.keywords - keywords
           keywords.clear
+
+          if keyword_rest
+            elements = keyword_rest.elements.except(*named)
+            keyword_rest = AST::Types::Record.new(elements: elements, required_keys: keyword_rest.required_keys & elements.keys)
+          end
 
           if keyword_params.rest
             rest_types << keyword_params.rest
