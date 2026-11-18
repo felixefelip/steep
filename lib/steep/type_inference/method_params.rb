@@ -487,16 +487,16 @@ module Steep
           rest_types = [] #: Array[AST::Types::t]
           has_error = false
 
-          keywords.each do |keyword|
-            rest_types << (keyword_params.requireds[keyword] || keyword_params.optionals.fetch(keyword))
-            has_error = true
-          end
+          absorbed = keywords.to_h { |keyword| [keyword, keyword_params.requireds[keyword] || keyword_params.optionals.fetch(keyword)] }
+          rest_types.concat(absorbed.values)
+          has_error = !absorbed.empty?
           keywords.clear
 
           if keyword_params.rest
             rest_types << keyword_params.rest
           else
             has_error = true
+            keyword_rest ||= AST::Types::Record.new(elements: absorbed, required_keys: absorbed.keys.select { keyword_params.requireds.key?(_1) }.to_set)
           end
 
           type = rest_types.empty? ? nil : AST::Types::Union.build(types: rest_types)
