@@ -122,6 +122,10 @@ class ClassStateAcrossFilesTest < Minitest::Test
   RBS
 
   def chunks(files, rbs = RBS, hooks = nil, &recorded)
+    specialize(files, rbs, hooks, &recorded).evals.values.flatten.map { |chunk| chunk&.source }
+  end
+
+  def specialize(files, rbs = RBS, hooks = nil, &recorded)
     in_tmpdir do
       write("sig/app.rbs", rbs)
       files.each { |name, content| write("app/#{name}", content) }
@@ -131,7 +135,7 @@ class ClassStateAcrossFilesTest < Minitest::Test
       runner.singleton_class.prepend(Module.new { define_method(:file_check) { |*args| super(*args).tap { |typing| recorded&.call(args[2].path, typing) if typing } } })
       runner.singleton_class.prepend(hooks) if hooks
       runner.run
-      runner.evals.values.flatten.map { |chunk| chunk&.source }
+      runner
     end
   end
 
@@ -253,5 +257,44 @@ class ClassStateAcrossFilesTest < Minitest::Test
     macro = "class Post\n  def self.m(name) = class_eval(\"def \#{Holder.started}_\#{name}; end\")\n  m :posts\nend\n"
     rbs = CURRENT_RBS.sub("  def self.reset: () -> Holder", "  def self.started: () -> Symbol")
     assert_equal [nil], chunks({ "a.rb" => started + RULES, "b.rb" => touch, "c.rb" => macro }, rbs)
+  end
+
+  def test_a_method_nothing_calls_reads_what_the_defining_file_left
+    uncalled = MACRO.sub("  m :posts", "  def self.setup = m(:posts)")
+    assert_equal ["def post_ids; []; end"], chunks("a.rb" => DEFINITIONS + RULES, "z.rb" => uncalled)
+  end
+
+  def test_a_method_nothing_calls_in_a_file_named_first_reads_what_the_defining_file_left
+    uncalled = MACRO.sub("  m :posts", "  def self.setup = m(:posts)")
+    assert_equal ["def post_ids; []; end"], chunks("z.rb" => DEFINITIONS + RULES, "a.rb" => uncalled)
+  end
+
+  def test_a_call_whose_answer_joins_an_untyped_arm_declares_nothing
+    rbs = RBS + <<~RBS
+      module Meths
+        def outer: () { (String) -> untyped } -> untyped
+        def inner: () { (String) -> untyped } -> untyped
+      end
+      module Tok
+        def self.auth: (untyped c) { (String) -> untyped } -> untyped
+      end
+    RBS
+    auth = <<~RUBY
+      module Meths
+        def outer(&blk) = inner(&blk) || :fallback
+        def inner(&blk) = Tok.auth(self, &blk)
+      end
+      module Tok
+        def self.auth(c, &lp)
+          tok = Holder.singularize(c.to_s)
+          lp.call(tok) unless tok.empty?
+        end
+      end
+    RUBY
+
+    declarations = specialize({ "a.rb" => DEFINITIONS + RULES + MACRO, "z.rb" => auth }, rbs).declarations
+
+    assert_includes declarations.keys, "Holder.singularize"
+    refute_includes declarations.keys, "Meths#inner"
   end
 end

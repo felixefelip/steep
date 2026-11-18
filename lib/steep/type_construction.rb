@@ -910,7 +910,7 @@ module Steep
       return nil if specializations.empty?
 
       path = source.path or return nil
-      offset = node.loc.expression&.begin_pos or return nil
+      offset = node&.loc&.expression&.begin_pos or return nil
 
       specializations.active_arguments([path.to_s, offset])
     end
@@ -7223,8 +7223,7 @@ module Steep
         AST::Types::Bot.instance
       else
         types.inject do |type1, type2|
-          next type2 if type1.is_a?(AST::Types::Any)
-          next type1 if type2.is_a?(AST::Types::Any)
+          next AST::Builtin.any_type if type1.is_a?(AST::Types::Any) || type2.is_a?(AST::Types::Any)
 
           unless no_subtyping?(sub_type: type1, super_type: type2)
             # type1 <: type2

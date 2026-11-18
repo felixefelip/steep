@@ -672,7 +672,7 @@ module Steep
       def file_check(context, store, source, active)
         type_check(context, store, source, active).tap do |typing|
           @class_exits.merge!(typing.class_exits) if typing
-          @file_states.record(source.path, typing) if typing
+          @file_states.record(source.path, typing, whole: checked_source(source, active).equal?(source)) if typing
         end
       end
 
