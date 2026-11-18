@@ -68,7 +68,7 @@ module Steep
             own = held(constr, singleton).merge(ClassMemos.memo_values(constr))
             known = known.merge(singleton.name => own) unless own.empty? && !Inherited.hook_call?(constr, call.node)
           end
-          return known if known.empty? && constr.method_context
+          return known if known.empty? && constr.specialization_arguments(constr.method_context&.node)
 
           receiver = call.is_a?(TypeInference::MethodCall::Typed) ? call.receiver_type : nil
           names = named_classes(constr, call)
@@ -85,7 +85,11 @@ module Steep
         # (`TypeInference::HeldIvars#escapes?`) only with what holds under any
         # name.
         def entered_method(constr, method_context, self_type, env, arguments)
-          return env unless arguments
+          unless arguments
+            path = constr.source.path
+            states = path ? constr.specializations.entering_class_states(path) : {}
+            return states.empty? ? env : env.update(class_states: states)
+          end
 
           ivars = arguments.self_ivars
           if self_type.is_a?(AST::Types::Name::Instance)

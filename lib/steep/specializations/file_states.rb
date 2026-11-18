@@ -11,12 +11,20 @@ module Steep
         @rewritten_elsewhere = Set[] #: Set[RBS::TypeName]
       end
 
-      def record(path, typing)
+      # A check of only some of a file's bodies skips the ones no call
+      # specializes, which enter with the file's states too: the file stays
+      # recorded as entered by the last check that ran them all.
+      def record(path, typing, whole:)
         return unless typing.top_level_states
 
         entered, left = typing.top_level_states
         entered.each { |name, ivars| @rewritten_elsewhere << name unless left[name] == ivars }
-        @by_path[path] = [typing.defined_classes, entered, left, typing.observed_classes]
+        observed = typing.observed_classes
+        if !whole && (_, last_entered, _, last_observed = @by_path[path])
+          entered = last_entered
+          observed |= last_observed
+        end
+        @by_path[path] = [typing.defined_classes, entered, left, observed]
       end
 
       # `states` of the classes in `names` (`ObjectStates::ClassStates.observed`).
