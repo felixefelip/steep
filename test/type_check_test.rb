@@ -2045,7 +2045,7 @@ class TypeCheckTest < Minitest::Test
 
       assert_equal "singleton(::Comment)", actual.fetch("found")
       assert_equal "nil", actual.fetch("missing")
-      assert_equal "untyped", actual.fetch("guarded")
+      assert_equal "(untyped | nil)", actual.fetch("guarded")
       assert_equal "(singleton(::Comment) | nil)", actual.fetch("ordinary")
     end
   end
