@@ -88,6 +88,8 @@ module Steep
         key = runs.keys.first
         arguments = returned_arguments(constr, node, call, block) or return call
         type = recorded_return(constr, key, arguments) or return call
+        # Used, a union with `untyped` is `untyped`: it says less than the declaration.
+        return call if AST::Types::Union.used_as_untyped?(type)
 
         return call.with_return_type(constructed(constructed_contents(constr, node, type, arguments), call.return_type)) if ObjectStates.initialize_call?(call)
 

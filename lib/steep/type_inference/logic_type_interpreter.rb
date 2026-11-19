@@ -192,7 +192,7 @@ module Steep
           return evaluate_node(env: env, node: last_node)
 
         when :csend
-          if type.is_a?(AST::Types::Any)
+          if AST::Types::Union.used_as_untyped?(type)
             type = guess_type_from_method(node) || type
           end
 
@@ -218,7 +218,7 @@ module Steep
           return [truthy_result, falsy_result]
 
         when :send
-          if type.is_a?(AST::Types::Any)
+          if AST::Types::Union.used_as_untyped?(type)
             type = guess_type_from_method(node) || type
           end
 
@@ -526,7 +526,7 @@ module Steep
 
         argument_type = typing.type_of(node: arguments[0]) rescue nil
         return nil unless argument_type
-        return nil if argument_type.is_a?(AST::Types::Any)
+        return nil if AST::Types::Union.used_as_untyped?(argument_type)
         return nil if nilable_type?(argument_type)
 
         # Only the truthy side has anything: `a != b` is as true of a nil `a` as of
@@ -878,7 +878,7 @@ module Steep
             type_case_select0(ty, instance_type)
           end
 
-        when AST::Types::Any, AST::Types::Top, AST::Types::Var, AST::Types::Name::Interface
+        when AST::Types::Union::USED_AS_UNTYPED, AST::Types::Top, AST::Types::Var, AST::Types::Name::Interface
           [
             [instance_type],
             [type]

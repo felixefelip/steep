@@ -1915,6 +1915,9 @@ y = x.itself
 x = if _ = 3
       _ = 1
     end
+y = if _ = 4
+      x
+    end
       RUBY
 
       with_standard_construction(checker, source) do |construction, typing|
@@ -1922,6 +1925,7 @@ x = if _ = 3
 
         assert_no_error typing
         assert_equal parse_type("untyped | nil"), pair.constr.context.type_env[:x]
+        assert_equal parse_type("untyped | nil"), pair.constr.context.type_env[:y]
       end
     end
   end

@@ -1512,7 +1512,7 @@ module Steep
                       var_type = enforced_type
                     end
 
-                    if rhs_type.is_a?(AST::Types::Any)
+                    if AST::Types::Union.used_as_untyped?(rhs_type)
                       var_type = enforced_type
                     end
                   end
@@ -2136,7 +2136,7 @@ module Steep
         when :true, :false
           ty = node.type == :true ? AST::Types::Literal.new(value: true) : AST::Types::Literal.new(value: false)
 
-          fits_hint = hint && !hint.is_a?(AST::Types::Any) && !hint.is_a?(AST::Types::Top) &&
+          fits_hint = hint && !AST::Types::Union.used_as_untyped?(hint) && !hint.is_a?(AST::Types::Top) &&
             check_relation(sub_type: ty, super_type: hint).success?
 
           # Narrowing needs something to narrow under: `x = true` stays `bool`,
@@ -2154,7 +2154,7 @@ module Steep
           HashMutation.held_literal(pair.constr, node, hint: hint) || pair.tap do |pair|
             if pair.type == AST::Builtin::Hash.instance_type(fill_untyped: true)
               case hint
-              when AST::Types::Any, AST::Types::Top, AST::Types::Void
+              when AST::Types::Union::USED_AS_UNTYPED, AST::Types::Top, AST::Types::Void
                 # ok
               else
                 unless hint == pair.type
@@ -2477,7 +2477,7 @@ module Steep
               env = context.type_env.join(left_falsy.env, right_context.type_env)
               type = union_type(left_falsy.type, TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy))
 
-              unless type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Literal)
+              unless AST::Types::Union.used_as_untyped?(type) || type.is_a?(AST::Types::Literal)
                 if check_relation(sub_type: type, super_type: AST::Types::Boolean.instance).success?
                   type = AST::Types::Boolean.instance
                 end
@@ -2535,7 +2535,7 @@ module Steep
               env = context.type_env.join(left_truthy.env, right_context.type_env)
               type = union_type(left_truthy.type, TypeInference::LogicTypeInterpreter::Result.decided_type(right_type, right_truthy, right_falsy))
 
-              unless type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Literal)
+              unless AST::Types::Union.used_as_untyped?(type) || type.is_a?(AST::Types::Literal)
                 if check_relation(sub_type: type, super_type: AST::Types::Boolean.instance).success?
                   type = AST::Types::Boolean.instance
                 end
@@ -2878,7 +2878,7 @@ module Steep
             collection_type, constr, collection_context = synthesize(collection).to_ary
             collection_type = expand_self(collection_type)
 
-            if collection_type.is_a?(AST::Types::Any)
+            if AST::Types::Union.used_as_untyped?(collection_type)
               var_type = AST::Builtin.any_type
             else
               if each = calculate_interface(collection_type, :each, private: true)
@@ -3141,7 +3141,7 @@ module Steep
                     # Assumes Symbol#to_proc implementation
                     param_type = hint.type.params.required.fetch(0)
                     case param_type
-                    when AST::Types::Any
+                    when AST::Types::Union::USED_AS_UNTYPED
                       type = AST::Types::Any.instance
                     else
                       if method = calculate_interface(param_type, private: true)&.methods&.[](value_node.children[0])
@@ -3609,7 +3609,7 @@ module Steep
       end
       optional = !falsys.empty?
 
-      if truthy_rhs_type.is_a?(AST::Types::Tuple) || AST::Builtin::Array.instance_type?(truthy_rhs_type) || truthy_rhs_type.is_a?(AST::Types::Any)
+      if truthy_rhs_type.is_a?(AST::Types::Tuple) || AST::Builtin::Array.instance_type?(truthy_rhs_type) || AST::Types::Union.used_as_untyped?(truthy_rhs_type)
         constr = lhs_constr.type_masgn_type(lhs, truthy_rhs_type, masgn: masgn, optional: optional)
       else
         ary_type = try_convert(truthy_rhs_type, :to_ary) || try_convert(truthy_rhs_type, :to_a) || AST::Types::Tuple.new(types: [truthy_rhs_type])
@@ -3743,7 +3743,7 @@ module Steep
 
               return [type, constr, name]
             end
-          when AST::Types::Any
+          when AST::Types::Union::USED_AS_UNTYPED
             # Couldn't detect the type of the parent constant
             # Skip reporting error for this node.
             if node
@@ -3793,10 +3793,10 @@ module Steep
 
         type_hint = deep_expand_alias(type_hint) || type_hint
 
-        unless type_hint.is_a?(AST::Types::Any)
+        unless AST::Types::Union.used_as_untyped?(type_hint)
           procs = flatten_union(type_hint).select do |type|
             check_relation(sub_type: type, super_type: AST::Builtin::Proc.instance_type).success? &&
-              !type.is_a?(AST::Types::Any)
+              !AST::Types::Union.used_as_untyped?(type)
           end
 
           proc_instances, proc_types = procs.partition {|type| AST::Builtin::Proc.instance_type?(type) }
@@ -4527,7 +4527,7 @@ module Steep
       # receiver stays `Self`, whose interface can't be built against an untyped
       # self, and every call wrongly reports "self does not have method ...".
       # Expanding `Self` to the (untyped) self here routes it to the `Any` arm.
-      if receiver_type.is_a?(AST::Types::Self) && self_type.is_a?(AST::Types::Any)
+      if receiver_type.is_a?(AST::Types::Self) && AST::Types::Union.used_as_untyped?(self_type)
         receiver_type = self_type
       end
       receiver_type, constr = ObjectStates::Nested.read_through(constr, receiver, receiver_type, method_name) if receiver
@@ -6669,7 +6669,7 @@ module Steep
 
                 nil_given =
                   constr.check_relation(sub_type: node_type, super_type: AST::Builtin.nil_type).success? &&
-                    !node_type.is_a?(AST::Types::Any)
+                    !AST::Types::Union.used_as_untyped?(node_type)
 
                 if nil_given
                   # nil is given ==> no block arg node is given
@@ -7223,7 +7223,7 @@ module Steep
         AST::Types::Bot.instance
       else
         types.inject do |type1, type2|
-          next union_type(type1, type2) if type1.is_a?(AST::Types::Any) || type2.is_a?(AST::Types::Any)
+          next union_type(type1, type2) if AST::Types::Union.used_as_untyped?(type1) || AST::Types::Union.used_as_untyped?(type2)
 
           unless no_subtyping?(sub_type: type1, super_type: type2)
             # type1 <: type2
@@ -7443,7 +7443,7 @@ module Steep
     def test_literal_type(literal, hint)
       if hint
         case hint
-        when AST::Types::Any
+        when AST::Types::Union::USED_AS_UNTYPED
           nil
         else
           literal_type = AST::Types::Literal.new(value: literal)
@@ -7551,7 +7551,7 @@ module Steep
 
     def arrayish_type?(type, untyped_is: false)
       case type
-      when AST::Types::Any
+      when AST::Types::Union::USED_AS_UNTYPED
         if untyped_is
           type
         end
@@ -7634,7 +7634,7 @@ module Steep
       if node.children.empty?
         if hint
           array = AST::Builtin::Array.instance_type(AST::Builtin.any_type)
-          if !hint.is_a?(AST::Types::Any) && check_relation(sub_type: array, super_type: hint).success?
+          if !AST::Types::Union.used_as_untyped?(hint) && check_relation(sub_type: array, super_type: hint).success?
             add_typing node, type: unwrap(hint)
           else
             add_typing node, type: array
@@ -7754,7 +7754,7 @@ module Steep
             if hints.key?(key)
               hint_type = hints.fetch(key)
               case
-              when value_type.is_a?(AST::Types::Any)
+              when AST::Types::Union.used_as_untyped?(value_type)
                 value_type = hints.fetch(key)
               when hint_type.is_a?(AST::Types::Var)
                 value_type = value_type
@@ -7844,8 +7844,8 @@ module Steep
         end
       end
 
-      key_types.reject! {|ty| ty.is_a?(AST::Types::Any) }
-      value_types.reject! {|ty| ty.is_a?(AST::Types::Any) }
+      key_types.reject! {|ty| AST::Types::Union.used_as_untyped?(ty) }
+      value_types.reject! {|ty| AST::Types::Union.used_as_untyped?(ty) }
 
       key_types << AST::Builtin.any_type if key_types.empty?
       value_types << AST::Builtin.any_type if value_types.empty?

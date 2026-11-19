@@ -405,9 +405,9 @@ module Steep
       def nonnil_rhs?(rhs)
         type = (@typing.type_of(node: rhs) rescue nil)
         return false unless type
-        return false if type.is_a?(AST::Types::Any) || type.is_a?(AST::Types::Nil)
+        return false if AST::Types::Union.used_as_untyped?(type) || type.is_a?(AST::Types::Nil)
         if type.is_a?(AST::Types::Union)
-          return type.types.none? { |t| t.is_a?(AST::Types::Nil) || t.is_a?(AST::Types::Any) }
+          return type.types.none? { |t| t.is_a?(AST::Types::Nil) || AST::Types::Union.used_as_untyped?(t) }
         end
         true
       end
