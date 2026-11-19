@@ -294,7 +294,7 @@ module Steep
           singleton = method_name.is_a?(SingletonMethodName)
           owner = method_name.type_name.to_s.delete_prefix("::")
           constr.specializations.keep([:named_classes, constr.checker, constr.constructor_bindings, owner, method_name.method_name, singleton]) do
-            names.tap { visit_named(constr, owner, method_name.method_name, singleton, names, Set[]) }.freeze
+            Set[].tap { |found| visit_named(constr, owner, method_name.method_name, singleton, found, Set[]) }.freeze
           end
         end
 

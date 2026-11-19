@@ -146,7 +146,7 @@ module Steep
         locations = {} #: Hash[String, Hash[Arguments, Set[String]]]
         baselines, tuples, collected, callees = collect(context, Store.new(methods: {}, source: nil, receivers: @receivers, bodies: {}), locations, writers | @definers)
         definitions.merge!(collected)
-        @kept = {}
+        @kept, @keepers = {}, {}
         if tuples.empty?
           # No return specializes, but a body that writes code can still be
           # decided — by its defaults, or by having no arguments at all.
@@ -267,10 +267,11 @@ module Steep
         [found, revealed, received]
       end
 
-      # Whether the receivers moved (`Receivers::Record#adopt`): every check
-      # read under the ones before is stale then, kept or not.
+      # Whether the receivers moved (`Receivers::Record#adopt`). What `keep`
+      # computed from them is computed again; a check whose reads still get
+      # the answers they got stays (`Store#kept`).
       def adopt_receivers(received)
-        @record.adopt(received).tap { |moved| [@kept, @checks, @demands].each(&:clear) if moved }
+        @record.adopt(received).tap { |moved| @kept.clear if moved }
       end
 
       # What each call site of a code-writing method writes there, read off one
@@ -440,7 +441,7 @@ module Steep
       def store(methods)
         Store.new(
           methods: methods.transform_values { |entries| entries.transform_values(&:to_s) }, entering: @file_states.entering,
-          source: nil, typed: methods, exits: @exits, demand: @demand, demanded: @demanded, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies, kept: @kept
+          source: nil, typed: methods, exits: @exits, demand: @demand, demanded: @demanded, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies, kept: @kept, keepers: @keepers
         )
       end
 
