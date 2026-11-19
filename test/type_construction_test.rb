@@ -1930,6 +1930,25 @@ y = if _ = 4
     end
   end
 
+  def test_literal_fits_the_known_member_of_an_untyped_union_hint
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+# @type var x: ::Symbol | untyped
+x = :badge
+# @type var y: ::Integer | untyped
+y = 1
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type(":badge"), typing.type_of(node: source.node.children[0].children[1])
+        assert_equal parse_type("1"), typing.type_of(node: source.node.children[1].children[1])
+      end
+    end
+  end
+
   def test_untyped_union_is_used_as_untyped
     with_checker do |checker|
       source = parse_ruby(<<-RUBY)

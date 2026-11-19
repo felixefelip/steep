@@ -14,6 +14,10 @@ module Steep
 
         USED_AS_UNTYPED = method(:used_as_untyped?).to_proc
 
+        # What a union with `untyped` is known to hold, for a hint: a literal that
+        # fits one of its other members is still that literal.
+        def self.without_untyped(type) = type.is_a?(Union) ? build(types: type.types.reject { _1.is_a?(Any) }) : type
+
         def self.build(types:)
           return AST::Types::Bot.instance if types.empty?
           if types.size == 1

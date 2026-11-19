@@ -2136,8 +2136,8 @@ module Steep
         when :true, :false
           ty = node.type == :true ? AST::Types::Literal.new(value: true) : AST::Types::Literal.new(value: false)
 
-          fits_hint = hint && !AST::Types::Union.used_as_untyped?(hint) && !hint.is_a?(AST::Types::Top) &&
-            check_relation(sub_type: ty, super_type: hint).success?
+          fits_hint = hint && !hint.is_a?(AST::Types::Any) && !hint.is_a?(AST::Types::Top) &&
+            check_relation(sub_type: ty, super_type: AST::Types::Union.without_untyped(hint)).success?
 
           # Narrowing needs something to narrow under: `x = true` stays `bool`,
           # or a later `x = false` is an error.
@@ -7443,11 +7443,11 @@ module Steep
     def test_literal_type(literal, hint)
       if hint
         case hint
-        when AST::Types::Union::USED_AS_UNTYPED
+        when AST::Types::Any
           nil
         else
           literal_type = AST::Types::Literal.new(value: literal)
-          if check_relation(sub_type: literal_type, super_type: hint).success?
+          if check_relation(sub_type: literal_type, super_type: AST::Types::Union.without_untyped(hint)).success?
             literal_type
           end
         end

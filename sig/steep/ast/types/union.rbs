@@ -12,6 +12,8 @@ module Steep
 
         USED_AS_UNTYPED: ^(t) -> bool
 
+        def self.without_untyped: (t) -> t
+
         def ==: (untyped other) -> bool
 
         @hash: Integer
