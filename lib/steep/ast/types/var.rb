@@ -30,6 +30,10 @@ module Steep
           end
         end
 
+        FRESH_SUFFIX = /\(\d+\)\z/
+
+        def self.fresh_name?(name) = FRESH_SUFFIX.match?(name.to_s)
+
         def self.fresh(name, location: nil)
           new(name: fresh_name(name))
         end

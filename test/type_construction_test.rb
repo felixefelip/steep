@@ -1909,6 +1909,42 @@ y = x.itself
     end
   end
 
+  def test_if_join_keeps_the_known_arm_of_an_untyped_union
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+x = if _ = 3
+      _ = 1
+    end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("untyped | nil"), pair.constr.context.type_env[:x]
+      end
+    end
+  end
+
+  def test_untyped_union_is_used_as_untyped
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+# @type var x: untyped | ::Integer
+x = (_ = nil)
+# @type var s: ::String
+s = x
+y = x.no_such_method
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("untyped"), pair.constr.context.type_env[:y]
+      end
+    end
+  end
+
   def test_intersection_attr_write_drops_invariant_component
     with_checker <<-EOF do |checker|
 class Box

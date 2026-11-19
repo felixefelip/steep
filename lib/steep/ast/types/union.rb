@@ -8,6 +8,12 @@ module Steep
           @types = types
         end
 
+        # A union with an `untyped` member keeps its other members only to spell
+        # them: wherever it is used, it is `untyped`.
+        def self.used_as_untyped?(type) = type.is_a?(Any) || (type.is_a?(Union) && type.types.any?(Any))
+
+        USED_AS_UNTYPED = method(:used_as_untyped?).to_proc
+
         def self.build(types:)
           return AST::Types::Bot.instance if types.empty?
           if types.size == 1
@@ -22,8 +28,6 @@ module Steep
             end
           end.map do |type|
             case type
-            when AST::Types::Any
-              return AST::Types::Any.instance()
             when AST::Types::Top
               return AST::Types::Top.instance
             when AST::Types::Bot

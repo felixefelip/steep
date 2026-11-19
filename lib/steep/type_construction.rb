@@ -4603,7 +4603,7 @@ module Steep
         when nil
           raise
 
-        when AST::Types::Any, AST::Types::Bot
+        when AST::Types::Union::USED_AS_UNTYPED, AST::Types::Bot
           case node.type
           when :block, :numblock, :itblock
             # @type var node: Parser::AST::Node & Parser::AST::_BlockNode
@@ -7223,7 +7223,7 @@ module Steep
         AST::Types::Bot.instance
       else
         types.inject do |type1, type2|
-          next AST::Builtin.any_type if type1.is_a?(AST::Types::Any) || type2.is_a?(AST::Types::Any)
+          next union_type(type1, type2) if type1.is_a?(AST::Types::Any) || type2.is_a?(AST::Types::Any)
 
           unless no_subtyping?(sub_type: type1, super_type: type2)
             # type1 <: type2

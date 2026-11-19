@@ -34,7 +34,7 @@ class SubstitutionTest < Minitest::Test
     assert_equal Types::Name.new_singleton(name: :Object), Types::Class.new.subst(s)
     assert_equal Types::Name.new_instance(name: :Float), Types::Self.new.subst(s)
 
-    assert_equal Types::Any.new,
+    assert_equal Types::Union.build(types: [Types::Name.new_instance(name: :String), Types::Any.new]),
                  Types::Union.build(types: [Types::Var.new(name: :a), Types::Var.new(name: :b)]).subst(s)
   end
 

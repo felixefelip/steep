@@ -302,7 +302,7 @@ module Steep
 
         case
         when relation.sub_type == relation.super_type,
-             relation.sub_type.is_a?(AST::Types::Any) || relation.super_type.is_a?(AST::Types::Any),
+             AST::Types::Union.used_as_untyped?(relation.sub_type) || AST::Types::Union.used_as_untyped?(relation.super_type),
              relation.super_type.is_a?(AST::Types::Void),
              relation.super_type.is_a?(AST::Types::Top),
              relation.sub_type.is_a?(AST::Types::Bot)
