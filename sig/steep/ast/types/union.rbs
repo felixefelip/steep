@@ -8,6 +8,12 @@ module Steep
 
         def self.build: (types: Array[t]) -> t
 
+        def self.used_as_untyped?: (t) -> bool
+
+        USED_AS_UNTYPED: ^(t) -> bool
+
+        def self.without_untyped: (t) -> t
+
         def ==: (untyped other) -> bool
 
         @hash: Integer

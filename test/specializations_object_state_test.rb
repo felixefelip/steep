@@ -779,8 +779,9 @@ class SpecializationsObjectStateTest < Minitest::Test
       assert_equal "20", types.fetch("run")
       assert_equal "99", types.fetch("poked")
       assert_equal "10", types.fetch("through_ivar")
-      %w[aliased handed blocked itselfed nested sneaked].each do |name|
-        assert_equal "untyped", types.fetch(name), name
+      { "aliased" => "(untyped | nil)", "handed" => "untyped", "blocked" => "untyped",
+        "itselfed" => "(10 | untyped)", "nested" => "(untyped | nil)", "sneaked" => "(10 | untyped)" }.each do |name, type|
+        assert_equal type, types.fetch(name), name
       end
     end
   end
@@ -1098,7 +1099,7 @@ class SpecializationsObjectStateTest < Minitest::Test
       assert_equal "singleton(::P17Through)", types.fetch("tags")
       assert_equal "singleton(::P17Plain)", types.fetch("comments")
       assert_equal ":taggings", types.fetch("tags_through")
-      assert_equal "untyped", types.fetch("tags_autosave")
+      assert_equal "(untyped | nil)", types.fetch("tags_autosave")
     end
   end
 

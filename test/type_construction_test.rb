@@ -1909,6 +1909,65 @@ y = x.itself
     end
   end
 
+  def test_if_join_keeps_the_known_arm_of_an_untyped_union
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+x = if _ = 3
+      _ = 1
+    end
+y = if _ = 4
+      x
+    end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("untyped | nil"), pair.constr.context.type_env[:x]
+        assert_equal parse_type("untyped | nil"), pair.constr.context.type_env[:y]
+      end
+    end
+  end
+
+  def test_literal_fits_the_known_member_of_an_untyped_union_hint
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+# @type var x: ::Symbol | untyped
+x = :badge
+# @type var y: ::Integer | untyped
+y = 1
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type(":badge"), typing.type_of(node: source.node.children[0].children[1])
+        assert_equal parse_type("1"), typing.type_of(node: source.node.children[1].children[1])
+      end
+    end
+  end
+
+  def test_untyped_union_is_used_as_untyped
+    with_checker do |checker|
+      source = parse_ruby(<<-RUBY)
+# @type var x: untyped | ::Integer
+x = (_ = nil)
+# @type var s: ::String
+s = x
+y = x.no_such_method
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        pair = construction.synthesize(source.node)
+
+        assert_no_error typing
+        assert_equal parse_type("untyped"), pair.constr.context.type_env[:y]
+      end
+    end
+  end
+
   def test_intersection_attr_write_drops_invariant_component
     with_checker <<-EOF do |checker|
 class Box
@@ -5824,7 +5883,7 @@ EOF
         # is `::String` as it always was.
         assert_equal parse_type('(::String | "foo")'), pair.context.type_env[:a]
         assert_equal parse_type("::String"), pair.context.type_env[:b]
-        assert_equal parse_type("untyped"), pair.context.type_env[:c]
+        assert_equal parse_type("untyped | ::String"), pair.context.type_env[:c]
       end
     end
   end
@@ -13328,7 +13387,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
         assert_equal parse_type('"Ana"?'), context.type_env[:a]
         assert_equal parse_type("::Array[::Integer]?"), context.type_env[:b]
         assert_equal parse_type('"Ana"?'), context.type_env[:c], "an alias holds the nil its expansion writes"
-        assert_equal parse_type("untyped"), context.type_env[:d]
+        assert_equal parse_type("untyped?"), context.type_env[:d]
         assert_equal parse_type("::Object"), context.type_env[:e], "an `Object` is never nil to this checker"
       end
     end

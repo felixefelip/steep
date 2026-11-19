@@ -252,6 +252,7 @@ module Steep
             outcome = outcomes.fetch(definitions.fetch(key).first)
             store_exit(key, arguments, outcome.exits[key]) if outcome.exits.key?(key)
             type = outcome.returns[key] or next
+            type = Specializations.unsolved_as_untyped(type)
             next if type.to_s == baselines[key] && !(arguments.stateful? && Specializations.answers_self?(type))
 
             (found[key] ||= {})[arguments.key] = type

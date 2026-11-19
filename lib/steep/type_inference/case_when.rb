@@ -242,7 +242,7 @@ module Steep
 
           if body_result.unreachable
             typing.add_dead_clause(when_node)
-            if body_result.type.is_a?(AST::Types::Any) || initial_constr.no_subtyping?(sub_type: body_result.type, super_type: AST::Builtin.bottom_type)
+            if AST::Types::Union.used_as_untyped?(body_result.type) || initial_constr.no_subtyping?(sub_type: body_result.type, super_type: AST::Builtin.bottom_type)
               typing.add_error(
                 Diagnostic::Ruby::UnreachableValueBranch.new(
                   node: when_node,
@@ -279,7 +279,7 @@ module Steep
 
         if unreachable
           typing.add_dead_clause(else_node) if else_node
-          if else_result.type.is_a?(AST::Types::Any) || initial_constr.no_subtyping?(sub_type: else_result.type, super_type: AST::Builtin.bottom_type)
+          if AST::Types::Union.used_as_untyped?(else_result.type) || initial_constr.no_subtyping?(sub_type: else_result.type, super_type: AST::Builtin.bottom_type)
             typing.add_error(
               Diagnostic::Ruby::UnreachableValueBranch.new(
                 node: else_node || node,

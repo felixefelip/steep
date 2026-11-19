@@ -409,7 +409,7 @@ module Steep
 
       def untyped_args?(params)
         flat = params.flat_unnamed_params
-        flat.size == 1 && flat.dig(0, 1)&.is_a?(AST::Types::Any)
+        flat.size == 1 && AST::Types::Union.used_as_untyped?(flat.dig(0, 1))
       end
     end
   end

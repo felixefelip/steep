@@ -691,7 +691,7 @@ module Steep
         writes.each_with_object({}) do |(name, attrs), result|
           established = attrs.each_with_object({}) do |(attr, write_node), acc|
             type = type_of(write_node.children[2]) or next
-            next if type.is_a?(AST::Types::Any)
+            next if AST::Types::Union.used_as_untyped?(type)
             # `self`, `instance`, `class` and type variables mean something else at the call site.
             next unless type.free_variables.empty?
             declared = declared_reader_type(write_node.children[0], attr) or next
@@ -1466,7 +1466,7 @@ module Steep
         return nil unless param_node
 
         type = type_of(param_node) or return nil
-        return nil if type.is_a?(AST::Types::Any)
+        return nil if AST::Types::Union.used_as_untyped?(type)
         subtract_nil(type)
       end
 
@@ -1781,7 +1781,7 @@ module Steep
       # RHS yields nil — nothing is proven.
       def nonnil_value_type(rhs)
         type = type_of(rhs) or return nil
-        return nil if type.is_a?(AST::Types::Any)
+        return nil if AST::Types::Union.used_as_untyped?(type)
         return nil unless subtract_nil(type) == type # already nil-free
 
         type

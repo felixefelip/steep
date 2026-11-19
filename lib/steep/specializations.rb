@@ -88,6 +88,8 @@ module Steep
         key = runs.keys.first
         arguments = returned_arguments(constr, node, call, block) or return call
         type = recorded_return(constr, key, arguments) or return call
+        # Used, a union with `untyped` is `untyped`: it says less than the declaration.
+        return call if AST::Types::Union.used_as_untyped?(type)
 
         return call.with_return_type(constructed(constructed_contents(constr, node, type, arguments), call.return_type)) if ObjectStates.initialize_call?(call)
 
@@ -243,6 +245,17 @@ module Steep
       def returned_arguments(constr, node, call, block)
         arguments = call_site_arguments(constr, node, call)
         block && !arguments&.closed_block? ? arguments&.yielded : arguments
+      end
+
+      # A type read off one check, with the variables that check made up for a
+      # call's type arguments as `untyped`. Such a variable is never solved
+      # outside the call that made it, and a tuple or answer that kept one would
+      # name a fresh variable each time the call is checked again.
+      def unsolved_as_untyped(type)
+        fresh = type.free_variables.select { |var| var.is_a?(Symbol) && AST::Types::Var.fresh_name?(var) }
+        return type if fresh.empty?
+
+        type.subst(Interface::Substitution.build(fresh, Array.new(fresh.size, AST::Builtin.any_type)))
       end
 
       # What a block written at a call returns, as its body was typed; nil
@@ -444,6 +457,8 @@ module Steep
           positionals << (written_array(arg, typing) || argument_type(arg, typing, exact_self))
         end
 
+        positionals = positionals.map { |type| Specializations.unsolved_as_untyped(type) }
+        keywords = keywords.transform_values { |type| Specializations.unsolved_as_untyped(type) }
         new(
           positionals: positionals, **split_keyword_rest(call, keywords), self_ivars: receiver_ivars, self_contents: receiver_contents, class_states: class_states,
           self_type: self_type, block: block, block_return: block && Specializations.block_return(typing, block),

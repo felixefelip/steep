@@ -27,7 +27,7 @@ module Steep
           if AST::Builtin::Array.instance_type?(rhs_type)
             expand_array(lhss.dup, rhs_type, optional)
           end
-        when AST::Types::Any
+        when AST::Types::Union::USED_AS_UNTYPED
           expand_any(lhss, rhs_type, AST::Builtin.any_type, optional)
         end
       end

@@ -381,7 +381,7 @@ class InterfaceTest < Minitest::Test
       assert_nil parse_method_type("() -> String") | parse_method_type("(Integer) -> untyped")
       assert_equal parse_method_type("() -> bool"),
                    parse_method_type("() -> bot") | parse_method_type("() -> bool")
-      assert_equal parse_method_type("() -> untyped"),
+      assert_equal parse_method_type("() -> (untyped | String)"),
                    parse_method_type("() -> untyped") | parse_method_type("() -> String")
 
       assert_equal parse_method_type("() { (String | Integer) -> (Integer & Float) } -> (String | Symbol)"),

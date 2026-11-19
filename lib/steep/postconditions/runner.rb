@@ -988,8 +988,8 @@ module Steep
       # `MethodEntryInferrer#nonnil_rhs?`, over an AST type rather than a node.
       def informative_type?(type)
         return false if type.nil?
-        return false if type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Any)
-        return type.types.none? { |t| t.is_a?(AST::Types::Nil) || t.is_a?(AST::Types::Any) } if type.is_a?(AST::Types::Union)
+        return false if type.is_a?(AST::Types::Nil) || AST::Types::Union.used_as_untyped?(type)
+        return type.types.none? { |t| t.is_a?(AST::Types::Nil) || AST::Types::Union.used_as_untyped?(t) } if type.is_a?(AST::Types::Union)
 
         true
       end

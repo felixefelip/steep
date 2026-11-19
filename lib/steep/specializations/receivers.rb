@@ -108,7 +108,7 @@ module Steep
         def elsewhere?(constr, use, target)
           factory = constr.checker.factory
           type = receiver_of(constr, use) or return false
-          return true if type.is_a?(AST::Types::Any)
+          return true if AST::Types::Union.used_as_untyped?(type)
 
           target = factory.instance_type(target.name) if target.is_a?(AST::Types::Name::Instance)
           interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: constr.checker, typing: constr.typing, config: constr.builder_config)

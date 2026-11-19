@@ -18,6 +18,10 @@ module Steep
 
         def self.fresh_name: (Symbol name) -> Symbol
 
+        FRESH_SUFFIX: Regexp
+
+        def self.fresh_name?: (Symbol name) -> bool
+
         def self.fresh: (Symbol name, ?location: untyped?) -> Var
 
         def to_s: () -> String
