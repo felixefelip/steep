@@ -1211,9 +1211,12 @@ module Steep
       # got (`Reads`).
       # `kept`: what `keep` computed, shared by every copy of this store. Only
       # valid while `receivers` and the constructor bindings stay as they are.
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, receivers:, bodies:, entering: {}, reads: nil, kept: {})
+      # `keepers`: how `keep` computed each value, to compute it again once
+      # `kept` is cleared.
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, receivers:, bodies:, entering: {}, reads: nil, kept: {}, keepers: {})
         @methods = methods
         @kept = kept
+        @keepers = keepers
         @entering = entering
         @receivers = receivers
         @bodies = bodies
@@ -1254,7 +1257,7 @@ module Steep
 
       def receiver_type(site, factory:)
         read(:receiver_type, site, factory: factory) do
-          keep([:receiver_type, site]) do
+          keep([:receiver_type, site], tracked: false) do
             types = @receivers[site]&.map { |raw| parse(site, raw, factory: factory) or break nil }
             types && AST::Types::Union.build(types: types)
           end
@@ -1318,12 +1321,16 @@ module Steep
       end
 
       # `yield`, computed once per `key` across every copy of this store: for
-      # what reads nothing but the receivers and the constructor bindings.
-      def keep(key)
-        return @kept[key] if @kept.key?(key)
-
-        @kept[key] = yield
+      # what reads nothing but the receivers and the constructor bindings. A
+      # check that asks records the answer, so it stays valid across a move of
+      # the receivers that leaves that answer as it was; `tracked: false` for
+      # an asker that records what it read itself.
+      def keep(key, tracked: true, &block)
+        @keepers[key] ||= block
+        tracked ? kept(key) : kept_value(key)
       end
+
+      def kept(key) = read(:kept, key) { kept_value(key) }
 
       def parse(method_key, raw, factory:)
         return nil unless raw
@@ -1399,12 +1406,18 @@ module Steep
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand, demanded: @demanded,
           class_exits: @class_exits, declarations: @declarations, receivers: @receivers, bodies: @bodies, entering: @entering, reads: reads,
-          kept: @kept
+          kept: @kept, keepers: @keepers
         )
       end
 
       def defining(node_key)
         @active.find { |key, _| key.size == 3 && key.take(2) == node_key }
+      end
+
+      def kept_value(key)
+        return @kept[key] if @kept.key?(key)
+
+        (keeper = @keepers[key]) && (@kept[key] = keeper.call)
       end
 
       def read(name, *arguments, **options)

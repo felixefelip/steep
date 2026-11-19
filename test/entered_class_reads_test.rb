@@ -28,8 +28,10 @@ class EnteredClassReadsTest < Minitest::Test
 
   HOLDER = ::RBS::TypeName.parse("::Holder")
 
+  # The runner's stores share what `keep` computed and how.
   def store(path, states, reads = nil)
-    Steep::Specializations::Store.new(methods: {}, source: nil, receivers: {}, bodies: {}, entering: { path => states }, reads: reads)
+    Steep::Specializations::Store.new(methods: {}, source: nil, receivers: {}, bodies: {}, entering: { path => states }, reads: reads,
+                                      kept: (@kept ||= {}), keepers: (@keepers ||= {}))
   end
 
   # Whether the check of each file, made entering with `before`, still holds

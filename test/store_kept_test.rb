@@ -17,6 +17,22 @@ class StoreKeptTest < Minitest::Test
     assert_equal 1, computed
   end
 
+  def test_a_check_that_read_a_kept_value_stays_valid_while_the_value_is_computed_the_same
+    kept = {}
+    keepers = {}
+    answer = :before
+    original = Steep::Specializations::Store.new(methods: {}, source: nil, receivers: {}, bodies: {}, kept: kept, keepers: keepers)
+    reads = Steep::Specializations::Reads.new
+    original.with_reads(reads).keep([:closure, :run]) { answer }
+
+    kept.clear
+    assert reads.same?(original)
+
+    kept.clear
+    answer = :after
+    refute reads.same?(original)
+  end
+
   def test_a_store_built_apart_keeps_its_own_values
     computed = 0
     [store, store].each { |apart| apart.keep([:closure, :run]) { computed += 1 } }
