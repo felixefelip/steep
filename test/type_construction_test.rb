@@ -5883,7 +5883,7 @@ EOF
         # is `::String` as it always was.
         assert_equal parse_type('(::String | "foo")'), pair.context.type_env[:a]
         assert_equal parse_type("::String"), pair.context.type_env[:b]
-        assert_equal parse_type("untyped"), pair.context.type_env[:c]
+        assert_equal parse_type("untyped | ::String"), pair.context.type_env[:c]
       end
     end
   end
@@ -13387,7 +13387,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
         assert_equal parse_type('"Ana"?'), context.type_env[:a]
         assert_equal parse_type("::Array[::Integer]?"), context.type_env[:b]
         assert_equal parse_type('"Ana"?'), context.type_env[:c], "an alias holds the nil its expansion writes"
-        assert_equal parse_type("untyped"), context.type_env[:d]
+        assert_equal parse_type("untyped?"), context.type_env[:d]
         assert_equal parse_type("::Object"), context.type_env[:e], "an `Object` is never nil to this checker"
       end
     end
