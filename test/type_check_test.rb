@@ -2615,6 +2615,64 @@ class TypeCheckTest < Minitest::Test
     end
   end
 
+  def test_a_constant_named_on_self_is_the_one_of_the_class_or_of_a_subclass
+    run_type_check_test(
+      signatures: {
+        "self_lookup.rbs" => <<~RBS
+          class Lookup
+            class X
+            end
+
+            def self.read: () -> untyped
+            def self.write: () -> untyped
+          end
+
+          class Shadow < Lookup
+            class X
+            end
+          end
+
+          class Plain < Lookup
+          end
+
+          module Holder
+            module Inner
+            end
+
+            def self.read_inner: () -> untyped
+            def self.memo_inner: () -> untyped
+          end
+        RBS
+      },
+      code: {
+        "self_lookup.rb" => <<~'RUBY'
+          class Lookup
+            def self.read = const_get(:X)
+            def self.write = const_set(:X, Class.new)
+          end
+
+          module Holder
+            def self.read_inner = const_get(:Inner)
+            def self.memo_inner = const_defined?(:Inner) ? const_get(:Inner) : const_set(:Inner, Module.new)
+          end
+        RUBY
+      }
+    ) do |typings|
+      typing = typings.fetch("self_lookup.rb")
+      actual = {}
+      typing.each_typing do |node, _type|
+        next unless node.type == :defs && node.children[3]
+
+        actual[node.children[1].to_s] = typing.type_of(node: node.children[3]).to_s
+      end
+
+      assert_equal "(singleton(::Lookup::X) | singleton(::Shadow::X))", actual.fetch("read")
+      assert_equal "::Class", actual.fetch("write")
+      assert_equal "singleton(::Holder::Inner)", actual.fetch("read_inner")
+      assert_equal "singleton(::Holder::Inner)", actual.fetch("memo_inner")
+    end
+  end
+
   # A constant is the one name Ruby means to be written once, so the value at a
   # read is the value at the assignment — provided this file is where the name
   # is decided and nothing here changes the object behind it.

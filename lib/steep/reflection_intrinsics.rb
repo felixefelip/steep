@@ -84,7 +84,25 @@ module Steep
 
         exact = Specializations.exact_self(constr)
         exact ||= constr.self_type if MethodIdentity.key(call) == "::Class#allocate"
+        exact ||= self_and_descendants(constr.self_type, constr.checker.factory) if CONSTANT_KEYS.include?(MethodIdentity.key(call))
         exact || receiver_type
+      end
+
+      # A constant read or written on `self` is the constant of the class the
+      # body is written in or of any subclass of it, which may declare its own.
+      # The union of what `block` answers for each member, or nil where one
+      # declines.
+      def each_member(receiver)
+        types = receiver.is_a?(AST::Types::Union) ? receiver.types : [receiver]
+        answers = types.map { |member| yield(member) }
+        AST::Types::Union.build(types: answers) if answers.all?
+      end
+
+      def self_and_descendants(self_type, factory)
+        classes = respondents(self_type, factory) or return nil
+        return nil unless classes.all? { |_, singleton| singleton }
+
+        AST::Types::Union.build(types: classes.map { |name, _| AST::Types::Name::Singleton.new(name: name) })
       end
 
       # Whether this reflection is one Ruby answers by RAISING: `NameError`,
@@ -284,18 +302,6 @@ module Steep
         name if factory.env.class_decls[name].is_a?(RBS::Environment::ClassEntry)
       end
 
-      def declared_as?(constant, value, factory)
-        value = ObjectStates.state_in(value)&.back_type || value
-        return false unless value.is_a?(AST::Types::Name::Instance)
-
-        entry = factory.env.class_decls[constant]
-        case value.name
-        when RBS::BuiltinNames::Module.name then entry.is_a?(RBS::Environment::ModuleEntry)
-        when RBS::BuiltinNames::Class.name then entry.is_a?(RBS::Environment::ClassEntry)
-        else false
-        end
-      end
-
       # `Kernel#respond_to?(name)`: whether every class the receiver may be
       # an instance of — or, for `singleton(::C)`, every class object it may be
       # — gives the same answer, and which.
@@ -385,32 +391,6 @@ module Steep
         !overridden_before?(chain, "::Kernel##{method_name}", override_registry)
       end
 
-      # `Module#const_get` of a literal name, typed as the checker types the
-      # same name written `Receiver::Name`, plus what `const_get` adds to that:
-      # the toplevel for the first segment, a `"A::B"` or `"::A"` path, and
-      # `inherit: false`. A name the signatures do not declare declines rather
-      # than reports: code the checker cannot see may define it.
-      def constant_named(receiver, argument_types, factory)
-        return nil unless receiver.is_a?(AST::Types::Name::Singleton)
-
-        name, inherit_type = argument_types
-        return nil unless argument_types.size.between?(1, 2) && name.is_a?(AST::Types::Literal)
-
-        inherit = inherit_type ? literal_truthiness(inherit_type) : true
-        path = constant_path(receiver.name, name.value) or return nil
-        owner, segments = path
-
-        type = nil #: AST::Types::t?
-        segments.each_with_index do |segment, index|
-          return nil if type && !type.is_a?(AST::Types::Name::Singleton)
-
-          owner = type.name if type.is_a?(AST::Types::Name::Singleton)
-          constant = child_constant(owner, segment, inherit, factory, toplevel: index.zero?) or return nil
-          type = factory.type(constant.type)
-        end
-        type
-      end
-
       # A literal path whose segments all resolve to modules but one, which
       # nothing declares where Ruby looks for it: `Object.const_get("Post::Comment")`
       # with no `Post::Comment`, since past the first segment Ruby does not
@@ -422,12 +402,12 @@ module Steep
         name, inherit_type = argument_types
         return false unless argument_types.size.between?(1, 2) && name.is_a?(AST::Types::Literal)
 
-        inherit = inherit_type ? literal_truthiness(inherit_type) : true
-        owner, segments = constant_path(receiver.name, name.value)
+        inherit = inherit_type ? Constants.literal_truthiness(inherit_type) : true
+        owner, segments = Constants.constant_path(receiver.name, name.value)
         return false if inherit == :unknown || segments.nil?
 
         segments.each_with_index do |segment, index|
-          constant = child_constant(owner, segment, inherit, factory, toplevel: index.zero?)
+          constant = Constants.child_constant(owner, segment, inherit, factory, toplevel: index.zero?)
           return const_missing_core?(owner, factory, override_registry) unless constant
 
           type = factory.type(constant.type)
@@ -443,56 +423,6 @@ module Steep
 
         chain = dispatch_chain(AST::Types::Name::Singleton.new(name: owner), :const_missing, factory) or return false
         !overridden_before?(chain, "::Module#const_missing", override_registry)
-      end
-
-      # `[module the lookup starts at, segments]`, or nil for a name Ruby
-      # rejects with `NameError`. A Symbol is one constant name; only a String
-      # is a path.
-      def constant_path(receiver_name, value)
-        case value
-        when ::Symbol
-          segments = [value]
-        when ::String
-          receiver_name = RBS::BuiltinNames::Object.name if value.start_with?("::")
-          segments = value.delete_prefix("::").split("::", -1).map(&:to_sym)
-        else
-          return nil
-        end
-        return nil unless segments.all? { |segment| segment.match?(/\A[A-Z]\w*\z/) }
-
-        [receiver_name, segments]
-      end
-
-      # `:unknown` for an `inherit` that is no literal, which still has an
-      # answer wherever the module's own table has one.
-      def literal_truthiness(type)
-        case type
-        when AST::Types::Literal then type.value ? true : false
-        when AST::Types::Nil then false
-        else :unknown
-        end
-      end
-
-      def child_constant(owner, name, inherit, factory, toplevel:)
-        resolver = factory.constant_resolver
-        owner = factory.env.normalize_module_name(owner)
-        own = resolver.table.children(owner)&.[](name)
-        return own if own || inherit != true
-
-        found = resolver.resolve_child(owner, name)
-        return found if found || !toplevel || !reaches_toplevel?(owner, factory)
-
-        resolver.table.toplevel[name] || resolver.resolve_child(RBS::BuiltinNames::Object.name, name)
-      end
-
-      # Ruby falls back to `Object` for a module, and a class reaches it as an
-      # ancestor; a `BasicObject` subclass does neither.
-      def reaches_toplevel?(owner, factory)
-        return true if factory.env.class_decls[owner].is_a?(RBS::Environment::ModuleEntry)
-
-        factory.definition_builder.ancestor_builder.instance_ancestors(owner).ancestors.any? do |ancestor|
-          ancestor.name == RBS::BuiltinNames::Object.name
-        end
       end
 
       def literal_method_name(argument_types)
@@ -704,16 +634,18 @@ module Steep
     end
 
     CONST_SET = lambda do |receiver, argument_types, factory, _override_registry|
-      name, value = argument_types
-      next nil unless argument_types.size == 2 && receiver.is_a?(AST::Types::Name::Singleton)
-      next nil unless name.is_a?(AST::Types::Literal) && name.value.is_a?(::Symbol)
+      each_member(receiver) do |member|
+        name, value = argument_types
+        next nil unless argument_types.size == 2 && member.is_a?(AST::Types::Name::Singleton)
+        next nil unless name.is_a?(AST::Types::Literal) && name.value.is_a?(::Symbol)
 
-      constant = RBS::TypeName.new(name: name.value, namespace: receiver.name.to_namespace)
-      AST::Types::Name::Singleton.new(name: constant) if declared_as?(constant, value, factory)
+        constant = RBS::TypeName.new(name: name.value, namespace: member.name.to_namespace)
+        AST::Types::Name::Singleton.new(name: constant) if Constants.declared_as?(constant, value, factory)
+      end
     end
 
     CONST_GET = lambda do |receiver, argument_types, factory, _override_registry|
-      constant_named(receiver, argument_types, factory)
+      each_member(receiver) { |member| Constants.constant_named(member, argument_types, factory) }
     end
 
     RESPOND_TO = lambda do |receiver, argument_types, factory, override_registry|
@@ -727,6 +659,7 @@ module Steep
     CONSULTED_NAMES = %i[respond_to_missing? const_missing].freeze
 
     CONST_GET_KEY = "::Module#const_get"
+    CONSTANT_KEYS = [CONST_GET_KEY, "::Module#const_set"].freeze
 
     # The reflections that raise `NameError` for a missing method, with whether
     # a private one counts as missing, and `const_get`, for a missing constant.
