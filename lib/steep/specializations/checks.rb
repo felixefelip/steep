@@ -93,7 +93,7 @@ module Steep
           end.to_h,
           sites: Collector.call_sites(typing, overrides: @overrides),
           class_exits: typing.class_exits,
-          receivers: bodies.to_h { |key, (def_node, _)| [key, Receivers.collect(typing, def_node, @names)] }
+          receivers: bodies.to_h { |key, (def_node, _)| [key, Receivers.collect(typing, def_node, @names, unwritten: {})] }
         )
       end
     end

@@ -83,6 +83,13 @@ module Steep
           stdout.puts "  → #{project.relative_path(runner.evals_output_path)}"
           stdout.puts
         end
+
+        unrecorded = runner.unrecorded_receivers
+        if unrecorded.any?
+          stdout.puts Rainbow("# Receivers typed but not recorded (taken as untyped):").bold
+          unrecorded.each { |site, type| stdout.puts "  #{site}  #{type}" }
+          stdout.puts
+        end
       rescue => e
         stderr.puts "Warning: specialization inference failed: #{e.class}: #{e.message}"
       end

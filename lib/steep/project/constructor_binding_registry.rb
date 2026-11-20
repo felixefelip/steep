@@ -186,10 +186,10 @@ module Steep
         @uses[name.to_sym] || @reader_uses.fetch(name.to_sym, [])
       end
 
-      # Every name `uses_of` answers for, and every one `calls_of` does.
+      # Every name `every_use_of` answers for, and every one `calls_of` does.
       def used_names
         index_uses unless @uses
-        @uses.keys.to_set | @calls.keys
+        @uses.keys.to_set | @reader_uses.keys | @calls.keys
       end
 
       def used_name?(name) = indexed_uses.key?(name) || @calls.key?(name)
