@@ -12,32 +12,33 @@ module Steep
         # makes one (`ObjectStates::BlockRun.runs_in_place?`), with the
         # receiver's type as RBS: on `self`, the type `self` has where the
         # call is made (`call`, which a call with a block is recorded on). A
-        # site whose receiver the checker did not type, or typed relative to
-        # where it is, is nil.
-        def collect(typing, node, names, found = {}, call: node)
+        # site whose receiver the checker did not type is nil; one it typed
+        # but RBS cannot spell is nil too, and its type is kept in
+        # `unwritten`.
+        def collect(typing, node, names, unwritten:, found: {}, call: node)
           return found unless node.is_a?(::Parser::AST::Node)
 
           if SENDS.include?(node.type) && names.include?(node.children[1]) && (site = TypeInference::ClassMemoAnalyzer.site(node))
-            found[site] = receiver_written(typing, node.children[0], call)
+            found[site] = receiver_written(typing, node.children[0], call, site, unwritten)
           end
           if Accumulators::LAMBDA_BODIES.include?(node.type) && SENDS.include?(node.children[0].type) && names_any?(node.children.drop(1), names) &&
              (site = TypeInference::ClassMemoAnalyzer.site(node.children[0]))
-            found[site] = receiver_written(typing, node.children[0].children[0], node)
+            found[site] = receiver_written(typing, node.children[0].children[0], node, site, unwritten)
           end
           node.children.each_with_index do |child, index|
-            collect(typing, child, names, found, call: Accumulators::LAMBDA_BODIES.include?(node.type) && index.zero? ? node : child)
+            collect(typing, child, names, unwritten: unwritten, found: found, call: Accumulators::LAMBDA_BODIES.include?(node.type) && index.zero? ? node : child)
           end
           found
         end
 
         # Adds what `collect` found to `receivers`: a site read by two targets
         # keeps what both typed it as, and one a target could not type is
-        # dropped for good (`unknown`).
+        # `untyped` for good (`unknown`).
         def record(receivers, unknown, found)
           found.each do |site, type|
             if type.nil? || unknown.include?(site)
               unknown << site
-              receivers.delete(site)
+              receivers[site] = Record::UNTYPED
             else
               receivers[site] = receivers.fetch(site, []) | [type]
             end
@@ -79,26 +80,58 @@ module Steep
           end
         end
 
-        def receiver_written(typing, receiver, call)
-          if receiver.nil? || receiver.type == :self
-            type = typing.self_type_of_call(node: call)
-            type && written(type)
-          elsif typing.has_type?(receiver)
-            written(typing.type_of(node: receiver))
-          end
+        def receiver_written(typing, receiver, call, site, unwritten)
+          self_type = typing.self_type_of_call(node: call)
+          type = receiver.nil? || receiver.type == :self ? self_type : (typing.type_of(node: receiver) if typing.has_type?(receiver))
+          return unless type
+
+          written(type, self_type).tap { |spelled| unwritten[site] = type.to_s unless spelled }
         end
 
-        def written(type)
-          type = erase_parameters(Specializations.rbs_writable(readable(type)))
+        def written(type, self_type)
+          type = classes_only(Specializations.rbs_writable(readable(type)).subst(placed(self_type)))
           type.to_s if type.free_variables.empty?
         end
 
-        # What a value of a class may be does not depend on its parameters.
-        def erase_parameters(type)
-          return type unless type.is_a?(AST::Types::Name::Instance)
+        # `self` and `instance` as the call they were typed at was checked
+        # under.
+        def placed(self_type)
+          instance = instance_of(self_type)
+          Interface::Substitution.build(
+            [], [],
+            self_type: self_type || AST::Types::Self.instance,
+            instance_type: instance || AST::Types::Instance.instance,
+            module_type: (instance && singleton_of(instance)) || AST::Types::Class.instance
+          )
+        end
 
-          variables = type.free_variables.grep(Symbol)
-          type.subst(Interface::Substitution.build(variables, variables.map { AST::Builtin.any_type }))
+        def instance_of(type)
+          case type
+          when AST::Types::Name::Singleton then AST::Types::Name::Instance.new(name: type.name, args: [])
+          when AST::Types::Name::Instance then type
+          when AST::Types::Union then type.types.map { |member| instance_of(member) or return nil }.then { |members| AST::Types::Union.build(types: members) }
+          end
+        end
+
+        def singleton_of(type)
+          case type
+          when AST::Types::Name::Instance then AST::Types::Name::Singleton.new(name: type.name)
+          when AST::Types::Union then type.types.map { |member| singleton_of(member) or return nil }.then { |members| AST::Types::Union.build(types: members) }
+          end
+        end
+
+        # What a value of a class may be depends neither on the class's
+        # parameters nor, for a proc, on its signature. A type variable may be
+        # a value of any class.
+        def classes_only(type)
+          case type
+          when AST::Types::Proc then AST::Builtin::Proc.instance_type
+          when AST::Types::Var then AST::Builtin::BasicObject.instance_type
+          when AST::Types::Name::Instance, AST::Types::Name::Interface
+            variables = type.free_variables.grep(Symbol)
+            type.subst(Interface::Substitution.build(variables, variables.map { AST::Builtin.any_type }))
+          else type.map_type { |child| classes_only(child) }
+          end
         end
 
         def readable(type)
