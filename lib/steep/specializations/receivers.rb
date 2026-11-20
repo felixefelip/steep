@@ -121,11 +121,15 @@ module Steep
         end
 
         # What a value of a class may be depends neither on the class's
-        # parameters nor, for a proc, on its signature.
+        # parameters nor, for a proc, on its signature. A type variable may be
+        # a value of any class.
         def classes_only(type)
           case type
           when AST::Types::Proc then AST::Builtin::Proc.instance_type
-          when AST::Types::Var then AST::Builtin.any_type
+          when AST::Types::Var then AST::Builtin::BasicObject.instance_type
+          when AST::Types::Name::Instance, AST::Types::Name::Interface
+            variables = type.free_variables.grep(Symbol)
+            type.subst(Interface::Substitution.build(variables, variables.map { AST::Builtin.any_type }))
           else type.map_type { |child| classes_only(child) }
           end
         end
