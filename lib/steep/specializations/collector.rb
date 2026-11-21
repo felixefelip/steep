@@ -39,9 +39,14 @@ module Steep
       # The tuples a call site specializes `key` under. A constructor called
       # with no arguments fixes nothing, but its body alone decides the object
       # it answers (`ObjectStates::Constructed`), and so does the frame that
-      # defined a method a block was found to define (`harvested`).
-      def self.tuples(key, arguments, harvested:)
-        (key.end_with?(".new") || harvested) && arguments.empty? && arguments.block.nil? ? [arguments] : arguments.tuples
+      # defined a method a block was found to define (`harvested`). A body that
+      # cannot read what its block returns is specialized for any block
+      # (`unread`, `BlockReads`).
+      def self.tuples(key, arguments, harvested:, unread:)
+        return [arguments] if (key.end_with?(".new") || harvested) && arguments.empty? && arguments.block.nil?
+
+        tuples = arguments.tuples
+        unread ? tuples.map { |tuple| tuple.any_block || tuple }.select(&:literal?).uniq : tuples
       end
 
       def self.constructor?(key, def_node)
@@ -50,14 +55,15 @@ module Steep
 
       # `{ "Foo#bar" => Set[Arguments] }` for the call sites in `typing` that
       # resolve to one method and fix at least one argument to a literal, under
-      # each body the call may run.
-      def self.call_sites(typing, overrides:)
+      # each body the call may run. `unread` says of a key whether its body
+      # cannot read what its block returns (`BlockReads`).
+      def self.call_sites(typing, overrides:, unread:)
         result = {} #: Hash[String, Set[Arguments]]
 
         each_call_site(typing, overrides: overrides) do |key, arguments, _node|
           # A tuple fixing no value specializes nothing: the body would be
           # re-checked under the declaration it already has.
-          (result[key] ||= Set.new).merge(tuples(key, arguments, harvested: overrides.harvested?(key)))
+          (result[key] ||= Set.new).merge(tuples(key, arguments, harvested: overrides.harvested?(key), unread: unread.call(key)))
         end
 
         result

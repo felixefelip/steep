@@ -67,12 +67,16 @@ module Steep
 
       # `returned`: the type a body returns in a typing, given its key and node.
       # `names`: the readers whose receivers an outcome records (`Receivers`).
-      def initialize(overrides:, returned:, names:)
+      # `unread`: whether a key's body cannot read what its block returns.
+      def initialize(overrides:, returned:, names:, unread:)
         @overrides = overrides
         @returned = returned
         @names = names
+        @unread = unread
         @outcomes = {} #: Hash[untyped, Outcome]
       end
+
+      attr_reader :unread
 
       def clear = @outcomes.clear
 
@@ -100,7 +104,7 @@ module Steep
             exit = typing.exit_ivars_of(node: def_node)
             [key, exit] if ObjectStates::KeptSelf.exit_kept?(arguments, exit)
           end.to_h,
-          sites: Collector.call_sites(typing, overrides: @overrides),
+          sites: Collector.call_sites(typing, overrides: @overrides, unread: @unread),
           class_exits: typing.class_exits,
           receivers: bodies.to_h { |key, (def_node, _)| [key, Receivers.collect(typing, def_node, @names, unwritten: {})] }
         )
