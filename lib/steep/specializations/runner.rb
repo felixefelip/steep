@@ -71,6 +71,7 @@ module Steep
         @demanding = Set[] #: Set[[String, String]]
         @class_exits = {} #: Hash[RBS::TypeName, Hash[Symbol, AST::Types::t]]
         @declarations = {} #: Hash[String, String]
+        @selves = {} #: Hash[String, Array[String]]
         @defined_methods = {} #: Hash[String, Hash[String, String]]
         @overrides = nil
         @record = Receivers::Record.new
@@ -82,9 +83,9 @@ module Steep
       # `path:line:column`. Filled by `run` alongside the return types.
       attr_reader :evals
 
-      # What each method returns across all its calls (`CallSiteUnions`), by
-      # method. Filled by `run`.
-      attr_reader :declarations
+      # What each method returns across all its calls (`CallSiteUnions`), and
+      # the selves they run it on (`Reader#foreign_selves`), by method. Filled by `run`.
+      attr_reader :declarations, :selves
 
       # The classes each typed receiver of a reader may be (`Receivers`), by
       # site, and the methods found defined with `define_method`
@@ -101,6 +102,7 @@ module Steep
         @class_exits = {}
         @file_states = FileStates.new
         @declarations = {}
+        @selves = {}
         @defined_methods = {}
         @record = Receivers::Record.new
         @receivers = @record.receivers
@@ -114,10 +116,10 @@ module Steep
 
       def write(methods)
         exits = @exits.transform_values { |by_key| by_key.transform_values { |exit| Specializations.sidecar_exit(exit) } }.reject { |_, by_key| by_key.empty? }
-        if methods.empty? && @declarations.empty? && @receivers.empty? && exits.empty?
+        if methods.empty? && @declarations.empty? && @selves.empty? && @receivers.empty? && exits.empty?
           output_path.delete if output_path.file?
         else
-          Writer.write(output_path, methods, @declarations, @receivers.transform_keys { |site| @project.relative_path(Pathname(site)).to_s }, exits)
+          Writer.write(output_path, methods, @declarations, @selves, @receivers.transform_keys { |site| @project.relative_path(Pathname(site)).to_s }, exits)
         end
 
         if @evals.empty?
@@ -196,7 +198,7 @@ module Steep
           writable = entries.select { |argument_key, _| Arguments.persistable_key?(argument_key) }
           (methods[key] ||= {}).merge!(writable.transform_values { |type| Specializations.sidecar_value(Specializations.sidecar_writable(type)) }) unless writable.empty?
         end
-        @declarations.merge!(call_site_unions(context, store(found), found, baselines, callees, definitions))
+        @declarations.merge!(call_site_unions(context, store(found), found, tuples, baselines, callees, definitions))
         @defined_methods.merge!(@harvested.signatures(@declarations))
 
         harvest_evals(context, store(found), locations, definitions, writers)
@@ -512,13 +514,14 @@ module Steep
       # the declarations and under the settled findings both. The calls are read
       # under the settled findings, which is what they pass once every inner
       # call has specialized.
-      def call_site_unions(context, store, found, baselines, callees, definitions)
+      def call_site_unions(context, store, found, tuples, baselines, callees, definitions)
         typings = Hash.new { |hash, path| hash[path] = type_check(context, store, context.sources.fetch(path), {}) }
         reader = CallSiteUnions::Reader.new(
           store: store, factory: context.subtyping.factory, definitions: definitions,
-          sites: call_site_reader(typings, callees), check: body_checker(context, store, definitions),
+          sites: CallSiteUnions.sites(typings, overrides: @overrides, paths: ->(key) { affected_paths(callees, Set[key]) }), check: body_checker(context, store, definitions),
           runs: ->(typing, node) { Collector.runs_at(typing, node, overrides: @overrides) }
         )
+        @selves.merge!(tuples.each_key.filter_map { |key| (selves = reader.foreign_selves(key)) && [key, selves] }.to_h)
 
         found.each_key.filter_map do |key|
           path, def_node = definitions.fetch(key)
@@ -529,16 +532,6 @@ module Steep
           answer = Returns.body_type(typings[path], def_node)
           [key, union.to_s] unless union.to_s == baselines[key] && answer && union.to_s == Specializations.rbs_writable(answer).to_s
         end.to_h
-      end
-
-      def call_site_reader(typings, callees)
-        by_path = Hash.new do |hash, path|
-          sites = Hash.new { |by_key, key| by_key[key] = [] } #: Hash[String, Array[untyped]]
-          Collector.each_call_site(typings[path], overrides: @overrides, every_call: true) { |key, arguments, node| sites[key] << [path, node, arguments] }
-          hash[path] = sites
-        end
-
-        ->(key) { affected_paths(callees, Set[key]).flat_map { |path| by_path[path].fetch(key, []) } }
       end
 
       def body_checker(context, store, definitions)
