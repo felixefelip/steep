@@ -173,10 +173,12 @@ module Steep
       # Every place the project names `name`, one of its class memos
       # (`Body#memo`) or a memo's ivar, by spelling
       # (`TypeInference::ClassMemoAnalyzer`).
-      def uses_of(name)
-        index_uses unless @uses
-        @uses.fetch(name.to_sym, [])
-      end
+      def uses_of(name) = indexed_uses.fetch(name.to_sym, [])
+
+      # `uses_of` for an ivar an instance method sets to a literal hash or
+      # array, read in the instance methods, a variable apart from the class's
+      # ivar of the same name, and for a method that answers one.
+      def instance_uses_of(name) = indexed_uses.then { @instance_uses.fetch(name.to_sym, []) }
 
       # `uses_of`, for a reader it does not index too, and what forwards one:
       # indexed apart, so what `uses_of` answers, and how it records a use of
@@ -333,13 +335,13 @@ module Steep
 
       # A method a use forwards (`ClassMemoAnalyzer::Use#forwarded_by`) is
       # used where it is called.
-      def uses_by_name(names)
+      def uses_by_name(names, instance: false)
         found = {} #: Hash[Symbol, Array[TypeInference::ClassMemoAnalyzer::Use]]
         indexed = Set[] #: Set[Symbol]
         until names.empty?
           indexed.merge(names)
           @nodes.each do |node|
-            TypeInference::ClassMemoAnalyzer.uses(node, names: names, folded_evals: @folded_evals).each { |name, uses| (found[name] ||= []).concat(uses) }
+            TypeInference::ClassMemoAnalyzer.uses(node, names: names, folded_evals: @folded_evals, instance: instance).each { |name, uses| (found[name] ||= []).concat(uses) }
           end
           found.each_value { |uses| hand_on(uses) }
           names = found.each_value.flat_map { |uses| uses.flat_map { |use| use.enum_for(:each_forwarder).to_a } }.to_set - indexed
@@ -449,6 +451,7 @@ module Steep
         names.merge(keyed_memo_names).merge(cvar_writes_of.filter_map { |_, name, _| name })
         @uses = uses_by_name(names)
         @reader_uses = uses_by_name(reader_names - names)
+        @instance_uses = uses_by_name(TypeInference::LiteralWrites.instance_names(@methods), instance: true)
         TypeInference::ClassMemoAnalyzer.index_calls(@nodes, keyed_memo_names | ivar_using_names, @calls, folded_evals: @folded_evals, callers: true)
         @hash_memos = hashes.to_set
         @forwarded_stores = forwarded_stores

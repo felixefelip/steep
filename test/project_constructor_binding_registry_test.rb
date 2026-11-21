@@ -112,6 +112,35 @@ class ProjectConstructorBindingRegistryTest < Minitest::Test
     end
   end
 
+  def test_an_instance_hash_ivar_is_used_where_its_instance_methods_read_it
+    registry = ConstructorBindingRegistry.new
+    registry.ingest_source(<<~RUBY, path_name: "app.rb")
+      class Base
+        def initialize = @cache = {}
+        def get(name) = @cache[name]
+        def set(name, value) = @cache[name] = value
+        def each_key = [1].each { @cache.keys }
+        def self.cache = @cache
+      end
+    RUBY
+
+    assert_equal [%i[receiver []], %i[receiver []=], %i[receiver keys]], registry.instance_uses_of(:@cache).map { |use| [use.kind, use.called] }
+    assert_equal [], registry.uses_of(:@cache)
+  end
+
+  def test_an_instance_hash_ivar_named_by_reflection_escapes
+    registry = ConstructorBindingRegistry.new
+    registry.ingest_source(<<~RUBY, path_name: "app.rb")
+      class Base
+        def initialize = @cache = {}
+        def get(name) = @cache[name]
+      end
+      Base.new.instance_variable_get(:@cache)
+    RUBY
+
+    assert_includes registry.instance_uses_of(:@cache).map(&:kind), :escape
+  end
+
   def class_bodies_of(source, name)
     registry = ConstructorBindingRegistry.new
     registry.ingest_source(source, path_name: "app.rb")

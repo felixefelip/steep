@@ -21,6 +21,14 @@ module Steep
         writes
       end
 
+      # The ivars an instance method of `methods` sets to a hash or array
+      # literal, and the methods that answer one of them.
+      def instance_names(methods)
+        bodies = methods.each_value.flat_map { |by_name| by_name.values.flatten }.compact
+        ivars = bodies.flat_map { |body| [*body.literal_writes, body.memoized_hash].compact }.to_set
+        ivars | methods.each_value.flat_map { |by_name| by_name.filter_map { |name, each| name if each.any? { |body| ivars.include?(body&.memoizes || body&.returns) } } }
+      end
+
       # Whether `call` is made on an ivar that every instance method of
       # `methods` (`{ class name => { method name => [Body or nil] } }`)
       # assigns only a literal, and names a method the project does not define
