@@ -173,10 +173,13 @@ module Steep
       class Record
         UNTYPED = ["untyped"].freeze
 
-        attr_reader :receivers
+        # `unwritten`: the type of each site the checker typed but RBS cannot
+        # spell (`Receivers.collect`).
+        attr_reader :receivers, :unwritten
 
         def initialize
           @receivers = {} #: Hash[String, Array[String]]
+          @unwritten = {} #: Hash[String, String]
           @whole = {} #: Hash[String, Array[String]]
           @unknown = Set[] #: Set[String]
           @received = {} #: Hash[String, Array[Hash[String, String?]]]
@@ -184,6 +187,10 @@ module Steep
         end
 
         def untupled(key) = @untupled << key
+
+        # The sites whose receiver the checker typed but the record holds as
+        # `untyped`, with that type (`Receivers.reaches?`).
+        def unrecorded = @unwritten.select { |site, _| @receivers.fetch(site, UNTYPED) == UNTYPED }
 
         def record(found)
           Receivers.record(@whole, @unknown, found)

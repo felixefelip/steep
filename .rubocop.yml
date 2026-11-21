@@ -41,7 +41,7 @@ Project/ClassLengthCeiling:
     "lib/steep/signature/validator.rb": 489
     "lib/steep/services/goto_service.rb": 473
     "lib/steep/services/completion_provider/ruby.rb": 472
-    "lib/steep/drivers/check.rb": 452
+    "lib/steep/drivers/check.rb": 434
 
 # Replaced by Project/ModuleLengthCeiling, which takes the same settings plus a
 # per-file ceiling.

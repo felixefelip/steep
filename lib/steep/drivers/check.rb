@@ -50,15 +50,8 @@ module Steep
         contracts = runner.run
         runner.write(contracts)
 
-        if contracts.any?
-          stdout.puts Rainbow("# Inferred preconditions:").bold
-          contracts.each do |contract|
-            sep = contract.singleton ? "." : "#"
-            stdout.puts "  #{contract.type_name}#{sep}#{contract.method_name}"
-          end
-          stdout.puts "  → #{project.relative_path(runner.output_path)}"
-          stdout.puts
-        end
+        lines = contracts.map { |contract| "#{contract.type_name}#{contract.singleton ? "." : "#"}#{contract.method_name}" }
+        print_inferred("Inferred preconditions", lines, project.relative_path(runner.output_path))
       rescue => e
         stderr.puts "Warning: precondition inference failed: #{e.class}: #{e.message}"
       end
@@ -68,28 +61,10 @@ module Steep
         methods = runner.run
         runner.write(methods)
 
-        if methods.any?
-          stdout.puts Rainbow("# Inferred specializations (return types per argument tuple):").bold
-          methods.each do |key, entries|
-            entries.each_key { |arguments| stdout.puts "  #{key}#{arguments}" }
-          end
-          stdout.puts "  → #{project.relative_path(runner.output_path)}"
-          stdout.puts
-        end
-
-        if runner.evals.any?
-          stdout.puts Rainbow("# Inferred string evals (code a call site writes):").bold
-          runner.evals.each_key { |site| stdout.puts "  #{site}" }
-          stdout.puts "  → #{project.relative_path(runner.evals_output_path)}"
-          stdout.puts
-        end
-
-        unrecorded = runner.unrecorded_receivers
-        if unrecorded.any?
-          stdout.puts Rainbow("# Receivers typed but not recorded (taken as untyped):").bold
-          unrecorded.each { |site, type| stdout.puts "  #{site}  #{type}" }
-          stdout.puts
-        end
+        tuples = methods.flat_map { |key, entries| entries.each_key.map { |arguments| "#{key}#{arguments}" } }
+        print_inferred("Inferred specializations (return types per argument tuple)", tuples, project.relative_path(runner.output_path))
+        print_inferred("Inferred string evals (code a call site writes)", runner.evals.keys, project.relative_path(runner.evals_output_path))
+        print_inferred("Receivers typed but not recorded (taken as untyped)", runner.unrecorded_receivers.map { |site, type| "#{site}  #{type}" })
       rescue => e
         stderr.puts "Warning: specialization inference failed: #{e.class}: #{e.message}"
       end
@@ -99,20 +74,21 @@ module Steep
         entries = runner.run
         runner.write(entries)
 
-        if entries.any?
-          stdout.puts Rainbow("# Inferred postconditions (ivar refinements):").bold
-          entries.each do |entry|
-            sep = entry.singleton ? "." : "#"
-            stdout.puts "  #{entry.class_name}#{sep}#{entry.method_name}"
-            entry.ivars.each do |name, type|
-              stdout.puts "    #{name}: #{type}"
-            end
-          end
-          stdout.puts "  → #{project.relative_path(runner.output_path)}"
-          stdout.puts
+        lines = entries.flat_map do |entry|
+          ["#{entry.class_name}#{entry.singleton ? "." : "#"}#{entry.method_name}", *entry.ivars.map { |name, type| "  #{name}: #{type}" }]
         end
+        print_inferred("Inferred postconditions (ivar refinements)", lines, project.relative_path(runner.output_path))
       rescue => e
         stderr.puts "Warning: postcondition inference failed: #{e.class}: #{e.message}"
+      end
+
+      def print_inferred(title, lines, path = nil)
+        return if lines.empty?
+
+        stdout.puts Rainbow("# #{title}:").bold
+        lines.each { |line| stdout.puts "  #{line}" }
+        stdout.puts "  → #{path}" if path
+        stdout.puts
       end
 
       def active_group?(group)
