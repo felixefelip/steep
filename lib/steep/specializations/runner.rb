@@ -137,7 +137,7 @@ module Steep
         @definers = code_writers(context, defines: true)
         @factory = context.subtyping.factory
         @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry, harvested: ->(key) { @harvested.harvested?(key) })
-        @checks = Checks.new(overrides: @overrides, returned: method(:returned_type), names: @project.constructor_binding_registry.used_names)
+        @checks = Checks.new(overrides: @overrides, returned: method(:returned_type), names: @project.constructor_binding_registry.used_names, unread: ->(key) { @sites.unread.include?(key) })
         @harvested = HarvestedMethods.new(@project.base_dir)
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         @growth = {} #: Hash[String, Set[Integer]]
@@ -429,7 +429,7 @@ module Steep
           active = by_node(@harvested.framed(key, arguments), definitions)
           checked, exit, returned, sites = @demands.value([memo, active.transform_values(&:key)], store.with_reads(nil).with_active(active), {}) do |reading, _|
             typing = type_check(context, reading, context.sources.fetch(path), active)
-            typing ? [true, typing.exit_ivars_of(node: def_node), returned_type(typing, def_node, key), Collector.call_sites(typing, overrides: @overrides)] : [false, nil, nil, {}]
+            typing ? [true, typing.exit_ivars_of(node: def_node), returned_type(typing, def_node, key), Collector.call_sites(typing, overrides: @overrides, unread: @checks.unread)] : [false, nil, nil, {}]
           end
           store_exit(key, arguments, exit) if checked && ObjectStates::KeptSelf.exit_kept?(arguments, exit)
           (@demanded_exits ||= Set[]) << memo
@@ -478,9 +478,9 @@ module Steep
           typing = file_check(context, store, source, {})
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
-            next @harvested.remember({ key => Collector.tuples(key, arguments, harvested: true) }, definitions) unless definitions.key?(key)
+            next @harvested.remember({ key => @sites.tuples_of(key, arguments, harvested: true) }, definitions) unless definitions.key?(key)
 
-            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)))
+            (tuples[key] ||= Set.new).merge(@sites.tuples_of(key, arguments, harvested: @harvested.harvested?(key)))
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
         end
@@ -592,13 +592,14 @@ module Steep
 
       def collect(context, store, locations, writers)
         baselines = {} #: Hash[String, String]
-        tuples = {} #: Hash[String, Set[Arguments]]
+        @sites = BlockReads::Sites.new
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         callees = {} #: Hash[Pathname, Set[String]]
 
         context.sources.each do |path, source|
           typing = file_check(context, store, source, {})
           record_receivers(typing, source)
+          @sites.read(typing, Collector.definitions(source)) if typing
 
           Collector.definitions(source).each do |key, def_node|
             definitions[key] = [path, def_node]
@@ -607,14 +608,14 @@ module Steep
           end
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
-            @record.untupled(key) if Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)).empty?
-            (tuples[key] ||= Set.new).merge(Collector.tuples(key, arguments, harvested: @harvested.harvested?(key)))
+            @sites << [key, arguments, @harvested.harvested?(key)]
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
 
           callees[path] = Collector.callees(typing, overrides: @overrides) if typing
         end
 
+        tuples = @sites.tuples(untupled: @record.method(:untupled))
         @harvested.remember(tuples, definitions)
         tuples.select! { |key, _| definitions.key?(key) }
         locations.select! { |key, _| definitions.key?(key) }

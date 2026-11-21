@@ -835,9 +835,11 @@ module Steep
         [(self if keyed), without_self].compact.flat_map { |arguments| [arguments, (arguments.yielded unless closed_block?)] }.compact.select(&:literal?)
       end
 
-      def yielded
-        with(block: nil) if block && block_return
-      end
+      def yielded = (with(block: nil) if block && block_return)
+
+      # A yielded tuple recorded for a body that cannot read what its block
+      # returns (`BlockReads`), under which any block's call reads the answer.
+      def any_block = (with(block_return: AST::Builtin.any_type) if block.nil? && block_return && !block_return.is_a?(AST::Types::Any))
 
       def without_self
         with_self(nil)
@@ -1240,7 +1242,7 @@ module Steep
       # specializing, rather than elsewhere in its file.
       def exit_ivars(method_key, arguments, in_checked_body:, factory:)
         read(:exit_ivars, method_key, arguments, in_checked_body: in_checked_body, factory: factory) do
-          exit = @exits.dig(method_key, arguments.key)
+          exit = @exits.dig(method_key, arguments.key) || arguments.any_block&.then { |any| @exits.dig(method_key, any.key) }
           exit = parse_exit(method_key, exit, factory: factory) if exit.is_a?(Hash)
           exit || @demand&.call(self, method_key, arguments, in_checked_body)
         end
@@ -1294,6 +1296,7 @@ module Steep
           types = arguments.alternatives.map do |alternative|
             return_type(method_key, alternative.key, factory: factory) ||
               (alternative.self_type && return_type(method_key, alternative.without_self.key, factory: factory)) ||
+              ((any = alternative.any_block) && return_type(method_key, any.key, factory: factory)) ||
               (break nil)
           end
 
