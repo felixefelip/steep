@@ -369,6 +369,8 @@ class PostconditionsInferrerTest < Minitest::Test
 
   METHOD_PREDICATE_RBS_FIXTURE = <<~RBS
     class PMWindow
+      def marker: () -> untyped
+      def stamp: () -> Integer
     end
 
     class NilClass
@@ -387,6 +389,8 @@ class PostconditionsInferrerTest < Minitest::Test
       def size: () -> Integer
       def at: (Integer) -> PMWindow?
       def at_windowed?: () -> bool
+      def linked?: (untyped suffix) -> bool
+      def untyped_linked?: (untyped suffix) -> (untyped | true | false)
     end
 
     module PMEntropic
@@ -459,6 +463,25 @@ class PostconditionsInferrerTest < Minitest::Test
     refute_nil entry
     assert_equal "::PMWindow", entry.when_true_methods[:entropy].to_s
     assert_equal "::PMEntropic & ::PMEntropic::AfterEntropic", entry.when_true_self_type_string
+  end
+
+  # The left of the `&&` is `untyped`, but a truthy `a && b` is `b`'s value,
+  # so it still proves `window` was not nil.
+  def test_infers_when_true_method_for_a_predicate_whose_return_has_an_untyped_member
+    entries = infer_method_predicate_for(<<~'RUBY')
+      class PMSource
+        def linked?(suffix)
+          window&.marker&.to_s == "opened_#{suffix}" && window.stamp > 0
+        end
+
+        def untyped_linked?(suffix)
+          window&.marker&.to_s == "opened_#{suffix}" && window.stamp > 0
+        end
+      end
+    RUBY
+
+    assert_equal "::PMWindow", entries.find { |e| e.method_name == :linked? }.when_true_methods[:window].to_s
+    assert_equal "::PMWindow", entries.find { |e| e.method_name == :untyped_linked? }.when_true_methods[:window].to_s
   end
 
   # A predicate whose subject is not nilable narrows nothing, so there is no
