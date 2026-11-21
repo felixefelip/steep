@@ -74,8 +74,8 @@ module Steep
       LOCAL_SCOPES = %i[def defs class module sclass].freeze
 
 
-      def self.uses(node, names:, folded_evals:)
-        new(names, folded_evals: folded_evals).uses(node)
+      def self.uses(node, names:, folded_evals:, instance: false)
+        new(names, folded_evals: folded_evals, instance: instance).uses(node)
       end
 
       def self.calls(node, names:, folded_evals:)
@@ -138,10 +138,13 @@ module Steep
 
       # `folded_evals`: the sites of the string evals whose source is placed in
       # the program as checked Ruby (`Specializations::Evals::Folds`).
-      def initialize(names, folded_evals:, calls: false)
+      # `instance`: the ivars named are those of an instance, read in its
+      # instance methods, blocks they hold included, and not those of a class.
+      def initialize(names, folded_evals:, calls: false, instance: false)
         @names = names
         @folded_evals = folded_evals
         @calls = calls
+        @instance = instance
         @uses = Hash.new { |hash, name| hash[name] = [] } #: Hash[Symbol, Array[Use]]
         @parents = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node?]
         @returned = {}.compare_by_identity #: Hash[::Parser::AST::Node, Set[::Parser::AST::Node]]
@@ -192,7 +195,7 @@ module Steep
         when :send, :csend
           @calls ? record_call(node, statement) : record_send(node, parent, in_statement)
         when :ivar
-          record(node.children[0], node, parent, in_statement) if on_class && !@calls
+          record(node.children[0], node, parent, in_statement) if !@calls && (@instance ? in_instance_method?(node, parent) : on_class)
         when :alias
           node.children.each { |name| @uses[name.children[0].to_sym] << alias_use(node) if named?(name) }
         end
@@ -547,6 +550,12 @@ module Steep
         end
         method = node && method_of_def(node) or return
         [method, blocks] unless blocks.empty?
+      end
+
+      def in_instance_method?(node, parent)
+        node = parent
+        node = @parents[node] until node.nil? || %i[def defs].include?(node.type)
+        !node.nil? && method_of_def(node) == [node.children[0], false]
       end
 
       def method_of_def(node)
