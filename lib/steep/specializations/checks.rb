@@ -21,6 +21,15 @@ module Steep
       def same?(store)
         @entries.all? { |name, arguments, options, answer| store.answer(name, arguments, options) == answer }
       end
+
+      def merge(other)
+        other.entries.each { |entry| record(*entry) }
+        self
+      end
+
+      protected
+
+      attr_reader :entries
     end
 
     # What a computation over the store came to, kept across generations as
