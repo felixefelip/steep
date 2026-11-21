@@ -403,12 +403,10 @@ module Steep
 
       def boolean_type?(type)
         case type
-        when AST::Types::Boolean, AST::Types::Logic::Base, AST::Types::Logic::Env
-          true
-        when AST::Types::Literal
-          type.value == true || type.value == false
-        else
-          false
+        when AST::Types::Boolean, AST::Types::Logic::Base, AST::Types::Logic::Env then true
+        when AST::Types::Literal then type.value == true || type.value == false
+        when AST::Types::Union then type.types.any? { |member| boolean_type?(member) } && type.types.all? { |member| member.is_a?(AST::Types::Any) || boolean_type?(member) }
+        else false
         end
       end
 
