@@ -75,7 +75,6 @@ module Steep
         @overrides = nil
         @record = Receivers::Record.new
         @receivers = @record.receivers
-        @unwritten = {} #: Hash[String, String]
         @pruned = {} #: Hash[[Pathname, Array[Integer]], Source]
       end
 
@@ -92,9 +91,7 @@ module Steep
       # (`HarvestedMethods#signatures`). Filled by `run`.
       attr_reader :receivers, :defined_methods
 
-      # The sites whose receiver the checker typed but the record holds as
-      # `untyped`, with that type (`Receivers.reaches?`).
-      def unrecorded_receivers = @unwritten.select { |site, _| @receivers.fetch(site, Receivers::Record::UNTYPED) == Receivers::Record::UNTYPED }
+      def unrecorded_receivers = @record.unrecorded
 
       def run
         methods = {} #: Hash[String, Hash[String, String]]
@@ -107,7 +104,6 @@ module Steep
         @defined_methods = {}
         @record = Receivers::Record.new
         @receivers = @record.receivers
-        @unwritten = {}
         @project.targets.each { |target| specialize_target(target, methods) }
         methods
       end
@@ -628,7 +624,7 @@ module Steep
       def record_receivers(typing, source)
         return unless typing && source.node
 
-        @record.record(Receivers.collect(typing, source.node, @project.constructor_binding_registry.used_names, unwritten: @unwritten))
+        @record.record(Receivers.collect(typing, source.node, @project.constructor_binding_registry.used_names, unwritten: @record.unwritten))
       end
 
       # One round per tuple position, so a method with two tuples costs two
