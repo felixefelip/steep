@@ -347,7 +347,7 @@ module Steep
       end
 
       def harvest_defines(context, store, locations, definitions)
-        @harvested.harvest(locations, definitions, @definers, overrides: @overrides, rounds: method(:rounds), store: store, class_exits: @class_exits, check: ->(logged, active) { check_definitions(context, logged, active, definitions) })
+        @harvested.harvest(locations, definitions, @definers, overrides: @overrides, rounds: method(:rounds), store: store, class_exits: @class_exits, check: ->(logged, active) { check_definitions(context, logged, active, definitions) }, nodes: ->(active) { by_node(active, definitions) })
       end
 
       # A call omitting an optional parameter does not leave it open: the body

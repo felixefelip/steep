@@ -1397,6 +1397,9 @@ module Steep
 
       def with_reads(reads) = with(active: @active, reads: reads)
 
+      # Records `reads` as asked of this store, for a check kept elsewhere.
+      def asked(reads) = @reads&.merge(reads)
+
       # Asks `name` again with what it was asked, for `Reads#same?`.
       def answer(name, arguments, options) = public_send(name, *arguments, **options)
 

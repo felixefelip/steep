@@ -68,6 +68,7 @@ module Steep
         @nodes = {} #: Hash[String, Parser::AST::Node]
         @frames = {} #: Hash[String, [String, Arguments]?]
         @rounds = Kept.new
+        @checks = {} #: Hash[untyped, Kept::Entry]
       end
 
       # The methods each adopted block is the body of, by the block's site.
@@ -154,9 +155,12 @@ module Steep
       # the frames it runs, the way the eval harvest reads what it writes: only
       # what a call site runs for certain defines a method, and a block's body
       # is deferred. `check` types, under a store, the bodies
-      # `{ key => arguments }` names. A round is checked again only where
-      # `store` answers what it asked differently from when it was last checked.
-      def harvest(locations, definitions, definers, overrides:, rounds:, check:, store:, class_exits:)
+      # `{ key => arguments }` names, and `nodes` what that check matches each
+      # body by. A round is checked again only where `store` answers what it
+      # asked differently from when it was last checked, and so is each check
+      # its walk makes.
+      def harvest(locations, definitions, definers, overrides:, rounds:, check:, nodes:, store:, class_exits:)
+        check = kept_check(check, nodes, definitions, class_exits)
         found = {} #: Hash[String, Parser::AST::Node]
         frames = {} #: Hash[String, Set[[String, Arguments]]]
         defining = locations.filter_map do |key, by_arguments|
@@ -175,6 +179,22 @@ module Steep
         end
         frames.each { |key, writers| @frames[key] = writers.size == 1 ? writers.first : nil }
         found
+      end
+
+      def kept_check(check, nodes, definitions, class_exits)
+        lambda do |store, active|
+          by_node = nodes.call(active)
+          kept = @checks[[by_node, definitions.size]]
+          if kept&.reads&.same?(store.with_active(by_node))
+            kept.class_exits.each { |left| class_exits.merge!(left) }
+          else
+            reads = Reads.new
+            typings = check.call(store.with_reads(reads), active)
+            kept = @checks[[by_node, definitions.size]] = Kept::Entry.new(reads, typings, typings.values.compact.map(&:class_exits))
+          end
+          store.asked(kept.reads)
+          kept.value
+        end
       end
 
       # `{ key => [block, writers] }` for the methods `active`'s bodies define,
