@@ -144,6 +144,26 @@ class KeyedMemoAnswersItsValueTest < Minitest::Test
     assert_equal "[:en]", types(ruby, RBS + LOCALS_RBS).fetch("en")
   end
 
+  HASH_RUNTIME = <<~RUBY
+    class Hash
+      def initialize(ifnone = nil)
+        @ifnone = ifnone
+      end
+
+      def default(key = nil) = @ifnone
+    end
+  RUBY
+
+  def test_a_keyed_memo_answers_its_value_past_the_runtime_s_own_hash_default
+    assert_equal "[:en]", types(HASH_RUNTIME + RUBY).fetch("en")
+  end
+
+  def test_a_keyed_memo_whose_class_answers_a_default_answers_no_literal_value
+    ruby = HASH_RUNTIME + RUBY.sub("  attr_reader :defaults\n", "  attr_reader :defaults\n\n  def default(key = nil) = [key]\n")
+
+    refute_equal "[:en]", types(ruby, RBS.sub("    attr_reader defaults: Array[untyped]\n", "    attr_reader defaults: Array[untyped]\n    def default: (?untyped key) -> Array[untyped]\n")).fetch("en")
+  end
+
   def test_a_type_refines_untyped_and_what_it_descends_from
     tuple = Steep::AST::Types::Tuple.new(types: [Steep::AST::Types::Literal.new(value: :en)])
     array_of = ->(element) { Steep::AST::Builtin::Array.instance_type(element) }

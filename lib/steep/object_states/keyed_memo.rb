@@ -96,17 +96,19 @@ module Steep
         end
 
         # A missing key reads `nil`: nothing hands `Hash#initialize` a default
-        # or sets one, and no method answers in its place.
+        # or sets one, and no method below `Hash` answers in its place.
         def without_default?(constr, instance)
-          ancestor_bodies(constr, instance).all? do |name, bodies|
+          ancestor_bodies(constr, instance, below: HASH).all? do |name, bodies|
             name != :default && bodies.all? { |body| body && !(name == :initialize && body.super_args) && !body.self_sends.intersect?(DEFAULT_WRITERS) }
           end
         rescue RBS::BaseError
           false
         end
 
-        def ancestor_bodies(constr, instance)
-          constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors.flat_map do |ancestor|
+        def ancestor_bodies(constr, instance, below: nil)
+          ancestors = constr.checker.factory.definition_builder.build_instance(instance.name).ancestors.ancestors
+          ancestors = ancestors.take_while { |ancestor| ancestor.name != below } if below
+          ancestors.flat_map do |ancestor|
             constr.constructor_bindings.method_bodies(ancestor.name.to_s).to_a
           end
         end
