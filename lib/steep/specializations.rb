@@ -1189,12 +1189,13 @@ module Steep
         end
 
         declarations = ((raw && raw["declarations"]) || {}).select { |key, type| key.is_a?(String) && type.is_a?(String) }
+        selves = ((raw && raw["selves"]) || {}).select { |key, types| key.is_a?(String) && types.is_a?(Array) && types.all?(String) }
         receivers = ((raw && raw["receivers"]) || {}).filter_map do |site, types|
           [File.expand_path(site, base_dir.to_s), types] if site.is_a?(String) && types.is_a?(Array) && types.all?(String)
         end.to_h
         exits = ((raw && raw["exits"]) || {}).select { |key, entries| key.is_a?(String) && entries.is_a?(Hash) }
 
-        new(methods: methods, source: source, declarations: declarations, receivers: receivers, exits: exits, bodies: bodies)
+        new(methods: methods, source: source, declarations: declarations, selves: selves, receivers: receivers, exits: exits, bodies: bodies)
       end
 
       # `typed`: returns a run computed, as types, read ahead of `methods`.
@@ -1205,6 +1206,8 @@ module Steep
       # (`Typing#class_exits`).
       # `declarations`: what each method answers across all its calls
       # (`CallSiteUnions`), as RBS.
+      # `selves`: the `self`s each method's calls run it on, where that is not
+      # its own class (`CallSiteUnions::Reader#selves`), as RBS.
       # `receivers`: the types the receiver of each call naming a reader was
       # given (`Receivers`), as RBS, by site.
       # `bodies`: the methods each block was found to be the body of, by site.
@@ -1215,8 +1218,9 @@ module Steep
       # valid while `receivers` and the constructor bindings stay as they are.
       # `keepers`: how `keep` computed each value, to compute it again once
       # `kept` is cleared.
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, receivers:, bodies:, entering: {}, reads: nil, kept: {}, keepers: {})
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, selves: {}, receivers:, bodies:, entering: {}, reads: nil, kept: {}, keepers: {})
         @methods = methods
+        @selves = selves
         @kept = kept
         @keepers = keepers
         @entering = entering
@@ -1235,7 +1239,7 @@ module Steep
       end
 
       def empty?
-        read(:empty?) { @methods.empty? && @active.empty? && @typed.empty? && @exits.empty? && @declarations.empty? }
+        read(:empty?) { @methods.empty? && @active.empty? && @typed.empty? && @exits.empty? && @declarations.empty? && @selves.empty? }
       end
 
       # `in_checked_body`: whether the call is made in a body this check is
@@ -1313,6 +1317,13 @@ module Steep
 
       def declaration_type(method_key, factory:)
         read(:declaration_type, method_key, factory: factory) { parse(method_key, @declarations[method_key], factory: factory) }
+      end
+
+      def selves(method_key, factory:)
+        read(:selves, method_key, factory: factory) do
+          types = @selves.fetch(method_key, []).map { |raw| parse(method_key, raw, factory: factory) }
+          types unless types.empty? || types.include?(nil)
+        end
       end
 
       # `yield`, computed once per `object` for as long as this store is the
@@ -1411,7 +1422,7 @@ module Steep
       def with(active:, reads:)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand, demanded: @demanded,
-          class_exits: @class_exits, declarations: @declarations, receivers: @receivers, bodies: @bodies, entering: @entering, reads: reads,
+          class_exits: @class_exits, declarations: @declarations, selves: @selves, receivers: @receivers, bodies: @bodies, entering: @entering, reads: reads,
           kept: @kept, keepers: @keepers
         )
       end
