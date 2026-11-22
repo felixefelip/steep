@@ -143,7 +143,7 @@ class CallSiteUnionsTest < Minitest::Test
     assert_equal({ "Tags.tag" => '"a!"', "Tags.labelled" => '"a!"' }, declarations(rbs, ruby))
   end
 
-  def test_a_method_whose_body_answers_more_under_the_findings_than_under_the_declarations_is_declared
+  def test_a_body_whose_calls_are_read_only_under_its_own_calls_answers_its_union_undeclared
     rbs = <<~RBS
       class Many
         @name: Symbol
@@ -175,7 +175,7 @@ class CallSiteUnionsTest < Minitest::Test
       end
     RUBY
 
-    assert_equal "::Many", declarations(rbs, ruby)["Builder.reflect"]
+    assert_nil declarations(rbs, ruby)["Builder.reflect"]
   end
 
   WRITER_RBS = <<~RBS

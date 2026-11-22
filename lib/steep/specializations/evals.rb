@@ -76,6 +76,27 @@ module Steep
         # block is what the method may be defined from.
         Walk = Struct.new(:writers, :typing, :overrides, :method_name, :defines, keyword_init: true)
 
+        # The methods of `sources` that write code — a string eval, a
+        # `const_set`, an `include` — which is the only thing the eval harvest
+        # reads. A pure walk of trees already parsed, so a project without the
+        # idiom pays this and nothing else. A method that calls one of them
+        # writes code too, so the set grows until no call adds one.
+        def writers(sources, defines: false)
+          writers = Set[] #: Set[String]
+          definitions = sources.flat_map { |source| Collector.definitions(source).to_a }
+
+          loop do
+            grown = definitions.filter_map do |key, def_node|
+              key if !writers.include?(key) && writes_code?(def_node, writers, defines: defines)
+            end
+            break if grown.empty?
+
+            writers.merge(grown)
+          end
+
+          writers
+        end
+
         # Whether the method writes code, directly or through a method it calls.
         # The gate that keeps a project without the idiom from paying for a
         # single extra check, so it reads the AST and nothing else.

@@ -135,8 +135,8 @@ module Steep
       def specialize_target(target, methods)
         context = load_target(target) or return
 
-        writers = code_writers(context)
-        @definers = code_writers(context, defines: true)
+        writers = Evals.writers(context.sources.each_value)
+        @definers = Evals.writers(context.sources.each_value, defines: true)
         @factory = context.subtyping.factory
         @overrides = Overrides.new(checker: context.subtyping, registry: @project.constructor_binding_registry, harvested: ->(key) { @harvested.harvested?(key) })
         @checks = Checks.new(overrides: @overrides, returned: method(:returned_type), names: @project.constructor_binding_registry.used_names, unread: ->(key) { @sites.unread.include?(key) })
@@ -450,28 +450,7 @@ module Steep
       end
 
       # The argument tuples the call sites in `paths` supply when read under
-      # `store`. Separate from `collect`, which also needs each body's type and so
-      # The methods that write code — a string eval, a `const_set`, an
-      # `include` — which is the only thing the eval harvest reads. A pure walk
-      # of trees already parsed, so a project without the idiom pays this and
-      # nothing else. A method that calls one of them writes code too, so the
-      # set grows until no call adds one.
-      def code_writers(context, defines: false)
-        writers = Set[] #: Set[String]
-        definitions = context.sources.each_value.flat_map { |source| Collector.definitions(source).to_a }
-
-        loop do
-          grown = definitions.filter_map do |key, def_node|
-            key if !writers.include?(key) && Evals.writes_code?(def_node, writers, defines: defines)
-          end
-          break if grown.empty?
-
-          writers.merge(grown)
-        end
-
-        writers
-      end
-
+      # `store`, but for the calls `collect` found framed.
       def call_sites(context, store, definitions, paths, locations, writers)
         tuples = {} #: Hash[String, Set[Arguments]]
 
@@ -480,6 +459,7 @@ module Steep
           typing = file_check(context, store, source, {})
 
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
+            next if @framed.call(path, node)
             next @harvested.remember({ key => @sites.tuples_of(key, arguments, harvested: true) }, definitions) unless definitions.key?(key)
 
             (tuples[key] ||= Set.new).merge(@sites.tuples_of(key, arguments, harvested: @harvested.harvested?(key)))
@@ -516,11 +496,7 @@ module Steep
       # call has specialized.
       def call_site_unions(context, store, found, tuples, baselines, callees, definitions)
         typings = Hash.new { |hash, path| hash[path] = type_check(context, store, context.sources.fetch(path), {}) }
-        reader = CallSiteUnions::Reader.new(
-          store: store, factory: context.subtyping.factory, definitions: definitions,
-          sites: CallSiteUnions.sites(typings, overrides: @overrides, paths: ->(key) { affected_paths(callees, Set[key]) }), check: body_checker(context, store, definitions),
-          runs: ->(typing, node) { Collector.runs_at(typing, node, overrides: @overrides) }
-        )
+        reader = site_reader(context, store, definitions, callees, typings)
         @selves.merge!(tuples.each_key.filter_map { |key| (selves = reader.foreign_selves(key)) && [key, selves] }.to_h)
 
         found.each_key.filter_map do |key|
@@ -532,6 +508,13 @@ module Steep
           answer = Returns.body_type(typings[path], def_node)
           [key, union.to_s] unless union.to_s == baselines[key] && answer && union.to_s == Specializations.rbs_writable(answer).to_s
         end.to_h
+      end
+
+      def site_reader(context, store, definitions, callees, typings)
+        CallSiteUnions::Reader.new(
+          store: store, factory: context.subtyping.factory, definitions: definitions, typings: typings,
+          paths: ->(key) { affected_paths(callees, Set[key]) }, overrides: @overrides, check: body_checker(context, store, definitions)
+        )
       end
 
       def body_checker(context, store, definitions)
@@ -588,9 +571,10 @@ module Steep
         @sites = BlockReads::Sites.new
         definitions = {} #: Hash[String, [Pathname, Parser::AST::Node]]
         callees = {} #: Hash[Pathname, Set[String]]
+        typings = context.sources.to_h { |path, source| [path, file_check(context, store, source, {})] }
 
         context.sources.each do |path, source|
-          typing = file_check(context, store, source, {})
+          typing = typings.fetch(path)
           record_receivers(typing, source)
           @sites.read(typing, Collector.definitions(source)) if typing
 
@@ -600,12 +584,18 @@ module Steep
             baselines[key] = Specializations.rbs_writable(type).to_s if type
           end
 
+          callees[path] = Collector.callees(typing, overrides: @overrides) if typing
+        end
+
+        framing = site_reader(context, store, definitions, callees, typings)
+        @framed = ->(path, node) { framing.framed?(path, node) { |key, arguments| !@sites.tuples_of(key, arguments, harvested: @harvested.harvested?(key)).empty? } }
+        typings.each do |path, typing|
           Collector.each_call_site(typing, overrides: @overrides) do |key, arguments, node|
+            next if @framed.call(path, node)
+
             @sites << [key, arguments, @harvested.harvested?(key)]
             record_location(locations, key, arguments, path, node, typing) if writers.include?(key)
           end
-
-          callees[path] = Collector.callees(typing, overrides: @overrides) if typing
         end
 
         tuples = @sites.tuples(untupled: @record.method(:untupled))

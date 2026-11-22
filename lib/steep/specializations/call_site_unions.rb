@@ -28,20 +28,20 @@ module Steep
       # `banana_delegate`, it is passed `(singleton(Peel), :human_name)` and
       # `(singleton(Rind), :nick)`.
       class Reader
-        # `sites`: every call of a method, as `[path, node, arguments, typing]`,
-        # read under the declarations (`Collector.each_call_site`, `every_call:`).
+        # `typings`: each file's typing under the declarations, read for every
+        # call of a method in the files `paths` names for it.
         # `check`: the typing of a method's file with its body checked under
-        # one set of arguments. `runs`: the keys of the bodies a call node
-        # runs in a typing, or nil where that is not known (`Overrides#runs`).
-        def initialize(store:, factory:, definitions:, sites:, check:, runs:)
+        # one set of arguments.
+        def initialize(store:, factory:, definitions:, typings:, paths:, overrides:, check:)
           @store = store
           @factory = factory
-          @sites = sites
+          @sites = CallSiteUnions.sites(typings, overrides: overrides, paths: paths)
           @check = check
-          @runs = runs
+          @runs = ->(typing, node) { Collector.runs_at(typing, node, overrides: overrides) }
           @definitions = definitions
           @arguments = {} #: Hash[String, Array[Arguments]?]
           @selves = {} #: Hash[String, Array[AST::Types::t?]]
+          @framed = {} #: Hash[String, bool]
           @namesakes = definitions.keys.group_by { |key| key.rpartition(/[.#]/).drop(1) }
           @definitions_by_path = definitions.each_with_object(Hash.new { |hash, path| hash[path] = [] }) do |(key, (path, def_node)), result|
             result[path] << [key, def_node]
@@ -77,7 +77,32 @@ module Steep
           written unless written == [singleton ? "singleton(#{owner})" : owner.to_s]
         end
 
+        # Whether the call at `node` in `path` is made inside a method every
+        # call of which is read here, each with arguments its body is
+        # re-checked under (`specialized`), and made outside any method or
+        # inside one that is itself framed, whose re-checks are what read it.
+        # That body runs only under those calls, so a call it makes is one of
+        # the calls the re-checks read; read under the declarations, it would
+        # be a call no run makes.
+        def framed?(path, node, &specialized)
+          key = enclosing_key(path, node) or return false
+          framed_key?(key, &specialized)
+        end
+
         private
+
+        def framed_key?(key, &specialized)
+          @framed.fetch(key) do
+            @framed[key] = false
+            @framed[key] = framed_calls?(key, &specialized)
+          end
+        end
+
+        def framed_calls?(key, &specialized)
+          calls = arguments_of(key) or return false
+          calls.all? { |arguments| specialized.call(key, arguments) } &&
+            namesake_sites(key).all? { |path, node| (outer = enclosing_key(path, node)).nil? || framed_key?(outer, &specialized) }
+        end
 
         # nil while `key` is being read: a call reached again through itself is
         # read under the declarations instead. So is a call inside a method
