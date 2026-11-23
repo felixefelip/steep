@@ -1212,18 +1212,21 @@ module Steep
       # given (`Receivers`), as RBS, by site.
       # `bodies`: the methods each block was found to be the body of, by site.
       # `entering`: the class states each file's top level starts with, by path.
+      # `loaded`: the class states the program's load leaves, which a method
+      # starts with where no call it is checked for says otherwise.
       # `reads`: where to record each question a check asks and the answer it
       # got (`Reads`).
       # `kept`: what `keep` computed, shared by every copy of this store. Only
       # valid while `receivers` and the constructor bindings stay as they are.
       # `keepers`: how `keep` computed each value, to compute it again once
       # `kept` is cleared.
-      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, selves: {}, receivers:, bodies:, entering: {}, reads: nil, kept: {}, keepers: {})
+      def initialize(methods:, source:, active: {}, typed: {}, exits: {}, demand: nil, demanded: {}, class_exits: {}, declarations: {}, selves: {}, receivers:, bodies:, entering: {}, loaded: {}, reads: nil, kept: {}, keepers: {})
         @methods = methods
         @selves = selves
         @kept = kept
         @keepers = keepers
         @entering = entering
+        @loaded = loaded
         @receivers = receivers
         @bodies = bodies
         @declarations = declarations
@@ -1285,6 +1288,10 @@ module Steep
       # What a file's top level starts with. A check is read for the classes
       # it observed of it (`entered_classes`), not for all of them.
       def entering_class_states(path) = @entering.fetch(path, {})
+
+      attr_reader :loaded
+
+      def loaded_class_states = read(:loaded_class_states) { @loaded }
 
       def entered_classes(path, names)
         read(:entered_classes, path, names) { FileStates.among(entering_class_states(path), names) }
@@ -1422,7 +1429,7 @@ module Steep
       def with(active:, reads:)
         Store.new(
           methods: @methods, source: @source, active: active, typed: @typed, exits: @exits, demand: @demand, demanded: @demanded,
-          class_exits: @class_exits, declarations: @declarations, selves: @selves, receivers: @receivers, bodies: @bodies, entering: @entering, reads: reads,
+          class_exits: @class_exits, declarations: @declarations, selves: @selves, receivers: @receivers, bodies: @bodies, entering: @entering, loaded: @loaded, reads: reads,
           kept: @kept, keepers: @keepers
         )
       end

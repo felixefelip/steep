@@ -83,12 +83,15 @@ module Steep
         # caller knew, and with `self`'s ivars as they were, but an object
         # the body reaches some other way than through calls made on it
         # (`TypeInference::HeldIvars#escapes?`) only with what holds under any
-        # name.
+        # name. One checked for no call runs after the program has loaded.
         def entered_method(constr, method_context, self_type, env, arguments)
           unless arguments
-            path = constr.source.path
-            states = path ? constr.specializations.entering_class_states(path) : {}
-            return states.empty? ? env : env.update(class_states: states)
+            states = constr.specializations.loaded_class_states
+            return env if states.empty?
+
+            own = self_type.is_a?(AST::Types::Name::Singleton) && states[self_type.name]
+            env = env.refine_types(instance_variable_types: own) if own
+            return env.update(class_states: own ? states.except(self_type.name) : states)
           end
 
           ivars = arguments.self_ivars

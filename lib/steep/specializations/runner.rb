@@ -444,7 +444,7 @@ module Steep
 
       def store(methods)
         Store.new(
-          methods: methods.transform_values { |entries| entries.transform_values(&:to_s) }, entering: @file_states.entering,
+          methods: methods.transform_values { |entries| entries.transform_values(&:to_s) }, entering: @file_states.entering, loaded: @file_states.loaded,
           source: nil, typed: methods, exits: @exits, demand: @demand, demanded: @demanded, class_exits: @class_exits, receivers: @receivers, bodies: @harvested.bodies, kept: @kept, keepers: @keepers
         )
       end

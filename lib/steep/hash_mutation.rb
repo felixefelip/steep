@@ -627,7 +627,7 @@ module Steep
       end
 
       def literal_key?(type)
-        type.is_a?(AST::Types::Literal) && type.value.is_a?(::Symbol)
+        type.is_a?(AST::Types::Literal) && (type.value.is_a?(::Symbol) || type.value.is_a?(::String))
       end
 
       def declared_hash(constr, ivar)

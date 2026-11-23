@@ -17,38 +17,44 @@ module Steep
       def record(path, typing, whole:)
         return unless typing.top_level_states
 
-        entered, left = typing.top_level_states
+        entered, left, loaded = typing.top_level_states
         entered.each { |name, ivars| @rewritten_elsewhere << name unless left[name] == ivars }
         observed = typing.observed_classes
-        if !whole && (_, last_entered, _, last_observed = @by_path[path])
+        if !whole && (_, last_entered, _, last_observed, last_loaded = @by_path[path])
           entered = last_entered
+          loaded = last_loaded
           observed |= last_observed
         end
-        @by_path[path] = [typing.defined_classes, entered, left, observed]
+        @by_path[path] = [typing.defined_classes, entered, left, observed, loaded]
       end
 
       # `states` of the classes in `names` (`ObjectStates::ClassStates.observed`).
       def self.among(states, names) = states.select { |name, _| names.include?(name.to_s.delete_prefix("::")) }
 
       def entering
-        definers = Hash.new { |hash, name| hash[name] = [] } #: Hash[RBS::TypeName, Array[Pathname]]
-        @by_path.each { |path, (defined, _, _)| defined.each { |name| definers[name] << path } }
-        @by_path.keys.to_h do |path|
-          states = definers.filter_map do |name, (definer, *others)|
-            next if others.any? || definer == path || @rewritten_elsewhere.include?(name)
-
-            ivars = @by_path.fetch(definer)[2][name] and [name, ivars]
-          end
-          [path, states.to_h]
-        end
+        loaded = self.loaded
+        @by_path.to_h { |path, (defined, _, _)| [path, loaded.reject { |name, _| defined.include?(name) }] }
       end
 
-      # The files last checked entering with other states than they would now,
-      # of the classes that check observed.
+      # What the program's load leaves each class holding: what the one file
+      # defining it left it holding, where no other file's top level changes it.
+      def loaded
+        definers = Hash.new { |hash, name| hash[name] = [] } #: Hash[RBS::TypeName, Array[Pathname]]
+        @by_path.each { |path, (defined, _, _)| defined.each { |name| definers[name] << path } }
+        definers.filter_map do |name, (definer, *others)|
+          next if others.any? || @rewritten_elsewhere.include?(name)
+
+          ivars = @by_path.fetch(definer)[2][name] and [name, ivars]
+        end.to_h
+      end
+
+      # The files last checked entering, or with their methods starting, with
+      # other states than they would now, of the classes that check observed.
       def stale_paths
+        loaded = self.loaded
         entering.filter_map do |path, states|
-          _, entered, _, observed = @by_path.fetch(path)
-          path unless FileStates.among(entered, observed) == FileStates.among(states, observed)
+          _, entered, _, observed, last_loaded = @by_path.fetch(path)
+          path unless FileStates.among(entered, observed) == FileStates.among(states, observed) && FileStates.among(last_loaded, observed) == FileStates.among(loaded, observed)
         end
       end
     end
