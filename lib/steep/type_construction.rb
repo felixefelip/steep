@@ -4110,16 +4110,10 @@ module Steep
         if call && constr
           entered = constr
           case method_name.to_s
-          when "[]="
-            if test_send_node(node) {|_, _, _, loc| !loc.dot }
-              last_arg = arguments.last or raise
-              if typing.has_type?(last_arg)
-                call = call.with_return_type(literal_operand_type(last_arg, typing.type_of(node: last_arg)))
-              end
-            end
-          when /\w=\Z/
+          when "[]=", /\w=\Z/
             last_arg = arguments.last or raise
-            call = call.with_return_type(literal_operand_type(last_arg, typing.type_of(node: last_arg))) if typing.has_type?(last_arg)
+            called_by_name = method_name == :[]= && test_send_node(node) {|_, _, _, loc| loc.dot }
+            call = call.with_return_type(assigned_value_type(last_arg)) if typing.has_type?(last_arg) && !called_by_name
           end
 
           if call.is_a?(TypeInference::MethodCall::Typed)
@@ -5692,6 +5686,11 @@ module Steep
     # widened the node to its nominal class (for example, a method body checked
     # against `String`). Specialized calls already arrive here as literal types;
     # this only recovers values that are visibly literal in the source.
+    def assigned_value_type(node)
+      literal = literal_operand_type(node, type = typing.type_of(node: node))
+      literal.is_a?(AST::Types::Literal) || LiteralIntrinsics.literal_union?(literal) ? literal : type
+    end
+
     def literal_operand_type(node, inferred_type)
       inferred_type = self_type if inferred_type.is_a?(AST::Types::Self) && self_type.is_a?(AST::Types::Literal)
       return inferred_type if inferred_type.is_a?(AST::Types::Literal) || inferred_type.is_a?(AST::Types::RegexpLiteral)

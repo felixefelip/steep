@@ -17,7 +17,7 @@ class ObjectMemoMapTest < Minitest::Test
   RUBY
 
   def test_a_memo_reads_back_what_a_store_made_through_a_synchronize_block_s_super_left
-    assert_equal "::Symbol", read(map: "class MMap < MLocked\nend\n")
+    assert_equal ":x", read(map: "class MMap < MLocked\nend\n")
   end
 
   def test_declines_a_store_in_a_block_a_method_that_names_its_block_runs
@@ -27,13 +27,13 @@ class ObjectMemoMapTest < Minitest::Test
   end
 
   def test_a_store_runs_the_body_the_source_inherits_where_the_rbs_declares_the_method_on_the_subclass
-    assert_equal "::Symbol", read(map: "class MMap < MLocked\nend\n", rbs: RBS.sub("    def []: (K key) -> V?\n", ""))
+    assert_equal ":x", read(map: "class MMap < MLocked\nend\n", rbs: RBS.sub("    def []: (K key) -> V?\n", ""))
   end
 
   def test_an_alias_of_a_body_the_source_defines_writes_what_that_body_writes
     map = "class MMap < MLocked\n  alias_method :get, :[]\n  alias_method :put, :[]=\nend\n"
 
-    assert_equal "::Symbol", read(map: map, rbs: with_map_methods("def get: (K key) -> V?", "def put: (K key, V value) -> V"))
+    assert_equal ":x", read(map: map, rbs: with_map_methods("def get: (K key) -> V?", "def put: (K key, V value) -> V"))
   end
 
   def test_a_def_in_a_class_body_branch_writes_what_its_body_writes
@@ -45,7 +45,7 @@ class ObjectMemoMapTest < Minitest::Test
       end
     RUBY
 
-    assert_equal "::Symbol", read(map: map, rbs: with_map_methods("def fill: (K key, V value) -> V"))
+    assert_equal ":x", read(map: map, rbs: with_map_methods("def fill: (K key, V value) -> V"))
   end
 
   def test_declines_a_def_in_a_class_body_branch_that_replaces_the_hash
@@ -64,14 +64,14 @@ class ObjectMemoMapTest < Minitest::Test
     backend = BACKEND.sub("      private\n", "      def clear\n        @backend.clear\n        self\n      end\n\n      private\n")
     rbs = RBS.sub("      private\n", "      def clear: () -> self\n      private\n")
 
-    assert_equal "::Symbol", read(map: "class MMap < MLocked\nend\n", backend: backend, rbs: rbs)
+    assert_equal ":x", read(map: "class MMap < MLocked\nend\n", backend: backend, rbs: rbs)
   end
 
   def test_a_copy_hook_s_calls_on_self_initialize_the_copy
     backend = BACKEND.sub("      private\n", "      private\n\n      def initialize_copy(other)\n        super\n        set_backend(@default_proc)\n        self\n      end\n")
     rbs = RBS.sub("      private\n", "      private\n      def initialize_copy: (untyped other) -> self\n")
 
-    assert_equal "::Symbol", read(map: "class MMap < MLocked\nend\n", backend: backend, rbs: rbs)
+    assert_equal ":x", read(map: "class MMap < MLocked\nend\n", backend: backend, rbs: rbs)
   end
 
   def test_an_initialize_the_class_body_never_defines_runs_the_inherited_one
@@ -85,7 +85,7 @@ class ObjectMemoMapTest < Minitest::Test
       end
     RUBY
 
-    assert_equal "::Symbol", read(map: map, rbs: with_map_methods("def initialize: () -> void"))
+    assert_equal ":x", read(map: map, rbs: with_map_methods("def initialize: () -> void"))
   end
 
   CLEARING_RBS = <<~RBS
