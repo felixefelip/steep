@@ -8123,6 +8123,28 @@ y = Fun.new[1] = "hoge"
     end
   end
 
+  def test_assignment_call_evaluates_to_the_literal_it_assigns
+    with_checker(<<-RBS) do |checker|
+class Fun
+  def foo=: (untyped) -> untyped
+  def []=: (untyped, untyped) -> untyped
+end
+    RBS
+      source = parse_ruby(<<-RUBY)
+fun = Fun.new
+x = (fun.foo = :reset)
+y = (fun[1] = "hoge")
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        _, constr = construction.synthesize(source.node)
+        assert_no_error typing
+        assert_equal parse_type(":reset"), constr.context.type_env[:x]
+        assert_equal parse_type('"hoge"'), constr.context.type_env[:y]
+      end
+    end
+  end
+
   def test_send_untyped
     with_checker() do |checker|
       source = parse_ruby(<<-RUBY)

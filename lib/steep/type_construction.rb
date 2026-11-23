@@ -4114,12 +4114,12 @@ module Steep
             if test_send_node(node) {|_, _, _, loc| !loc.dot }
               last_arg = arguments.last or raise
               if typing.has_type?(last_arg)
-                call = call.with_return_type(typing.type_of(node: last_arg))
+                call = call.with_return_type(literal_operand_type(last_arg, typing.type_of(node: last_arg)))
               end
             end
           when /\w=\Z/
             last_arg = arguments.last or raise
-            call = call.with_return_type(typing.type_of(node: last_arg)) if typing.has_type?(last_arg)
+            call = call.with_return_type(literal_operand_type(last_arg, typing.type_of(node: last_arg))) if typing.has_type?(last_arg)
           end
 
           if call.is_a?(TypeInference::MethodCall::Typed)
