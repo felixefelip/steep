@@ -304,6 +304,64 @@ class SpecializationsObjectStateTest < Minitest::Test
     end
   end
 
+  def test_a_new_object_only_its_call_names_keeps_the_hash_it_was_built_with
+    in_tmpdir do
+      write("sig/catalog.rbs", <<~RBS)
+        class P13Catalog
+          @lookups: Hash[untyped, untyped]
+          def initialize: () -> void
+          def lookup: (String entry) -> untyped
+        end
+        class P13SharedCatalog < P13Catalog
+          def shared_lookup: (String entry) -> untyped
+        end
+        class P13Registry
+          def self.keep: (P13SharedCatalog catalog) -> untyped
+        end
+        class P13Reader
+          def label: () -> untyped
+          def shared: () -> untyped
+        end
+      RBS
+      write("app/catalog.rb", <<~RUBY)
+        class P13Catalog
+          def initialize
+            @lookups = {}
+          end
+
+          def lookup(entry)
+            found = @lookups[entry]
+            return found if found
+
+            value = "Catalog::\#{entry}"
+            @lookups[entry] = value
+            value
+          end
+        end
+
+        class P13SharedCatalog < P13Catalog
+          def shared_lookup(entry)
+            P13Registry.keep(self)
+            lookup(entry)
+          end
+        end
+
+        class P13Registry
+          def self.keep(catalog) = catalog
+        end
+
+        class P13Reader
+          def label = P13Catalog.new.lookup("Item")
+          def shared = P13SharedCatalog.new.shared_lookup("Item")
+        end
+      RUBY
+      types = specialized_body_types("app/catalog.rb")
+
+      assert_equal '"Catalog::Item"', types.fetch("label")
+      refute_equal '"Catalog::Item"', types["shared"]
+    end
+  end
+
   def test_a_body_that_returns_early_leaves_what_every_way_out_holds_alike
     in_tmpdir do
       write("sig/early.rbs", <<~RBS)
@@ -436,7 +494,7 @@ class SpecializationsObjectStateTest < Minitest::Test
       [%w[P13Status untyped], leak] => "singleton(::P13Through)",
       [["P13Tagged"], leak] => union,
       [["P13Holder"], "status.held.delete(:through)"] => union,
-      [["P13Status"], leak, "def copy = itself.options.delete(:through)"] => union
+      [["P13Status"], leak, "def copy = itself.options.delete(:through)"] => "singleton(::P13Through)"
     }
     cases.each do |(receivers, body, own), through|
       in_tmpdir do

@@ -49,7 +49,9 @@ module Steep
       # array or a hash the checker follows.
       # `contents`: whether nothing but the call names the object, so what
       # the hashes it holds hold may be kept, where nothing else writes them.
-      def self.kept(constr, state, held:, contents:)
+      # `records`: whether that call keeps `self` to itself, so a hash it
+      # holds as a plain record may be kept too.
+      def self.kept(constr, state, held:, contents:, records: false)
         return {} unless state
 
         state = ObjectStates.without_contents(state) unless contents
@@ -57,7 +59,7 @@ module Steep
           settled = ObjectStates.state_in(ObjectStates.settled(constr, state))&.ivars || {}
           return settled unless contents
 
-          return settled.merge(state.ivars.select { |ivar, value| HashMutation.contents_state?(value) && HashMutation.held(constr, state.back_type, ivar, value, followed: true) })
+          return settled.merge(state.ivars.select { |ivar, value| (records || HashMutation.contents_state?(value)) && HashMutation.held(constr, state.back_type, ivar, value, followed: true) })
         end
 
         state.ivars.select do |ivar, value|
