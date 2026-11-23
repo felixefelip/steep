@@ -121,7 +121,7 @@ module Steep
           held ? declared?(constr, instance, ivar) && !rewritten.include?(ivar) : never_rewritten?(constr, instance, ivar)
         end
         bound = arguments.all? { |argument| plain_argument?(argument) } ? bound_values(constr, instance, bindings, arguments, followed: held) : {}
-        ivars = bound.merge(Constructed.kept(constr, constructed, held: held, contents: fresh))
+        ivars = bound.merge(Constructed.kept(constr, constructed, held: held, contents: fresh, records: fresh && !held && kept_by_its_call?(constr, node, instance)))
         return call.with_return_type(Specializations.overrides(constr).exact(instance)) if ivars.empty?
 
         call.with_return_type(AST::Types::ObjectState.new(back_type: instance, ivars: ivars))

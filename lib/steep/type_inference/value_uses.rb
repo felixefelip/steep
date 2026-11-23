@@ -17,6 +17,7 @@ module Steep
         @discarded = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @returned = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @receivers = Set[].compare_by_identity #: Set[::Parser::AST::Node]
+        @receiving = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node]
         @assignments = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node]
         body = def_node && (def_node.type == :defs ? def_node.children[3] : def_node.children[2])
         return unless body
@@ -26,6 +27,9 @@ module Steep
       end
 
       def receiver?(node) = @receivers.include?(node)
+
+      # The call `node` is the receiver of, or the block node wrapping it.
+      def receiving_call(node) = @receiving[node]
 
       # Discarded or returned: nothing in the body takes it.
       def left?(node) = @discarded.include?(node) || @returned.include?(node)
@@ -51,6 +55,9 @@ module Steep
           node.children[0...-1].each { |child| @discarded << child }
         when *CALLS
           @receivers << node.children[0] if node.children[0].is_a?(::Parser::AST::Node)
+          @receiving[node.children[0]] ||= node if node.children[0].is_a?(::Parser::AST::Node)
+        when :block, :numblock, :itblock
+          @receiving[node.children[0].children[0]] = node if node.children[0].type != :lambda && node.children[0].children[0].is_a?(::Parser::AST::Node)
         when :ivasgn
           @assignments[node.children[1]] = node if node.children[1]
         end
