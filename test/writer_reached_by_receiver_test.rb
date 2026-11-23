@@ -36,6 +36,10 @@ class WriterReachedByReceiverTest < Minitest::Test
       def unwritten: () -> untyped
       def written: () -> untyped
       def write: () -> untyped
+      def held: () -> Written
+      def or_held: () -> OrWritten
+      @held: Written?
+      @or_held: OrWritten?
     end
   RBS
 
@@ -83,20 +87,22 @@ class WriterReachedByReceiverTest < Minitest::Test
     end
 
     class P
-      def or_written = OrWritten.new[:k]
+      def or_written = or_held[:k]
 
       def write_by_or
-        written = OrWritten.new
-        written[:k] ||= K.new
+        or_held[:k] ||= K.new
       end
+
+      def or_held = @or_held ||= OrWritten.new
 
       def unwritten = Locals.new[:k]
-      def written = Written.new[:k]
+      def written = held[:k]
 
       def write
-        written = Written.new
-        written[:k] = K.new
+        held[:k] = K.new
       end
+
+      def held = @held ||= Written.new
     end
 
     P.new.write
