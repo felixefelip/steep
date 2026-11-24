@@ -1439,9 +1439,7 @@ module Steep
       end
 
       def kept_value(key)
-        return @kept[key] if @kept.key?(key)
-
-        (keeper = @keepers[key]) && (@kept[key] = keeper.call)
+        @kept.fetch(key) { (keeper = @keepers[key]) && (@kept[key] = keeper.call) }
       end
 
       def read(name, *arguments, **options)

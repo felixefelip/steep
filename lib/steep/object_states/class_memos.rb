@@ -434,11 +434,14 @@ module Steep
           overrides_class_method?(constr, names) || names.any? { |name| protocol_methods(constr).include?(name) }
         end
 
+        # Asked for at nearly every call, and fixed by the environment alone:
+        # kept per checker rather than in the store, whose reads it would only
+        # fill (felixefelip/steep#763).
+        PROTOCOL_METHODS = ObjectSpace::WeakKeyMap.new
+
         def protocol_methods(constr)
           builder = constr.checker.factory.definition_builder
-          constr.specializations.keep([:protocol_methods, constr.checker]) do
-            builder.env.interface_decls.each_key.select { |name| name.namespace.empty? }.flat_map { |name| builder.build_interface(name).methods.keys }.to_set.freeze
-          end
+          PROTOCOL_METHODS[constr.checker] ||= builder.env.interface_decls.each_key.select { |name| name.namespace.empty? }.flat_map { |name| builder.build_interface(name).methods.keys }.to_set.freeze
         end
 
         # `Klass.new` whose `initialize` chain only binds or stores what it is
