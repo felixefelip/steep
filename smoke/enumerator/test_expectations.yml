@@ -10,7 +10,7 @@
         character: 3
     severity: ERROR
     message: |-
-      Unsatisfiable constraint `::String <: U(19) <: ::Hash[::Symbol, ::String]` is generated through (U(19)) { (::Integer, U(19)) -> untyped } -> U(19)
+      Unsatisfiable constraint `::String <: U(13) <: ::Hash[::Symbol, ::String]` is generated through (U(13)) { (::Integer, U(13)) -> untyped } -> U(13)
         ::String <: ::Hash[::Symbol, ::String]
           ::Object <: ::Hash[::Symbol, ::String]
             ::BasicObject <: ::Hash[::Symbol, ::String]
@@ -40,7 +40,7 @@
         character: 3
     severity: ERROR
     message: |-
-      Unsatisfiable constraint `::Array[untyped] <: U(21) <: ::String` is generated through (U(21)) { (::Integer, U(21)) -> untyped } -> U(21)
+      Unsatisfiable constraint `::Array[untyped] <: U(15) <: ::String` is generated through (U(15)) { (::Integer, U(15)) -> untyped } -> U(15)
         ::Array[untyped] <: ::String
           ::Object <: ::String
             ::BasicObject <: ::String
