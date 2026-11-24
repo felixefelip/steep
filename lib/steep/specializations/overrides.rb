@@ -70,7 +70,7 @@ module Steep
         owner, name, singleton = Specializations.method_key_parts(key)
         definition = singleton ? @factory.definition_builder.build_singleton(owner) : @factory.definition_builder.build_instance(owner)
         definition.ancestors.ancestors.drop(1).each do |ancestor|
-          candidate = "#{ancestor.name.to_s.delete_prefix("::")}#{singleton ? "." : "#"}#{name}"
+          candidate = "#{RelativeNames.of(ancestor.name)}#{singleton ? "." : "#"}#{name}"
           return candidate if defined.call(candidate)
         end
         nil
@@ -185,7 +185,7 @@ module Steep
       # that body is defined in a branch its class body may not take.
       def source_key(definition, method_name)
         definition.ancestors.ancestors.each do |ancestor|
-          owner = ancestor.name.to_s.delete_prefix("::")
+          owner = RelativeNames.of(ancestor.name)
           singleton = ancestor.is_a?(RBS::Definition::Ancestor::Singleton)
           constructs = singleton && method_name == :new
           next unless constructs ? @registry.initializers_for(owner).any? : ObjectStates.ancestor_defines?(@registry, ancestor, method_name)

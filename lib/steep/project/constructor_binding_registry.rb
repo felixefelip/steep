@@ -76,7 +76,7 @@ module Steep
       # module), as `TypeInference::ConstructorBindingAnalyzer::Body`,
       # nil for one it cannot read. More than one: which runs is load order.
       def initializers_for(class_name)
-        name = class_name.to_s.delete_prefix("::")
+        name = RelativeNames.of(class_name)
         unreached?("#{name}#initialize") ? [] : @initializers[name] || []
       end
 

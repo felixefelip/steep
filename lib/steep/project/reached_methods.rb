@@ -12,7 +12,7 @@ module Steep
 
       def of(class_name, unreached)
         (@by_unreached[unreached] ||= {})[class_name] ||= begin
-          name = class_name.to_s.delete_prefix("::")
+          name = RelativeNames.of(class_name)
           methods = @table[name] || {}
           unreached.empty? ? methods : methods.reject { |method_name, _| unreached.include?("#{name}#{@separator}#{method_name}") }
         end

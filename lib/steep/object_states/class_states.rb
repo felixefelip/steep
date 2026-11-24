@@ -75,7 +75,7 @@ module Steep
           handed = handed_classes(constr, call_arguments(call.node))
           constr.typing.asked_classes.merge(names).merge([receiver, *handed].filter_map { |name| class_name(name) })
           known.select do |name, _|
-            (receiver.is_a?(AST::Types::Name::Singleton) && receiver.name == name) || handed.include?(name) || names.include?(name.to_s.delete_prefix("::"))
+            (receiver.is_a?(AST::Types::Name::Singleton) && receiver.name == name) || handed.include?(name) || names.include?(RelativeNames.of(name))
           end
         end
 
@@ -284,7 +284,7 @@ module Steep
 
         def class_name(name)
           name = name.name if name.is_a?(AST::Types::Name::Singleton)
-          name.to_s.delete_prefix("::") if name.is_a?(RBS::TypeName)
+          RelativeNames.of(name) if name.is_a?(RBS::TypeName)
         end
 
         def memo_ivars(constr, name)
@@ -297,7 +297,7 @@ module Steep
 
           method_name = call.method_decls.first.method_name
           singleton = method_name.is_a?(SingletonMethodName)
-          owner = method_name.type_name.to_s.delete_prefix("::")
+          owner = RelativeNames.of(method_name.type_name)
           by_checker = (NAMED_CLASSES[constr.checker] ||= {})
           by_checker[[constr.constructor_bindings, owner, method_name.method_name, singleton]] ||=
             Set[].tap { |found| visit_named(constr, owner, method_name.method_name, singleton, found, Set[]) }.freeze
@@ -340,7 +340,7 @@ module Steep
           definition = singleton ? builder.build_singleton(type_name) : builder.build_instance(type_name)
           definition.ancestors.ancestors.filter_map do |ancestor|
             on_class = ancestor.is_a?(RBS::Definition::Ancestor::Singleton)
-            owner = ancestor.name.to_s.delete_prefix("::")
+            owner = RelativeNames.of(ancestor.name)
             [owner, on_class, sent] if constr.constructor_bindings.defines?(owner, sent, singleton: on_class)
           end
         rescue RBS::BaseError, RuntimeError
