@@ -897,12 +897,12 @@ module Steep
       def with_defaults(positionals: {}, keywords: {}) = with(positional_defaults: positionals, keyword_defaults: keywords)
 
       def key
-        key = arguments_key
-        key += "#{SELF_MARKER}#{self_type}" if self_type
-        key += block ? "#{BLOCK_MARKER}#{block_key}" : "#{BLOCK_RETURN_MARKER}#{block_return}" if block || block_return
-        return key unless stateful?
-
-        "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key, *("[]: #{self_contents}" if self_contents)].join(", ")}}"
+        @key ||= begin
+          key = arguments_key
+          key += "#{SELF_MARKER}#{self_type}" if self_type
+          key += block ? "#{BLOCK_MARKER}#{block_key}" : "#{BLOCK_RETURN_MARKER}#{block_return}" if block || block_return
+          stateful? ? "#{key}#{STATE_MARKER}#{[*ivars_key(self_ivars), *class_states_key, *("[]: #{self_contents}" if self_contents)].join(", ")}}" : key
+        end
       end
 
       def argument_types
@@ -1083,12 +1083,12 @@ module Steep
       alias eql? ==
 
       def hash
-        positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ self_contents.hash ^ class_states.hash ^ block_identity.hash ^ block_return.hash
+        @hash ||= positionals.hash ^ keywords.hash ^ keyword_rest.hash ^ self_type.hash ^ self_ivars.hash ^ self_contents.hash ^ class_states.hash ^ block_identity.hash ^ block_return.hash
       end
 
       # Two closed blocks written alike are the same block.
       def block_identity
-        closed_block? ? block_key : block.object_id
+        @block_identity ||= closed_block? ? block_key : block.object_id
       end
 
       private

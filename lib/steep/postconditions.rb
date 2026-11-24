@@ -217,7 +217,7 @@ module Steep
         @may_write_index ||= @entries.each_with_object({}) do |((klass, method), entry), index| #$ Hash[String, Hash[Symbol, Set[Symbol]]]
           entry.may_write_ivars.each { |name| ((index[klass] ||= {})[name] ||= Set[]) << method }
         end
-        @may_write_index.dig(class_name.to_s.delete_prefix("::"), ivar) || Set[]
+        @may_write_index.dig(RelativeNames.of(class_name), ivar) || Set[]
       end
 
       # felixefelip/steep#68 item 4: facts holding at `class_name#method_name`'s

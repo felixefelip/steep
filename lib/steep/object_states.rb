@@ -333,7 +333,7 @@ module Steep
       # there to run, whatever the RBS declares.
       # The key `Klass.new` is recorded under: the class whose `initialize` the
       # chain starts at.
-      def constructor_key(chain) = "#{chain.first[0].to_s.delete_prefix("::")}.new"
+      def constructor_key(chain) = "#{RelativeNames.of(chain.first[0])}.new"
 
       def initialize_chain(constr, instance)
         registry = constr.constructor_bindings
@@ -351,12 +351,12 @@ module Steep
           return nil if skipped.any? { |name| !registry.initializers_for(name.to_s).empty? }
 
           initializers = registry.initializers_for(owner.to_s)
-          if initializers.empty? && registry.unreached?("#{owner.to_s.delete_prefix("::")}#initialize")
+          if initializers.empty? && registry.unreached?("#{RelativeNames.of(owner)}#initialize")
             method = method.super_method or return nil
             next
           end
           if initializers.empty?
-            return nil unless Project::LiteralMethodRegistry::CORE_CLASSES.include?(owner.to_s.delete_prefix("::"))
+            return nil unless Project::LiteralMethodRegistry::CORE_CLASSES.include?(RelativeNames.of(owner))
             chain << [owner, nil]
             return chain
           end
