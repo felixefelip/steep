@@ -29,10 +29,17 @@ module Steep
         # is known; nil where it is not.
         attr_reader :contents
 
-        def initialize(back_type:, ivars:, contents: nil)
+        # The node of the body being checked that built this object, where one
+        # local there holds it (`ObjectStates::Aliases`). Every other name the
+        # body gives the same object carries the same node. Not part of `==`:
+        # it names the object, not what it holds.
+        attr_reader :origin
+
+        def initialize(back_type:, ivars:, contents: nil, origin: nil)
           @back_type = back_type
           @ivars = ivars.sort_by { |name, _| name }.to_h
           @contents = contents
+          @origin = origin
         end
 
         def ==(other)
@@ -46,10 +53,14 @@ module Steep
         alias eql? ==
 
         def subst(s)
-          self.class.new(back_type: back_type.subst(s), ivars: ivars.transform_values { |type| type.subst(s) }, contents: contents&.subst(s))
+          self.class.new(back_type: back_type.subst(s), ivars: ivars.transform_values { |type| type.subst(s) }, contents: contents&.subst(s), origin: origin)
         end
 
-        def with_contents(contents) = self.class.new(back_type: back_type, ivars: ivars, contents: contents)
+        def with_contents(contents) = self.class.new(back_type: back_type, ivars: ivars, contents: contents, origin: origin)
+
+        def with_ivars(ivars) = self.class.new(back_type: back_type, ivars: ivars, contents: contents, origin: origin)
+
+        def with_origin(origin) = self.class.new(back_type: back_type, ivars: ivars, contents: contents, origin: origin)
 
         # Unlike any RBS type, so a reader can tell the values are the answer and
         # not a declaration: the class, then what it holds.
@@ -75,7 +86,7 @@ module Steep
         end
 
         def map_type(&block)
-          self.class.new(back_type: yield(back_type), ivars: ivars.transform_values(&block), contents: contents && yield(contents))
+          self.class.new(back_type: yield(back_type), ivars: ivars.transform_values(&block), contents: contents && yield(contents), origin: origin)
         end
 
         def level

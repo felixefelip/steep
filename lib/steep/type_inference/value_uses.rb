@@ -17,6 +17,8 @@ module Steep
         @discarded = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @returned = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @receivers = Set[].compare_by_identity #: Set[::Parser::AST::Node]
+        @arguments = Set[].compare_by_identity #: Set[::Parser::AST::Node]
+        @repeated = Set[].compare_by_identity #: Set[::Parser::AST::Node]
         @receiving = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node]
         @assignments = {}.compare_by_identity #: Hash[::Parser::AST::Node, ::Parser::AST::Node]
         body = def_node && (def_node.type == :defs ? def_node.children[3] : def_node.children[2])
@@ -27,6 +29,11 @@ module Steep
       end
 
       def receiver?(node) = @receivers.include?(node)
+
+      def argument?(node) = @arguments.include?(node)
+
+      # Whether `node` sits in a loop or a block, and so may run more than once.
+      def repeated?(node) = @repeated.include?(node)
 
       # The call `node` is the receiver of, or the block node wrapping it.
       def receiving_call(node) = @receiving[node]
@@ -46,9 +53,11 @@ module Steep
 
       private
 
-      def walk(node)
+      def walk(node, repeated = false)
         return unless node.is_a?(::Parser::AST::Node)
         return if LocalReach::SCOPES.include?(node.type)
+
+        @repeated << node if repeated
 
         case node.type
         when :begin, :kwbegin
@@ -56,12 +65,13 @@ module Steep
         when *CALLS
           @receivers << node.children[0] if node.children[0].is_a?(::Parser::AST::Node)
           @receiving[node.children[0]] ||= node if node.children[0].is_a?(::Parser::AST::Node)
+          LocalReach.argument_values(node.children.drop(2)).each { |argument| @arguments << argument }
         when :block, :numblock, :itblock
           @receiving[node.children[0].children[0]] = node if node.children[0].type != :lambda && node.children[0].children[0].is_a?(::Parser::AST::Node)
         when :ivasgn
           @assignments[node.children[1]] = node if node.children[1]
         end
-        node.children.each { |child| walk(child) }
+        node.children.each_with_index { |child, index| walk(child, repeated || LocalReach.repeats?(node, index)) }
       end
     end
   end

@@ -3949,7 +3949,7 @@ module Steep
 
     def pure_send?(call, receiver, arguments)
       return false unless call.node.type == :send || call.node.type == :csend
-      return false unless call.pure? || KNOWN_PURE_METHODS.superset?(Set.new(call.method_decls.map(&:method_name)))
+      return false unless (call.pure? || KNOWN_PURE_METHODS.superset?(Set.new(call.method_decls.map(&:method_name)))) && !ObjectStates::Aliases.labeled?(call.return_type)
 
       argishes = [*arguments]
       argishes << receiver if receiver
