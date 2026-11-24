@@ -1,0 +1,27 @@
+module Steep
+  module Drivers
+    module Utils
+      class InferredSidecars
+        attr_reader stdout: IO
+
+        attr_reader stderr: IO
+
+        def initialize: (stdout: IO, stderr: IO) -> void
+
+        def run: (Project) -> void
+
+        private
+
+        def contracts_and_specializations: (Project) -> void
+
+        def postconditions: (Project) -> void
+
+        def contracts: (Project, ?out: IO | StringIO) -> void
+
+        def specializations: (Project, ?out: IO | StringIO) -> void
+
+        def print_inferred: (String title, Array[String] lines, ?Pathname? path, ?out: IO | StringIO) -> void
+      end
+    end
+  end
+end
