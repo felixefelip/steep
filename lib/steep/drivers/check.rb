@@ -45,52 +45,6 @@ module Steep
         @expressions = []
       end
 
-      def infer_contracts(project)
-        runner = Contracts::Runner.new(project)
-        contracts = runner.run
-        runner.write(contracts)
-
-        lines = contracts.map { |contract| "#{contract.type_name}#{contract.singleton ? "." : "#"}#{contract.method_name}" }
-        print_inferred("Inferred preconditions", lines, project.relative_path(runner.output_path))
-      rescue => e
-        stderr.puts "Warning: precondition inference failed: #{e.class}: #{e.message}"
-      end
-
-      def infer_specializations(project)
-        runner = Specializations::Runner.new(project)
-        methods = runner.run
-        runner.write(methods)
-
-        tuples = methods.flat_map { |key, entries| entries.each_key.map { |arguments| "#{key}#{arguments}" } }
-        print_inferred("Inferred specializations (return types per argument tuple)", tuples, project.relative_path(runner.output_path))
-        print_inferred("Inferred string evals (code a call site writes)", runner.evals.keys, project.relative_path(runner.evals_output_path))
-        print_inferred("Receivers typed but not recorded (taken as untyped)", runner.unrecorded_receivers.map { |site, type| "#{site}  #{type}" })
-      rescue => e
-        stderr.puts "Warning: specialization inference failed: #{e.class}: #{e.message}"
-      end
-
-      def infer_postconditions(project)
-        runner = Postconditions::Runner.new(project)
-        entries = runner.run
-        runner.write(entries)
-
-        lines = entries.flat_map do |entry|
-          ["#{entry.class_name}#{entry.singleton ? "." : "#"}#{entry.method_name}", *entry.ivars.map { |name, type| "  #{name}: #{type}" }]
-        end
-        print_inferred("Inferred postconditions (ivar refinements)", lines, project.relative_path(runner.output_path))
-      rescue => e
-        stderr.puts "Warning: postcondition inference failed: #{e.class}: #{e.message}"
-      end
-
-      def print_inferred(title, lines, path = nil)
-        return if lines.empty?
-
-        stdout.puts Rainbow("# #{title}:").bold
-        lines.each { |line| stdout.puts "  #{line}" }
-        stdout.puts "  → #{path}" if path
-        stdout.puts
-      end
-
       def active_group?(group)
         return true if active_group_names.empty?
 
@@ -114,16 +68,7 @@ module Steep
           return run_expressions(project)
         end
 
-        # Postconditions first: contract enforcement (inside `infer_contracts`)
-        # observes call sites, and a call site's satisfaction can depend on a
-        # postcondition establishment — `x = build` importing `x.attr` non-nil
-        # so a later `x.save` satisfies `requires self.attr` (felixefelip/steep#56).
-        # Reload the memoized store after writing so enforcement sees it.
-        infer_postconditions(project)
-        project.reload_postconditions!
-        infer_contracts(project)
-        infer_specializations(project)
-        project.reload_specializations!
+        Utils::InferredSidecars.new(stdout: stdout, stderr: stderr).run(project)
 
         params = build_typecheck_params(project)
 
