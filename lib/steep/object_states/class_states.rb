@@ -86,8 +86,10 @@ module Steep
         # name. One checked for no call runs after the program has loaded.
         def entered_method(constr, method_context, self_type, env, arguments)
           unless arguments
-            states = constr.specializations.loaded_class_states
+            states = constr.specializations.loaded
             return env if states.empty?
+
+            constr.typing.started_loaded = true
 
             own = self_type.is_a?(AST::Types::Name::Singleton) && states[self_type.name]
             env = env.refine_types(instance_variable_types: own) if own

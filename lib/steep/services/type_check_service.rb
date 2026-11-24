@@ -547,6 +547,7 @@ module Steep
           typing.top_level_states = [type_env.class_states, left, specializations.loaded]
           typing.observed_classes = ObjectStates::ClassStates.observed(typing, type_env.class_states, left)
           specializations.entered_classes(source.path, typing.observed_classes)
+          specializations.loaded_classes(typing.observed_classes) if typing.started_loaded
         end
 
         typing

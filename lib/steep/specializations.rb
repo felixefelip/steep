@@ -1291,7 +1291,9 @@ module Steep
 
       attr_reader :loaded
 
-      def loaded_class_states = read(:loaded_class_states) { @loaded }
+      def loaded_classes(names)
+        read(:loaded_classes, names) { FileStates.among(@loaded, names) }
+      end
 
       def entered_classes(path, names)
         read(:entered_classes, path, names) { FileStates.among(entering_class_states(path), names) }
