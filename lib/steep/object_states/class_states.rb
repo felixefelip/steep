@@ -296,10 +296,15 @@ module Steep
           method_name = call.method_decls.first.method_name
           singleton = method_name.is_a?(SingletonMethodName)
           owner = method_name.type_name.to_s.delete_prefix("::")
-          constr.specializations.keep([:named_classes, constr.checker, constr.constructor_bindings, owner, method_name.method_name, singleton]) do
+          by_checker = (NAMED_CLASSES[constr.checker] ||= {})
+          by_checker[[constr.constructor_bindings, owner, method_name.method_name, singleton]] ||=
             Set[].tap { |found| visit_named(constr, owner, method_name.method_name, singleton, found, Set[]) }.freeze
-          end
         end
+
+        # Fixed by the environment and the constructor bindings, which a run
+        # replaces rather than changes: kept per checker, out of the store's
+        # reads (felixefelip/steep#763).
+        NAMED_CLASSES = ObjectSpace::WeakKeyMap.new
 
         # A call on `self` runs the body the class of `self` resolves, which is
         # `owner` or one of its subclasses; one on a constant, the body that
