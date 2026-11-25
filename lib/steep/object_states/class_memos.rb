@@ -342,12 +342,14 @@ module Steep
         # carried to it is followed only by name, which is not precise enough
         # to say it does.
         def stored_through(constr, singleton, ivars, call, left, carried:)
+          return ivars unless carried.call
+
           ivars.filter_map do |ivar, type|
             unset = type.is_a?(AST::Types::Nil)
             held = !unset && hash_held?(constr, singleton, ivar, type)
-            changes = if held then (may_store?(constr, singleton, call, ivar, type) || may_rewrite?(constr, singleton, call, ivar)) && carried.call
-                      elsif unset then may_set?(constr, singleton, call, ivar, nil, false) && carried.call
-                      else ObjectStates.state_in(type) && may_yield?(constr, singleton, call, ivar) && carried.call
+            changes = if held then may_store?(constr, singleton, call, ivar, type) || may_rewrite?(constr, singleton, call, ivar)
+                      elsif unset then may_set?(constr, singleton, call, ivar, nil, false)
+                      else ObjectStates.state_in(type) && may_yield?(constr, singleton, call, ivar)
                       end
             next [ivar, type] unless changes && !(unset && Allocated.kept_unset?(constr, singleton, ivar))
 
@@ -362,13 +364,7 @@ module Steep
 
         # Whether `call` may run a store into the hash a memo of `singleton`
         # keeps in `ivar` (`ConstructorBindingRegistry#storing_closure`).
-        def may_store?(constr, singleton, call, ivar, type)
-          return true unless call.is_a?(TypeInference::MethodCall::Typed)
-
-          value_memos(constr, singleton).any? do |held, _, method_name|
-            held == ivar && closure_runs?(constr, call, storing_closure(constr, ivar, method_name, type))
-          end
-        end
+        def may_store?(constr, singleton, call, ivar, type) = !call.is_a?(TypeInference::MethodCall::Typed) || value_memos(constr, singleton).any? { |held, _, method_name| held == ivar && closure_runs?(constr, call, storing_closure(constr, ivar, method_name, type)) }
 
         # Whether `call` may run the memo that writes `ivar`, the one method
         # that does (`written_only_through?`): by name, or through a `self` it
