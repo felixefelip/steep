@@ -442,7 +442,7 @@ module Steep
       def index_uses
         names = Set[] #: Set[Symbol]
         @singleton_methods.each_value do |methods|
-          methods.each { |name, bodies| bodies.compact.each { |body| names.merge(body.memo ? [name, body.memo[0]] : []).merge(name == :inherited ? body.param_births || [] : []) } }
+          methods.each { |name, bodies| bodies.compact.each { |body| names.merge(body.memo ? [name, body.memo[0]] : []).merge(name == :inherited ? body.param_births&.keys || [] : []) } }
         end
         hashes = hash_memos
         hashes.each { |name, ivar| names << name << ivar }
@@ -475,9 +475,12 @@ module Steep
 
       def scan_closures(hashes)
         hashes.each { |memo, ivar| closure_of_stores(memo, ivar, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
-        (memoizing_methods | yielding_methods).each { |name| closure_of_calls({ name => owners_of(name).to_set }, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
+        (memoizing_methods | yielding_methods | rewriting_methods(hashes)).each { |name| closure_of_calls({ name => owners_of(name).to_set }, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
         @born_objects.each_value.flat_map(&:keys).uniq.each { |ivar| closure_of_stores(ivar, ivar, @forwarded_stores, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
       end
+
+      # The class-side methods that assign anew the ivar of a hash a class keeps.
+      def rewriting_methods(hashes) = @singleton_methods.each_value.flat_map { |methods| methods.filter_map { |name, bodies| name if bodies.any? { |body| body&.writes&.any? { |ivar| hashes.any? { |_, held| held == ivar } } } } }.uniq
 
       def yielding_methods
         @uses.each_value.flat_map { |uses| uses.filter_map { |use| use.called if use.kind == :yielded } }.uniq
@@ -518,13 +521,15 @@ module Steep
       end
 
       # `[memo, ivar]` for each hash a class keeps: what a memo of `{}` holds
-      # (`Body#memoized_hash`), or what an ivar a class body sets to `{}`
-      # holds, reached by the ivar itself.
+      # (`Body#memoized_hash`), or what an ivar a class body, or an
+      # `inherited` hook on the subclass, sets to `{}` holds, reached by the
+      # ivar itself.
       def hash_memos
         readers = @singleton_methods.each_value.flat_map do |methods|
           methods.flat_map { |name, bodies| bodies.filter_map { |body| [name, body.memoized_hash] if body&.memoized_hash } }
         end
-        readers.to_set | @born_hashes.each_value.flat_map { |ivars| ivars.each_key.map { |ivar| [ivar, ivar] } }
+        hooked = @singleton_methods.each_value.flat_map { |methods| (methods[:inherited] || []).compact.flat_map { |body| (body.param_births || {}).filter_map { |ivar, kind| ivar if kind == :hash } } }
+        readers.to_set | (@born_hashes.each_value.flat_map(&:keys) + hooked).map { |ivar| [ivar, ivar] }
       end
 
       # Every call the project makes of one of `names`, each name looked for

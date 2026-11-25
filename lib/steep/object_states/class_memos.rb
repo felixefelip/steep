@@ -345,7 +345,7 @@ module Steep
           ivars.filter_map do |ivar, type|
             unset = type.is_a?(AST::Types::Nil)
             held = !unset && hash_held?(constr, singleton, ivar, type)
-            changes = if held then may_store?(constr, singleton, call, ivar, type) && carried.call
+            changes = if held then (may_store?(constr, singleton, call, ivar, type) || may_rewrite?(constr, singleton, call, ivar)) && carried.call
                       elsif unset then may_set?(constr, singleton, call, ivar, nil, false) && carried.call
                       else ObjectStates.state_in(type) && may_yield?(constr, singleton, call, ivar) && carried.call
                       end
@@ -355,6 +355,10 @@ module Steep
             [ivar, value] if value && ((unset && value.is_a?(AST::Types::Nil)) || hash_held?(constr, singleton, ivar, value) || (!held && ObjectStates.state_in(value)))
           end.to_h
         end
+
+        # Whether `call` may run a method of `singleton`'s that assigns `ivar`
+        # anew.
+        def may_rewrite?(constr, singleton, call, ivar) = !call.is_a?(TypeInference::MethodCall::Typed) || ObjectStates.class_side_bodies(constr, singleton).any? { |_, writer, body| (body.nil? || body.writes.include?(ivar)) && closure_runs?(constr, call, running_closure(constr, writer)) }
 
         # Whether `call` may run a store into the hash a memo of `singleton`
         # keeps in `ivar` (`ConstructorBindingRegistry#storing_closure`).
