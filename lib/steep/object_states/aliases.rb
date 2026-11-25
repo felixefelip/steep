@@ -30,7 +30,7 @@ module Steep
 
       class << self
         def labeled(constr, node, type)
-          return type unless type.is_a?(AST::Types::ObjectState) && ObjectStates.held_value?(constr, node)
+          return type unless type.is_a?(AST::Types::ObjectState) && (ObjectStates.held_value?(constr, node) || kept?(constr, node))
 
           type.with_origin(Id.new(node))
         end
@@ -61,7 +61,7 @@ module Steep
         # followed under both names; and with every other local holding an
         # object an argument handed on settled too.
         def handed_on(constr, locals, arguments, answer)
-          kept = each_origin(answer)
+          kept = each_origin(answer).merge(handed_origins(constr, arguments.select { |argument| kept?(constr, argument) }))
           constr = locals.reduce(constr) do |current, name|
             type = current.context.type_env[name] or next current
             next current if kept.include?(origin_of(type))
@@ -134,8 +134,26 @@ module Steep
           return constr if origins.empty?
 
           constr.context.type_env.local_variable_types.reduce(constr) do |current, (name, (type, _))|
-            origins.include?(origin_of(type)) ? ObjectStates.refine_local(current, name, ObjectStates.settled(current, type)) : current
+            table = each_labeled(type).filter_map { |state| [state.origin, ObjectStates.settled(current, state)] if origins.include?(state.origin) }.to_h
+            table.empty? ? current : ObjectStates.refine_local(current, name, replaced(type, table))
           end
+        end
+
+        # Whether `node` is a value pushed onto a local whose contents this body
+        # reads to the end (`Accumulators::Analysis#kept`).
+        def kept?(constr, node) = constr.source.accumulators.kept.key?(node)
+
+        # `type`, as pushed, with each object it holds as it stands now: as a
+        # name here holds it, as it was where only the array holds it, and
+        # settled where every name that held it let it go.
+        def current(constr, type)
+          env = constr.context.type_env
+          table = {} #: Hash[Id, AST::Types::t]
+          [*env.local_variable_types.each_value.map(&:first), *env.instance_variable_types.each_value].each do |held|
+            each_labeled(held) { |state| table[state.origin] ||= state }
+          end
+          each_labeled(type) { |state| table[state.origin] ||= kept?(constr, state.origin.node) ? state : ObjectStates.settled(constr, state) }
+          replaced(type, table)
         end
 
         # `after`, what a call left an object `before` stood for, with the
@@ -159,8 +177,19 @@ module Steep
 
         # `constr` with every name holding an object `type` holds, at any
         # depth, holding it as `type` does.
-        def spread(constr, type)
-          table = each_labeled(type).to_h { |state| [state.origin, state] }
+        def spread(constr, type) = spread_states(constr, states_of(type))
+
+        # `spread` of what a call answered, but for each object it answers as
+        # the receiver held it going in: the passes the call made may have
+        # moved that one since.
+        def spread_answer(constr, answer, receiver_type)
+          held = states_of(receiver_type)
+          spread_states(constr, states_of(answer).reject { |origin, state| held[origin] == state })
+        end
+
+        def states_of(type) = each_labeled(type).to_h { |state| [state.origin, state] }
+
+        def spread_states(constr, table)
           return constr if table.empty?
 
           env = constr.context.type_env

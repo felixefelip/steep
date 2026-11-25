@@ -37,7 +37,7 @@ module Steep
         call = read(constr, memo || built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
         call = HashMutation.entered_read(constr, HashMutation.handed_out(Yields.called(constr, Yields.block_given(constr, call, node), node), node, constr, receiver_type), node)
         call = Aliases.reminted_call(constr, call, node, receiver_type, arguments)
-        [call, Aliases.spread(handed_on(constr, arguments, Aliases.followed(constr, node, call)), call.return_type)]
+        [call, Aliases.spread_answer(handed_on(constr, arguments, Aliases.followed(constr, node, call)), call.return_type, receiver_type)]
       end
 
       # What a body checked under its receiver's contents, or handed records,

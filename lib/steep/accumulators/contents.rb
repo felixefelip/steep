@@ -68,15 +68,18 @@ module Steep
       # not be in this typing at all, since each check builds its own. The
       # syntax is the same either way, and it is exact.
       #
-      # Only a literal or `nil` counts: an array holding anything else has no
-      # contents to state, which is the right answer for `parts << some_value`.
+      # Only a literal, `nil`, or an object this body follows counts: an array
+      # holding anything else has no contents to state, which is the right
+      # answer for `parts << some_value`. An object is read as it stands now,
+      # not as it was pushed (`ObjectStates::Aliases.current`).
       def element_type(constr, node)
         type = operand_type(constr, node)
+        type = ObjectStates::Aliases.current(constr, type) if type.is_a?(AST::Types::ObjectState)
         type if value?(type)
       end
 
       def value?(type)
-        type.is_a?(AST::Types::Literal) || type.is_a?(AST::Types::Nil)
+        type.is_a?(AST::Types::Literal) || type.is_a?(AST::Types::Nil) || (type.is_a?(AST::Types::ObjectState) && !type.origin.nil?)
       end
 
       # The array a `Spliced` node evaluates to, read as a pushed value is, or

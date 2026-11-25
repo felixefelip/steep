@@ -115,6 +115,18 @@ module Steep
           METHODS.include?(pass.children[0].children[0])
       end
 
+      # `local.each { … }` and the like, over a local `found` watches.
+      def block_read?(call, found)
+        receiver = call.children[0]
+        receiver&.type == :lvar && found[receiver.children[0]] && Accumulators::BLOCK_READS.include?(call.children[1])
+      end
+
+      # `local.each(&:name)`, which runs as `local.each { |element| element.name }`
+      # does. `map(&:name)` is a read of its own (`mapped_read?`).
+      def symbol_block_read?(node, found)
+        node.type == :send && node.children[1] == :each && node.children.size == 3 && node.children[2].type == :block_pass && node.children[2].children[0]&.type == :sym && block_read?(node, found)
+      end
+
       def reads_arguments?(send_node)
         send_node.type == :send && ARGUMENT_READS.include?(send_node.children[1])
       end
