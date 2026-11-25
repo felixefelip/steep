@@ -7,10 +7,22 @@ class ClassReachedByValueTest < Minitest::Test
   include SpecializationsProjectHelper
 
   RUBY = <<~'RUBY'
+    class Store
+      def initialize
+        @backend = {}
+      end
+
+      def [](key) = @backend[key]
+
+      def []=(key, value)
+        @backend[key] = value
+      end
+    end
+
     class Base
       def self.inherited(subclass)
         super
-        subclass.instance_variable_set(:@cache, {})
+        subclass.instance_variable_set(:@cache, %{born})
       end
 
       def self.compute(name)
@@ -52,6 +64,12 @@ class ClassReachedByValueTest < Minitest::Test
   RUBY
 
   RBS = <<~RBS
+    class Store
+      @backend: Hash[untyped, untyped]
+      def initialize: () -> void
+      def []: (untyped key) -> untyped
+      def []=: (untyped key, untyped value) -> untyped
+    end
     class Base
       def self.inherited: (untyped subclass) -> untyped
       def self.compute: (String name) -> untyped
@@ -79,10 +97,10 @@ class ClassReachedByValueTest < Minitest::Test
     end
   RBS
 
-  def declarations(run, other: "")
+  def declarations(run, other: "", born: "{}")
     in_tmpdir do
       write("sig/app.rbs", RBS)
-      write("app/app.rb", format(RUBY, run: run))
+      write("app/app.rb", format(RUBY, run: run, born: born))
       write("app/other.rb", "class Other\n  def self.compute(name) = name\n#{other}end\n")
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
@@ -118,6 +136,12 @@ class ClassReachedByValueTest < Minitest::Test
 
   def test_a_namesake_s_method_object_does_not_store_into_the_cache
     found = declarations("    Reflection.new(Post).klass", other: "  def self.computed = method(:compute).call(3)\n")
+
+    assert_equal '"Xa"', found["Reflection#klass"]
+  end
+
+  def test_an_object_the_hook_builds_carries_its_state_too
+    found = declarations("    Reflection.new(Post).klass", other: "  def self.computed = method(:compute).call(3)\n", born: "Store.new")
 
     assert_equal '"Xa"', found["Reflection#klass"]
   end
