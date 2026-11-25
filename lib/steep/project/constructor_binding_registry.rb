@@ -553,7 +553,7 @@ module Steep
         stores = stores_into(memo, ivar, names)
         return if stores.any? { |use| use.kind != :statement && !use.within }
 
-        storing = stores.filter_map(&:within).uniq.to_h { |name| [name, owners_of(name).select { |_, singleton| singleton }.to_set] }
+        storing = stores.select(&:within).group_by(&:within).to_h { |name, uses| [name, uses.to_set { |use| [use.owner, true] }] }
         closure_of_calls(storing, reaching: reaching, in_place: in_place)
       end
 

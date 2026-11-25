@@ -69,6 +69,10 @@ module Steep
 
       SENDS_BY_NAME = %i[send __send__ public_send].freeze
 
+      # Calls that answer a `Method` bound to their receiver, which runs the
+      # method of that name on it alone, wherever it is called.
+      METHOD_OBJECTS = %i[method public_method].freeze
+
       OP_ASSIGNS = %i[op_asgn or_asgn and_asgn].freeze
 
       LOCAL_SCOPES = %i[def defs class module sclass].freeze
@@ -262,7 +266,7 @@ module Steep
           return record_fresh_set(node, arguments[0]) if name == :instance_variable_set && fresh_value?(arguments[1])
 
           use = name == :alias_method && on_self?(node) ? alias_use(node) : ESCAPE
-          arguments.each { |argument| @uses[argument.children[0].to_sym] << use if named?(argument) }
+          arguments.each { |argument| @uses[argument.children[0].to_sym] << (METHOD_OBJECTS.include?(name) ? method_object_use(node, argument) : use) if named?(argument) }
         elsif STRING_EVALS.include?(name) && !@folded_evals.include?(self.class.site(node))
           arguments.each { |argument| each_string(argument) { |text| escape_mentioned(text) } }
         end
@@ -304,7 +308,7 @@ module Steep
       def record(name, node, parent, in_statement)
         return unless @names.include?(name)
 
-        uses = value_uses(node, parent, in_statement) || [ESCAPE]
+        uses = (value_uses(node, parent, in_statement) || [ESCAPE]).map { |use| use.kind == :escape || use.owner ? use : use.dup.tap { |owned| owned.owner = owner_of(node) } }
         site = %i[send csend].include?(node.type) && ClassMemoAnalyzer.site(node)
         on_self = site && (node.children[0].nil? || node.children[0].type == :self)
         @uses[name].concat(site ? uses.map { |use| use.dup.tap { |sited| on_self ? sited.self_at = site : sited.at = site } } : uses)
@@ -568,6 +572,15 @@ module Steep
         return [name, false] unless parent&.type == :sclass
 
         [name, true] if parent.children[0].type == :self
+      end
+
+      # The escape of the method `argument` names, on the receiver of `node`.
+      def method_object_use(node, argument)
+        on_self = node.children[0].nil? || node.children[0].type == :self
+        Use.new(:escape, argument.children[0].to_sym, Set[], nil, nil, on_self ? nil : ClassMemoAnalyzer.site(node)).tap do |use|
+          use.self_at = ClassMemoAnalyzer.site(node) if on_self
+          use.owner = owner_of(node)
+        end
       end
 
       def named?(node)

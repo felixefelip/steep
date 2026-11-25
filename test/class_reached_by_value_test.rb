@@ -73,12 +73,17 @@ class ClassReachedByValueTest < Minitest::Test
     class App
       def self.run: () -> untyped
     end
+    class Other
+      def self.compute: (untyped name) -> untyped
+      def self.computed: () -> untyped
+    end
   RBS
 
-  def declarations(run)
+  def declarations(run, other: "")
     in_tmpdir do
       write("sig/app.rbs", RBS)
       write("app/app.rb", format(RUBY, run: run))
+      write("app/other.rb", "class Other\n  def self.compute(name) = name\n#{other}end\n")
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
       runner = Steep::Specializations::Runner.new(setup_project)
@@ -103,6 +108,18 @@ class ClassReachedByValueTest < Minitest::Test
     found = declarations("    Lookup.first_klass([Reflection.new(Post)])")
 
     assert_equal '"Xa"', found["Lookup.first_klass"]
+  end
+
+  def test_a_namesake_called_outside_any_method_does_not_store_into_the_cache
+    found = declarations("    Reflection.new(Post).klass", other: "end\nOther.compute(1)\n[Other].each { |other| other.compute(2) }\nclass Other\n")
+
+    assert_equal '"Xa"', found["Reflection#klass"]
+  end
+
+  def test_a_namesake_s_method_object_does_not_store_into_the_cache
+    found = declarations("    Reflection.new(Post).klass", other: "  def self.computed = method(:compute).call(3)\n")
+
+    assert_equal '"Xa"', found["Reflection#klass"]
   end
 
   def test_a_class_cleared_through_a_holder_is_read_as_cleared
