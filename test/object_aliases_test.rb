@@ -34,6 +34,10 @@ class ObjectAliasesTest < Minitest::Test
       def clear = @catalog.reset("Item")
     end
 
+    class Wiper
+      def self.wipe(catalog) = catalog.reset("Item")
+    end
+
     class Reader
       def initialize(catalog)
         @catalog = catalog
@@ -61,6 +65,9 @@ class ObjectAliasesTest < Minitest::Test
       def initialize: (Catalog catalog) -> void
       def clear: () -> :reset
     end
+    class Wiper
+      def self.wipe: (Catalog catalog) -> :reset
+    end
     class Reader
       @catalog: Catalog
       def initialize: (Catalog catalog) -> void
@@ -72,14 +79,30 @@ class ObjectAliasesTest < Minitest::Test
   RBS
 
   def label(run)
+    in_project(run) do
+      runner = Steep::Specializations::Runner.new(setup_project)
+      runner.run
+      runner.declarations["Reader#label"]
+    end
+  end
+
+  def type_at(run, source)
+    in_project(run) do
+      runner = Steep::Specializations::Runner.new(setup_project)
+      runner.write(runner.run)
+      typing = checked(setup_project, current_dir + "app/app.rb")
+      node, = typing.each_typing.select { |node, _| node.loc.expression&.source == source }.last
+      typing.type_of(node: node).to_s
+    end
+  end
+
+  def in_project(run)
     in_tmpdir do
       write("sig/app.rbs", RBS)
       write("app/app.rb", format(RUBY, run: run.gsub(/^/, "    ")))
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
-      runner = Steep::Specializations::Runner.new(setup_project)
-      runner.run
-      runner.declarations["Reader#label"]
+      yield
     end
   end
 
@@ -123,10 +146,50 @@ class ObjectAliasesTest < Minitest::Test
   def test_an_object_kept_where_no_name_follows_it_is_settled
     assert_nil label(<<~RUBY)
       catalog = Catalog.new
+      admins = [Admin.new(catalog)]
+      admins.each(&:clear)
+      Reader.new(catalog).label
+    RUBY
+  end
+
+  def test_a_write_through_each_element_of_an_array_reaches_the_local
+    assert_equal ":reset", label(<<~RUBY)
+      catalog = Catalog.new
       admins = []
       admins << Admin.new(catalog)
       admins.each(&:clear)
       Reader.new(catalog).label
+    RUBY
+  end
+
+  def test_a_write_in_a_block_over_an_array_reaches_the_local
+    assert_equal ":reset", label(<<~RUBY)
+      catalog = Catalog.new
+      admins = []
+      admins << Admin.new(catalog)
+      admins.each { |admin| admin.clear }
+      Reader.new(catalog).label
+    RUBY
+  end
+
+  def test_an_element_holds_what_a_write_after_the_push_left
+    assert_equal '[::Admin{@catalog: ::Catalog{@lookups: { "Item" => :reset }}}]', type_at(<<~RUBY, "admins")
+      catalog = Catalog.new
+      admins = []
+      admins << Admin.new(catalog)
+      Admin.new(catalog).clear
+      admins
+    RUBY
+  end
+
+  def test_an_element_handed_on_after_the_push_is_settled
+    assert_equal "[::Admin{@catalog: ::Catalog}]", type_at(<<~RUBY, "admins.each(&:clear)")
+      catalog = Catalog.new
+      admins = []
+      admins << Admin.new(catalog)
+      Wiper.wipe(catalog)
+      admins.each(&:clear)
+      nil
     RUBY
   end
 end

@@ -27,18 +27,55 @@ module Steep
     # One no pass takes never runs.
     def apply(constr, node, iterated:, entry:, receiver_type:, block_params:, block_body:, block_type_hint:, decls:)
       unwidened = block_body && constr.typing.unwidened_of(node: block_body)
-      return [constr, iterated] unless unwidened || returns_in?(block_body)
+      followed = followed?(receiver_type)
+      return [constr, iterated] unless unwidened || followed || returns_in?(block_body)
 
       env, taken, pass = run(constr, node, unwidened || {}, entry: entry, receiver_type: receiver_type, block_params: block_params,
                                                             block_body: block_body, block_type_hint: block_type_hint, decls: decls)
-      return [constr, iterated] unless env
+      return [followed ? let_go(constr, receiver_type) : constr, iterated] unless env
 
       types = (unwidened || {}).keys.to_h { |name| [name, env.local_variable_types.fetch(name)[0]] }
-      constr = constr.update_type_env { |current| current.refine_types(local_variable_types: types) }
+      constr = moved(constr.update_type_env { |current| current.refine_types(local_variable_types: types) }, env)
       returned = taken&.type == :return && taken
       returns_in(block_body).each { |left| left.equal?(returned) ? taken_return(constr, left, pass) : constr.typing.add_dead_clause(left) }
       [constr, returned ? AST::Builtin.bottom_type : iterated]
     end
+
+    # `each(&:name)`, run as `each { |element| element.name }` is.
+    def by_symbol(constr, node, symbol, iterated:, receiver_type:, decls:)
+      intrinsic = constr.iteration_intrinsic(decls)
+      return [constr, iterated] unless intrinsic&.collect == :each && followed?(receiver_type)
+
+      runs = IterationIntrinsics.passes(constr, node, receiver_type, intrinsic) or return [let_go(constr, receiver_type), iterated]
+      element = TypeConstruction::ITERATED_ELEMENT
+      call = node.updated(:send, [node.updated(:lvar, [element]), symbol])
+      env = runs.reduce(constr.context.type_env) do |current, run|
+        pass = constr.with_new_typing(constr.typing.new_child).update_type_env { current.assign_local_variable(element, run.element, nil) }
+        pass.synthesize(call).constr.context.type_env
+      end
+      [moved(constr, env), iterated]
+    end
+
+    # A collection holding objects this body follows under other names
+    # (`ObjectStates::Aliases`): what a pass does to an element, it does to
+    # them.
+    def followed?(type) = type.is_a?(AST::Types::Tuple) && ObjectStates::Aliases.labeled?(type)
+
+    # `constr` with each name that held a followed object holding it as the
+    # passes left it.
+    def moved(constr, env)
+      before = constr.context.type_env
+      constr = before.local_variable_types.reduce(constr) do |current, (name, (type, _))|
+        ObjectStates::Aliases.labeled?(type) ? ObjectStates.refine_local(current, name, env.local_variable_types.fetch(name, [type])[0]) : current
+      end
+      before.instance_variable_types.reduce(constr) do |current, (name, type)|
+        ObjectStates::Aliases.labeled?(type) ? ObjectStates::HeldIvar.refine(current, name, env.instance_variable_types.fetch(name, type)) : current
+      end
+    end
+
+    # The passes are not known, so the objects went where nothing here
+    # follows them.
+    def let_go(constr, type) = ObjectStates::Aliases.settled_elsewhere(constr, ObjectStates::Aliases.each_origin(type))
 
     # The env the passes end with, the jump that ended them, and the pass that
     # took it.

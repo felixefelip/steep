@@ -6700,7 +6700,7 @@ module Steep
 
                   symbol = arg.node.children[0]
                   if symbol&.type == :sym
-                    iterated = constr.iterated_by_symbol(node, symbol.children[0], receiver_type: receiver_type, decls: decls)
+                    constr, iterated = UnrolledEach.by_symbol(constr, node, symbol.children[0], iterated: constr.iterated_by_symbol(node, symbol.children[0], receiver_type: receiver_type, decls: decls), receiver_type: receiver_type, decls: decls)
                   end
                 end
               else

@@ -300,7 +300,11 @@ module Steep
       # call as an argument, with what it holds as the call is made. The callee
       # reads it from its own parameter, so this is what that parameter arrives
       # holding.
-      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, :at_args, keyword_init: true)
+      #
+      # `kept` — `{ value node => true }`, every value pushed onto a local whose
+      # contents stand to the end: the local is a name the checker follows the
+      # value under.
+      Analysis = Struct.new(:at_reads, :final, :returned, :loops, :branches, :at_args, :kept, keyword_init: true)
 
       # Every value node and every `Branch` in a list of pushes, however deeply
       # nested in arms. What a pass of a loop has to keep is exactly these.
@@ -335,6 +339,7 @@ module Steep
         loops = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
         branches = {}.compare_by_identity #: Hash[untyped, bool]
         at_args = {}.compare_by_identity #: Hash[untyped, Array[untyped]]
+        kept = {}.compare_by_identity #: Hash[untyped, bool]
 
         builders = builders_in(node)
 
@@ -390,13 +395,14 @@ module Steep
           end
 
           # A local read only up to a statement does not stay complete past it.
-          last.each do |name, (statement, elements)|
-            (final[statement] ||= {})[name] = elements unless ends&.[](name)
+          last.reject { |name, _| ends&.[](name) }.each do |name, (statement, elements)|
+            (final[statement] ||= {})[name] = elements
+            elements.each { |element| kept[element] = true if element.is_a?(Parser::AST::Node) }
           end
           end
         end
 
-        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches, at_args: at_args)
+        Analysis.new(at_reads: at_reads, final: final, returned: returned, loops: loops, branches: branches, at_args: at_args, kept: kept)
       end
 
       private
@@ -766,15 +772,15 @@ module Steep
         reads = [] #: Array[untyped]
         block_reads_in(node, found, reads)
 
-        by_name = reads.group_by { |block| block.children[0].children[0].children[0] }
-        by_name.filter_map do |name, blocks|
-          next if blocks.size > 1
+        by_name = reads.group_by { |call| call.children[0].children[0] }
+        by_name.filter_map do |name, calls|
+          next if calls.size > 1
 
-          block = blocks.first
-          next if under_modifier?(node, block)
+          call = calls.first
+          next if under_modifier?(node, call)
 
-          start = block.location.expression.begin_pos
-          others = mention_nodes(node, name).reject { |mention| mention.equal?(block.children[0].children[0]) }
+          start = call.location.expression.begin_pos
+          others = mention_nodes(node, name).reject { |mention| mention.equal?(call.children[0]) }
           next unless others.all? { |mention| mention.location.expression.end_pos <= start && CollectionReaders.mapped_read_of?(node, mention) }
 
           name
@@ -817,14 +823,12 @@ module Steep
 
         if CLOSURES.include?(node.type)
           call = node.children[0]
-          receiver = call.children[0] if call.type == :send
-          if receiver&.type == :lvar && found[receiver.children[0]] &&
-             BLOCK_READS.include?(call.children[1]) && call.children.size == 2 && node.type == :block
-            reads << node
-          end
+          reads << call if node.type == :block && call.type == :send && call.children.size == 2 && CollectionReaders.block_read?(call, found)
           # The body runs on a schedule of its own.
           return block_reads_in(call, found, reads)
         end
+
+        reads << node if CollectionReaders.symbol_block_read?(node, found)
 
         node.children.each { |child| block_reads_in(child, found, reads) }
       end

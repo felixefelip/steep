@@ -199,6 +199,42 @@ class LocalReachTest < Minitest::Test
     assert_equal({ "words.flatten" => [Steep::Accumulators::Arrived], "words.map" => [Steep::Accumulators::Built] }, reads)
   end
 
+  # `ActiveSupport::Delegation.generate`: `map(&:first)` read by a scalar
+  # read is not a last read of its own beside the `filter_map`.
+  def test_accumulators_read_a_local_mapped_by_symbol_before_its_last_read
+    analysis = Steep::Accumulators.analyze(parse(<<~RUBY))
+      class Scans
+        def run(method_object)
+          parameters = method_object.parameters.map { |pair| pair }
+          if parameters.map(&:first).intersect?([:opt])
+            "..."
+          else
+            defn = parameters.filter_map { |type, arg| arg if type == :req }
+            defn << "&"
+            defn.join(", ")
+          end
+        end
+      end
+    RUBY
+
+    assert_includes analysis.at_reads.keys.map { |read| read.location.expression.source }, "parameters.filter_map"
+  end
+
+  def test_accumulators_keep_the_values_pushed_onto_a_local_read_to_the_end
+    analysis = Steep::Accumulators.analyze(parse(<<~RUBY))
+      class Scans
+        def run(catalog)
+          admins = []
+          admins << Admin.new(catalog)
+          admins.each(&:clear)
+          nil
+        end
+      end
+    RUBY
+
+    assert_equal ["Admin.new(catalog)"], analysis.kept.keys.map { |value| value.location.expression.source }
+  end
+
   def test_local_assignments_decline_a_reflective_body
     analysis = Steep::LocalAssignments.analyze(parse(<<~'RUBY'))
       def run
