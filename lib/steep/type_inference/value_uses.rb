@@ -45,10 +45,11 @@ module Steep
       def taken?(node) = !left?(node) && !receiver?(node)
 
       # The ivar of `self` a statement assigns the value of `node` to, which
-      # then takes it alone.
-      def kept_in(node)
+      # then takes it alone. `return_dropped`: the body's caller drops what it
+      # returns (`initialize`), so a returned assignment is a statement too.
+      def kept_in(node, return_dropped: false)
         assignment = @assignments[node] or return
-        assignment.children[0] if @discarded.include?(assignment)
+        assignment.children[0] if @discarded.include?(assignment) || (return_dropped && @returned.include?(assignment))
       end
 
       private

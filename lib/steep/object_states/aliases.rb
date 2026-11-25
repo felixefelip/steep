@@ -98,6 +98,21 @@ module Steep
           each_labeled(type).to_set(&:origin)
         end
 
+        # Whether parameter `name` enters as it arrived: held, or mentioned once,
+        # kept in an ivar of `self` this body follows, so the object is one
+        # under two names, both followed.
+        def entered_whole?(constr, method_context, self_type, name)
+          return true if method_context.held_locals.held?(name)
+
+          body = ObjectStates.pair_body(method_context.node) or return false
+          return false unless self_type.is_a?(AST::Types::Name::Instance) && LocalReach.mentions(body, name) == 1
+
+          mention = LocalReach.enum_for(:each_node, body).find { |node| node.type == :lvar && node.children[0] == name } or return false
+          ivar = method_context.value_uses.kept_in(mention, return_dropped: method_context.name == :initialize) or return false
+          held = method_context.held_ivars(taken: constr.constructor_bindings.method(:answer_taken?)) { |reader| HeldIvar.reader_ivar(constr, self_type, reader) }
+          held.held?(ivar)
+        end
+
         # Whether the value of `node` goes where this body follows what it
         # holds: into a held local, as the receiver or an argument of another
         # call, or nowhere.

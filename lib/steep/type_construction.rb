@@ -409,7 +409,7 @@ module Steep
       local_variable_types = method_params.each_param.with_object({}) do |param, hash| #$ Hash[Symbol, AST::Types::t]
         if param.name
           if !SPECIAL_LVAR_NAMES.include?(param.name)
-            hash[param.name] = method_context.held_locals.held?(param.name) ? Specializations.param_type(param, arguments) : ObjectStates.settled(self, Specializations.param_type(param, arguments))
+            hash[param.name] = ObjectStates::Aliases.entered_whole?(self, method_context, self_type, param.name) ? Specializations.param_type(param, arguments) : ObjectStates.settled(self, Specializations.param_type(param, arguments))
           elsif param.name == :_ && !cast_lvar?(:_)
             # Untyped as before, but bound: an ordinary `_` from outside must
             # not show through it.
