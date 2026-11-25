@@ -36,7 +36,8 @@ module Steep
         memo, constr = ClassMemos.remembered(constr, call, node)
         call = read(constr, memo || built(constr, call, node: node, arguments: arguments), receiver_type: receiver_type, arguments: arguments)
         call = HashMutation.entered_read(constr, HashMutation.handed_out(Yields.called(constr, Yields.block_given(constr, call, node), node), node, constr, receiver_type), node)
-        [call, handed_on(constr, arguments)]
+        call = Aliases.reminted_call(constr, call, node, receiver_type, arguments)
+        [call, Aliases.spread(handed_on(constr, arguments, Aliases.followed(constr, node, call)), call.return_type)]
       end
 
       # What a body checked under its receiver's contents, or handed records,
@@ -124,7 +125,7 @@ module Steep
         ivars = bound.merge(Constructed.kept(constr, constructed, held: held, contents: fresh, records: fresh && !held && kept_by_its_call?(constr, node, instance)))
         return call.with_return_type(Specializations.overrides(constr).exact(instance)) if ivars.empty?
 
-        call.with_return_type(AST::Types::ObjectState.new(back_type: instance, ivars: ivars))
+        call.with_return_type(Aliases.labeled(constr, node, Aliases.bound(constr, AST::Types::ObjectState.new(back_type: instance, ivars: ivars), compose(chain), arguments)))
       end
 
       # What the locals a call touched hold once it returns: the receiver as
@@ -141,10 +142,11 @@ module Steep
         reaches_self = on_self || ClassStates.hands_self?(constr, arguments, handed)
         constr = BlockRun.after(constr, node, receiver_type, method_name) unless reaches_self
         if (variable = receiver && HeldIvar.variable(constr, receiver)) && holds_state?(receiver_type)
-          left = left(constr, receiver_type, constr.context.type_env[variable], method_name, arguments, node)
+          left = Aliases.relabeled(receiver_type, left(constr, receiver_type, constr.context.type_env[variable], method_name, arguments, node))
           left = settled(constr, left) if ReturnedSelf.aliased?(constr, node, receiver_type, method_name)
-          constr = HeldIvar.refine_variable(constr, receiver, left)
+          constr = Aliases.spread(HeldIvar.refine_variable(constr, receiver, left), left)
         end
+        constr = Aliases.spread(constr, Aliases.relabeled(receiver_type, left(constr, receiver_type, nil, method_name, arguments, node))) if !variable && receiver && Aliases.labeled?(receiver_type)
         constr = ClassMemos.remembered_after(constr, receiver, receiver_type, method_name, arguments, node) if receiver
         exit = self_exit_or_unchanged(constr, node, on_self) if reaches_self
         constr = HeldIvar.moved(self_moved(constr, exit), exit) if reaches_self
@@ -152,7 +154,7 @@ module Steep
         constr = ClassMemos.after_class_call(constr, call, exit, (ClassStates.reach(constr, call) if reaches_self), hands_self: reaches_self && !on_self) unless !reaches_self && ClassMemos.builds_only?(constr, call)
         constr = ClassStates.moved(constr, node, receiver_type, handed)
         constr = ClassStates.after_call(constr)
-        HashMutation.answer_taken(HashMutation.handed_back(handed_on(constr, arguments), node, arguments), node)
+        HashMutation.answer_taken(HashMutation.handed_back(handed_on(constr, arguments, Aliases.followed(constr, node, call)), node, arguments), node)
       end
 
       # The ivars of `self` a call's own check left, made on `self` or handed
@@ -256,12 +258,7 @@ module Steep
         nil
       end
 
-      def handed_on(constr, arguments)
-        handed_locals(arguments).reduce(constr) do |current, name|
-          type = current.context.type_env[name] or next current
-          refine_local(current, name, settled(current, type))
-        end
-      end
+      def handed_on(constr, arguments, answer) = Aliases.handed_on(constr, handed_locals(arguments), arguments, answer)
 
       # `type` with every state reduced to the ivars no method but
       # `initialize` writes.
@@ -533,11 +530,11 @@ module Steep
         end
       end
 
-      private
-
       def held_value?(constr, node)
         constr.method_context&.held_locals&.held_value?(node) || HeldIvar.held_ivars(constr)&.held_value?(node) || false
       end
+
+      private
 
       def bound_values(constr, instance, bindings, arguments, followed:)
         bindings.filter_map do |ivar, index|

@@ -116,6 +116,7 @@ require "steep/object_states/tap"
 require "steep/object_states/yields"
 require "steep/object_states/captures"
 require "steep/object_states/unshared"
+require "steep/object_states/aliases"
 
 require "steep/range_extension"
 
