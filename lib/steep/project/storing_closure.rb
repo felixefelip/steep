@@ -19,7 +19,7 @@ module Steep
             named = calls_named.call(closure.constructs ? owners.keys | [:new] : owners.keys)
             calls = closure.reached(named.reject { |call| call.kind == :escape }, reaching)
             made_in = calls.to_h { |call| [call, made_in(call, in_place)] }
-            escaped ||= named.any? { |call| call.kind == :escape } || calls.any? { |call| !(call.in_class_body || made_in[call]) }
+            escaped ||= closure.reached(named.select { |call| call.kind == :escape }, reaching).any? || calls.any? { |call| !(call.in_class_body || made_in[call]) }
 
             grown = made_in.values.compact.reject { |name, method| owners.fetch(name, Set[]).include?(method) }
             return (closure unless escaped) if grown.empty?

@@ -57,10 +57,11 @@ module Steep
           outer.update_type_env { |env| env.update(class_states: states) }
         end
 
-        # The class states a call hands its callee: its receiver's, those of
-        # the classes it hands on as an argument, and those of the classes its
-        # body, or a method it calls on `self` or on a constant, names. `self`'s own include the
-        # memos whose value the env knows, for a callee it is handed to.
+        # The class states a call hands its callee: those of the classes its
+        # receiver and arguments reach (`reached_classes`), and those of the
+        # classes its body, or a method it calls on `self` or on a constant,
+        # names. `self`'s own include the memos whose value the env knows,
+        # for a callee it is handed to.
         def of_call(constr, call)
           known = constr.context.type_env.class_states
           singleton = constr.self_type
@@ -71,11 +72,26 @@ module Steep
           return known if known.empty? && constr.specialization_arguments(constr.method_context&.node)
 
           receiver = call.is_a?(TypeInference::MethodCall::Typed) ? call.receiver_type : nil
+          receiver = constr.self_type if receiver.is_a?(AST::Types::Self) && !singleton.is_a?(AST::Types::Name::Singleton)
           names = named_classes(constr, call)
-          handed = handed_classes(constr, call_arguments(call.node))
-          constr.typing.asked_classes.merge(names).merge([receiver, *handed].filter_map { |name| class_name(name) })
-          known.select do |name, _|
-            (receiver.is_a?(AST::Types::Name::Singleton) && receiver.name == name) || handed.include?(name) || names.include?(RelativeNames.of(name))
+          reached = reached_classes(constr, [receiver, *argument_types(constr, call_arguments(call.node))])
+          constr.typing.asked_classes.merge(names).merge(reached.filter_map { |name| class_name(name) })
+          known.select { |name, _| reached.include?(name) || names.include?(RelativeNames.of(name)) }
+        end
+
+        # The class objects a callee can reach through what it is handed: a
+        # class object itself, an instance's own class, and the values an
+        # object holds, as its state knows them or its class declares them.
+        def reached_classes(constr, types)
+          Set[].tap { |found| types.each { |type| reach_classes(constr, type, found, Set[]) } }
+        end
+
+        def argument_types(constr, arguments)
+          LocalReach.argument_values(arguments).filter_map do |argument|
+            next unless constr.typing.has_type?(argument)
+
+            type = constr.typing.type_of(node: argument)
+            type.is_a?(AST::Types::Self) ? constr.self_type : type
           end
         end
 
@@ -190,6 +206,8 @@ module Steep
             singleton = AST::Types::Name::Singleton.new(name: name)
             next [name, ClassMemos.stored_through(constr, singleton, ivars, call, -> { exit.value&.classes&.[](name) }, carried: -> { carried.value.include?(name) })] unless name == receiver || handed.include?(name)
 
+            next [name, ivars] if name == receiver && ClassMemos.builds_only?(constr, call)
+
             moved = ObjectStates.moved_ivars(constr, singleton, ivars, name == receiver ? exit.value&.ivars : exit.value&.classes&.[](name))
             [name, moved.merge(ivars.select { |ivar, type| type.is_a?(AST::Types::Nil) && Allocated.kept_unset?(constr, singleton, ivar) })]
           end
@@ -290,6 +308,39 @@ module Steep
         def memo_ivars(constr, name)
           ObjectStates.class_side_bodies(constr, AST::Types::Name::Singleton.new(name: name)).filter_map { |_, _, body| body&.memo&.first }.to_set
         end
+
+        def reach_classes(constr, type, found, seen)
+          case type
+          when AST::Types::Name::Singleton
+            found << type.name
+          when AST::Types::Name::Instance
+            return unless seen.add?(type)
+
+            found << type.name
+            type.args.each { |arg| reach_classes(constr, arg, found, seen) }
+            declared_ivar_types(constr, type.name).each { |held| reach_classes(constr, held, found, seen) }
+          when AST::Types::ObjectState
+            reach_classes(constr, type.back_type, found, seen)
+            type.ivars.each_value { |held| reach_classes(constr, held, found, seen) }
+          when AST::Types::Union, AST::Types::Intersection, AST::Types::Tuple
+            type.types.each { |member| reach_classes(constr, member, found, seen) }
+          when AST::Types::Record
+            type.elements.each_value { |member| reach_classes(constr, member, found, seen) }
+          end
+        end
+
+        def declared_ivar_types(constr, name)
+          by_checker = (DECLARED_IVAR_TYPES[constr.checker] ||= {})
+          by_checker[name] ||= begin
+            factory = constr.checker.factory
+            factory.definition_builder.build_instance(name).instance_variables.each_value.map { |variable| factory.type(variable.type) }.freeze
+          rescue RBS::BaseError
+            [].freeze
+          end
+        end
+
+        # Fixed by the environment, like `NAMED_CLASSES`.
+        DECLARED_IVAR_TYPES = ObjectSpace::WeakKeyMap.new
 
         def named_classes(constr, call)
           names = Set[] #: Set[String]

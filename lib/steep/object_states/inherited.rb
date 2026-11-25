@@ -48,22 +48,26 @@ module Steep
       # The ivars the `inherited` hooks of a class's ancestors set on it
       # (`param_births`).
       def self.births(constr, singleton)
-        ObjectStates.class_side_bodies(constr, singleton).flat_map { |_, name, body| name == :inherited && body&.param_births ? body.param_births.to_a : [] }
+        ObjectStates.class_side_bodies(constr, singleton).flat_map { |_, name, body| name == :inherited && body&.param_births ? body.param_births.keys : [] }
       end
 
       # The ivars a body sets on what its first parameter holds, with
-      # `instance_variable_set`, to an empty hash or a new object.
+      # `instance_variable_set`, each to `:hash` (an empty one) or `:object`
+      # (a new one).
       def self.param_births(args_node, body)
         param = args_node&.children&.first
-        return Set[] unless param&.type == :arg
+        return {} unless param&.type == :arg
 
-        born = Set[] #: Set[Symbol]
+        born = {} #: Hash[Symbol, Symbol]
         LocalReach.each_node(body) do |node|
           receiver, method, ivar, value, *rest = node.children
           next unless node.type == :send && method == :instance_variable_set && receiver&.type == :lvar && receiver.children[0] == param.children[0]
-          next unless rest.empty? && ivar&.type == :sym && value && ((value.type == :hash && value.children.empty?) || TypeInference::ConstructorBindingAnalyzer::HandedBack.fresh_object?(value))
+          next unless rest.empty? && ivar&.type == :sym && value
 
-          born << ivar.children[0]
+          kind = if value.type == :hash && value.children.empty? then :hash
+                 elsif TypeInference::ConstructorBindingAnalyzer::HandedBack.fresh_object?(value) then :object
+                 end
+          born[ivar.children[0]] = kind if kind
         end
         born
       end

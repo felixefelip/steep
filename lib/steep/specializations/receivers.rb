@@ -18,7 +18,7 @@ module Steep
         def collect(typing, node, names, unwritten:, found: {}, call: node)
           return found unless node.is_a?(::Parser::AST::Node)
 
-          if SENDS.include?(node.type) && names.include?(node.children[1]) && (site = TypeInference::ClassMemoAnalyzer.site(node))
+          if SENDS.include?(node.type) && (names.include?(node.children[1]) || method_object?(node, names)) && (site = TypeInference::ClassMemoAnalyzer.site(node))
             found[site] = receiver_written(typing, node.children[0], call, site, unwritten)
           end
           if Accumulators::LAMBDA_BODIES.include?(node.type) && SENDS.include?(node.children[0].type) && names_any?(node.children.drop(1), names) &&
@@ -73,6 +73,11 @@ module Steep
         end
 
         private
+
+        def method_object?(node, names)
+          name = node.children[2]
+          TypeInference::ClassMemoAnalyzer::METHOD_OBJECTS.include?(node.children[1]) && %i[sym str].include?(name&.type) && names.include?(name.children[0].to_sym)
+        end
 
         def names_any?(nodes, names)
           nodes.any? do |node|
@@ -146,7 +151,7 @@ module Steep
           target = factory.instance_type(target.name) if target.is_a?(AST::Types::Name::Instance)
           interpreter = TypeInference::LogicTypeInterpreter.new(subtyping: constr.checker, typing: constr.typing, config: constr.builder_config)
           interpreter.type_case_select0(type, target)[0].empty?
-        rescue RBS::BaseError
+        rescue RBS::BaseError, RuntimeError
           false
         end
 

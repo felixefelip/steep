@@ -224,8 +224,7 @@ module Steep
       # be one of its stores.
       def forwarded_storing_closure(ivar, reaching:, in_place:)
         index_uses unless @uses
-        ivar = ivar.to_sym
-        closure_of_stores(ivar, ivar, @forwarded_stores, reaching: reaching, in_place: in_place) if @born_objects.each_value.any? { |ivars| ivars.key?(ivar) }
+        closure_of_stores(ivar.to_sym, ivar.to_sym, @forwarded_stores, reaching: reaching, in_place: in_place) if born_object_ivars.include?(ivar.to_sym)
       end
 
       # The calls that may run `method_name` (`StoringClosure`): its own and
@@ -442,7 +441,7 @@ module Steep
       def index_uses
         names = Set[] #: Set[Symbol]
         @singleton_methods.each_value do |methods|
-          methods.each { |name, bodies| bodies.compact.each { |body| names.merge(body.memo ? [name, body.memo[0]] : []).merge(name == :inherited ? body.param_births || [] : []) } }
+          methods.each { |name, bodies| bodies.compact.each { |body| names.merge(body.memo ? [name, body.memo[0]] : []).merge(name == :inherited ? body.param_births&.keys || [] : []) } }
         end
         hashes = hash_memos
         hashes.each { |name, ivar| names << name << ivar }
@@ -475,9 +474,14 @@ module Steep
 
       def scan_closures(hashes)
         hashes.each { |memo, ivar| closure_of_stores(memo, ivar, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
-        (memoizing_methods | yielding_methods).each { |name| closure_of_calls({ name => owners_of(name).to_set }, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
-        @born_objects.each_value.flat_map(&:keys).uniq.each { |ivar| closure_of_stores(ivar, ivar, @forwarded_stores, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
+        (memoizing_methods | yielding_methods | rewriting_methods(hashes)).each { |name| closure_of_calls({ name => owners_of(name).to_set }, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
+        born_object_ivars.each { |ivar| closure_of_stores(ivar, ivar, @forwarded_stores, reaching: EVERY_CALL, in_place: EVERY_BLOCK) }
       end
+
+      def born_object_ivars = (@born_objects.each_value.flat_map(&:keys) + hooked_births(:object)).uniq
+
+      # The class-side methods that assign anew the ivar of a hash a class keeps.
+      def rewriting_methods(hashes) = @singleton_methods.each_value.flat_map { |methods| methods.filter_map { |name, bodies| name if bodies.any? { |body| body&.writes&.any? { |ivar| hashes.any? { |_, held| held == ivar } } } } }.uniq
 
       def yielding_methods
         @uses.each_value.flat_map { |uses| uses.filter_map { |use| use.called if use.kind == :yielded } }.uniq
@@ -518,14 +522,19 @@ module Steep
       end
 
       # `[memo, ivar]` for each hash a class keeps: what a memo of `{}` holds
-      # (`Body#memoized_hash`), or what an ivar a class body sets to `{}`
-      # holds, reached by the ivar itself.
+      # (`Body#memoized_hash`), or what an ivar a class body, or an
+      # `inherited` hook on the subclass, sets to `{}` holds, reached by the
+      # ivar itself.
       def hash_memos
         readers = @singleton_methods.each_value.flat_map do |methods|
           methods.flat_map { |name, bodies| bodies.filter_map { |body| [name, body.memoized_hash] if body&.memoized_hash } }
         end
-        readers.to_set | @born_hashes.each_value.flat_map { |ivars| ivars.each_key.map { |ivar| [ivar, ivar] } }
+        readers.to_set | (@born_hashes.each_value.flat_map(&:keys) + hooked_births(:hash)).map { |ivar| [ivar, ivar] }
       end
+
+      # The ivars an `inherited` hook sets on the subclass to a new `kind`
+      # (`ObjectStates::Inherited.param_births`).
+      def hooked_births(kind) = @singleton_methods.each_value.flat_map { |methods| (methods[:inherited] || []).compact.flat_map { |body| (body.param_births || {}).filter_map { |ivar, born| ivar if born == kind } } }
 
       # Every call the project makes of one of `names`, each name looked for
       # in the sources once.
@@ -548,7 +557,7 @@ module Steep
         stores = stores_into(memo, ivar, names)
         return if stores.any? { |use| use.kind != :statement && !use.within }
 
-        storing = stores.filter_map(&:within).uniq.to_h { |name| [name, owners_of(name).select { |_, singleton| singleton }.to_set] }
+        storing = stores.select(&:within).group_by(&:within).to_h { |name, uses| [name, uses.to_set { |use| [use.owner, true] }] }
         closure_of_calls(storing, reaching: reaching, in_place: in_place)
       end
 
