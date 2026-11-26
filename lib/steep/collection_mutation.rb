@@ -18,14 +18,19 @@ module Steep
       # Whether a method `self` runs reaches no ivar of it: a core one that
       # touches only its own elements, or that answers from its arguments
       # whatever `self` is (`Array(tags)`), or one of the project's that only
-      # reads (`attr_reader`), or the core `allocate`, which runs no method.
+      # reads (`attr_reader`), or the core `allocate`, which runs no method,
+      # or a reflection that runs no hook of the project's (`const_set`).
       def reaches_no_ivar?(call, constr)
         return false unless resolved?(call)
 
         key = MethodIdentity.key(call)
-        ArrayMutation.elements_only?(call, constr) || HashMutation.elements_only?(call, constr) || allocates?(call, constr, key) ||
+        ArrayMutation.elements_only?(call, constr) || HashMutation.elements_only?(call, constr) || allocates?(call, constr, key) || reflects_only?(call, constr, call.receiver_type) ||
           (!key.nil? && LiteralIntrinsics.self_independent?(key, override_registry: constr.literal_method_registry)) ||
           (constr.self_type.is_a?(AST::Types::Name::Base) && !!ObjectStates::MethodEffects.of(constr, constr.self_type, call.method_name)&.reads_only)
+      end
+
+      def reflects_only?(call, constr, receiver_type)
+        ReflectionIntrinsics.reaches_no_ivar?(call, ReflectionIntrinsics.receiver_of(constr, call, receiver_type), factory: constr.checker.factory, override_registry: constr.literal_method_registry)
       end
 
       # A call whose method was found, even where its arguments do not check

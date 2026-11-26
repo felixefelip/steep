@@ -44,7 +44,10 @@ module Steep
     #
     # `method` also carries the NAME the lookup chain is walked for, which is
     # why the entry holds the method object rather than just its key.
-    Entry = _ = Struct.new(:method, :handler, keyword_init: true)
+    #
+    # `runs`: the hooks the method calls on its receiver, as the core keys
+    # them, which a definition the project writes takes the place of.
+    Entry = _ = Struct.new(:method, :handler, :runs, keyword_init: true)
 
     # How many subclasses a reflected class may have before `parameters` stops
     # asking them and declines. A bound on the work rather than on the answer:
@@ -172,7 +175,18 @@ module Steep
       # shadows a reflection is the receiver's, and the receiver is any class the
       # project has.
       def dispatched_names
-        @dispatched_names ||= Set.new(ENTRIES.each_value.map { |entry| entry.method.name }) + CONSULTED_NAMES
+        @dispatched_names ||= Set.new(ENTRIES.each_value.flat_map { |entry| [entry.method.name, *entry.runs.to_a.map { |hook| hook_name(hook) }] })
+      end
+
+      # Whether `call` runs a reflection's core method on `receiver_type`, and
+      # none of the hooks it runs there (`Entry#runs`) is the project's: it
+      # then reaches no ivar of the receiver.
+      def reaches_no_ivar?(call, receiver_type, factory:, override_registry:)
+        key = MethodIdentity.key(call)
+        entry = ENTRIES[key] or return false
+        return false if override_registry.blocked?(key) || shadowed?(receiver_type, key, entry, factory, override_registry)
+
+        entry.runs.to_a.none? { |hook| hooked?(receiver_type, hook, factory, override_registry) }
       end
 
       private
@@ -418,12 +432,19 @@ module Steep
         false
       end
 
-      def const_missing_core?(owner, factory, override_registry)
-        return false if override_registry.name_blocked?(:const_missing)
+      def const_missing_core?(owner, factory, override_registry) = !hooked?(AST::Types::Name::Singleton.new(name: owner), "::Module#const_missing", factory, override_registry)
 
-        chain = dispatch_chain(AST::Types::Name::Singleton.new(name: owner), :const_missing, factory) or return false
-        !overridden_before?(chain, "::Module#const_missing", override_registry)
+      # Whether the project writes `hook`, a core method's key, where Ruby
+      # finds it on `receiver_type`.
+      def hooked?(receiver_type, hook, factory, override_registry)
+        return true if override_registry.name_blocked?(hook_name(hook))
+        return receiver_type.types.any? { |type| hooked?(type, hook, factory, override_registry) } if receiver_type.is_a?(AST::Types::Union)
+
+        chain = dispatch_chain(receiver_type, hook_name(hook), factory) or return true
+        overridden_before?(chain, hook, override_registry)
       end
+
+      def hook_name(hook) = hook.split("#").last.to_sym
 
       def literal_method_name(argument_types)
         return nil unless argument_types.size == 1
@@ -652,12 +673,6 @@ module Steep
       responds_to(receiver, argument_types, factory, override_registry)
     end
 
-    # Names a reflection does not dispatch under but CONSULTS, so that a
-    # redefinition of one changes its answer: `respond_to?` asks
-    # `respond_to_missing?` for a method it does not find.
-    # `const_get` calls `const_missing` for a constant it does not find.
-    CONSULTED_NAMES = %i[respond_to_missing? const_missing].freeze
-
     CONST_GET_KEY = "::Module#const_get"
     CONSTANT_KEYS = [CONST_GET_KEY, "::Module#const_set"].freeze
 
@@ -704,13 +719,13 @@ module Steep
         method: ::Module.instance_method(:to_s), handler: NAME
       ),
       "::Module#const_set" => Entry.new(
-        method: ::Module.instance_method(:const_set), handler: CONST_SET
+        method: ::Module.instance_method(:const_set), handler: CONST_SET, runs: ["::Module#const_added"]
       ),
       "::Module#const_get" => Entry.new(
-        method: ::Module.instance_method(:const_get), handler: CONST_GET
+        method: ::Module.instance_method(:const_get), handler: CONST_GET, runs: ["::Module#const_missing"]
       ),
       "::Kernel#respond_to?" => Entry.new(
-        method: ::Kernel.instance_method(:respond_to?), handler: RESPOND_TO
+        method: ::Kernel.instance_method(:respond_to?), handler: RESPOND_TO, runs: ["::Kernel#respond_to_missing?"]
       )
     }.freeze
   end
