@@ -455,12 +455,18 @@ module Steep
       # of `singleton`'s ancestors.
       def class_side_bodies(constr, singleton)
         registry = constr.constructor_bindings
-        constr.checker.factory.definition_builder.build_singleton(singleton.name).ancestors.ancestors.flat_map do |ancestor|
-          ancestor_bodies(registry, ancestor).flat_map { |method_name, bodies| bodies.map { |body| [ancestor.name, method_name, body] } }
+        (CLASS_SIDE_BODIES[constr.checker] ||= {})[[registry, singleton.name]] ||= begin
+          constr.checker.factory.definition_builder.build_singleton(singleton.name).ancestors.ancestors.flat_map do |ancestor|
+            ancestor_bodies(registry, ancestor).flat_map { |method_name, bodies| bodies.map { |body| [ancestor.name, method_name, body] } }
+          end.freeze
+        rescue RBS::BaseError
+          [].freeze
         end
-      rescue RBS::BaseError
-        []
       end
+
+      # Fixed by the environment and the constructor bindings, like
+      # `ClassStates::NAMED_CLASSES`.
+      CLASS_SIDE_BODIES = ObjectSpace::WeakKeyMap.new
 
       # A method whose body this cannot read leaves only what holds under any
       # name.
