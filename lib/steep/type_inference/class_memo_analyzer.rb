@@ -45,8 +45,9 @@ module Steep
       # (`ConstructorBindingRegistry#hand_on`). `self_at`: the call naming it
       # on `self`, by `site`. `on_ivar`: of a call, the ivar it is made on.
       # `blocks`: of a call made inside blocks of a method's body, where no
-      # `enclosing` is, `[[name, singleton], [[site, method], ...]]`: that
-      # method, and each call whose block holds it, innermost first.
+      # `enclosing` is, or of a use on `self` inside blocks of a class
+      # method's, `[[name, singleton], [[site, method], ...]]`: that method,
+      # and each call whose block holds it, innermost first.
       Use = Struct.new(:kind, :called, :element_calls, :within, :forwarded_by, :at, :direct, :key, :value, :enclosing, :singleton, :owner, :in_class_body, :on_self, :handed_to, :handed, :self_at, :on_ivar, :blocks, :key_local, :key_param) do
         def each_forwarder(&block)
           yield forwarded_by if forwarded_by
@@ -374,7 +375,8 @@ module Steep
         use = Use.new(in_statement && on_self ? :statement : :receiver, call.children[1], element_calls, within, nil, nil, direct, key)
         use.key_local = KeyParams.local(call, @parents)
         use.value = element_uses(op_assigned ? @parents[call] : call) if KEY_READS.include?(use.called)
-        op_assigned ? [Use.new(use.kind, :"#{use.called}=", Set[], within, nil, nil, nil, key), use] : [use]
+        use.blocks = blocks_to_method(call)&.then { |blocks| blocks if blocks.dig(0, 1) } if on_self && !within
+        op_assigned ? [Use.new(use.kind, :"#{use.called}=", Set[], within, nil, nil, nil, key).tap { |assigned| assigned.blocks = use.blocks }, use] : [use]
       end
 
       # A hash `self` holds keeps its elements on `self` too.

@@ -30,7 +30,7 @@ class ClassReachedByValueTest < Minitest::Test
         return found if found
 
         value = "X#{name}"
-        @cache[name] = value
+    %{store}
         value
       end
 
@@ -47,6 +47,7 @@ class ClassReachedByValueTest < Minitest::Test
 
       def klass = @owner.send(:compute, "a")
       def clear = @owner.wipe
+      def owner = @owner
     end
 
     class Lookup
@@ -82,6 +83,7 @@ class ClassReachedByValueTest < Minitest::Test
       def initialize: (singleton(Post) owner) -> void
       def klass: () -> untyped
       def clear: () -> untyped
+      def owner: () -> singleton(Post)
     end
     class Lookup
       def self.first_klass: (Array[Reflection] reflections) -> untyped
@@ -97,10 +99,10 @@ class ClassReachedByValueTest < Minitest::Test
     end
   RBS
 
-  def declarations(run, other: "", born: "{}")
+  def declarations(run, other: "", born: "{}", store: "    @cache[name] = value")
     in_tmpdir do
       write("sig/app.rbs", RBS)
-      write("app/app.rb", format(RUBY, run: run, born: born))
+      write("app/app.rb", format(RUBY, run: run, born: born, store: store))
       write("app/other.rb", "class Other\n  def self.compute(name) = name\n#{other}end\n")
       postconditions = Steep::Postconditions::Runner.new(setup_project)
       postconditions.write(postconditions.run)
@@ -150,5 +152,11 @@ class ClassReachedByValueTest < Minitest::Test
     found = declarations("    Post.compute(\"a\")\n    Reflection.new(Post).clear\n    Post.peek(\"a\")")
 
     assert_equal "nil", found["Base.peek"]
+  end
+
+  def test_a_store_inside_a_block_leaves_the_state_to_calls_that_cannot_run_it
+    found = declarations("    reflection = Reflection.new(Post)\n    reflection.owner\n    reflection.klass", born: "Store.new", store: "    [name].each { |key| @cache[key] = value }")
+
+    assert_equal '"Xa"', found["Reflection#klass"]
   end
 end

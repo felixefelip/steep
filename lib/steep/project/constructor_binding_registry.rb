@@ -554,11 +554,11 @@ module Steep
       # Grows past a call that escapes, so that `build` scans every name a
       # closure `reaching` fewer calls may ask for: no node is left after it.
       def closure_of_stores(memo, ivar, names = HASH_STORES, reaching:, in_place:)
-        stores = stores_into(memo, ivar, names)
-        return if stores.any? { |use| use.kind != :statement && !use.within }
+        stores = stores_into(memo, ivar, names).reject { |use| use.kind == :statement }
+        made_in = stores.map { |use| use.within ? [use.within, [use.owner, true]] : StoringClosure.made_in(use, in_place) }
+        return unless made_in.all?
 
-        storing = stores.select(&:within).group_by(&:within).to_h { |name, uses| [name, uses.to_set { |use| [use.owner, true] }] }
-        closure_of_calls(storing, reaching: reaching, in_place: in_place)
+        closure_of_calls(made_in.group_by(&:first).transform_values { |found| found.to_set(&:last) }, reaching: reaching, in_place: in_place)
       end
 
       def closure_of_calls(owners, reaching:, in_place:) = StoringClosure.grow(owners, reaching: reaching, in_place: in_place) { |names| calls_named(names) }
