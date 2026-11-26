@@ -70,6 +70,7 @@ class CoreCallKeepsClassStateTest < Minitest::Test
       def self.compute: (String name) -> untyped
       def self.generated: () -> Module
       def self.const_added: (Symbol name) -> untyped
+      def self.to_str: () -> String
     end
     class Reflection
       @owner: singleton(Post)
@@ -109,6 +110,18 @@ class CoreCallKeepsClassStateTest < Minitest::Test
 
   def test_a_const_added_the_project_writes_may_change_the_cache
     found = declarations("    Post.const_set(:Gen, Module.new)\n    Reflection.new(Post).klass", hook: '  def self.const_added(name) = @cache["a"] = "Y"')
+
+    refute_equal '"Xa"', found["Reflection#klass"]
+  end
+
+  def test_a_class_handed_to_a_reflection_keeps_its_cache
+    found = declarations("    Base.equal?(Post)\n    Reflection.new(Post).klass")
+
+    assert_equal '"Xa"', found["Reflection#klass"]
+  end
+
+  def test_a_to_str_the_project_writes_may_change_the_cache_of_a_class_handed_to_a_reflection
+    found = declarations("    Base.respond_to?(Post)\n    Reflection.new(Post).klass", hook: '  def self.to_str = @cache["a"] = "Y"')
 
     refute_equal '"Xa"', found["Reflection#klass"]
   end

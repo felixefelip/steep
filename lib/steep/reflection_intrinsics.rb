@@ -47,7 +47,13 @@ module Steep
     #
     # `runs`: the hooks the method calls on its receiver, as the core keys
     # them, which a definition the project writes takes the place of.
-    Entry = _ = Struct.new(:method, :handler, :runs, keyword_init: true)
+    #
+    # `converts`: the same for its arguments. One that names a method or a
+    # constant takes it by `rb_check_id`, which calls `to_str` on anything but
+    # a `String` or a `Symbol`.
+    Entry = _ = Struct.new(:method, :handler, :runs, :converts, keyword_init: true)
+
+    TO_STR = ["::BasicObject#to_str"].freeze
 
     # How many subclasses a reflected class may have before `parameters` stops
     # asking them and declines. A bound on the work rather than on the answer:
@@ -175,16 +181,19 @@ module Steep
       # shadows a reflection is the receiver's, and the receiver is any class the
       # project has.
       def dispatched_names
-        @dispatched_names ||= Set.new(ENTRIES.each_value.flat_map { |entry| [entry.method.name, *entry.runs.to_a.map { |hook| hook_name(hook) }] })
+        @dispatched_names ||= Set.new(ENTRIES.each_value.flat_map { |entry| [entry.method.name, *[*entry.runs, *entry.converts].map { |hook| hook_name(hook) }] })
       end
 
       # Whether `call` runs a reflection's core method on `receiver_type`, and
       # none of the hooks it runs there (`Entry#runs`) is the project's: it
-      # then reaches no ivar of the receiver.
-      def reaches_no_ivar?(call, receiver_type, factory:, override_registry:)
+      # then reaches no ivar of the receiver. Nor of `handed`, a class it was
+      # passed, where none of the methods it converts that by
+      # (`Entry#converts`) is the project's either.
+      def reaches_no_ivar?(call, receiver_type, factory:, override_registry:, handed: nil)
         key = MethodIdentity.key(call)
         entry = ENTRIES[key] or return false
         return false if override_registry.blocked?(key) || shadowed?(receiver_type, key, entry, factory, override_registry)
+        return false if handed && entry.converts.to_a.any? { |hook| hooked?(handed, hook, factory, override_registry) }
 
         entry.runs.to_a.none? { |hook| hooked?(receiver_type, hook, factory, override_registry) }
       end
@@ -698,13 +707,13 @@ module Steep
         method: ::Module.instance_method(:singleton_class?), handler: SINGLETON_CLASS_PREDICATE
       ),
       "::Module#instance_method" => Entry.new(
-        method: ::Module.instance_method(:instance_method), handler: INSTANCE_METHOD
+        method: ::Module.instance_method(:instance_method), handler: INSTANCE_METHOD, converts: TO_STR
       ),
       "::Module#public_instance_method" => Entry.new(
-        method: ::Module.instance_method(:public_instance_method), handler: PUBLIC_INSTANCE_METHOD
+        method: ::Module.instance_method(:public_instance_method), handler: PUBLIC_INSTANCE_METHOD, converts: TO_STR
       ),
       "::Kernel#method" => Entry.new(
-        method: ::Kernel.instance_method(:method), handler: METHOD
+        method: ::Kernel.instance_method(:method), handler: METHOD, converts: TO_STR
       ),
       "::Method#parameters" => Entry.new(
         method: ::Method.instance_method(:parameters), handler: PARAMETERS
@@ -719,13 +728,13 @@ module Steep
         method: ::Module.instance_method(:to_s), handler: NAME
       ),
       "::Module#const_set" => Entry.new(
-        method: ::Module.instance_method(:const_set), handler: CONST_SET, runs: ["::Module#const_added"]
+        method: ::Module.instance_method(:const_set), handler: CONST_SET, runs: ["::Module#const_added"], converts: TO_STR
       ),
       "::Module#const_get" => Entry.new(
-        method: ::Module.instance_method(:const_get), handler: CONST_GET, runs: ["::Module#const_missing"]
+        method: ::Module.instance_method(:const_get), handler: CONST_GET, runs: ["::Module#const_missing"], converts: TO_STR
       ),
       "::Kernel#respond_to?" => Entry.new(
-        method: ::Kernel.instance_method(:respond_to?), handler: RESPOND_TO, runs: ["::Kernel#respond_to_missing?"]
+        method: ::Kernel.instance_method(:respond_to?), handler: RESPOND_TO, runs: ["::Kernel#respond_to_missing?"], converts: TO_STR
       )
     }.freeze
   end
