@@ -127,7 +127,7 @@ module Steep
 
       def self.empty: (node: Node) -> MethodParams
 
-      def self.build: (node: Node, method_type: MethodType, keyword_rest: AST::Types::Record?) -> MethodParams
+      def self.build: (node: Node, method_type: MethodType, keyword_rest: AST::Types::Record?, positional_rest: AST::Types::Tuple?) -> MethodParams
     end
   end
 end

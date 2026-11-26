@@ -244,7 +244,7 @@ module Steep
         params
       end
 
-      def self.build(node:, method_type:, keyword_rest:)
+      def self.build(node:, method_type:, keyword_rest:, positional_rest:)
         # @type var args_node: ::Parser::AST::Node
         args_node =
           case node.type
@@ -390,6 +390,7 @@ module Steep
           end
 
           type = rest_types.empty? ? nil : AST::Types::Union.build(types: rest_types)
+          type = AST::Types::Union.build(types: positional_rest.types) unless positional_rest.nil? || positional_rest.types.empty?
 
           method_param = PositionalRestParameter.new(name: name, type: type, node: arg)
           instance.params[name] = method_param

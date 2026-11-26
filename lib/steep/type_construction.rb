@@ -383,7 +383,7 @@ module Steep
 
       method_params =
         if method_type
-          TypeInference::MethodParams.build(node: node, method_type: method_type, keyword_rest: arguments&.passed_keywords)
+          TypeInference::MethodParams.build(node: node, method_type: method_type, keyword_rest: arguments&.passed_keywords, positional_rest: arguments&.rest_tuple(node))
         else
           TypeInference::MethodParams.empty(node: node)
         end
