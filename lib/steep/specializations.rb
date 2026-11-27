@@ -226,6 +226,15 @@ module Steep
         overrides(constr).body_key(call, node: node, exact_self: exact_self(constr), self_type: constr.self_type)
       end
 
+      # The key of the body whose exit `call` leaves under `arguments`: the
+      # body it runs, or, of a method a block defines and the body it
+      # overrides, the one `answered_first` picks for its return.
+      def exit_key(constr, call, node, arguments)
+        runs = overrides(constr).runs(call, node: node, exact_self: exact_self(constr), self_type: constr.self_type) or return nil
+        runs = answered_first(constr, runs, arguments)
+        runs.keys.first if runs.size == 1
+      end
+
       def overrides(constr)
         Overrides.new(checker: constr.checker, registry: constr.constructor_bindings, harvested: constr.specializations.method(:harvested?))
       end

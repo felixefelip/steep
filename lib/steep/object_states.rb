@@ -166,14 +166,14 @@ module Steep
 
       # `self_exit`, or every ivar as it stands where the call evaluates a
       # string that only defines methods, is a core method that reaches no ivar
-      # (`CollectionMutation.reaches_no_ivar?`), or a `super` reaching a core class's
-      # `initialize` (`initialize_chain`).
+      # (`CollectionMutation.reaches_no_ivar?`) or a reflection `self` is handed
+      # to, or a `super` reaching a core class's `initialize` (`initialize_chain`).
       def self_exit_or_unchanged(constr, node, on_self)
         exit = self_exit(constr, node, on_self)
         return exit if exit
 
         call = recorded_call(constr, node)
-        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node) || Supers.core_initializer?(call, node) || (on_self && CollectionMutation.reaches_no_ivar?(call, constr))
+        constr.context.type_env.instance_variable_types if Specializations::Evals.defines_only?(constr.typing, node) || Supers.core_initializer?(call, node) || (on_self ? CollectionMutation.reaches_no_ivar?(call, constr) : CollectionMutation.keeps_handed?(call, constr, constr.self_type))
       end
 
       # A call on `self`, or one handed `self`, from a body checked under its
@@ -220,7 +220,7 @@ module Steep
         arguments = Specializations::Arguments.recorded(node, constr.typing) or return
         return unless arguments.public_send(under)
 
-        key = Specializations.body_key(constr, call, node) or return
+        key = Specializations.exit_key(constr, call, node, arguments) or return
         recorded_exit(constr, key, arguments)
       end
 

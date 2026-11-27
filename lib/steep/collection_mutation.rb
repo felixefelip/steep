@@ -29,8 +29,11 @@ module Steep
           (constr.self_type.is_a?(AST::Types::Name::Base) && !!ObjectStates::MethodEffects.of(constr, constr.self_type, call.method_name)&.reads_only)
       end
 
-      def reflects_only?(call, constr, receiver_type)
-        ReflectionIntrinsics.reaches_no_ivar?(call, ReflectionIntrinsics.receiver_of(constr, call, receiver_type), factory: constr.checker.factory, override_registry: constr.literal_method_registry)
+      # Whether a reflection `call` keeps `handed`, a class it was passed.
+      def keeps_handed?(call, constr, handed) = resolved?(call) && reflects_only?(call, constr, call.receiver_type, handed: handed)
+
+      def reflects_only?(call, constr, receiver_type, handed: nil)
+        ReflectionIntrinsics.reaches_no_ivar?(call, ReflectionIntrinsics.receiver_of(constr, call, receiver_type), factory: constr.checker.factory, override_registry: constr.literal_method_registry, handed: handed)
       end
 
       # A call whose method was found, even where its arguments do not check

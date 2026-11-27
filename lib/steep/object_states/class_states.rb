@@ -206,7 +206,7 @@ module Steep
             singleton = AST::Types::Name::Singleton.new(name: name)
             next [name, ClassMemos.stored_through(constr, singleton, ivars, call, -> { exit.value&.classes&.[](name) }, carried: -> { carried.value.include?(name) })] unless name == receiver || handed.include?(name)
 
-            next [name, ivars] if name == receiver && (ClassMemos.builds_only?(constr, call) || (CollectionMutation.resolved?(call) && CollectionMutation.reflects_only?(call, constr, receiver_type)))
+            next [name, ivars] if (name == receiver && ClassMemos.builds_only?(constr, call)) || (CollectionMutation.resolved?(call) && CollectionMutation.reflects_only?(call, constr, receiver_type, handed: (singleton if handed.include?(name))))
 
             moved = ObjectStates.moved_ivars(constr, singleton, ivars, name == receiver ? exit.value&.ivars : exit.value&.classes&.[](name))
             [name, moved.merge(ivars.select { |ivar, type| type.is_a?(AST::Types::Nil) && Allocated.kept_unset?(constr, singleton, ivar) })]
