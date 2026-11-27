@@ -477,6 +477,28 @@ end
     end
   end
 
+  def test_call_arg_is_ancestor_of_a_subclass_keeps_the_subclass
+    with_checker() do |checker|
+      source = parse_ruby("klass = Foo; klass < Numeric")
+
+      node = source.node.children[1]
+
+      typing = Typing.new(source: source, root_context: nil, cursor: nil)
+      typing.add_typing(dig(node), AST::Types::Logic::ArgIsAncestor.new(), nil)
+      typing.add_typing(dig(node, 0), parse_type("singleton(::Integer)"), nil)
+      typing.add_typing(dig(node, 2), parse_type("singleton(::Numeric)"), nil)
+
+      env = type_env
+        .assign_local_variable(:klass, parse_type("singleton(::Integer)"), nil)
+
+      interpreter = LogicTypeInterpreter.new(subtyping: checker, typing: typing, config: config)
+      truthy_result, falsy_result = interpreter.eval(env: env, node: node)
+
+      assert_equal parse_type("singleton(::Integer)"), truthy_result.env[:klass]
+      assert_predicate falsy_result, :unreachable
+    end
+  end
+
   def test_call_not
     with_checker(<<-RBS) do |checker|
       RBS

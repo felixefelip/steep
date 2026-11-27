@@ -679,7 +679,7 @@ module Steep
             arg_type = factory.deep_expand_alias(typing.type_of(node: arg))
 
             if arg_type.is_a?(AST::Types::Name::Singleton)
-              truthy_type = arg_type
+              truthy_type = (descends = factory.descends?(receiver_type.is_a?(AST::Types::Self) ? self_type : receiver_type, arg_type)) ? receiver_type : arg_type
               falsy_type = receiver_type
               truthy_env, falsy_env = refine_node_type(
                 env: env,
@@ -692,7 +692,7 @@ module Steep
               truthy_result.unreachable! unless truthy_type
 
               falsy_result = Result.new(type: FALSE, env: falsy_env, unreachable: false)
-              falsy_result.unreachable! unless falsy_type && !factory.descends?(receiver_type.is_a?(AST::Types::Self) ? self_type : receiver_type, arg_type)
+              falsy_result.unreachable! unless falsy_type && !descends
 
               [truthy_result, falsy_result]
             end

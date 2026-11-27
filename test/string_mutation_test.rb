@@ -186,6 +186,63 @@ class StringMutationTest < Minitest::Test
   end
 
   # A project that redefines one of them writes what the program runs instead.
+  STRING_EXTENSION = <<~'RUBY'
+    class String
+      def handed = Keeper.keep(self)
+      def stomp = upcase!
+      def outer = handed
+      def aliased
+        other = self
+        other.upcase!
+      end
+    end
+
+    module Keeper
+      def self.keep(word) = word.size
+    end
+  RUBY
+
+  STRING_EXTENSION_RBS = <<~RBS
+    class String
+      def handed: () -> Integer
+      def stomp: () -> String?
+      def outer: () -> Integer
+      def aliased: () -> String?
+    end
+    module Keeper
+      def self.keep: (String word) -> Integer
+    end
+  RBS
+
+  def kept_after(call)
+    registry = Steep::Project::ConstructorBindingRegistry.new
+    registry.ingest_source(STRING_EXTENSION, path_name: "string_ext.rb")
+
+    with_checker({ "string_ext.rbs" => STRING_EXTENSION_RBS }, with_stdlib: true) do |checker|
+      source = parse_ruby("# @type var word: \"posts\"\nword = _ = \"posts\"\nword.#{call}\ncopy = word\n")
+
+      with_standard_construction(checker, source, constructor_bindings: registry) do |construction, _typing|
+        return construction.synthesize(source.node).context.type_env[:copy].to_s
+      end
+    end
+  end
+
+  def test_a_project_method_that_hands_self_to_a_call_keeps_the_literal
+    assert_equal '"posts"', kept_after("handed")
+  end
+
+  def test_a_project_method_that_changes_self_widens
+    assert_equal "::String", kept_after("stomp")
+  end
+
+  def test_a_project_method_calling_one_that_keeps_self_keeps_the_literal
+    assert_equal '"posts"', kept_after("outer")
+  end
+
+  def test_a_project_method_that_names_self_otherwise_widens
+    assert_equal "::String", kept_after("aliased")
+  end
+
   def test_a_redefined_method_is_not_vouched_for
     with_checker(with_stdlib: true) do |checker|
       source = parse_ruby(<<~'RUBY')

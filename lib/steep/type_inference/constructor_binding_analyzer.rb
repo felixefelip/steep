@@ -132,7 +132,7 @@ module Steep
       Body = Struct.new(
         :bindings, :writes, :ivars, :super_args, :self_sends, :exposes_self, :exposes_self_besides_return, :returns_self, :returned_sends, :iterations, :ivar_uses, :returns, :memo, :memoizes, :memoized_hash, :calls,
         :empties, :literal_writes, :rebuilds, :handed, :consts, :hands_back, :hands_back_element, :stores_element, :block_super, :hands_back_elements, :keyed_memo, :outside_state,
-        :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, :other_sends, :param_births, keyword_init: true
+        :own_class_sends, :cvars, :cvar_writes, :cvar_memos, :const_reads, :const_sends, :other_sends, :param_births, :self_in_calls_only, keyword_init: true
       ) { def names_ivar? = !(writes.empty? && ivar_uses.empty?) }
 
       def self.analyze(node, folded_evals:)
@@ -395,6 +395,7 @@ module Steep
           self_sends: sends[:self],
           other_sends: sends[:other],
           exposes_self: !self.class.self_exposures(body).empty?,
+          self_in_calls_only: self.class.self_in_calls_only?(body),
           **SelfReturns.facts(body),
           iterations: self_iterations(body),
           ivar_uses: KeyParams.placed(ClassMemoAnalyzer.uses(body, names: ivars, folded_evals: @folded_evals).to_h, args_node, body),
@@ -424,6 +425,16 @@ module Steep
 
         node.children.each { |child| self_exposures(child, node, found) }
         found
+      end
+
+      # Whether `self` is mentioned only as what a call is made on, an argument
+      # handed to one, or what a `return` hands back: never assigned, nor put in
+      # a collection, where another name could reach it.
+      def self.self_in_calls_only?(node, parent = nil)
+        return true unless node.is_a?(::Parser::AST::Node)
+        return %i[send csend super return].include?(parent&.type) if node.type == :self
+
+        node.children.all? { |child| self_in_calls_only?(child, node) }
       end
 
       # `[ivar, method]` for each block handed to a method called on an ivar,
