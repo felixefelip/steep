@@ -37,6 +37,8 @@ class CoreCallKeepsClassStateTest < Minitest::Test
       def self.generated
         @generated ||= const_set(:Generated, Module.new)
       end
+
+      def self.checked = Base.equal?(self)
     %{hook}
     end
 
@@ -71,6 +73,7 @@ class CoreCallKeepsClassStateTest < Minitest::Test
       def self.generated: () -> Module
       def self.const_added: (Symbol name) -> untyped
       def self.to_str: () -> String
+      def self.checked: () -> untyped
     end
     class Reflection
       @owner: singleton(Post)
@@ -116,6 +119,12 @@ class CoreCallKeepsClassStateTest < Minitest::Test
 
   def test_a_class_handed_to_a_reflection_keeps_its_cache
     found = declarations("    Base.equal?(Post)\n    Reflection.new(Post).klass")
+
+    assert_equal '"Xa"', found["Reflection#klass"]
+  end
+
+  def test_a_class_handing_itself_to_a_reflection_keeps_its_cache
+    found = declarations("    Post.checked\n    Reflection.new(Post).klass")
 
     assert_equal '"Xa"', found["Reflection#klass"]
   end
