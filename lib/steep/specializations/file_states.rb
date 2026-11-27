@@ -25,7 +25,7 @@ module Steep
           loaded = last_loaded
           observed |= last_observed
         end
-        @by_path[path] = [typing.defined_classes, entered, left, observed, loaded]
+        @by_path[path] = [typing.defined_classes, entered, left, observed, loaded, typing.coded_classes]
       end
 
       # `states` of the classes in `names` (`ObjectStates::ClassStates.observed`).
@@ -38,10 +38,17 @@ module Steep
 
       # What the program's load leaves each class holding: what the one file
       # defining it left it holding, where no other file's top level changes it.
+      # A file whose bodies of the class only define methods and mix in inert
+      # modules defines it only where no file runs code in it.
       def loaded
         definers = Hash.new { |hash, name| hash[name] = [] } #: Hash[RBS::TypeName, Array[Pathname]]
-        @by_path.each { |path, (defined, _, _)| defined.each { |name| definers[name] << path } }
-        definers.filter_map do |name, (definer, *others)|
+        coders = Hash.new { |hash, name| hash[name] = [] } #: Hash[RBS::TypeName, Array[Pathname]]
+        @by_path.each do |path, (defined, _, _, _, _, coded)|
+          defined.each { |name| definers[name] << path }
+          coded.each { |name| coders[name] << path }
+        end
+        definers.filter_map do |name, paths|
+          definer, *others = coders.key?(name) ? coders[name] : paths
           next if others.any? || @rewritten_elsewhere.include?(name)
 
           ivars = @by_path.fetch(definer)[2][name] and [name, ivars]

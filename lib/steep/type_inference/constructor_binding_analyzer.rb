@@ -626,34 +626,7 @@ module Steep
       # nil. A class written with a superclass runs that superclass's
       # `inherited`.
       def body_code(body, nesting)
-        mixins = [] #: Array[String]
-        each_stmt(body) do |stmt|
-          next if %i[def defs].include?(stmt.type)
-
-          names = nested_code(stmt, nesting) || mixed_names(stmt, nesting) or return true
-          mixins.concat(names)
-        end
-        mixins.empty? ? nil : mixins
-      end
-
-      # What a nested `module`, or `class` with no superclass, runs: its own
-      # body's code, which runs as the outer body does.
-      def nested_code(stmt, nesting)
-        return unless stmt.type == :module || (stmt.type == :class && stmt.children[1].nil?)
-
-        name = const_to_name(stmt.children[0]) or return
-        code = body_code(stmt.children.last, nesting + [name])
-        code == true ? nil : code || []
-      end
-
-      def mixed_names(stmt, nesting)
-        return unless stmt.type == :send && (stmt.children[0].nil? || stmt.children[0].type == :self)
-        return unless %i[include extend prepend].include?(stmt.children[1])
-
-        arguments = stmt.children.drop(2)
-        return if arguments.empty? || arguments.any? { |argument| argument.type != :const }
-
-        arguments.flat_map { |argument| referenced_names(argument, nesting) }
+        BodyCode.code(body, nesting) { |argument, inner| referenced_names(argument, inner) }
       end
 
       def memoized_ivar(body)
@@ -696,23 +669,9 @@ module Steep
         body.type == :ivar ? body.children[0] : nil
       end
 
-      def each_stmt(body)
-        return unless body.is_a?(::Parser::AST::Node)
-        stmts = body.type == :begin || body.type == :kwbegin ? body.children : [body]
-        stmts.each { |s| yield s if s.is_a?(::Parser::AST::Node) }
-      end
+      def each_stmt(body, &block) = BodyCode.each_stmt(body, &block)
 
-      def const_to_name(node)
-        return nil unless node.is_a?(::Parser::AST::Node) && node.type == :const
-        scope, name = node.children
-        case scope&.type
-        when nil, :cbase
-          name.to_s
-        when :const
-          prefix = const_to_name(scope)
-          prefix ? "#{prefix}::#{name}" : name.to_s
-        end
-      end
+      def const_to_name(node) = BodyCode.const_to_name(node)
     end
   end
 end

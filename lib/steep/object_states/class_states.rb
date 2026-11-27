@@ -42,7 +42,7 @@ module Steep
         end
 
         # `outer` once a body that ended as `exit` has run.
-        def left(outer, exit)
+        def left(outer, exit, node)
           return outer unless exit
 
           ClassMemos.record_hash_exits(exit)
@@ -50,6 +50,7 @@ module Steep
           singleton = exit.self_type
           if singleton.is_a?(AST::Types::Name::Singleton)
             exit.typing.defined_classes << singleton.name
+            exit.typing.coded_classes << singleton.name unless TypeInference::ConstructorBindingAnalyzer::BodyCode.inert?(node, exit.typing, exit.constructor_bindings)
             memos = ClassMemos.memo_values(exit).select { |_, type| type.is_a?(AST::Types::Nil) || type.is_a?(AST::Types::Record) }
             ivars = held(exit, singleton).merge(memos)
             states = ivars.empty? ? states.except(singleton.name) : states.merge(singleton.name => ivars)

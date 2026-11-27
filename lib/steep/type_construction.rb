@@ -2240,7 +2240,7 @@ module Steep
               end
             end
 
-            ObjectStates::ClassStates.left(self, exit).add_typing(node, type: AST::Builtin.nil_type)
+            ObjectStates::ClassStates.left(self, exit, node).add_typing(node, type: AST::Builtin.nil_type)
           end
 
         when :module
@@ -2284,7 +2284,7 @@ module Steep
               end
             end
 
-            ObjectStates::ClassStates.left(self, exit).add_typing(node, type: AST::Builtin.nil_type)
+            ObjectStates::ClassStates.left(self, exit, node).add_typing(node, type: AST::Builtin.nil_type)
           end
 
         when :sclass
