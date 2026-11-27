@@ -125,10 +125,24 @@ module Steep
       # Whether a call through `keys` — every method it may resolve to — leaves
       # the receiver's value as it was. A call with a block never does: the
       # block can reach the receiver through a name it closes over.
-      def preserves?(keys, block:, override_registry:)
+      def preserves?(constr, method_name, keys, block:, visiting: Set[])
         return false if block || keys.empty?
 
-        keys.all? { |key| ENTRIES.key?(key) && !override_registry.blocked?(key) }
+        keys.all? { |key| ENTRIES.key?(key) ? !constr.literal_method_registry.blocked?(key) : kept_by_body?(constr, method_name, visiting) }
+      end
+
+      # Whether the project's own String method `method_name` leaves its
+      # receiver as it was: every call its body makes on `self` does, and it
+      # hands `self` to nothing but a call (`Body#self_in_calls_only`), as a
+      # literal handed to a call stays one. A method calling back into one
+      # already asked about adds nothing to the question.
+      def kept_by_body?(constr, method_name, visiting)
+        return true if visiting.include?(method_name)
+
+        _, body = ObjectStates.resolved_body(constr, AST::Builtin::String.instance_type, method_name)
+        return false unless body&.self_in_calls_only && body.super_args.nil?
+
+        body.self_sends.all? { |sent| preserves?(constr, sent, string_method_keys(constr, sent, private: true), block: nil, visiting: visiting | [method_name]) }
       end
 
       # After an in-place call on a single String literal: the value it leaves,
@@ -186,7 +200,7 @@ module Steep
         return if widened.equal?(type)
 
         keys = string_method_keys(constr, method_name, private: private)
-        return if preserves?(keys, block: block, override_registry: constr.literal_method_registry)
+        return if preserves?(constr, method_name, keys, block: block)
 
         widened
       end
