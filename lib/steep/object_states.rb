@@ -220,7 +220,7 @@ module Steep
         arguments = Specializations::Arguments.recorded(node, constr.typing) or return
         return unless arguments.public_send(under)
 
-        key = Specializations.body_key(constr, call, node) or return
+        key = Specializations.exit_key(constr, call, node, arguments) or return
         recorded_exit(constr, key, arguments)
       end
 

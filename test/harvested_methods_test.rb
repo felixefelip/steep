@@ -426,6 +426,106 @@ class HarvestedMethodsTest < Minitest::Test
     end
   end
 
+  def test_a_subclass_s_state_stands_after_a_write_through_the_store_it_inherits
+    in_tmpdir do
+      write("sig/gadget.rbs", <<~RBS)
+        class Store
+          @backend: Hash[untyped, untyped]
+          def initialize: () -> void
+          def []: (untyped key) -> untyped
+          def []=: (untyped key, untyped value) -> untyped
+        end
+        class Reflection
+        end
+        class Gadget < Base
+          def self.__store: () -> untyped
+          def self.__store=: (untyped) -> untyped
+        end
+        class Probe
+          @owner: singleton(Gadget)
+          def initialize: (singleton(Gadget) owner) -> void
+          def klass: () -> untyped
+        end
+        class App
+          def self.run: () -> untyped
+        end
+      RBS
+      write("app/gadget.rb", <<~RUBY)
+        class Store
+          def initialize
+            @backend = {}
+          end
+
+          def [](key) = @backend[key]
+
+          def []=(key, value)
+            @backend[key] = value
+          end
+        end
+        class Reflection
+        end
+        class Gadget < Base
+        end
+        class Probe
+          def initialize(owner)
+            @owner = owner
+          end
+
+          def klass = @owner.send(:compute, "a")
+        end
+        class App
+          def self.run
+            Gadget.add(:comments)
+            Probe.new(Gadget).klass
+          end
+        end
+      RUBY
+      project = store_project(
+        store_rbs: <<~RBS.gsub("\n", "\n  "),
+          self.@cache: Store
+          def self.inherited: (untyped) -> untyped
+          def self.compute: (String name) -> untyped
+          def self.__store: () -> untyped
+          def self.__store=: (untyped) -> untyped
+          def self.store: () -> untyped
+          def self.store=: (untyped) -> untyped
+          def self.add: (Symbol) -> untyped
+        RBS
+        attr_ruby: CLASS_ATTRIBUTE,
+        base_ruby: <<~RUBY.gsub("\n", "\n  "),
+          def self.inherited(subclass)
+            super
+            subclass.instance_variable_set(:@cache, Store.new)
+          end
+          def self.compute(name)
+            found = @cache[name]
+            return found if found
+
+            value = "X\#{name}"
+            @cache[name] = value
+            value
+          end
+          def self.pluralize = 1
+          def self.store = __store
+          def self.store=(value)
+            self.__store = value
+          end
+          def self.add(name)
+            self.store = store.except(name).merge!(name => Reflection.new)
+          end
+          Attr.redefine(self, :__store, {})
+        RUBY
+        value_rbs: "untyped"
+      )
+      postconditions = Steep::Postconditions::Runner.new(project)
+      postconditions.write(postconditions.run)
+      runner = Steep::Specializations::Runner.new(setup_project)
+      runner.run
+
+      assert_equal '"Xa"', runner.declarations["Probe#klass"]
+    end
+  end
+
   def test_a_subclass_s_store_holds_the_hash_written_from_the_one_it_inherits
     assert_equal ["{ :comments => ::Reflection }"], inherited_store_methods[0].fetch("Gadget.__store").values.uniq
   end
