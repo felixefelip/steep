@@ -209,6 +209,9 @@ module Steep
     # The classes and modules whose bodies the file opens, and the class
     # states its top level entered with and left (`TypeCheckService.type_check`).
     attr_reader :defined_classes
+    # Those of them a body runs code in, besides definitions and inert
+    # mixins (`ConstructorBindingAnalyzer::BodyCode.inert?`).
+    attr_reader :coded_classes
     attr_accessor :top_level_states
     # The classes whose state a call asked the env for, found or not
     # (`ObjectStates::ClassStates.of_call`), and all those the check may have
@@ -284,6 +287,7 @@ module Steep
       (@exit_ivars = {}).compare_by_identity
       @class_exits = {}
       @defined_classes = Set[]
+      @coded_classes = Set[]
       @asked_classes = Set[]
       (@iterations = {}).compare_by_identity
       (@arms = {}).compare_by_identity
@@ -599,6 +603,7 @@ module Steep
       parent.exit_ivars.merge!(exit_ivars)
       parent.class_exits.merge!(class_exits)
       parent.defined_classes.merge(defined_classes)
+      parent.coded_classes.merge(coded_classes)
       parent.asked_classes.merge(asked_classes)
       parent.started_loaded ||= started_loaded
       parent.iterations.merge!(iterations)

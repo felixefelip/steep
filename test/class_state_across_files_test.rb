@@ -230,6 +230,17 @@ class ClassStateAcrossFilesTest < Minitest::Test
     assert_equal [nil], chunks("a.rb" => DEFINITIONS + RULES, "b.rb" => reopened, "c.rb" => MACRO)
   end
 
+  def test_a_class_another_file_reopens_without_changing_it_keeps_its_state
+    reopened = "class Holder\n  module Extra\n  end\nend\n"
+    assert_equal ["def post_ids; []; end"], chunks({ "a.rb" => DEFINITIONS + RULES, "b.rb" => reopened, "c.rb" => MACRO }, RBS + "module Holder::Extra\nend\n")
+  end
+
+  def test_declines_a_class_another_file_reopens_to_mix_in_a_module_with_a_hook
+    reopened = "module Hook\n  def self.included(base) = Holder.instance(:en).singular(/ts\\z/, \"\")\nend\nclass Holder\n  include Hook\nend\n"
+    rbs = RBS + "module Hook\n  def self.included: (untyped base) -> untyped\nend\n"
+    assert_equal [nil], chunks({ "a.rb" => DEFINITIONS + RULES, "b.rb" => reopened, "c.rb" => MACRO }, rbs)
+  end
+
   def test_declines_a_class_another_file_reopens_in_a_block
     reopened = "[1].each do\n  class Holder\n    instance(:en).singular(/ts\\z/, \"\")\n  end\nend\n"
     assert_equal [nil], chunks("a.rb" => DEFINITIONS + RULES, "b.rb" => reopened, "c.rb" => MACRO)
